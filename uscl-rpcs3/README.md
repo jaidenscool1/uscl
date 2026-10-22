@@ -13,5 +13,5 @@ git am ../patches/*.patch
 Then build as in RPCS3's `BUILDING.md`.
 
 ## Patches
-- 0001: send `CELL_SYSUTIL_NP_INVITATION_SELECTED` after `sceNpBasicRecvMessageCustom`. Skate 3 waits for it
+- 0001: send `CELL_SYSUTIL_NP_INVITATION_SELECTED` after `sceNpBasicRecvMessageCustom` picks an invite. Skate 3 waits for it
   before fading in after accepting an invite. Untested in game.
