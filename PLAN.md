@@ -1,4 +1,4 @@
-# PS3 games online through Steam (via RPCS3)
+# USCL: The Ultimate Steam Compatibility Layer
 
 Goal: PS3 games (your own dumps) running in RPCS3 use Steam for friends, invites, lobbies and P2P, without
 patching each game. Status: design + game survey. No Steam code yet.
@@ -9,7 +9,7 @@ calls itself, backed by RPCN (its PSN replacement). This project adds a second b
 
 ```
 game ──sceNp* calls──▶ RPCS3 (np_handler) ──▶ RPCN             (today)
-                                          └─▶ steam-bridge ──▶ Steam   (this project)
+                                          └─▶ uscl-bridge ──▶ Steam   (this project)
 ```
 
 | PSN library | Steam stand-in |
@@ -22,7 +22,7 @@ game ──sceNp* calls──▶ RPCS3 (np_handler) ──▶ RPCN             (
 | sceNpTus (per-user cloud data) | none: needs a small server |
 | sceNpTrophy | not feasible: Steam achievements need an App ID per game |
 
-**steam-bridge** is a separate helper process. RPCS3 is GPL-2 and the Steamworks SDK is proprietary, so they
+**uscl-bridge** is a separate helper process. RPCS3 is GPL-2 and the Steamworks SDK is proprietary, so they
 can't be linked into one program that gets shared. RPCS3 talks to the bridge over a local socket. That also
 keeps the RPCS3 patch small: it is an alternative to the RPCN client, not a rewrite.
 
@@ -61,10 +61,20 @@ updates around the same time). The test is to capture each edition's session tra
 Treat it as research, not a feature.
 
 ## Phases
-1. **Survey** (now): profile every game you own. Pick the first FULL one (Minecraft).
-2. **Bridge proof of concept**: steam-bridge with lobby create/join/list and Rich Presence, driven from a small
-   test client. No RPCS3 changes yet.
+1. **Survey**: profile every game you own. Pick the first FULL one (Minecraft). Done for the 4 owned games.
+2. **Bridge proof of concept**: uscl-bridge with lobby create/join/list and Rich Presence, driven from a small
+   test client. No RPCS3 changes yet. *Started:* `uscl-bridge selftest` PASSes against real Steam (create
+   lobby, lobby data, filtered search, owner/member, Rich Presence). A new lobby takes ~2 s to show up in
+   search, so room searches need a retry or a short delay.
 3. **RPCS3 backend**: route sceNpMatching2 rooms + signaling to the bridge in an RPCS3 fork, using
    Minecraft. Done when two PCs join the same world through Steam with RPCN off.
 4. Basic (invites/presence) + Score for FULL games. Then friends/invites only for PARTIAL games like Skate 3.
-5. Cross-play research (Minecraft PS3 ↔ 360).
+5. Cross-play research (Minecraft PS3 ↔ 360). Player is dumping their own 360 copy (JTAG) for Xenia Canary.
+6. **Blaze-over-Steam**: a local stand-in for EA's Blaze server on each player's PC. The game talks Blaze to
+   localhost; the stand-in answers using Steam: login = Steam account, game manager = Steam lobbies (lobby owner
+   acts as host, with host migration when they leave), invites = Steam invites, game traffic = Steam P2P.
+   Persistent data (stats, teams, uploaded parks/clips) stays on a real server or is left out. Blaze is shared by
+   most 2009–2013 EA PS3 titles (Skate 3, Battlefield 3, FIFA, Madden, NFS, Mass Effect 3), so one engine covers
+   many games, with per-game components on top. Test game: Skate 3. Protocol reference: the Skate3BlazeServer
+   community server, which has no license, so it's used as reference only unless its author agrees.
+   Activision's Demonware (Call of Duty) would be a second engine of the same shape.
