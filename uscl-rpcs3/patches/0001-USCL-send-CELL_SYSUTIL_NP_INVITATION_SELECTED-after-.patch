@@ -1,0 +1,28 @@
+From ac3d73f367141edb610055eb5db807e00bb809fe Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 13:07:15 -0700
+Subject: [PATCH] USCL: send CELL_SYSUTIL_NP_INVITATION_SELECTED after
+ sceNpBasicRecvMessageCustom (Skate 3 waits for it)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rpcs3/Emu/Cell/Modules/sceNp.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/rpcs3/Emu/Cell/Modules/sceNp.cpp b/rpcs3/Emu/Cell/Modules/sceNp.cpp
+index a13e49f..2adb52c 100644
+--- a/rpcs3/Emu/Cell/Modules/sceNp.cpp
++++ b/rpcs3/Emu/Cell/Modules/sceNp.cpp
+@@ -1693,7 +1693,8 @@ error_code recv_message_gui(ppu_thread& ppu, u16 mainType, u32 recvOptions)
+ 	nph.set_message_selected(data.id, chosen_msg_id);
+ 
+ 	// Is this sent if used from home menu but not from sceNpBasicRecvMessageCustom, not sure
+-	// sysutil_send_system_cmd(CELL_SYSUTIL_NP_INVITATION_SELECTED, 0);
++	// USCL test: Skate 3 accepts invites through sceNpBasicRecvMessageCustom and waits for this before fading in
++	sysutil_send_system_cmd(CELL_SYSUTIL_NP_INVITATION_SELECTED, 0);
+ 
+ 	nph.queue_basic_event(to_add);
+ 	nph.send_basic_event(event_to_send, 0, 0);
+-- 
+2.56.0
+

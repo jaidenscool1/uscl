@@ -1,7 +1,7 @@
 # USCL: The Ultimate Steam Compatibility Layer
 
 Goal: PS3 games (your own dumps) running in RPCS3 use Steam for friends, invites, lobbies and P2P, without
-patching each game **and without a modified RPCS3**. Status: Steam bridge service working (see Phases).
+patching each game. Status: Steam bridge service working (see Phases).
 
 ## How it works
 PS3 games never talk to PSN directly. They call Sony's libraries (`sceNp*`). RPCS3 already answers those
@@ -9,7 +9,7 @@ calls itself, backed by RPCN (its PSN replacement). RPCS3 lets you pick the RPCN
 RPCN-compatible server on each player's PC and points RPCS3 at 127.0.0.1:
 
 ```
-game ─sceNp*─▶ official RPCS3 ─RPCN protocol─▶ uscl-rpcn (local) ─JSON socket─▶ uscl-bridge ─▶ Steam
+game ─sceNp*─▶ RPCS3 (official or uscl-rpcs3) ─RPCN protocol─▶ uscl-rpcn (local) ─JSON socket─▶ uscl-bridge ─▶ Steam
                      ▲                                                              │
                      └──── UDP game traffic ◀── local relay ports ◀── Steam P2P ◀───┘
 ```
@@ -21,6 +21,10 @@ game ─sceNp*─▶ official RPCS3 ─RPCN protocol─▶ uscl-rpcn (local) ─
 - **Signaling**: RPCN normally hands RPCS3 the peer's real IP:port. uscl-rpcn hands out a local relay
   address (127.0.0.1:port per peer). uscl-bridge forwards those UDP packets over SteamNetworkingMessages,
   through Valve's relay, so no port forwarding is needed.
+- **uscl-rpcs3** (decided 2026-10-22): our own RPCS3 build, patches in `uscl-rpcs3/`. Only for what the server
+  can't do: per-game sceNp fixes, an NP call trace for working out each game, and turning Steam invites into
+  in-game invites. New RPCS3↔RPCN messages go at the end of the RPCN protocol's command/notification lists,
+  so official RPCS3 keeps working against uscl-rpcn without the USCL extras.
 - Neither RPCS3 nor RPCN code links Steam: the GPL/AGPL parts and the proprietary Steamworks SDK only meet
   over a local socket.
 
@@ -76,7 +80,7 @@ Treat it as research, not a feature.
    search, so room searches need a retry or a short delay.
    *Done:* `uscl-bridge serve` (local JSON socket: create/search/join/leave rooms, room data, presence, pushed
    member/room-data/join-request events). `uscl-bridge client-test` PASSes through the socket on real Steam.
-3. **uscl-rpcn** (no RPCS3 fork): local RPCN server fork with Steam-backed distributed rooms + the UDP
+3. **uscl-rpcn**: local RPCN server fork with Steam-backed distributed rooms + the UDP
    relay, tested with Minecraft (a dump the player made). Steps: (a) stock RPCN running locally with an
    RPCS3 test config pointed at 127.0.0.1, so the player's real config is untouched; (b) auto-login; (c) room
    create/search/join through uscl-bridge; (d) signaling through the Steam relay. Done when two PCs join the
