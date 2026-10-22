@@ -6,6 +6,8 @@ use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use steamworks::{Client, LobbyId, LobbyKey, LobbyType, StringFilter, StringFilterKind};
 
+mod serve;
+
 const APP_ID: u32 = 480;
 
 /// Pump Steam callbacks until `rx` delivers a value or `secs` pass.
@@ -84,8 +86,25 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        Some("serve") => {
+            let client = Client::init_app(APP_ID).unwrap_or_else(|e| {
+                eprintln!("Steam init failed (is Steam running?): {e:?}");
+                std::process::exit(1);
+            });
+            if let Err(e) = serve::serve(client) {
+                eprintln!("FAIL: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some("client-test") => match serve::client_test() {
+            Ok(()) => println!("PASS"),
+            Err(e) => {
+                eprintln!("FAIL: {e}");
+                std::process::exit(1);
+            }
+        },
         _ => {
-            eprintln!("usage: uscl-bridge selftest");
+            eprintln!("usage: uscl-bridge selftest | serve | client-test");
             std::process::exit(2);
         }
     }
