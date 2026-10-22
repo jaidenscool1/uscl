@@ -1,0 +1,30 @@
+From fbe8a86a9b811687116eddb289c2295239f09083 Mon Sep 17 00:00:00 2001
+From: jaidenscool1 <jaidenscool1@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:21:03 -0700
+Subject: [PATCH 2/2] USCL: auto-created accounts get RPCS3's default avatar
+ URL (empty one is rejected as malformed)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01WmDJeZat7xJ2DuTXVZQxWn
+---
+ src/server/client/cmd_account.rs | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/server/client/cmd_account.rs b/src/server/client/cmd_account.rs
+index d58ba52..04f6c1d 100644
+--- a/src/server/client/cmd_account.rs
++++ b/src/server/client/cmd_account.rs
+@@ -87,7 +87,9 @@ impl Client {
+ 			// login creates the account instead of asking the player to register one.
+ 			if std::env::var_os("USCL_LOCAL").is_some() && db.get_user_id(&login).is_err() && Client::is_valid_client_username(&login) {
+ 				let email = format!("{login}@uscl.local");
+-				db.add_user(&login, &password, &login, "", &email, &email, false).map_err(|_| ErrorType::DbFail)?;
++				// RPCS3 rejects an empty avatar URL in the login reply; use the one its own sign-up dialog sends
++				let avatar = "https://rpcs3.net/cdn/netplay/DefaultAvatar.png";
++				db.add_user(&login, &password, &login, avatar, &email, &email, false).map_err(|_| ErrorType::DbFail)?;
+ 				info!("USCL: created local account {}", login);
+ 			}
+ 
+-- 
+2.56.0
+

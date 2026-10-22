@@ -81,6 +81,8 @@ Treat it as research, not a feature.
    RPCS3 test config pointed at 127.0.0.1, so the player's real config is untouched; (b) auto-login; (c) room
    create/search/join through uscl-bridge; (d) signaling through the Steam relay. Done when two PCs join the
    same world through Steam.
+   *(a) + (b) done 2026-10-22:* official RPCS3 + Minecraft PS3 logs in to the local uscl-rpcn with no
+   registration (see `uscl-rpcn/README.md`). Next: (c).
 4. Basic (invites/presence) + Score for FULL games. Then friends/invites only for PARTIAL games like Skate 3.
 5. Cross-play research (Minecraft PS3 ↔ 360). Player is dumping their own 360 copy (JTAG) for Xenia Canary.
 6. **Blaze-over-Steam**: a local stand-in for EA's Blaze server on each player's PC. The game talks Blaze to
