@@ -6,7 +6,9 @@ use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use steamworks::{Client, LobbyId, LobbyKey, LobbyType, StringFilter, StringFilterKind};
 
+#[cfg(unix)] // Unix socket; the tunnel below doesn't need it
 mod serve;
+mod tunnel;
 
 const APP_ID: u32 = 480;
 
@@ -86,6 +88,21 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        Some(cmd @ ("host" | "join")) => {
+            let join = std::env::args().nth(2).map(|s| s.parse().map(steamworks::LobbyId::from_raw).unwrap_or_else(|_| {
+                eprintln!("session id must be the number the host printed");
+                std::process::exit(2);
+            }));
+            let client = Client::init_app(APP_ID).unwrap_or_else(|e| {
+                eprintln!("Steam init failed (is Steam running?): {e:?}");
+                std::process::exit(1);
+            });
+            if let Err(e) = tunnel::run(client, cmd == "host", join) {
+                eprintln!("FAIL: {e}");
+                std::process::exit(1);
+            }
+        }
+        #[cfg(unix)]
         Some("serve") => {
             let client = Client::init_app(APP_ID).unwrap_or_else(|e| {
                 eprintln!("Steam init failed (is Steam running?): {e:?}");
@@ -96,6 +113,7 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        #[cfg(unix)]
         Some("client-test") => match serve::client_test() {
             Ok(()) => println!("PASS"),
             Err(e) => {
@@ -104,7 +122,7 @@ fn main() {
             }
         },
         _ => {
-            eprintln!("usage: uscl-bridge selftest | serve | client-test");
+            eprintln!("usage: uscl-bridge host | join [session id] | selftest | serve | client-test");
             std::process::exit(2);
         }
     }

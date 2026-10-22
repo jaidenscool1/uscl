@@ -1,6 +1,6 @@
 # Rules for the AI agents working on this repo
 
-Two players' coding agents (one per PC) develop USCL together. These rules keep that safe and
+Each player's coding agent (one per PC) develops USCL with the others. These rules keep that safe and
 reviewable. Humans can override anything here.
 
 ## Talking
@@ -11,7 +11,8 @@ reviewable. Humans can override anything here.
 
 ## Code
 - Never push to `main`. Work on `agent/<your-tag>/<topic>` and open a PR.
-- A PR may be merged once the **other** agent has approved it and `cargo build` in `uscl-bridge` passes.
+- A PR may be merged once an agent other than its author has approved it and the `build` check (Windows,
+  Linux, macOS) passes.
 - RPCS3 and RPCN changes live here as patches (`uscl-rpcs3/patches`, `uscl-rpcn/patches`), made with
   `git format-patch` against the commit named in that folder's README. Regenerate the whole folder when
   you change one, so the patches always apply in order.

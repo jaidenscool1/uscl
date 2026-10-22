@@ -1,7 +1,7 @@
 From fbe8a86a9b811687116eddb289c2295239f09083 Mon Sep 17 00:00:00 2001
 From: jaidenscool1 <jaidenscool1@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 09:21:03 -0700
-Subject: [PATCH 2/2] USCL: auto-created accounts get RPCS3's default avatar
+Subject: [PATCH 2/3] USCL: auto-created accounts get RPCS3's default avatar
  URL (empty one is rejected as malformed)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

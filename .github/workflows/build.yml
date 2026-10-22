@@ -1,0 +1,15 @@
+name: build
+on: [push, pull_request]
+jobs:
+  uscl-bridge:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: uscl-bridge
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build
+      - run: cargo test
