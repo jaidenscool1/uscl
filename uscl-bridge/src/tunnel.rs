@@ -16,7 +16,7 @@ use std::sync::mpsc::{channel, Sender};
 use std::time::{Duration, Instant};
 use steamworks::networking_messages::SessionRequest;
 use steamworks::networking_types::{NetworkingIdentity, SendFlags};
-use steamworks::{Client, GameLobbyJoinRequested, LobbyChatUpdate, LobbyDataUpdate, LobbyId, LobbyType, SteamId};
+use steamworks::{Client, FriendFlags, GameLobbyJoinRequested, LobbyChatUpdate, LobbyDataUpdate, LobbyId, LobbyType, SteamId};
 
 const RPCN_TCP: u16 = 31313;
 const RPCN_UDP: u16 = 3657;
@@ -99,7 +99,45 @@ fn wait<T>(client: &Client, rx: &std::sync::mpsc::Receiver<T>, what: &str) -> Re
     Err(format!("timed out waiting for {what}"))
 }
 
-/// `join`: None waits for a Steam invite (accept it from the friends list while the bridge runs).
+/// A new session lobby. `slots` carry over when Steam dropped the old one, so members keep their ports.
+fn create_session(client: &Client, slots: &HashMap<u64, u16>) -> Result<LobbyId, String> {
+    let mm = client.matchmaking();
+    let (t, r) = channel();
+    mm.create_lobby(LobbyType::FriendsOnly, 250, move |res| {
+        let _ = t.send(res);
+    });
+    let lobby = wait(client, &r, "lobby creation")?.map_err(|e| format!("create_lobby: {e:?}"))?;
+    mm.set_lobby_data(lobby, "uscl", "session");
+    for (id, slot) in slots {
+        mm.set_lobby_data(lobby, &format!("slot:{id}"), &slot.to_string());
+    }
+    Ok(lobby)
+}
+
+fn join_session(client: &Client, lobby: LobbyId) -> Result<LobbyId, String> {
+    let (t, r) = channel();
+    client.matchmaking().join_lobby(lobby, move |res| {
+        let _ = t.send(res);
+    });
+    wait(client, &r, "lobby join")?.map_err(|_| "join_lobby failed (wrong id, full, or not a friend of the host)".to_string())
+}
+
+/// Lobbies of this app that friends are in, with who's in them: the sessions we could join.
+fn friend_sessions(client: &Client) -> Vec<(LobbyId, String)> {
+    let app = client.utils().app_id();
+    let mut found: Vec<(LobbyId, String)> = Vec::new();
+    for f in client.friends().get_friends(FriendFlags::IMMEDIATE) {
+        if let Some(g) = f.game_played().filter(|g| g.game.app_id() == app && g.lobby.raw() != 0) {
+            match found.iter_mut().find(|(l, _)| *l == g.lobby) {
+                Some((_, names)) => *names += &format!(", {}", f.name()),
+                None => found.push((g.lobby, f.name())),
+            }
+        }
+    }
+    found
+}
+
+/// `join`: None joins the one session a friend is in, or a Steam invite, whichever comes first.
 pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), String> {
     client.networking_utils().init_relay_network_access();
     let mm = client.matchmaking();
@@ -129,34 +167,37 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), Stri
         let _ = t.send(Ev::Session(req));
     });
 
-    let lobby = if host {
-        let (t, r) = channel();
-        mm.create_lobby(LobbyType::FriendsOnly, 250, move |res| {
-            let _ = t.send(res);
-        });
-        let lobby = wait(&client, &r, "lobby creation")?.map_err(|e| format!("create_lobby: {e:?}"))?;
-        mm.set_lobby_data(lobby, "uscl", "session");
-        mm.set_lobby_data(lobby, &format!("slot:{}", me.raw()), "1");
-        lobby
+    let mut slot_of: HashMap<u64, u16> = HashMap::new();
+    let mut lobby = if host {
+        slot_of.insert(me.raw(), 1);
+        create_session(&client, &slot_of)?
     } else {
-        let id = match join {
-            Some(id) => id,
+        match join {
+            Some(id) => join_session(&client, id)?,
             None => {
-                eprintln!("uscl-bridge: waiting for a Steam invite to a USCL session...");
+                eprintln!("uscl-bridge: looking for a friend's USCL session (or accept a Steam invite)...");
+                let mut last = Instant::now() - Duration::from_secs(10);
                 loop {
                     client.run_callbacks();
                     if let Ok(Ev::Invite(id)) = rx.try_recv() {
-                        break id;
+                        break join_session(&client, id)?;
+                    }
+                    if last.elapsed() > Duration::from_secs(2) {
+                        last = Instant::now();
+                        let found = friend_sessions(&client);
+                        match found.len() {
+                            0 => {}
+                            1 => break join_session(&client, found[0].0)?,
+                            _ => {
+                                let list: Vec<String> = found.iter().map(|(l, who)| format!("  {}  ({who})", l.raw())).collect();
+                                return Err(format!("friends are in more than one session; run `join <number>` with one of:\n{}", list.join("\n")));
+                            }
+                        }
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
             }
-        };
-        let (t, r) = channel();
-        mm.join_lobby(id, move |res| {
-            let _ = t.send(res);
-        });
-        wait(&client, &r, "lobby join")?.map_err(|_| "join_lobby failed (wrong id, full, or not a friend of the host)".to_string())?
+        }
     };
     let host_id = mm.lobby_owner(lobby);
     println!("uscl-bridge: session {} ({}); give friends this number or invite them from Steam", lobby.raw(), if host { "hosting" } else { "joined" });
@@ -181,13 +222,13 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), Stri
         );
     };
 
-    let mut slot_of: HashMap<u64, u16> = HashMap::new();
     let mut member_at: HashMap<u16, u64> = HashMap::new();
     let mut socks: HashMap<u16, UdpSocket> = HashMap::new();
     let mut tcp: HashMap<(u64, u32), TcpStream> = HashMap::new();
     let mut next_conn: u32 = 0;
     let mut next_slot: u16 = 1;
     let mut changed = true;
+    let mut last_check = Instant::now();
     let mut members: HashSet<u64> = HashSet::new();
     // a request can beat the lobby update that makes its sender a member, so it waits here a little
     let mut pending: Vec<(SessionRequest, Instant)> = Vec::new();
@@ -235,9 +276,6 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), Stri
         if changed {
             changed = false;
             let list = mm.lobby_members(lobby);
-            if !host && !list.is_empty() && mm.lobby_owner(lobby) != host_id {
-                return Err("the host left; the session is over".into());
-            }
             members = list.iter().map(|m| m.raw()).collect();
             for m in &list {
                 let key = format!("slot:{}", m.raw());
@@ -257,6 +295,32 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), Stri
                 }
             }
         }
+        // Steam deletes a lobby when its owner's client loses its connection, even for a few seconds. The
+        // host makes a new one with the same slots; members follow the host there. RPCN and game traffic
+        // go peer to peer, not through the lobby, so they carry on.
+        if last_check.elapsed() > Duration::from_secs(2) {
+            last_check = Instant::now();
+            let list = mm.lobby_members(lobby);
+            if host && !list.contains(&me) {
+                match create_session(&client, &slot_of) {
+                    Ok(l) => {
+                        lobby = l;
+                        changed = true;
+                        println!("uscl-bridge: Steam dropped the session; new session {} (members rejoin by themselves)", lobby.raw());
+                    }
+                    Err(e) => eprintln!("uscl-bridge: session lost, retrying: {e}"),
+                }
+            } else if !host && !list.contains(&host_id) {
+                let now = client.friends().get_friend(host_id).game_played().map(|g| g.lobby).filter(|l| l.raw() != 0 && *l != lobby);
+                if let Some(l) = now.and_then(|l| join_session(&client, l).ok()) {
+                    mm.leave_lobby(lobby);
+                    lobby = l;
+                    changed = true;
+                    println!("uscl-bridge: followed the host to session {}", lobby.raw());
+                }
+            }
+        }
+
         let mut waiting = Vec::new();
         for (req, since) in pending.drain(..) {
             if req.remote().steam_id().is_some_and(|id| members.contains(&id.raw())) {
