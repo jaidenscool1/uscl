@@ -85,6 +85,10 @@ Treat it as research, not a feature.
    search, so room searches need a retry or a short delay.
    *Done:* `uscl-bridge serve` (local JSON socket: create/search/join/leave rooms, room data, presence, pushed
    member/room-data/join-request events). `uscl-bridge client-test` PASSes through the socket on real Steam.
+   *Windows (2026-10-22):* same three commands PASS on Windows 11 with real Steam. There the socket is TCP
+   `127.0.0.1:47321` (`USCL_BRIDGE_ADDR` overrides it), since Rust's std has no Unix sockets on Windows. Build
+   with the rustup GNU toolchain (`x86_64-pc-windows-gnu`, no Visual Studio needed) and copy
+   `target/<profile>/build/steamworks-sys-*/out/steam_api64.dll` next to `uscl-bridge.exe`.
 3. **uscl-rpcn**: local RPCN server fork with Steam-backed distributed rooms + the UDP
    relay, tested with Minecraft (a dump the player made). Steps: (a) stock RPCN running locally with an
    RPCS3 test config pointed at 127.0.0.1, so the player's real config is untouched; (b) auto-login; (c) room

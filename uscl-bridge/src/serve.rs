@@ -1,6 +1,7 @@
 //! `uscl-bridge serve`: the local service RPCS3 talks to.
 //!
-//! Unix socket at $XDG_RUNTIME_DIR/uscl.sock, one client at a time, newline-delimited JSON.
+//! Unix socket at $XDG_RUNTIME_DIR/uscl.sock (Windows: TCP 127.0.0.1:47321, or $USCL_BRIDGE_ADDR),
+//! one client at a time, newline-delimited JSON.
 //!   request : {"id":1,"op":"create_room","max":4,"data":{"game":"BLUS31426"}}
 //!   reply   : {"id":1,"ok":true,"result":{...}}  or  {"id":1,"ok":false,"error":"..."}
 //!   event   : {"event":"member","room":"...","user":"...","change":"entered"}   (pushed, no id)
@@ -12,7 +13,7 @@
 
 use serde_json::{json, Map, Value};
 use std::io::{BufRead, BufReader, ErrorKind, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+use sock::Stream;
 use std::sync::mpsc::{channel, Sender};
 use std::time::Duration;
 use steamworks::{
@@ -20,10 +21,37 @@ use steamworks::{
     LobbyType, StringFilter, StringFilterKind,
 };
 
-pub fn socket_path() -> String {
-    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
-    format!("{dir}/uscl.sock")
+#[cfg(unix)]
+mod sock {
+    pub use std::os::unix::net::{UnixListener as Listener, UnixStream as Stream};
+
+    pub fn socket_path() -> String {
+        let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+        format!("{dir}/uscl.sock")
+    }
+
+    pub fn bind(path: &str) -> std::io::Result<Listener> {
+        let _ = std::fs::remove_file(path); // stale socket from a previous run
+        Listener::bind(path)
+    }
 }
+
+// Rust's std has no Unix sockets on Windows. A TCP port bound to 127.0.0.1 only: like the Unix socket,
+// any local process can connect, nothing outside this PC can.
+#[cfg(windows)]
+mod sock {
+    pub use std::net::{TcpListener as Listener, TcpStream as Stream};
+
+    pub fn socket_path() -> String {
+        std::env::var("USCL_BRIDGE_ADDR").unwrap_or_else(|_| "127.0.0.1:47321".into())
+    }
+
+    pub fn bind(addr: &str) -> std::io::Result<Listener> {
+        Listener::bind(addr)
+    }
+}
+
+pub use sock::socket_path;
 
 fn room_id(req: &Value) -> Result<LobbyId, String> {
     req["room"].as_str().and_then(|s| s.parse().ok()).map(LobbyId::from_raw).ok_or("missing or bad \"room\"".into())
@@ -134,8 +162,7 @@ fn change_name(c: ChatMemberStateChange) -> &'static str {
 
 pub fn serve(client: Client) -> Result<(), String> {
     let path = socket_path();
-    let _ = std::fs::remove_file(&path); // stale socket from a previous run
-    let listener = UnixListener::bind(&path).map_err(|e| format!("bind {path}: {e}"))?;
+    let listener = sock::bind(&path).map_err(|e| format!("bind {path}: {e}"))?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     eprintln!("uscl-bridge: listening on {path}");
 
@@ -157,7 +184,7 @@ pub fn serve(client: Client) -> Result<(), String> {
             "friend": j.friend_steam_id.raw().to_string()}));
     });
 
-    let mut conn: Option<(UnixStream, BufReader<UnixStream>)> = None;
+    let mut conn: Option<(Stream, BufReader<Stream>)> = None;
     let mut line = String::new();
     loop {
         client.run_callbacks();
@@ -216,7 +243,7 @@ pub fn serve(client: Client) -> Result<(), String> {
 /// `uscl-bridge client-test`: talks to a running `serve` the way RPCS3 will. No Steam in this process.
 pub fn client_test() -> Result<(), String> {
     let path = socket_path();
-    let s = UnixStream::connect(&path).map_err(|e| format!("connect {path}: {e} (is `uscl-bridge serve` running?)"))?;
+    let s = Stream::connect(&path).map_err(|e| format!("connect {path}: {e} (is `uscl-bridge serve` running?)"))?;
     s.set_read_timeout(Some(Duration::from_secs(30))).map_err(|e| e.to_string())?;
     let mut w = s.try_clone().map_err(|e| e.to_string())?;
     let mut r = BufReader::new(s);

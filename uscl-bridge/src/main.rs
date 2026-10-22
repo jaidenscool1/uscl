@@ -6,7 +6,6 @@ use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use steamworks::{Client, LobbyId, LobbyKey, LobbyType, StringFilter, StringFilterKind};
 
-#[cfg(unix)] // Unix socket; the tunnel below doesn't need it
 mod serve;
 mod tunnel;
 
@@ -102,7 +101,6 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        #[cfg(unix)]
         Some("serve") => {
             let client = Client::init_app(APP_ID).unwrap_or_else(|e| {
                 eprintln!("Steam init failed (is Steam running?): {e:?}");
@@ -113,7 +111,6 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        #[cfg(unix)]
         Some("client-test") => match serve::client_test() {
             Ok(()) => println!("PASS"),
             Err(e) => {
