@@ -1,16 +1,28 @@
 # USCL: The Ultimate Steam Compatibility Layer
 
 Goal: PS3 games (your own dumps) running in RPCS3 use Steam for friends, invites, lobbies and P2P, without
-patching each game. Status: design + game survey. No Steam code yet.
+patching each game **and without a modified RPCS3**. Status: Steam bridge service working (see Phases).
 
 ## How it works
 PS3 games never talk to PSN directly. They call Sony's libraries (`sceNp*`). RPCS3 already answers those
-calls itself, backed by RPCN (its PSN replacement). This project adds a second backend behind the same calls:
+calls itself, backed by RPCN (its PSN replacement). RPCS3 lets you pick the RPCN host, so USCL runs a local
+RPCN-compatible server on each player's PC and points RPCS3 at 127.0.0.1:
 
 ```
-game ──sceNp* calls──▶ RPCS3 (np_handler) ──▶ RPCN             (today)
-                                          └─▶ uscl-bridge ──▶ Steam   (this project)
+game ─sceNp*─▶ official RPCS3 ─RPCN protocol─▶ uscl-rpcn (local) ─JSON socket─▶ uscl-bridge ─▶ Steam
+                     ▲                                                              │
+                     └──── UDP game traffic ◀── local relay ports ◀── Steam P2P ◀───┘
 ```
+
+- **uscl-rpcn**: a fork of the RPCN server (RipleyTom/rpcn, Rust, AGPL-3.0; the fork stays AGPL). Login
+  accepts the local player automatically (identity = Steam account). Rooms are distributed: the room
+  creator's uscl-rpcn is authoritative. Room external data and the member list live in the Steam lobby. Ops
+  from other members (set member data, room messages) travel as lobby chat messages to the owner.
+- **Signaling**: RPCN normally hands RPCS3 the peer's real IP:port. uscl-rpcn hands out a local relay
+  address (127.0.0.1:port per peer). uscl-bridge forwards those UDP packets over SteamNetworkingMessages,
+  through Valve's relay, so no port forwarding is needed.
+- Neither RPCS3 nor RPCN code links Steam: the GPL/AGPL parts and the proprietary Steamworks SDK only meet
+  over a local socket.
 
 | PSN library | Steam stand-in |
 |---|---|
@@ -21,10 +33,6 @@ game ──sceNp* calls──▶ RPCS3 (np_handler) ──▶ RPCN             (
 | sceNpManager sign-in, NP ID | Steam account (persona name becomes the online ID) |
 | sceNpTus (per-user cloud data) | none: needs a small server |
 | sceNpTrophy | not feasible: Steam achievements need an App ID per game |
-
-**uscl-bridge** is a separate helper process. RPCS3 is GPL-2 and the Steamworks SDK is proprietary, so they
-can't be linked into one program that gets shared. RPCS3 talks to the bridge over a local socket. That also
-keeps the RPCS3 patch small: it is an alternative to the RPCN client, not a rewrite.
 
 **Steam App ID:** Steam features need one. For personal testing, the public test ID 480 works. Anything shared
 beyond the two of you needs its own ($100 Steamworks fee, and Valve has to accept it).
@@ -66,8 +74,13 @@ Treat it as research, not a feature.
    test client. No RPCS3 changes yet. *Started:* `uscl-bridge selftest` PASSes against real Steam (create
    lobby, lobby data, filtered search, owner/member, Rich Presence). A new lobby takes ~2 s to show up in
    search, so room searches need a retry or a short delay.
-3. **RPCS3 backend**: route sceNpMatching2 rooms + signaling to the bridge in an RPCS3 fork, using
-   Minecraft. Done when two PCs join the same world through Steam with RPCN off.
+   *Done:* `uscl-bridge serve` (local JSON socket: create/search/join/leave rooms, room data, presence, pushed
+   member/room-data/join-request events). `uscl-bridge client-test` PASSes through the socket on real Steam.
+3. **uscl-rpcn** (no RPCS3 fork): local RPCN server fork with Steam-backed distributed rooms + the UDP
+   relay, tested with Minecraft (a dump the player made). Steps: (a) stock RPCN running locally with an
+   RPCS3 test config pointed at 127.0.0.1, so the player's real config is untouched; (b) auto-login; (c) room
+   create/search/join through uscl-bridge; (d) signaling through the Steam relay. Done when two PCs join the
+   same world through Steam.
 4. Basic (invites/presence) + Score for FULL games. Then friends/invites only for PARTIAL games like Skate 3.
 5. Cross-play research (Minecraft PS3 ↔ 360). Player is dumping their own 360 copy (JTAG) for Xenia Canary.
 6. **Blaze-over-Steam**: a local stand-in for EA's Blaze server on each player's PC. The game talks Blaze to
