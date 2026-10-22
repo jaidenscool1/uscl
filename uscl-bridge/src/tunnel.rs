@@ -76,6 +76,11 @@ fn spawn_reader(mut s: TcpStream, peer: u64, id: u32, tx: Sender<Ev>) {
     });
 }
 
+/// The host's RPCN. Windows takes ~2 s to refuse a closed loopback port, which would stall the whole loop.
+fn connect_rpcn() -> std::io::Result<TcpStream> {
+    TcpStream::connect_timeout(&local(HOST_RPCN_TCP), Duration::from_millis(300))
+}
+
 fn bind_udp(port: u16) -> Result<UdpSocket, String> {
     let s = UdpSocket::bind(local(port)).map_err(|e| format!("bind UDP 127.0.0.1:{port}: {e}"))?;
     s.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -200,7 +205,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), Stri
                     next_conn += 1;
                     if host {
                         // our own RPCS3: straight to the local RPCN
-                        match TcpStream::connect(local(HOST_RPCN_TCP)) {
+                        match connect_rpcn() {
                             Ok(up) => {
                                 let (mut a, mut b) = (s.try_clone().map_err(|e| e.to_string())?, up.try_clone().map_err(|e| e.to_string())?);
                                 std::thread::spawn(move || { let _ = std::io::copy(&mut a, &mut b); let _ = b.shutdown(Shutdown::Both); });
@@ -307,7 +312,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), Stri
             let Some(peer) = m.identity_peer().steam_id().map(|s| s.raw()) else { continue };
             let Some((id, op, d)) = parse_tcp_frame(m.data()) else { continue };
             match op {
-                TCP_OPEN if host => match TcpStream::connect(local(HOST_RPCN_TCP)) {
+                TCP_OPEN if host => match connect_rpcn() {
                     Ok(s) => {
                         if let Ok(r) = s.try_clone() {
                             tcp.insert((peer, id), s);

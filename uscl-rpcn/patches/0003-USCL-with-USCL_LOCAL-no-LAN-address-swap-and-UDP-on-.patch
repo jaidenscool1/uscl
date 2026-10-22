@@ -1,7 +1,7 @@
 From 8ee3605395c565d0d2bce47c92382f788dedbab6 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 13:51:52 -0700
-Subject: [PATCH 3/3] USCL: with USCL_LOCAL, no LAN-address swap and UDP on
+Subject: [PATCH 3/4] USCL: with USCL_LOCAL, no LAN-address swap and UDP on
  3757 (uscl-bridge fronts 3657)
 
 Every player reaches the host's RPCN through uscl-bridge as 127.0.0.1 with their own port, so equal IPs

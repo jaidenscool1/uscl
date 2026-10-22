@@ -41,3 +41,5 @@ In RPCN settings (`rpcn.yml`): `Host: 127.0.0.1`, any NPID/password. The first l
   `get_string(false)` and treats an empty one as a malformed login reply.
 - 0003: with `USCL_LOCAL`, no LAN-address swap (every player is 127.0.0.1 with their own port) and UDP on
   3757, because the bridge owns 3657.
+- 0004: with `USCL_LOCAL`, a new account is friends with every other account on the server (everyone there is
+  in the same Steam session; Minecraft only lists friends' worlds). Online players are notified.
