@@ -1,0 +1,244 @@
+From 825409f209bfafc98ec3cf1b64dba22bb1019823 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 15:08:09 -0700
+Subject: [PATCH 3/3] Teams service (3) stub, list/filter user files, unknown
+ services don't end the session
+
+Black Ops II calls Teams task 27, lists its stats backup (mpdatabk0000) and
+calls an unknown service 32; before, each of these dropped or crashed the
+session.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dw-server/src/lobby/mod.rs               |  4 +-
+ dw-server/src/lobby/storage/user_file.rs | 96 ++++++++++++++++++++----
+ libbitdemon/src/lobby/mod.rs             | 11 ++-
+ libbitdemon/src/lobby/teams/mod.rs       | 41 ++++++++++
+ 4 files changed, 136 insertions(+), 16 deletions(-)
+ create mode 100644 libbitdemon/src/lobby/teams/mod.rs
+
+diff --git a/dw-server/src/lobby/mod.rs b/dw-server/src/lobby/mod.rs
+index c44c1f3..387b026 100644
+--- a/dw-server/src/lobby/mod.rs
++++ b/dw-server/src/lobby/mod.rs
+@@ -15,7 +15,7 @@ use crate::lobby::storage::create_storage_handler;
+ use axum::Router;
+ use bitdemon::lobby::LobbyServiceId::{
+     Anticheat, BandwidthTest, Counter, Dml, EventLog, Group, KeyArchive, League, Profile,
+-    RichPresence, Stats, Storage, TitleUtilities, Twitch, VoteRank, Youtube,
++    RichPresence, Stats, Storage, Teams, TitleUtilities, Twitch, VoteRank, Youtube,
+ };
+ use bitdemon::lobby::anti_cheat::AntiCheatHandler;
+ use bitdemon::lobby::bandwidth::BandwidthHandler;
+@@ -24,6 +24,7 @@ use bitdemon::lobby::event_log::EventLogHandler;
+ use bitdemon::lobby::key_archive::KeyArchiveHandler;
+ use bitdemon::lobby::league::LeagueHandler;
+ use bitdemon::lobby::stats::StatsHandler;
++use bitdemon::lobby::teams::TeamsHandler;
+ use bitdemon::lobby::title_utilities::TitleUtilitiesHandler;
+ use bitdemon::lobby::twitch::TwitchHandler;
+ use bitdemon::lobby::vote_rank::VoteRankHandler;
+@@ -54,6 +55,7 @@ pub fn configure_lobby_server(
+     configurer.direct_config(Profile, create_profile_handler());
+     configurer.direct_config(RichPresence, create_rich_presence_handler(session_manager));
+     configurer.direct_config(Stats, Arc::new(StatsHandler::new()));
++    configurer.direct_config(Teams, Arc::new(TeamsHandler::new()));
+     configurer.direct_config(Storage, create_storage_handler());
+     configurer.direct_config(TitleUtilities, Arc::new(TitleUtilitiesHandler::new()));
+     configurer.direct_config(Twitch, Arc::new(TwitchHandler::new()));
+diff --git a/dw-server/src/lobby/storage/user_file.rs b/dw-server/src/lobby/storage/user_file.rs
+index 3eef725..e1ab2d6 100644
+--- a/dw-server/src/lobby/storage/user_file.rs
++++ b/dw-server/src/lobby/storage/user_file.rs
+@@ -73,25 +73,41 @@ impl UserStorageService for DwUserStorageService {
+ 
+     fn list_storage_files(
+         &self,
+-        _session: &BdSession,
+-        _owner_id: u64,
+-        _min_date_time: i64,
+-        _page_offset: usize,
+-        _page_size: usize,
++        session: &BdSession,
++        owner_id: u64,
++        min_date_time: i64,
++        page_offset: usize,
++        page_size: usize,
+     ) -> Result<ResultSlice<StorageFileInfo>, StorageServiceError> {
+-        todo!()
++        info!("Listing files owner_id={owner_id} min_date_time={min_date_time}");
++        query_files(
++            session,
++            owner_id,
++            min_date_time,
++            page_offset * page_size,
++            page_size,
++            "",
++        )
+     }
+ 
+     fn filter_storage_files(
+         &self,
+-        _session: &BdSession,
+-        _owner_id: u64,
+-        _min_date_time: i64,
+-        _item_offset: usize,
+-        _item_count: usize,
+-        _filter: String,
++        session: &BdSession,
++        owner_id: u64,
++        min_date_time: i64,
++        item_offset: usize,
++        item_count: usize,
++        filter: String,
+     ) -> Result<ResultSlice<StorageFileInfo>, StorageServiceError> {
+-        todo!()
++        info!("Filtering files owner_id={owner_id} min_date_time={min_date_time} filter={filter}");
++        query_files(
++            session,
++            owner_id,
++            min_date_time,
++            item_offset,
++            item_count,
++            &filter,
++        )
+     }
+ 
+     fn create_storage_file(
+@@ -273,3 +289,57 @@ impl DwUserStorageService {
+         DwUserStorageService {}
+     }
+ }
++
++/// The owner's files (or, for anyone else, the public ones) whose name starts with `prefix`, oldest first.
++fn query_files(
++    session: &BdSession,
++    owner_id: u64,
++    min_date_time: i64,
++    offset: usize,
++    count: usize,
++    prefix: &str,
++) -> Result<ResultSlice<StorageFileInfo>, StorageServiceError> {
++    let auth = session.authentication().unwrap();
++    let (title, is_owner) = (auth.title, auth.user_id == owner_id);
++
++    let files: rusqlite::Result<Vec<StorageFileInfo>> = STORAGE_DB.with_borrow(|db| {
++        let mut stmt = db.prepare(
++            "SELECT u.id, u.filename, length(u.data), u.created_at, u.modified_at, u.visibility
++                 FROM user_file u
++                 WHERE u.owner_id = ?1 AND u.title = ?2 AND u.modified_at >= ?3
++                   AND substr(u.filename, 1, length(?4)) = ?4 AND (?5 OR u.visibility = ?6)
++                 ORDER BY u.id LIMIT ?7 OFFSET ?8",
++        )?;
++        stmt.query_map(
++            (
++                owner_id,
++                from_title(title),
++                min_date_time,
++                prefix,
++                is_owner,
++                from_file_visibility(FileVisibility::VisiblePublic),
++                count as i64,
++                offset as i64,
++            ),
++            |row| {
++                Ok(StorageFileInfo {
++                    id: row.get(0)?,
++                    filename: row.get(1)?,
++                    title,
++                    file_size: row.get(2)?,
++                    created: row.get(3)?,
++                    modified: row.get(4)?,
++                    visibility: to_file_visibility(row.get(5)?),
++                    owner_id,
++                })
++            },
++        )?
++        .collect()
++    });
++
++    let files = files.map_err(|e| {
++        warn!("Listing files failed: {e}");
++        StorageServiceError::StorageFileNotFoundError
++    })?;
++    Ok(ResultSlice::new(files, offset))
++}
+diff --git a/libbitdemon/src/lobby/mod.rs b/libbitdemon/src/lobby/mod.rs
+index 2237890..d3a246a 100644
+--- a/libbitdemon/src/lobby/mod.rs
++++ b/libbitdemon/src/lobby/mod.rs
+@@ -13,6 +13,7 @@ mod response;
+ pub mod rich_presence;
+ pub mod stats;
+ pub mod storage;
++pub mod teams;
+ pub mod title_utilities;
+ pub mod twitch;
+ pub mod vote_rank;
+@@ -250,8 +251,14 @@ impl BdMessageHandler for LobbyServer {
+         message.reader.set_type_checked(false);
+         let service_id_input = message.reader.read_u8()?;
+ 
+-        let service_id = LobbyServiceId::from_u8(service_id_input)
+-            .ok_or_else(|| IllegalServiceIdSnafu { service_id_input }.build())?;
++        let Some(service_id) = LobbyServiceId::from_u8(service_id_input) else {
++            // An unknown service shouldn't end the whole session (Black Ops II calls 32)
++            warn!("Tried to call unknown service {service_id_input}");
++            TaskReply::with_only_error_code(ServiceNotAvailable, 0)
++                .to_response()?
++                .send(session)?;
++            return Ok(());
++        };
+ 
+         let handlers = self.lobby_handlers.read().unwrap();
+         let maybe_handler = handlers.get(&service_id);
+diff --git a/libbitdemon/src/lobby/teams/mod.rs b/libbitdemon/src/lobby/teams/mod.rs
+new file mode 100644
+index 0000000..8b2a28d
+--- /dev/null
++++ b/libbitdemon/src/lobby/teams/mod.rs
+@@ -0,0 +1,41 @@
++//! bdTeams (service 3): clans.
++//! shortcut: answers every task with "no error, no rows" (a player in no clan) and logs the request, so
++//! the real tasks can be worked out from what games send; store teams once their format is known.
++use crate::lobby::LobbyHandler;
++use crate::lobby::response::task_reply::TaskReply;
++use crate::messaging::BdErrorCode;
++use crate::messaging::bd_message::BdMessage;
++use crate::messaging::bd_response::{BdResponse, ResponseCreator};
++use crate::networking::bd_session::BdSession;
++use log::info;
++use std::error::Error;
++
++#[derive(Default)]
++pub struct TeamsHandler {}
++
++impl TeamsHandler {
++    pub fn new() -> TeamsHandler {
++        TeamsHandler {}
++    }
++}
++
++impl LobbyHandler for TeamsHandler {
++    fn handle_message(
++        &self,
++        _session: &mut BdSession,
++        mut message: BdMessage,
++    ) -> Result<BdResponse, Box<dyn Error>> {
++        let task_id = message.reader.read_u8()?;
++        let data = message.reader.remaining_data();
++        info!(
++            "Teams task {task_id} ({} bytes): {}",
++            data.len(),
++            hex(&data[..data.len().min(256)])
++        );
++        TaskReply::with_only_error_code(BdErrorCode::NoError, task_id).to_response()
++    }
++}
++
++fn hex(data: &[u8]) -> String {
++    data.iter().map(|b| format!("{b:02x}")).collect()
++}
+-- 
+2.56.0
+

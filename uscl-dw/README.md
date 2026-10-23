@@ -25,9 +25,13 @@ need the bridge to carry it (not done yet).
 - 0001: PS3 login (`Ps3ForMmpRequest`) as Black Ops II does it: the key comes from the PSN/RPCN ticket's cookie
   (see `games/BLUS31011.md`). `DW_AUTH_ADDR` / `DW_LOBBY_ADDR`.
 - 0002: Stats service (4): every task answers "no rows" and logs the request (BO2 calls task 11 at startup).
+- 0003: Teams service (3) stub; listing/filtering a player's own files; an unknown service id gets "not available"
+  instead of ending the session.
 
 ## Status
 Black Ops II 1.19 logs in and reaches the lobby server (2026-10-23). Play Online still fails: it needs our own
-NAT traversal server (`cod7-stun`), see `games/BLUS31011.md`. Publisher files go in `storage/publisher/<title id>/`
-(BO2 retries `largeheatmap.raw` until it gets one; any non-empty file works). Missing services show as
+NAT traversal server (`cod7-stun`), see `games/BLUS31011.md`. Publisher files go in `storage/publisher/<title id>/`.
+BO2 needs `online_tu19_mp_english.wad`: a 16-byte header is enough (`54 33 77 ab`, timestamp 0, 0 entries,
+version `ff ff ff ff`); without it it never fetches its stats. Don't serve `largeheatmap.raw`: any file we've
+tried makes BO2 drop the lobby connection right after, every 30 s. Missing services show as
 `Tried to call unavailable service ...` in the log.
