@@ -95,203 +95,208 @@ maplist nuketown
 mp_nuketown_2020
 
 supercategory main
-name "Matchmaking"
+name english "Matchmaking"
+filter playermatch
 
 category core
-name "Core"
+name english "Core"
+filter playermatch
 supercategory main
 
 category hardcore
-name "Hardcore"
+name english "Hardcore"
+filter playermatch
 supercategory main
 
 category party
-name "Party Games"
+name english "Party Games"
+filter playermatch
 supercategory main
 
 category uscl
-name "USCL"
+name english "USCL"
+filter playermatch
 supercategory main
 
 playlist 1
-name "Team Deathmatch"
-description "Team Deathmatch"
+name english "Team Deathmatch"
+description english "Team Deathmatch"
 category core
 maxparty 6
 ranked
 base,tdm,1
 
 playlist 2
-name "Free-for-All"
-description "Free-for-All"
+name english "Free-for-All"
+description english "Free-for-All"
 category core
 maxparty 1
 ranked
 base,dm,1
 
 playlist 3
-name "Domination"
-description "Domination"
+name english "Domination"
+description english "Domination"
 category core
 maxparty 6
 ranked
 base,dom,1
 
 playlist 4
-name "Kill Confirmed"
-description "Kill Confirmed"
+name english "Kill Confirmed"
+description english "Kill Confirmed"
 category core
 maxparty 6
 ranked
 base,conf,1
 
 playlist 5
-name "Hardpoint"
-description "Hardpoint"
+name english "Hardpoint"
+description english "Hardpoint"
 category core
 maxparty 6
 ranked
 base,koth,1
 
 playlist 6
-name "Search and Destroy"
-description "Search and Destroy"
+name english "Search and Destroy"
+description english "Search and Destroy"
 category core
 maxparty 6
 ranked
 base,sd,1
 
 playlist 7
-name "Demolition"
-description "Demolition"
+name english "Demolition"
+description english "Demolition"
 category core
 maxparty 6
 ranked
 base,dem,1
 
 playlist 8
-name "Capture the Flag"
-description "Capture the Flag"
+name english "Capture the Flag"
+description english "Capture the Flag"
 category core
 maxparty 6
 ranked
 base,ctf,1
 
 playlist 9
-name "Headquarters"
-description "Headquarters"
+name english "Headquarters"
+description english "Headquarters"
 category core
 maxparty 6
 ranked
 base,hq,1
 
 playlist 10
-name "Hardcore Team Deathmatch"
-description "Hardcore Team Deathmatch"
+name english "Hardcore Team Deathmatch"
+description english "Hardcore Team Deathmatch"
 category hardcore
 maxparty 6
 ranked
 base,hc_tdm,1
 
 playlist 11
-name "Hardcore Free-for-All"
-description "Hardcore Free-for-All"
+name english "Hardcore Free-for-All"
+description english "Hardcore Free-for-All"
 category hardcore
 maxparty 1
 ranked
 base,hc_dm,1
 
 playlist 12
-name "Hardcore Domination"
-description "Hardcore Domination"
+name english "Hardcore Domination"
+description english "Hardcore Domination"
 category hardcore
 maxparty 6
 ranked
 base,hc_dom,1
 
 playlist 13
-name "Hardcore Kill Confirmed"
-description "Hardcore Kill Confirmed"
+name english "Hardcore Kill Confirmed"
+description english "Hardcore Kill Confirmed"
 category hardcore
 maxparty 6
 ranked
 base,hc_conf,1
 
 playlist 14
-name "Hardcore Hardpoint"
-description "Hardcore Hardpoint"
+name english "Hardcore Hardpoint"
+description english "Hardcore Hardpoint"
 category hardcore
 maxparty 6
 ranked
 base,hc_koth,1
 
 playlist 15
-name "Hardcore Search and Destroy"
-description "Hardcore Search and Destroy"
+name english "Hardcore Search and Destroy"
+description english "Hardcore Search and Destroy"
 category hardcore
 maxparty 6
 ranked
 base,hc_sd,1
 
 playlist 16
-name "Hardcore Demolition"
-description "Hardcore Demolition"
+name english "Hardcore Demolition"
+description english "Hardcore Demolition"
 category hardcore
 maxparty 6
 ranked
 base,hc_dem,1
 
 playlist 17
-name "Hardcore Capture the Flag"
-description "Hardcore Capture the Flag"
+name english "Hardcore Capture the Flag"
+description english "Hardcore Capture the Flag"
 category hardcore
 maxparty 6
 ranked
 base,hc_ctf,1
 
 playlist 18
-name "Hardcore Headquarters"
-description "Hardcore Headquarters"
+name english "Hardcore Headquarters"
+description english "Hardcore Headquarters"
 category hardcore
 maxparty 6
 ranked
 base,hc_hq,1
 
 playlist 19
-name "Gun Game"
-description "Gun Game"
+name english "Gun Game"
+description english "Gun Game"
 category party
 maxparty 4
 ranked
 base,gun,1
 
 playlist 20
-name "One in the Chamber"
-description "One in the Chamber"
+name english "One in the Chamber"
+description english "One in the Chamber"
 category party
 maxparty 4
 ranked
 base,oic,1
 
 playlist 21
-name "Sharpshooter"
-description "Sharpshooter"
+name english "Sharpshooter"
+description english "Sharpshooter"
 category party
 maxparty 4
 ranked
 base,shrp,1
 
 playlist 22
-name "Sticks and Stones"
-description "Sticks and Stones"
+name english "Sticks and Stones"
+description english "Sticks and Stones"
 category party
 maxparty 4
 ranked
 base,sas,1
 
 playlist 23
-name "Mosh Pit"
-description "Mixed team modes on every base map"
+name english "Mosh Pit"
+description english "Mixed team modes on every base map"
 category uscl
 maxparty 6
 ranked
@@ -303,8 +308,8 @@ base,sd,1
 base,ctf,1
 
 playlist 24
-name "Nuketown 24/7"
-description "Team Deathmatch and Domination on Nuketown 2025"
+name english "Nuketown 24/7"
+description english "Team Deathmatch and Domination on Nuketown 2025"
 category uscl
 maxparty 6
 ranked
@@ -312,8 +317,8 @@ nuketown,tdm,1
 nuketown,dom,1
 
 playlist 25
-name "Hardcore Mosh Pit"
-description "Mixed hardcore team modes"
+name english "Hardcore Mosh Pit"
+description english "Mixed hardcore team modes"
 category uscl
 maxparty 6
 ranked
