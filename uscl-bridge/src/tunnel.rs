@@ -8,6 +8,10 @@
 //! so RPCN hands it out as the member's P2P address, and every bridge listens there and relays to that member.
 //! Only 127.0.0.1 and ports, so it behaves the same on Windows, Linux, macOS and the Steam Deck.
 //! Game traffic goes straight between members (Steam relay), not through the host. Lobbies hold up to 250.
+//!
+//! Forwards (`host skate3` or `host tcp:42100,udp:17001-17064`): for games that play through a community server.
+//! The host runs that server; members' bridges listen on the same 127.0.0.1 ports (lobby data "fwd") and carry the
+//! traffic to it, so members point the game at 127.0.0.1. The host only ever connects to ports on its own list.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
@@ -30,9 +34,51 @@ const CH_TCP: u32 = 1;
 const CH_UDP: u32 = 2;
 const UDP_RPCN: u8 = 0;
 const UDP_P2P: u8 = 1;
-const TCP_OPEN: u8 = 0;
+const UDP_FWD: u8 = 2; // [port u16 BE][data]
+const TCP_OPEN: u8 = 0; // payload: empty = RPCN, or a forwarded port u16 BE
 const TCP_DATA: u8 = 1;
 const TCP_CLOSE: u8 = 2;
+
+/// Port lists for games played through a community server (see games/<serial>.md).
+fn preset(name: &str) -> Option<&'static str> {
+    match name {
+        // Skate3BlazeServer: Blaze, HTTP, one UDP relay per lobby at 17000 + game id
+        "skate3" => Some("tcp:42100,tcp:80,udp:17001-17064"),
+        _ => None,
+    }
+}
+
+/// "tcp:42100,udp:17001-17064" -> [(udp?, port)]
+pub fn parse_forwards(spec: &str) -> Result<Vec<(bool, u16)>, String> {
+    let spec = preset(spec).unwrap_or(spec);
+    let mut out = Vec::new();
+    for item in spec.split(',').filter(|i| !i.is_empty()) {
+        let bad = || format!("bad forward `{item}` (want tcp:PORT, udp:PORT or udp:FIRST-LAST, or a preset: skate3)");
+        let (proto, ports) = item.split_once(':').ok_or_else(bad)?;
+        let udp = match proto { "tcp" => false, "udp" => true, _ => return Err(bad()) };
+        let (a, b) = ports.split_once('-').unwrap_or((ports, ports));
+        let (a, b): (u16, u16) = (a.parse().map_err(|_| bad())?, b.parse().map_err(|_| bad())?);
+        if a == 0 || b < a {
+            return Err(bad());
+        }
+        out.extend((a..=b).map(|p| (udp, p)));
+    }
+    if out.len() > 512 {
+        return Err("more than 512 forwarded ports".into());
+    }
+    Ok(out)
+}
+
+fn fwd_spec(fwd: &[(bool, u16)]) -> String {
+    fwd.iter().map(|(u, p)| format!("{}:{p}", if *u { "udp" } else { "tcp" })).collect::<Vec<_>>().join(",")
+}
+
+fn fwd_frame(port: u16, data: &[u8]) -> Vec<u8> {
+    let mut f = vec![UDP_FWD];
+    f.extend_from_slice(&port.to_be_bytes());
+    f.extend_from_slice(data);
+    f
+}
 
 fn local(port: u16) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], port))
@@ -52,7 +98,7 @@ fn parse_tcp_frame(f: &[u8]) -> Option<(u32, u8, &[u8])> {
 }
 
 enum Ev {
-    Accepted(TcpStream),
+    Accepted(TcpStream, u16), // local port it came in on
     Tcp { peer: u64, id: u32, data: Option<Vec<u8>> }, // None: that side closed
     Changed,
     Invite(LobbyId),
@@ -100,7 +146,7 @@ fn wait<T>(client: &Client, rx: &std::sync::mpsc::Receiver<T>, what: &str) -> Re
 }
 
 /// A new session lobby. `slots` carry over when Steam dropped the old one, so members keep their ports.
-fn create_session(client: &Client, slots: &HashMap<u64, u16>) -> Result<LobbyId, String> {
+fn create_session(client: &Client, slots: &HashMap<u64, u16>, fwd: &[(bool, u16)]) -> Result<LobbyId, String> {
     let mm = client.matchmaking();
     let (t, r) = channel();
     mm.create_lobby(LobbyType::FriendsOnly, 250, move |res| {
@@ -108,6 +154,7 @@ fn create_session(client: &Client, slots: &HashMap<u64, u16>) -> Result<LobbyId,
     });
     let lobby = wait(client, &r, "lobby creation")?.map_err(|e| format!("create_lobby: {e:?}"))?;
     mm.set_lobby_data(lobby, "uscl", "session");
+    mm.set_lobby_data(lobby, "fwd", &fwd_spec(fwd));
     for (id, slot) in slots {
         mm.set_lobby_data(lobby, &format!("slot:{id}"), &slot.to_string());
     }
@@ -146,7 +193,7 @@ fn friend_sessions(client: &Client) -> Vec<(LobbyId, String)> {
 }
 
 /// `join`: None joins the one session a friend is in, or a Steam invite, whichever comes first.
-pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), String> {
+pub fn run(client: Client, host: bool, join: Option<LobbyId>, fwd: Vec<(bool, u16)>) -> Result<(), String> {
     client.networking_utils().init_relay_network_access();
     let mm = client.matchmaking();
     let net = client.networking_messages();
@@ -178,7 +225,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), Stri
     let mut slot_of: HashMap<u64, u16> = HashMap::new();
     let mut lobby = if host {
         slot_of.insert(me.raw(), 1);
-        create_session(&client, &slot_of)?
+        create_session(&client, &slot_of, &fwd)?
     } else {
         match join {
             Some(id) => join_session(&client, id)?,
@@ -230,14 +277,40 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), Stri
     println!("uscl-bridge: session {} ({}); give friends this number or invite them from Steam", lobby.raw(), if host { "hosting" } else { "joined" });
     client.friends().set_rich_presence("status", Some("USCL session"));
 
-    let t = tx.clone();
-    std::thread::spawn(move || {
-        for s in listener.incoming().flatten() {
-            if t.send(Ev::Accepted(s)).is_err() {
-                return;
+    let accept = |listener: TcpListener, port: u16| {
+        let t = tx.clone();
+        std::thread::spawn(move || {
+            for s in listener.incoming().flatten() {
+                if t.send(Ev::Accepted(s, port)).is_err() {
+                    return;
+                }
+            }
+        });
+    };
+    accept(listener, RPCN_TCP);
+
+    // Forwards: the host connects to its own list only; a member listens on the host's list.
+    let fwd = if host { fwd } else { parse_forwards(&mm.lobby_data(lobby, "fwd").unwrap_or_default())? };
+    let mut fwd_udp: HashMap<u16, (UdpSocket, Option<SocketAddr>)> = HashMap::new(); // member: port -> socket, game's address
+    let mut fwd_host: HashMap<(u64, u16), UdpSocket> = HashMap::new(); // host: one socket per member and port
+    if !host && !fwd.is_empty() {
+        let mut failed = Vec::new();
+        for &(udp, port) in &fwd {
+            let res = if udp {
+                bind_udp(port).map(|s| { fwd_udp.insert(port, (s, None)); })
+            } else {
+                TcpListener::bind(local(port)).map(|l| accept(l, port)).map_err(|e| e.to_string())
+            };
+            if res.is_err() {
+                failed.push(format!("{}:{port}", if udp { "udp" } else { "tcp" }));
             }
         }
-    });
+        println!("uscl-bridge: forwarding {} ports to the host's server", fwd.len() - failed.len());
+        if !failed.is_empty() {
+            // e.g. port 80 on Linux needs privileges
+            eprintln!("uscl-bridge: couldn't listen on {} (in use, or a port below 1024 on Linux)", failed.join(", "));
+        }
+    }
 
     let send = |peer: u64, ch: u32, data: &[u8], reliable: bool| {
         let flags = if reliable { SendFlags::RELIABLE_NO_NAGLE } else { SendFlags::UNRELIABLE_NO_NAGLE };
@@ -270,7 +343,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), Stri
                 Ev::Changed => changed = true,
                 Ev::Invite(_) => {} // already in a session
                 Ev::Session(req) => pending.push((req, Instant::now())),
-                Ev::Accepted(s) => {
+                Ev::Accepted(s, port) => {
                     next_conn += 1;
                     if host {
                         // our own RPCS3: straight to the local RPCN
@@ -288,7 +361,8 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), Stri
                         if let Ok(r) = s.try_clone() {
                             tcp.insert((host, next_conn), s);
                             spawn_reader(r, host, next_conn, tx.clone());
-                            send(host, CH_TCP, &tcp_frame(next_conn, TCP_OPEN, &[]), true);
+                            let to: &[u8] = if port == RPCN_TCP { &[] } else { &port.to_be_bytes() };
+                            send(host, CH_TCP, &tcp_frame(next_conn, TCP_OPEN, to), true);
                         }
                     }
                 }
@@ -330,7 +404,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), Stri
             last_check = Instant::now();
             let list = mm.lobby_members(lobby);
             if host && !list.contains(&me) {
-                match create_session(&client, &slot_of) {
+                match create_session(&client, &slot_of, &fwd) {
                     Ok(l) => {
                         lobby = l;
                         changed = true;
@@ -394,8 +468,39 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), Stri
             }
         }
 
+        // Forwarded UDP: member side (game <-> host) and host side (member <-> server)
+        for (&port, (sock, game)) in fwd_udp.iter_mut() {
+            while let Ok((n, src)) = sock.recv_from(&mut buf) {
+                *game = Some(src);
+                send(host_id.raw(), CH_UDP, &fwd_frame(port, &buf[..n]), false);
+            }
+        }
+        for (&(peer, port), sock) in &fwd_host {
+            while let Ok((n, _)) = sock.recv_from(&mut buf) {
+                send(peer, CH_UDP, &fwd_frame(port, &buf[..n]), false);
+            }
+        }
+
         for m in net.receive_messages_on_channel(CH_UDP, 256) {
             let Some(peer) = m.identity_peer().steam_id().map(|s| s.raw()) else { continue };
+            if let [UDP_FWD, a, b, d @ ..] = m.data() {
+                let port = u16::from_be_bytes([*a, *b]);
+                if host && members.contains(&peer) && fwd.contains(&(true, port)) {
+                    if !fwd_host.contains_key(&(peer, port)) {
+                        // its own source port, so the server tells members apart by address
+                        match bind_udp(0) {
+                            Ok(s) => { fwd_host.insert((peer, port), s); }
+                            Err(e) => { eprintln!("uscl-bridge: {e}"); continue; }
+                        }
+                    }
+                    let _ = fwd_host[&(peer, port)].send_to(d, local(port));
+                } else if peer == host_id.raw() {
+                    if let Some((sock, Some(game))) = fwd_udp.get(&port) {
+                        let _ = sock.send_to(d, *game);
+                    }
+                }
+                continue;
+            }
             let Some(sock) = slot_of.get(&peer).and_then(|s| socks.get(s)) else { continue };
             match m.data().split_first() {
                 Some((&UDP_RPCN, d)) if host => { let _ = sock.send_to(d, local(HOST_RPCN_UDP)); }
@@ -409,7 +514,13 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), Stri
             let Some(peer) = m.identity_peer().steam_id().map(|s| s.raw()) else { continue };
             let Some((id, op, d)) = parse_tcp_frame(m.data()) else { continue };
             match op {
-                TCP_OPEN if host => match connect_rpcn() {
+                TCP_OPEN if host => match match d {
+                    [] => connect_rpcn(),
+                    &[a, b] if fwd.contains(&(false, u16::from_be_bytes([a, b]))) => {
+                        TcpStream::connect_timeout(&local(u16::from_be_bytes([a, b])), Duration::from_millis(300))
+                    }
+                    _ => Err(std::io::Error::other("port isn't forwarded")),
+                } {
                     Ok(s) => {
                         if let Ok(r) = s.try_clone() {
                             tcp.insert((peer, id), s);
@@ -417,7 +528,8 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), Stri
                         }
                     }
                     Err(e) => {
-                        eprintln!("uscl-bridge: RPCN not reachable on {HOST_RPCN_TCP}: {e}");
+                        let what = if d.is_empty() { format!("RPCN on {HOST_RPCN_TCP}") } else { format!("forwarded port {d:?}") };
+                        eprintln!("uscl-bridge: {what} not reachable: {e}");
                         send(peer, CH_TCP, &tcp_frame(id, TCP_CLOSE, &[]), true);
                     }
                 },
@@ -451,5 +563,17 @@ mod tests {
         let f = tcp_frame(0xDEADBEEF, TCP_DATA, b"hi");
         assert_eq!(parse_tcp_frame(&f), Some((0xDEADBEEF, TCP_DATA, &b"hi"[..])));
         assert_eq!(parse_tcp_frame(&f[..4]), None);
+    }
+
+    #[test]
+    fn forwards() {
+        let f = parse_forwards("skate3").unwrap();
+        assert_eq!(f.len(), 2 + 64);
+        assert_eq!(&f[..3], &[(false, 42100), (false, 80), (true, 17001)]);
+        assert_eq!(parse_forwards(&fwd_spec(&f)).unwrap(), f);
+        assert_eq!(parse_forwards("").unwrap(), vec![]);
+        for bad in ["tcp", "sctp:1", "udp:0", "udp:5-4", "tcp:70000", "udp:1-1000"] {
+            assert!(parse_forwards(bad).is_err(), "{bad}");
+        }
     }
 }

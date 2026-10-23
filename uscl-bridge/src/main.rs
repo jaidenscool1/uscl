@@ -88,15 +88,24 @@ fn main() {
             }
         },
         Some(cmd @ ("host" | "join")) => {
-            let join = std::env::args().nth(2).map(|s| s.parse().map(steamworks::LobbyId::from_raw).unwrap_or_else(|_| {
-                eprintln!("session id must be the number the host printed");
-                std::process::exit(2);
-            }));
+            let arg = std::env::args().nth(2);
+            let (join, fwd) = if cmd == "host" {
+                (None, tunnel::parse_forwards(arg.as_deref().unwrap_or("")).unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }))
+            } else {
+                let join = arg.map(|s| s.parse().map(steamworks::LobbyId::from_raw).unwrap_or_else(|_| {
+                    eprintln!("session id must be the number the host printed");
+                    std::process::exit(2);
+                }));
+                (join, vec![])
+            };
             let client = Client::init_app(APP_ID).unwrap_or_else(|e| {
                 eprintln!("Steam init failed (is Steam running?): {e:?}");
                 std::process::exit(1);
             });
-            if let Err(e) = tunnel::run(client, cmd == "host", join) {
+            if let Err(e) = tunnel::run(client, cmd == "host", join, fwd) {
                 eprintln!("FAIL: {e}");
                 std::process::exit(1);
             }
@@ -119,7 +128,7 @@ fn main() {
             }
         },
         _ => {
-            eprintln!("usage: uscl-bridge host | join [session id] | selftest | serve | client-test");
+            eprintln!("usage: uscl-bridge host [skate3 | tcp:PORT,udp:FIRST-LAST,...] | join [session id] | selftest | serve | client-test");
             std::process::exit(2);
         }
     }
