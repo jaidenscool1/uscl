@@ -119,8 +119,16 @@ fn join_session(client: &Client, lobby: LobbyId) -> Result<LobbyId, String> {
     client.matchmaking().join_lobby(lobby, move |res| {
         let _ = t.send(res);
     });
-    wait(client, &r, "lobby join")?.map_err(|_| "join_lobby failed (wrong id, full, or not a friend of the host)".to_string())
+    let lobby = wait(client, &r, "lobby join")?.map_err(|_| "join_lobby failed (wrong id, full, or not a friend of the host)".to_string())?;
+    // other projects use app 480 too, so a friend's lobby may be someone else's
+    if client.matchmaking().lobby_data(lobby, "uscl").as_deref() != Some("session") {
+        client.matchmaking().leave_lobby(lobby);
+        return Err(NOT_USCL.to_string());
+    }
+    Ok(lobby)
 }
+
+const NOT_USCL: &str = "that lobby isn't a USCL session";
 
 /// Lobbies of this app that friends are in, with who's in them: the sessions we could join.
 fn friend_sessions(client: &Client) -> Vec<(LobbyId, String)> {
@@ -177,19 +185,38 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), Stri
             None => {
                 eprintln!("uscl-bridge: looking for a friend's USCL session (or accept a Steam invite)...");
                 let mut last = Instant::now() - Duration::from_secs(10);
+                // lobbies that turned out not to be USCL sessions or refused us
+                let mut skip: HashSet<LobbyId> = HashSet::new();
                 loop {
                     client.run_callbacks();
                     if let Ok(Ev::Invite(id)) = rx.try_recv() {
-                        break join_session(&client, id)?;
+                        match join_session(&client, id) {
+                            Ok(l) => break l,
+                            Err(e) => eprintln!("uscl-bridge: couldn't join the invite: {e}"),
+                        }
                     }
                     if last.elapsed() > Duration::from_secs(2) {
                         last = Instant::now();
-                        let found = friend_sessions(&client);
-                        match found.len() {
+                        // join each candidate to read its data; stay only if exactly one is a USCL session
+                        let mut ok: Vec<(LobbyId, String)> = Vec::new();
+                        let fresh: Vec<_> = friend_sessions(&client).into_iter().filter(|(l, _)| !skip.contains(l)).collect();
+                        for (l, who) in fresh {
+                            match join_session(&client, l) {
+                                Ok(l) => ok.push((l, who)),
+                                Err(e) => {
+                                    if e != NOT_USCL {
+                                        eprintln!("uscl-bridge: couldn't join {}'s lobby: {e}", who);
+                                    }
+                                    skip.insert(l);
+                                }
+                            }
+                        }
+                        match ok.len() {
                             0 => {}
-                            1 => break join_session(&client, found[0].0)?,
+                            1 => break ok[0].0,
                             _ => {
-                                let list: Vec<String> = found.iter().map(|(l, who)| format!("  {}  ({who})", l.raw())).collect();
+                                ok.iter().for_each(|(l, _)| mm.leave_lobby(*l));
+                                let list: Vec<String> = ok.iter().map(|(l, who)| format!("  {}  ({who})", l.raw())).collect();
                                 return Err(format!("friends are in more than one session; run `join <number>` with one of:\n{}", list.join("\n")));
                             }
                         }
@@ -229,6 +256,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), Stri
     let mut next_slot: u16 = 1;
     let mut changed = true;
     let mut last_check = Instant::now();
+    let mut host_gone = false;
     let mut members: HashSet<u64> = HashSet::new();
     // a request can beat the lobby update that makes its sender a member, so it waits here a little
     let mut pending: Vec<(SessionRequest, Instant)> = Vec::new();
@@ -311,11 +339,16 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>) -> Result<(), Stri
                     Err(e) => eprintln!("uscl-bridge: session lost, retrying: {e}"),
                 }
             } else if !host && !list.contains(&host_id) {
+                if !host_gone {
+                    host_gone = true;
+                    println!("uscl-bridge: the host left the session; waiting for them to start it again (Ctrl+C to stop)");
+                }
                 let now = client.friends().get_friend(host_id).game_played().map(|g| g.lobby).filter(|l| l.raw() != 0 && *l != lobby);
                 if let Some(l) = now.and_then(|l| join_session(&client, l).ok()) {
                     mm.leave_lobby(lobby);
                     lobby = l;
                     changed = true;
+                    host_gone = false;
                     println!("uscl-bridge: followed the host to session {}", lobby.raw());
                 }
             }
