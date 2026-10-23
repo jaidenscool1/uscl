@@ -1,0 +1,189 @@
+From 6c04ab4d02ca3f8c91b43fb9583811c76a4bddbd Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 13:11:53 -0700
+Subject: [PATCH 2/2] Stats service (4): answer every task with no rows and log
+ the request
+
+Black Ops II calls task 11 at startup; until now the service was missing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dw-server/src/lobby/mod.rs               |  4 ++-
+ libbitdemon/src/auth/auth_handler/ps3.rs | 32 +++++++++++++++---
+ libbitdemon/src/lobby/mod.rs             |  1 +
+ libbitdemon/src/lobby/stats/mod.rs       | 41 ++++++++++++++++++++++++
+ libbitdemon/src/messaging/bd_reader.rs   |  5 +++
+ 5 files changed, 77 insertions(+), 6 deletions(-)
+ create mode 100644 libbitdemon/src/lobby/stats/mod.rs
+
+diff --git a/dw-server/src/lobby/mod.rs b/dw-server/src/lobby/mod.rs
+index 0067c89..c44c1f3 100644
+--- a/dw-server/src/lobby/mod.rs
++++ b/dw-server/src/lobby/mod.rs
+@@ -15,7 +15,7 @@ use crate::lobby::storage::create_storage_handler;
+ use axum::Router;
+ use bitdemon::lobby::LobbyServiceId::{
+     Anticheat, BandwidthTest, Counter, Dml, EventLog, Group, KeyArchive, League, Profile,
+-    RichPresence, Storage, TitleUtilities, Twitch, VoteRank, Youtube,
++    RichPresence, Stats, Storage, TitleUtilities, Twitch, VoteRank, Youtube,
+ };
+ use bitdemon::lobby::anti_cheat::AntiCheatHandler;
+ use bitdemon::lobby::bandwidth::BandwidthHandler;
+@@ -23,6 +23,7 @@ use bitdemon::lobby::dml::DmlHandler;
+ use bitdemon::lobby::event_log::EventLogHandler;
+ use bitdemon::lobby::key_archive::KeyArchiveHandler;
+ use bitdemon::lobby::league::LeagueHandler;
++use bitdemon::lobby::stats::StatsHandler;
+ use bitdemon::lobby::title_utilities::TitleUtilitiesHandler;
+ use bitdemon::lobby::twitch::TwitchHandler;
+ use bitdemon::lobby::vote_rank::VoteRankHandler;
+@@ -52,6 +53,7 @@ pub fn configure_lobby_server(
+     configurer.direct_config(League, Arc::new(LeagueHandler::new()));
+     configurer.direct_config(Profile, create_profile_handler());
+     configurer.direct_config(RichPresence, create_rich_presence_handler(session_manager));
++    configurer.direct_config(Stats, Arc::new(StatsHandler::new()));
+     configurer.direct_config(Storage, create_storage_handler());
+     configurer.direct_config(TitleUtilities, Arc::new(TitleUtilitiesHandler::new()));
+     configurer.direct_config(Twitch, Arc::new(TwitchHandler::new()));
+diff --git a/libbitdemon/src/auth/auth_handler/ps3.rs b/libbitdemon/src/auth/auth_handler/ps3.rs
+index 42138ca..4a85df3 100644
+--- a/libbitdemon/src/auth/auth_handler/ps3.rs
++++ b/libbitdemon/src/auth/auth_handler/ps3.rs
+@@ -73,8 +73,15 @@ pub fn parse_np_ticket(ticket: &[u8]) -> Option<NpTicket> {
+     let user_id = u64::from_be_bytes(fields.get(4).filter(|f| f.0 == 2)?.1.try_into().ok()?);
+     let online_id = fields.get(5).filter(|f| f.0 == 4)?.1;
+     let online_id = String::from_utf8_lossy(online_id.split(|b| *b == 0).next()?).into_owned();
+-    let cookie = fields.get(10).filter(|f| f.0 == 8).and_then(|f| f.1.try_into().ok());
+-    Some(NpTicket { user_id, online_id, cookie })
++    let cookie = fields
++        .get(10)
++        .filter(|f| f.0 == 8)
++        .and_then(|f| f.1.try_into().ok());
++    Some(NpTicket {
++        user_id,
++        online_id,
++        cookie,
++    })
+ }
+ 
+ pub struct Ps3AuthHandler {
+@@ -112,7 +119,11 @@ impl AuthResponse for Ps3AuthResponse {
+             self.ticket.serialize(&mut ticket_writer)?;
+         }
+         ticket_buf.resize(ENCRYPTED_TICKET_LEN, 0);
+-        encrypt_buffer_in_place(&mut ticket_buf, &self.client_key, &generate_iv_from_seed(seed));
++        encrypt_buffer_in_place(
++            &mut ticket_buf,
++            &self.client_key,
++            &generate_iv_from_seed(seed),
++        );
+         writer.write_bytes(ticket_buf.as_slice())?;
+ 
+         writer.write_bytes(&self.serialized_proof_data)?;
+@@ -172,7 +183,11 @@ impl AuthHandler for Ps3AuthHandler {
+         };
+         let serialized_proof_data = proof.serialize(self.key_store.as_ref());
+ 
+-        Ok(Box::new(Ps3AuthResponse { ticket, client_key, serialized_proof_data }))
++        Ok(Box::new(Ps3AuthResponse {
++            ticket,
++            client_key,
++            serialized_proof_data,
++        }))
+     }
+ }
+ 
+@@ -217,7 +232,14 @@ mod tests {
+     #[test]
+     fn reads_rpcn_ticket() {
+         let t = parse_np_ticket(&rpcn_ticket(&[7; 24])).unwrap();
+-        assert_eq!(t, NpTicket { user_id: 42, online_id: "uscltest".into(), cookie: Some([7; 24]) });
++        assert_eq!(
++            t,
++            NpTicket {
++                user_id: 42,
++                online_id: "uscltest".into(),
++                cookie: Some([7; 24])
++            }
++        );
+         assert_eq!(parse_np_ticket(&rpcn_ticket(&[])).unwrap().cookie, None);
+         let good = rpcn_ticket(&[7; 24]);
+         assert_eq!(parse_np_ticket(&good[..good.len() - 30]), None);
+diff --git a/libbitdemon/src/lobby/mod.rs b/libbitdemon/src/lobby/mod.rs
+index acbb954..2237890 100644
+--- a/libbitdemon/src/lobby/mod.rs
++++ b/libbitdemon/src/lobby/mod.rs
+@@ -11,6 +11,7 @@ mod lsg;
+ pub mod profile;
+ mod response;
+ pub mod rich_presence;
++pub mod stats;
+ pub mod storage;
+ pub mod title_utilities;
+ pub mod twitch;
+diff --git a/libbitdemon/src/lobby/stats/mod.rs b/libbitdemon/src/lobby/stats/mod.rs
+new file mode 100644
+index 0000000..2fbed11
+--- /dev/null
++++ b/libbitdemon/src/lobby/stats/mod.rs
+@@ -0,0 +1,41 @@
++//! bdStats (service 4): player stats / leaderboards.
++//! shortcut: answers every task with "no error, no rows" (a new player has no stats) and logs the request, so
++//! the real tasks can be worked out from what games send; store and return stats once their format is known.
++use crate::lobby::LobbyHandler;
++use crate::lobby::response::task_reply::TaskReply;
++use crate::messaging::BdErrorCode;
++use crate::messaging::bd_message::BdMessage;
++use crate::messaging::bd_response::{BdResponse, ResponseCreator};
++use crate::networking::bd_session::BdSession;
++use log::info;
++use std::error::Error;
++
++#[derive(Default)]
++pub struct StatsHandler {}
++
++impl StatsHandler {
++    pub fn new() -> StatsHandler {
++        StatsHandler {}
++    }
++}
++
++impl LobbyHandler for StatsHandler {
++    fn handle_message(
++        &self,
++        _session: &mut BdSession,
++        mut message: BdMessage,
++    ) -> Result<BdResponse, Box<dyn Error>> {
++        let task_id = message.reader.read_u8()?;
++        let data = message.reader.remaining_data();
++        info!(
++            "Stats task {task_id} ({} bytes): {}",
++            data.len(),
++            hex(&data[..data.len().min(256)])
++        );
++        TaskReply::with_only_error_code(BdErrorCode::NoError, task_id).to_response()
++    }
++}
++
++fn hex(data: &[u8]) -> String {
++    data.iter().map(|b| format!("{b:02x}")).collect()
++}
+diff --git a/libbitdemon/src/messaging/bd_reader.rs b/libbitdemon/src/messaging/bd_reader.rs
+index 37b0260..b96d13e 100644
+--- a/libbitdemon/src/messaging/bd_reader.rs
++++ b/libbitdemon/src/messaging/bd_reader.rs
+@@ -254,6 +254,11 @@ impl BdReader {
+         Ok(self.next_data_type()?.eq_non_array(BdDataType::BlobType))
+     }
+ 
++    /// The unread rest of the message, without consuming it (for logging unknown requests).
++    pub fn remaining_data(&self) -> &[u8] {
++        &self.cursor.get_ref()[(self.cursor.position() as usize).min(self.cursor.get_ref().len())..]
++    }
++
+     pub fn remaining_bytes(&self) -> Result<usize, Box<dyn Error>> {
+         ensure!(
+             self.mode == StreamMode::ByteMode,
+-- 
+2.56.0
+
