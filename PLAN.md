@@ -52,11 +52,15 @@ Boot a game to its menu, then run `./np-profile.py`. It reads the PSN imports fr
 | Verdict | Meaning | Example (profiled) |
 |---|---|---|
 | FULL | rooms + P2P through Sony: Steam can carry all of it | Minecraft PS3 Edition (BLUS31426): 27 Matching2 functions, plus Score and Basic |
-| PARTIAL | PSN only for sign-in/invites; matchmaking on the publisher's servers | Skate 3 (BLUS30464): Basic, Manager, Lookup, no Matching2 |
+| PARTIAL | PSN only for sign-in/invites; matchmaking on the publisher's servers | Skate 3 (BLUS30464), Black Ops II (BLUS31011): Basic, Manager, Lookup, no Matching2 |
 | NONE | no PSN multiplayer | Spider-Man: Shattered Dimensions / Edge of Time |
 
 PARTIAL games still need a community server for that publisher (EA's Blaze for Skate 3, Battlefield, FIFA;
 Activision's Demonware for Call of Duty; Rockstar's own for GTA/RDR). Steam can only add friends/invites on top.
+Where one exists, the host can run it and the session tunnel can carry its ports, so nobody port-forwards
+(`games/BLUS30464.md`).
+
+First three games: Minecraft (FULL), Skate 3 and Black Ops II (PARTIAL). Notes per game in `games/<serial>.md`.
 
 ### The "top 10" list
 Candidates (best-selling PS3 multiplayer titles in the US, from memory; nothing profiled yet): Call of Duty MW2,
@@ -99,6 +103,8 @@ Treat it as research, not a feature.
    *(c) + (d) replaced by the session tunnel (2026-10-22):* `uscl-bridge host` / `join`. On one PC: Minecraft logs
    in through the bridge and the UDP signaling round trip works (host path). Next: two PCs in one world.
 4. Basic (invites/presence) + Score for FULL games. Then friends/invites only for PARTIAL games like Skate 3.
+4b. **Server over the tunnel** for PARTIAL games with a community server: the host runs the server, and the
+   bridge forwards its TCP/UDP ports from every member's loopback. First: Skate 3 (`games/BLUS30464.md`).
 5. Cross-play research (Minecraft PS3 ↔ 360). Player is dumping their own 360 copy (JTAG) for Xenia Canary.
 6. **Blaze-over-Steam**: a local stand-in for EA's Blaze server on each player's PC. The game talks Blaze to
    localhost; the stand-in answers using Steam: login = Steam account, game manager = Steam lobbies (lobby owner
