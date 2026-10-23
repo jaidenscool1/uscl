@@ -1,0 +1,16 @@
+version 1
+
+gametype tdm
+script tdm
+
+maplist core
+mp_raid
+mp_slums
+mp_nuketown_2020
+
+category core
+name "Core"
+
+playlist 1
+name "Team Deathmatch"
+category core
