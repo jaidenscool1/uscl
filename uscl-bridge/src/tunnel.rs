@@ -309,6 +309,10 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, fwd: Vec<(bool, u1
         if !failed.is_empty() {
             // e.g. port 80 on Linux needs privileges
             eprintln!("uscl-bridge: couldn't listen on {} (in use, or a port below 1024 on Linux)", failed.join(", "));
+            if cfg!(target_os = "linux") && fwd.iter().any(|&(_, p)| p < 1024) {
+                let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or("uscl-bridge".into());
+                eprintln!("uscl-bridge: to allow ports below 1024 once: sudo setcap cap_net_bind_service=+ep '{exe}'");
+            }
         }
     }
 
