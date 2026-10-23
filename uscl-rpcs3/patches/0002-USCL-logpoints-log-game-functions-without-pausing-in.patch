@@ -1,7 +1,7 @@
 From eb89636d5f89f483ec8786b793286404b2c0cec9 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:28:28 -0700
-Subject: [PATCH 2/2] USCL logpoints: log game functions without pausing
+Subject: [PATCH 2/3] USCL logpoints: log game functions without pausing
  (interpreter)
 
 USCL_LOGPOINTS=<file>, lines "PPU-<hash> <hex address> <name>". The first

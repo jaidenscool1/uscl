@@ -27,10 +27,11 @@ need the bridge to carry it (not done yet).
 - 0002: Stats service (4): every task answers "no rows" and logs the request (BO2 calls task 11 at startup).
 - 0003: Teams service (3) stub; listing/filtering a player's own files; an unknown service id gets "not available"
   instead of ending the session.
+- 0004: Teams, Twitter and Facebook all answered by one logging stub (`lobby/stub`).
 
 ## Status
-Black Ops II 1.19 logs in and reaches the lobby server (2026-10-23). Play Online still fails: it needs our own
-NAT traversal server (`cod7-stun`), see `games/BLUS31011.md`. Publisher files go in `storage/publisher/<title id>/`.
+Black Ops II 1.19 logs in and reaches the lobby server (2026-10-23). Play Online still fails: the menu waits for
+`IsDemonwareFetchingDone`, and some of its checks are still false. See `games/BLUS31011.md`, part 3. Publisher files go in `storage/publisher/<title id>/`.
 BO2 needs `online_tu19_mp_english.wad`: a 16-byte header is enough (`54 33 77 ab`, timestamp 0, 0 entries,
 version `ff ff ff ff`); without it it never fetches its stats. Don't serve `largeheatmap.raw`: any file we've
 tried makes BO2 drop the lobby connection right after, every 30 s. Missing services show as

@@ -20,6 +20,11 @@ Then build as in RPCS3's `BUILDING.md`.
   LR and r3–r5 and the game carries on; a name starting with `*` logs every call; ending in `@rN` also logs the string
   rN points to. Unlike breakpoints it never pauses, so games with a hang watchdog keep running.
 
+- 0003: the GDB server survives a client leaving (a closed connection or `D` used to be a fatal error that froze
+  emulation; now the session ends and the game resumes). Reading/writing memory with `gdb` works with any decoder;
+  breakpoints need the interpreter. A logpoint named `!...` writes all mapped game memory to `$USCL_MEMDUMP_DIR`
+  (one file per range, named by start address) when hit.
+
 ## Building (Arch, 2026-10)
 The bundled LLVM doesn't compile with GCC 16's libstdc++ and `llvm-ar` isn't installed, so the debugging build is
 interpreter-only: `cmake -S . -B build-nollvm -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang
