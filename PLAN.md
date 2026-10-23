@@ -63,6 +63,7 @@ Where one exists, the host can run it and the session tunnel can carry its ports
 First three games: Minecraft (FULL), Skate 3 and Black Ops II (PARTIAL). Notes per game in `games/<serial>.md`.
 
 ### The "top 10" list
+The live list of games, their status and what's next is in `GAMES.md`.
 Candidates (best-selling PS3 multiplayer titles in the US, from memory; nothing profiled yet): Call of Duty MW2,
 MW3, Black Ops, Black Ops II; GTA IV / V; Battlefield 3; Red Dead Redemption; Uncharted 2 / 3; LittleBigPlanet
 1 / 2; Gran Turismo 5; Killzone 2 / 3; FIFA. Most big third-party ones are expected to be PARTIAL
