@@ -114,3 +114,6 @@ Treat it as research, not a feature.
    many games, with per-game components on top. Test game: Skate 3. Protocol reference: the Skate3BlazeServer
    community server, which has no license, so it's used as reference only unless its author agrees.
    Activision's Demonware (Call of Duty) would be a second engine of the same shape.
+   **Goal (player, 2026-10-23):** online services that work like Steam's for every such game, bypassing the
+   publisher's servers completely: our own stand-ins for Blaze (EA) and Demonware (Activision), backed by Steam.
+   Black Ops II confirmed the need: Demonware is up but refuses RPCN tickets (`games/BLUS31011.md`).
