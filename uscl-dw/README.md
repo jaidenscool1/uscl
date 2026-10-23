@@ -28,6 +28,8 @@ need the bridge to carry it (not done yet).
 - 0003: Teams service (3) stub; listing/filtering a player's own files; an unknown service id gets "not available"
   instead of ending the session.
 - 0004: Teams, Twitter and Facebook all answered by one logging stub (`lobby/stub`).
+- 0005: Matchmaking service (21): hosts create/update/delete sessions, searches return other players' open
+  sessions (in memory; the title's own fields are passed through unchanged).
 
 ## Status
 Black Ops II 1.19: login, lobby, stats and **Play Online** work (2026-10-23). Publisher files go in
