@@ -1,0 +1,121 @@
+From 6a7a616316e003968235c6dca3db327e242777ba Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 19:21:22 -0700
+Subject: [PATCH 6/6] NAT discovery server (cod7-stun) for titles' NAT type
+ checks
+
+DW_STUN_ADDR / DW_STUN_ALT_ADDR start a UDP responder with the live servers'
+reply format, so Black Ops II gets past Play Online without Activision.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dw-server/src/main.rs |  2 ++
+ dw-server/src/stun.rs | 76 +++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 78 insertions(+)
+ create mode 100644 dw-server/src/stun.rs
+
+diff --git a/dw-server/src/main.rs b/dw-server/src/main.rs
+index c1af874..cae33eb 100644
+--- a/dw-server/src/main.rs
++++ b/dw-server/src/main.rs
+@@ -1,6 +1,7 @@
+ mod config;
+ mod lobby;
+ mod log;
++mod stun;
+ 
+ use crate::config::DwServerConfig;
+ use crate::lobby::configure_lobby_server;
+@@ -27,6 +28,7 @@ async fn main() {
+     initialize_log();
+ 
+     let config = read_config().await;
++    stun::start().await;
+ 
+     let auth_session_manager = Arc::new(SessionManager::new());
+     log_session_id(auth_session_manager.as_ref(), "auth");
+diff --git a/dw-server/src/stun.rs b/dw-server/src/stun.rs
+new file mode 100644
+index 0000000..1819c0b
+--- /dev/null
++++ b/dw-server/src/stun.rs
+@@ -0,0 +1,76 @@
++//! Demonware NAT discovery ("cod7-stun.*.demonware.net", UDP 3074), so titles find their NAT type without
++//! Activision. Formats taken from the live servers (Black Ops II): addresses are IPv4 big-endian, port
++//! little-endian.
++//!   1e 02 00            -> 1f 02 00 <sender addr>
++//!   14 02 00 <mode>     -> 15 02 00 <sender addr> <second server addr>
++//! The client also asks the second server, which answers the same way; replying to everything makes the NAT
++//! look open, which is right on a LAN or inside the session tunnel.
++use log::info;
++use std::net::{SocketAddr, SocketAddrV4};
++use tokio::net::UdpSocket;
++
++fn addr_bytes(addr: SocketAddrV4) -> [u8; 6] {
++    let ip = addr.ip().octets();
++    let port = addr.port().to_le_bytes();
++    [ip[0], ip[1], ip[2], ip[3], port[0], port[1]]
++}
++
++pub fn reply(request: &[u8], sender: SocketAddrV4, second_server: SocketAddrV4) -> Option<Vec<u8>> {
++    match request {
++        [0x1e, 0x02, 0x00, ..] => Some([&[0x1f, 0x02, 0x00][..], &addr_bytes(sender)].concat()),
++        [0x14, 0x02, 0x00, ..] => Some(
++            [&[0x15, 0x02, 0x00][..], &addr_bytes(sender), &addr_bytes(second_server)].concat(),
++        ),
++        _ => None,
++    }
++}
++
++async fn serve(socket: UdpSocket, second_server: SocketAddrV4) {
++    let mut buf = [0u8; 1500];
++    loop {
++        let Ok((len, SocketAddr::V4(sender))) = socket.recv_from(&mut buf).await else {
++            continue;
++        };
++        if let Some(answer) = reply(&buf[..len], sender, second_server) {
++            let _ = socket.send_to(&answer, sender).await;
++        }
++    }
++}
++
++/// Starts the NAT discovery server if DW_STUN_ADDR is set (DW_STUN_ALT_ADDR: the second server, default the
++/// same address).
++pub async fn start() {
++    let Ok(primary) = std::env::var("DW_STUN_ADDR") else {
++        return;
++    };
++    let alt = std::env::var("DW_STUN_ALT_ADDR").unwrap_or_else(|_| primary.clone());
++    let (Ok(primary_addr), Ok(alt_addr)) = (primary.parse::<SocketAddrV4>(), alt.parse::<SocketAddrV4>()) else {
++        panic!("DW_STUN_ADDR / DW_STUN_ALT_ADDR must be IPv4 addr:port");
++    };
++    for addr in if primary_addr == alt_addr { vec![primary_addr] } else { vec![primary_addr, alt_addr] } {
++        let socket = UdpSocket::bind(addr)
++            .await
++            .unwrap_or_else(|e| panic!("Failed to open NAT discovery socket on {addr}: {e}"));
++        info!("NAT discovery (stun) on udp {addr}");
++        tokio::spawn(serve(socket, alt_addr));
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::reply;
++    use std::net::{Ipv4Addr, SocketAddrV4};
++
++    #[test]
++    fn answers_like_the_live_server() {
++        let me = SocketAddrV4::new(Ipv4Addr::new(4, 43, 245, 102), 3076);
++        let second = SocketAddrV4::new(Ipv4Addr::new(185, 34, 107, 129), 3074);
++        // bytes the live server sent on 2026-10-23
++        assert_eq!(reply(&[0x1e, 0x02, 0x00], me, second).unwrap(), [0x1f, 2, 0, 4, 0x2b, 0xf5, 0x66, 0x04, 0x0c]);
++        assert_eq!(
++            reply(&[0x14, 0x02, 0x00, 0x00], me, second).unwrap(),
++            [0x15, 2, 0, 4, 0x2b, 0xf5, 0x66, 0x04, 0x0c, 0xb9, 0x22, 0x6b, 0x81, 0x02, 0x0c]
++        );
++        assert!(reply(&[0x0e, 0x02, 0x00], me, second).is_none());
++    }
++}
+-- 
+2.56.0
+

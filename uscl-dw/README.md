@@ -14,10 +14,12 @@ cargo build --release      # target/release/dw-server
 ## Run (host, next to uscl-rpcn)
 PS3 games use port 3074 for both the auth and the lobby server, on two host names:
 ```
-DW_AUTH_ADDR=127.0.0.1:3074 DW_LOBBY_ADDR=127.0.0.2:3074 RUST_LOG=info target/release/dw-server
+DW_AUTH_ADDR=127.0.0.1:3074 DW_LOBBY_ADDR=127.0.0.2:3074 DW_STUN_ADDR=127.0.0.3:3074 DW_STUN_ALT_ADDR=127.0.0.4:3074 \
+  RUST_LOG=info target/release/dw-server
 ```
 RPCS3 (Black Ops II): `Network → IP swap list`:
-`ops2-ps3-auth.prod.demonware.net=127.0.0.1&&ops2-ps3-lobby.prod.demonware.net=127.0.0.2`.
+`ops2-ps3-auth.prod.demonware.net=127.0.0.1&&ops2-ps3-lobby.prod.demonware.net=127.0.0.2&&cod7-stun.us.demonware.net=127.0.0.3&&cod7-stun.eu.demonware.net=127.0.0.3&&cod7-stun.jp.demonware.net=127.0.0.3&&cod7-stun.au.demonware.net=127.0.0.3&&stun.us.demonware.net=127.0.0.3`
+(the stun names are NAT type discovery, needed before Play Online; without them BO2 still uses Activision's).
 RPCN must be the one the player logs in to (the login uses its ticket). 127.0.0.2 works on Linux; other systems
 need the bridge to carry it (not done yet).
 
@@ -30,6 +32,7 @@ need the bridge to carry it (not done yet).
 - 0004: Teams, Twitter and Facebook all answered by one logging stub (`lobby/stub`).
 - 0005: Matchmaking service (21): hosts create/update/delete sessions, searches return other players' open
   sessions (in memory; the title's own fields are passed through unchanged).
+- 0006: NAT discovery (`cod7-stun`, UDP): `DW_STUN_ADDR` / `DW_STUN_ALT_ADDR`, replies like the live servers.
 
 ## Status
 Black Ops II 1.19: login, lobby, stats and **Play Online** work (2026-10-23). Publisher files go in
