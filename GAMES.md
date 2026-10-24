@@ -37,7 +37,7 @@ with `np-profile.py` on your own dump before starting.
 | Uncharted 2 / 3 | ? | ? | profile first | ⬜ |
 | Killzone 2 / 3 | ? | ? | profile first | ⬜ |
 | Gran Turismo 5 | ? | ? | profile first | ⬜ |
-| Midnight Club: Los Angeles | BLUS30442 | ? (owned, not profiled) | profile first | ⬜ |
+| Midnight Club: Los Angeles | BLUS30442 | own (Rockstar) + PSN friends/invites, scores (profiled 2026-10-23: PARTIAL) | new service: find what its race lobbies talk to | ⬜ |
 | GTA IV / GTA V, Red Dead Redemption | ? | own (Rockstar) ? | new service | ⬜ |
 
 ## No online multiplayer
