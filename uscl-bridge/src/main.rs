@@ -4,7 +4,7 @@
 
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use steamworks::{Client, LobbyId, LobbyKey, LobbyType, StringFilter, StringFilterKind};
+use steamworks::{Client, FriendFlags, FriendState, LobbyId, LobbyKey, LobbyType, StringFilter, StringFilterKind};
 
 mod serve;
 mod tunnel;
@@ -78,6 +78,28 @@ fn selftest() -> Result<(), String> {
     }
 }
 
+/// `friends`: Steam friends who are online, as a JSON array for the USCL home screen.
+/// "session" is the USCL session (lobby) a friend is in, as a string because it doesn't fit a JS number.
+fn friends() -> Result<(), String> {
+    let client = Client::init_app(APP_ID).map_err(|e| format!("Steam init failed (is Steam running?): {e:?}"))?;
+    let app = client.utils().app_id();
+    let list: Vec<serde_json::Value> = client
+        .friends()
+        .get_friends(FriendFlags::IMMEDIATE)
+        .into_iter()
+        .filter_map(|f| {
+            let state = f.state();
+            if matches!(state, FriendState::Offline | FriendState::Invisible) {
+                return None;
+            }
+            let session = f.game_played().filter(|g| g.game.app_id() == app && g.lobby.raw() != 0).map(|g| g.lobby.raw().to_string());
+            Some(serde_json::json!({"name": f.name(), "state": format!("{state:?}"), "session": session}))
+        })
+        .collect();
+    println!("{}", serde_json::Value::Array(list));
+    Ok(())
+}
+
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("selftest") => match selftest() {
@@ -122,6 +144,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("friends") => {
+            if let Err(e) = friends() {
+                eprintln!("FAIL: {e}");
+                std::process::exit(1);
+            }
+        }
         Some("client-test") => match serve::client_test() {
             Ok(()) => println!("PASS"),
             Err(e) => {
@@ -130,7 +158,7 @@ fn main() {
             }
         },
         _ => {
-            eprintln!("usage: uscl-bridge host [skate3 | bo2 | tcp:PORT,udp:FIRST-LAST,sudp:PORT,...] | join [session id] | selftest | serve | client-test");
+            eprintln!("usage: uscl-bridge host [skate3 | bo2 | tcp:PORT,udp:FIRST-LAST,sudp:PORT,...] | join [session id] | friends | selftest | serve | client-test");
             std::process::exit(2);
         }
     }

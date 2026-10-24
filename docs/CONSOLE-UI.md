@@ -84,7 +84,7 @@ USCL (one install, one icon)
 1. **Shell** (done 2026-10-24, `uscl-shell/`): full-screen QML window, XMB theme, game list from `games.yml`, launch and return through a child
    `rpcs3`, controller navigation with sounds and startup chime. AppImage and installer ship it as the default
    app; Classic mode is one item away.
-2. **Settings and online:** the main settings, first-run setup, the Online/Friends columns (replacing the USCL
+2. **Settings and online** (done 2026-10-24; Steam name is the default online name): the main settings, first-run setup, the Online/Friends columns (replacing the USCL
    panel), Test Connection.
 3. **Hardening:** auto-configuration, crash handling and log viewer, updater, Windows PC tests.
 4. **More looks:** the PS4 theme, then Xbox 360 Classic and Metro. More cores come later.

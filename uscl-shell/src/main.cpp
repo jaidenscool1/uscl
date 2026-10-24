@@ -1,6 +1,7 @@
 #include "gamepad.h"
 #include "games.h"
 #include "launcher.h"
+#include "online.h"
 #include "system.h"
 
 #include <QFontDatabase>
@@ -75,6 +76,28 @@ namespace
 		check(GameModel::readIsoFile(tmp.fileName(), {"PS3_GAME", "PARAM.SFO"}) == sfo, "ISO 9660 read");
 		check(GameModel::readIsoFile(tmp.fileName(), {"PS3_GAME", "ICON0.PNG"}).isEmpty(), "ISO 9660 missing file");
 
+		// online names from Steam persona names
+		check(Online::sanitizeName("Jeffery Epstein") == "Jeffery_Epstein", "name: spaces");
+		check(Online::sanitizeName("ab") == "abPlayer", "name: too short");
+		check(Online::sanitizeName("Zoë ★ the Great Destroyer") == "Zo_the_Great_Des", "name: symbols, length");
+		check(Online::personaFromVdf("\"users\"\n{\n\t\"1\"\n\t{\n\t\t\"PersonaName\"\t\t\"Old\"\n\t\t\"timestamp\"\t\t\"5\"\n\t}\n"
+		                             "\t\"2\"\n\t{\n\t\t\"PersonaName\"\t\t\"New One\"\n\t\t\"timestamp\"\t\t\"9\"\n\t}\n}\n") == "New One", "loginusers.vdf");
+
+		// RPCS3 YAML edits keep everything else
+		const QString cfg = "Audio:\n  Volume: 100\nNet:\n  Bind address: 1.2.3.4\n  PSN status: Disconnected\nVFS:\n  x: y\n";
+		QString edited = Online::setYamlValue(cfg, "Net", "PSN status", "RPCN");
+		edited = Online::setYamlValue(edited, "Net", "IP swap list", "a=1&&b=2");
+		check(Online::yamlValue(edited, "Net", "PSN status") == "RPCN" && Online::yamlValue(edited, "Net", "IP swap list") == "a=1&&b=2" &&
+		      Online::yamlValue(edited, "Net", "Bind address") == "1.2.3.4" && Online::yamlValue(edited, "VFS", "x") == "y" &&
+		      Online::yamlValue(edited, "Audio", "Volume") == "100", "YAML section edit");
+		check(Online::yamlValue(Online::setYamlValue("", "Net", "PSN status", "RPCN"), "Net", "PSN status") == "RPCN", "YAML new file");
+		const QString rpcn = Online::setYamlValue("Version: 2\nNPID: old\n", {}, "NPID", "new_name");
+		check(Online::yamlValue(rpcn, {}, "NPID") == "new_name" && Online::yamlValue(rpcn, {}, "Version") == "2", "YAML top level");
+
+		check(System::cdnUrl("Dest=84;ImageVersion=1;CDN=http://x.y/a/PS3PATCH.PUP;\nDest=84;CDN=http://x.y/b/PS3UPDAT.PUP;CDN_Timeout=30;") ==
+		      "http://x.y/b/PS3UPDAT.PUP", "Sony update list");
+		check(GameModel::readGamesYml(GameModel::ymlLine("BLUS1", "/a/it's/b.iso").toUtf8()).value("BLUS1") == "/a/it's/b.iso", "games.yml write");
+
 		std::fprintf(stderr, failed ? "self-test: %d failed\n" : "self-test: ok\n", failed);
 		return failed ? 1 : 0;
 	}
@@ -98,12 +121,14 @@ int main(int argc, char* argv[])
 	Gamepad gamepad;
 	Launcher launcher;
 	System system;
+	Online online;
 
 	QQmlApplicationEngine engine;
 	engine.rootContext()->setContextProperty("games", &games);
 	engine.rootContext()->setContextProperty("gamepad", &gamepad);
 	engine.rootContext()->setContextProperty("launcher", &launcher);
 	engine.rootContext()->setContextProperty("system", &system);
+	engine.rootContext()->setContextProperty("online", &online);
 	engine.rootContext()->setContextProperty("windowed", app.arguments().contains("--windowed"));
 	QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
 	engine.loadFromModule("Uscl", "Main");

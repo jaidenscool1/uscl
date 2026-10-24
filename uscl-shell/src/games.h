@@ -10,6 +10,7 @@ class GameModel : public QAbstractListModel
 {
 	Q_OBJECT
 	Q_PROPERTY(int count READ rowCount NOTIFY countChanged)
+	Q_PROPERTY(bool scanning READ scanning NOTIFY scanningChanged)
 
 public:
 	enum Role { TitleRole = Qt::UserRole + 1, SerialRole, PathRole, IconRole, ConsoleRole };
@@ -28,6 +29,17 @@ public:
 	Q_INVOKABLE void reload();
 	Q_INVOKABLE QVariantMap get(int row) const;
 
+	// Add Games: finds every PS3 game under a folder (disc folders, installed games, ISOs) and adds the new ones
+	// to RPCS3's games.yml; scanFinished reports how many were new
+	Q_INVOKABLE void scanFolder(const QString& path);
+	bool scanning() const { return m_scanning; }
+	// for the folder browser: drives / home, and the folders inside one
+	Q_INVOKABLE static QVariantList roots();
+	Q_INVOKABLE static QVariantList folders(const QString& path);
+	// serial -> path of every game under a folder
+	static QMap<QString, QString> findGames(const QString& path);
+	static QString ymlLine(const QString& serial, const QString& path);
+
 	// RPCS3's settings folder: ~/.config/uscl on Linux, the folder of rpcs3.exe on Windows
 	static QString rpcs3ConfigDir();
 
@@ -38,9 +50,12 @@ public:
 
 signals:
 	void countChanged();
+	void scanningChanged();
+	void scanFinished(int added);
 
 private:
 	bool describe(const QString& path, Game& game) const;
 
 	QVector<Game> m_games;
+	bool m_scanning = false;
 };

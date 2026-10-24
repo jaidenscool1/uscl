@@ -22,6 +22,7 @@ public:
 	Q_INVOKABLE bool openClassic();
 	Q_INVOKABLE void stop();
 	Q_INVOKABLE static bool coreFound();
+	static QString corePath();
 
 signals:
 	void runningChanged();
@@ -30,7 +31,6 @@ signals:
 
 private:
 	bool start(const QStringList& args, const QString& title);
-	static QString corePath();
 
 	QProcess m_process;
 	QString m_title;

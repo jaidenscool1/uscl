@@ -1,0 +1,78 @@
+#pragma once
+
+#include <QObject>
+#include <QProcess>
+#include <QVariantList>
+
+#include <array>
+
+// Online play from the home screen: sets RPCS3 up for USCL, runs our servers and the Steam session tunnel
+// (uscl-rpcn, dw-server, uscl-bridge, all next to this executable), lists Steam friends and tests the setup.
+class Online : public QObject
+{
+	Q_OBJECT
+	// off, starting, waiting (for a Steam invite), hosting, joined
+	Q_PROPERTY(QString state READ state NOTIFY stateChanged)
+	Q_PROPERTY(QString session READ session NOTIFY stateChanged)
+	Q_PROPERTY(QString game READ game NOTIFY stateChanged)
+	Q_PROPERTY(QString message READ message NOTIFY stateChanged)
+	Q_PROPERTY(QVariantList friends READ friends NOTIFY friendsChanged)
+	Q_PROPERTY(bool friendsLoading READ friendsLoading NOTIFY friendsChanged)
+	Q_PROPERTY(QString friendsError READ friendsError NOTIFY friendsChanged)
+	Q_PROPERTY(QVariantList tests READ tests NOTIFY testsChanged)
+	Q_PROPERTY(QString steamName READ steamName CONSTANT)
+
+public:
+	explicit Online(QObject* parent = nullptr);
+	~Online() override;
+
+	QString state() const { return m_state; }
+	QString session() const { return m_session; }
+	QString game() const { return m_game; }
+	QString message() const { return m_message; }
+	QVariantList friends() const { return m_friends; }
+	bool friendsLoading() const { return m_friends_proc.state() != QProcess::NotRunning; }
+	QString friendsError() const { return m_friends_error; }
+	QVariantList tests() const { return m_tests; }
+	QString steamName() const;
+
+	// Online name + RPCS3 network settings (RPCN on the session tunnel, Demonware names to our server)
+	Q_INVOKABLE bool setup(const QString& name);
+	Q_INVOKABLE static bool validName(const QString& name);
+	// serial: the game the session is for (picks which servers run); title is shown in the menu
+	Q_INVOKABLE void host(const QString& serial, const QString& title);
+	// empty session: wait for a Steam invite (or the one session a friend is in)
+	Q_INVOKABLE void join(const QString& session);
+	Q_INVOKABLE void stop();
+	Q_INVOKABLE void refreshFriends();
+	Q_INVOKABLE void testConnection();
+
+	// Exposed for the self-test
+	static QString sanitizeName(const QString& persona);
+	static QString personaFromVdf(const QByteArray& vdf);
+	static QString setYamlValue(const QString& yml, const QString& section, const QString& key, const QString& value);
+	static QString yamlValue(const QString& yml, const QString& section, const QString& key);
+
+signals:
+	void stateChanged();
+	void friendsChanged();
+	void testsChanged();
+
+private:
+	enum service { rpcn, demonware, bridge };
+	bool start(service s, const QString& tool, const QStringList& args, const QString& dir, const QProcessEnvironment& env);
+	void setState(const QString& state, const QString& message = {});
+	void setTest(int i, const QString& result, const QString& detail);
+	static QString toolPath(const QString& name);
+	static QString dataDir();
+	static QString templateDir();
+	static QString rpcs3File(const QString& name);
+
+	std::array<QProcess*, 3> m_services{};
+	QString m_state = "off", m_session, m_game, m_message;
+	QProcess m_friends_proc;
+	QVariantList m_friends;
+	QString m_friends_error;
+	QVariantList m_tests;
+	QProcess m_test_proc;
+};

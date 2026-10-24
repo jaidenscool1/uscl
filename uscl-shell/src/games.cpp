@@ -6,6 +6,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QStandardPaths>
+#include <QStorageInfo>
+#include <QThread>
 #include <QUrl>
 #include <QtEndian>
 
@@ -259,4 +261,118 @@ QVariantMap GameModel::get(int row) const
 		return {};
 	const Game& g = m_games[row];
 	return {{"title", g.title}, {"serial", g.serial}, {"path", g.path}, {"icon", g.icon}, {"console", g.console}};
+}
+
+namespace
+{
+	void walk(const QString& dir, int depth, QMap<QString, QString>& out)
+	{
+		const auto serialOf = [](const QString& sfo) {
+			QFile f(sfo);
+			return f.open(QIODevice::ReadOnly) ? GameModel::readSfo(f.readAll()).value("TITLE_ID") : QString();
+		};
+		// a disc folder, or an installed game: this folder is the game, don't look inside it
+		for (const QString& sfo : {dir + "/PS3_GAME/PARAM.SFO", dir + "/PARAM.SFO"})
+		{
+			if (QFileInfo(sfo).isFile() && (sfo.contains("PS3_GAME") || QFileInfo(dir + "/USRDIR").isDir()))
+			{
+				if (const QString serial = serialOf(sfo); !serial.isEmpty() && !out.contains(serial))
+					out[serial] = dir;
+				return;
+			}
+		}
+		const QDir d(dir);
+		for (const QFileInfo& f : d.entryInfoList({"*.iso", "*.ISO"}, QDir::Files))
+		{
+			const QString serial = GameModel::readSfo(GameModel::readIsoFile(f.absoluteFilePath(), {"PS3_GAME", "PARAM.SFO"})).value("TITLE_ID");
+			if (!serial.isEmpty() && !out.contains(serial))
+				out[serial] = f.absoluteFilePath();
+		}
+		if (depth > 0)
+		{
+			for (const QFileInfo& sub : d.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks))
+				walk(sub.absoluteFilePath(), depth - 1, out);
+		}
+	}
+}
+
+QMap<QString, QString> GameModel::findGames(const QString& path)
+{
+	QMap<QString, QString> out;
+	walk(QDir::cleanPath(path), 6, out);
+	return out;
+}
+
+QString GameModel::ymlLine(const QString& serial, const QString& path)
+{
+	QString p = path;
+	return serial + ": '" + p.replace("'", "''") + "'";
+}
+
+void GameModel::scanFolder(const QString& path)
+{
+	if (m_scanning)
+		return;
+	m_scanning = true;
+	emit scanningChanged();
+	auto* found = new QMap<QString, QString>;
+	QThread* t = QThread::create([found, path] { *found = findGames(path); });
+	connect(t, &QThread::finished, this, [this, t, found] {
+		t->deleteLater();
+		QFile yml(gamesYmlPath());
+		QByteArray text;
+		if (yml.open(QIODevice::ReadOnly))
+			text = yml.readAll();
+		yml.close();
+		const QMap<QString, QString> known = readGamesYml(text);
+		int added = 0;
+		for (auto it = found->cbegin(); it != found->cend(); ++it)
+		{
+			if (known.contains(it.key()))
+				continue;
+			if (!text.isEmpty() && !text.endsWith('\n'))
+				text += '\n';
+			text += ymlLine(it.key(), it.value()).toUtf8() + '\n';
+			added++;
+		}
+		delete found;
+		if (added)
+		{
+			QDir().mkpath(QFileInfo(gamesYmlPath()).absolutePath());
+			if (yml.open(QIODevice::WriteOnly | QIODevice::Truncate))
+				yml.write(text);
+			yml.close(); // flush before reload() reads it back
+			reload();
+		}
+		m_scanning = false;
+		emit scanningChanged();
+		emit scanFinished(added);
+	});
+	t->start();
+}
+
+QVariantList GameModel::roots()
+{
+	QVariantList out{QVariantMap{{"name", tr("Home")}, {"path", QDir::homePath()}}};
+	for (const QStorageInfo& v : QStorageInfo::mountedVolumes())
+	{
+		const QString root = v.rootPath();
+#ifndef _WIN32
+		// real drives only: removable media and extra disks, not system mounts
+		if (!(root.startsWith("/run/media/") || root.startsWith("/media/") || root.startsWith("/mnt/")))
+			continue;
+#endif
+		if (v.isValid() && v.isReady())
+			out << QVariantMap{{"name", v.displayName().isEmpty() ? root : v.displayName() + "  (" + root + ")"}, {"path", root}};
+	}
+	return out;
+}
+
+QVariantList GameModel::folders(const QString& path)
+{
+	QVariantList out;
+	const QDir d(path);
+	for (const QFileInfo& f : d.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name | QDir::IgnoreCase))
+		out << QVariantMap{{"name", f.fileName()}, {"path", f.absoluteFilePath()}};
+	return out;
 }
