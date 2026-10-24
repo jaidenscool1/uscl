@@ -12,16 +12,14 @@ cargo build --release      # target/release/dw-server
 ```
 
 ## Run (host, next to uscl-rpcn)
-PS3 games use port 3074 for both the auth and the lobby server, on two host names:
+Everything on 127.0.0.1 (works behind the session tunnel on every OS):
 ```
-DW_AUTH_ADDR=127.0.0.1:3074 DW_LOBBY_ADDR=127.0.0.2:3074 DW_STUN_ADDR=127.0.0.3:3074 DW_STUN_ALT_ADDR=127.0.0.4:3074 \
-  RUST_LOG=info target/release/dw-server
+DW_ADDR=127.0.0.1:3074 DW_STUN_ADDR=127.0.0.1:3074 DW_STUN_ALT_ADDR=127.0.0.1:3077 RUST_LOG=info target/release/dw-server
 ```
-RPCS3 (Black Ops II): `Network → IP swap list`:
-`ops2-ps3-auth.prod.demonware.net=127.0.0.1&&ops2-ps3-lobby.prod.demonware.net=127.0.0.2&&cod7-stun.us.demonware.net=127.0.0.3&&cod7-stun.eu.demonware.net=127.0.0.3&&cod7-stun.jp.demonware.net=127.0.0.3&&cod7-stun.au.demonware.net=127.0.0.3&&stun.us.demonware.net=127.0.0.3`
-(the stun names are NAT type discovery, needed before Play Online; without them BO2 still uses Activision's).
-RPCN must be the one the player logs in to (the login uses its ticket). 127.0.0.2 works on Linux; other systems
-need the bridge to carry it (not done yet).
+RPCS3 (Black Ops II): `Network → IP swap list` (auth, lobby and the NAT discovery names):
+`ops2-ps3-auth.prod.demonware.net=127.0.0.1&&ops2-ps3-lobby.prod.demonware.net=127.0.0.1&&cod7-stun.us.demonware.net=127.0.0.1&&cod7-stun.eu.demonware.net=127.0.0.1&&cod7-stun.jp.demonware.net=127.0.0.1&&cod7-stun.au.demonware.net=127.0.0.1&&stun.us.demonware.net=127.0.0.1`
+Without the stun names BO2 still asks Activision for its NAT type. RPCN must be the one the player logs in to (the
+login uses its ticket). The older two-address setup (`DW_AUTH_ADDR` / `DW_LOBBY_ADDR`) still works.
 
 ## Patches
 - 0001: PS3 login (`Ps3ForMmpRequest`) as Black Ops II does it: the key comes from the PSN/RPCN ticket's cookie
@@ -35,6 +33,7 @@ need the bridge to carry it (not done yet).
 - 0006: NAT discovery (`cod7-stun`, UDP): `DW_STUN_ADDR` / `DW_STUN_ALT_ADDR`, replies like the live servers.
 - 0007: NAT discovery passes the open-NAT test (mode 3 answered from the second server's IP, port+1; also
   listens on port+1), so titles report NAT Open; matchmaking removes a host's sessions when its connection closes.
+- 0008: `DW_ADDR`: auth and lobby on one address (routed by the first message); stun binds only what it answers from.
 
 ## Status
 Black Ops II 1.19: login, lobby, stats and **Play Online** work (2026-10-23). Publisher files go in

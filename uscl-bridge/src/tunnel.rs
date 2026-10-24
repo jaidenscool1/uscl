@@ -35,6 +35,7 @@ const CH_UDP: u32 = 2;
 const UDP_RPCN: u8 = 0;
 const UDP_P2P: u8 = 1;
 const UDP_FWD: u8 = 2; // [port u16 BE][data]
+const UDP_P2P_PORT: u8 = 3; // [sender's local port u16 BE][data]: delivered to the same port on the other side
 const TCP_OPEN: u8 = 0; // payload: empty = RPCN, or a forwarded port u16 BE
 const TCP_DATA: u8 = 1;
 const TCP_CLOSE: u8 = 2;
@@ -75,6 +76,20 @@ fn fwd_spec(fwd: &[(bool, u16)]) -> String {
 
 fn fwd_frame(port: u16, data: &[u8]) -> Vec<u8> {
     let mut f = vec![UDP_FWD];
+    f.extend_from_slice(&port.to_be_bytes());
+    f.extend_from_slice(data);
+    f
+}
+
+/// Game traffic is delivered to the port it was sent from (a game uses the same ports on every PC): RPCS3's P2P
+/// port for RPCN games, the game's own UDP socket for others (Demonware titles: 3074-3079). Nothing else, so a
+/// peer can't reach other local services through us.
+fn p2p_port_ok(port: u16) -> bool {
+    port == RPCS3_P2P || (3074..=3079).contains(&port)
+}
+
+fn p2p_frame(port: u16, data: &[u8]) -> Vec<u8> {
+    let mut f = vec![UDP_P2P_PORT];
     f.extend_from_slice(&port.to_be_bytes());
     f.extend_from_slice(data);
     f
@@ -464,8 +479,11 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, fwd: Vec<(bool, u1
                     let _ = rpcn_sock.send_to(&buf[..n], local(RPCS3_P2P));
                 } else if Some(slot) != my_slot {
                     if let Some(&peer) = member_at.get(&slot) {
-                        let mut f = vec![if from_rpcn { UDP_RPCN } else { UDP_P2P }];
-                        f.extend_from_slice(&buf[..n]);
+                        let f = if from_rpcn {
+                            [&[UDP_RPCN][..], &buf[..n]].concat()
+                        } else {
+                            p2p_frame(src.port(), &buf[..n])
+                        };
                         send(peer, CH_UDP, &f, false);
                     }
                 }
@@ -510,6 +528,12 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, fwd: Vec<(bool, u1
                 Some((&UDP_RPCN, d)) if host => { let _ = sock.send_to(d, local(HOST_RPCN_UDP)); }
                 Some((&UDP_RPCN, d)) if peer == host_id.raw() => { let _ = rpcn_sock.send_to(d, local(RPCS3_P2P)); }
                 Some((&UDP_P2P, d)) => { let _ = sock.send_to(d, local(RPCS3_P2P)); }
+                Some((&UDP_P2P_PORT, [a, b, d @ ..])) => {
+                    let port = u16::from_be_bytes([*a, *b]);
+                    if p2p_port_ok(port) {
+                        let _ = sock.send_to(d, local(port));
+                    }
+                }
                 _ => {}
             }
         }
@@ -567,6 +591,15 @@ mod tests {
         let f = tcp_frame(0xDEADBEEF, TCP_DATA, b"hi");
         assert_eq!(parse_tcp_frame(&f), Some((0xDEADBEEF, TCP_DATA, &b"hi"[..])));
         assert_eq!(parse_tcp_frame(&f[..4]), None);
+    }
+
+    #[test]
+    fn p2p_frames_keep_the_port() {
+        assert_eq!(p2p_frame(3076, b"x"), [UDP_P2P_PORT, 0x0c, 0x04, b'x']);
+        assert!(p2p_port_ok(RPCS3_P2P) && p2p_port_ok(3076));
+        for port in [RPCN_TCP, RPCN_UDP, HOST_RPCN_UDP, SLOT_BASE + 1, 80, 22] {
+            assert!(!p2p_port_ok(port), "{port}");
+        }
     }
 
     #[test]
