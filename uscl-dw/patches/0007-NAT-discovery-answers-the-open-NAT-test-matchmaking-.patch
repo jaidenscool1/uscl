@@ -1,7 +1,7 @@
 From f157f1529dd288780fc6dac6b9cb5f7049f1591e Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 03:05:31 -0700
-Subject: [PATCH 7/9] NAT discovery answers the open-NAT test; matchmaking
+Subject: [PATCH 07/10] NAT discovery answers the open-NAT test; matchmaking
  drops a host's sessions on disconnect
 
 stun: mode 3 is answered from the second server's IP on port+1 (read from the

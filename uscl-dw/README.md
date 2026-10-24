@@ -35,6 +35,7 @@ login uses its ticket). The older two-address setup (`DW_AUTH_ADDR` / `DW_LOBBY_
   listens on port+1), so titles report NAT Open; matchmaking removes a host's sessions when its connection closes.
 - 0008: `DW_ADDR`: auth and lobby on one address (routed by the first message); stun binds only what it answers from.
 - 0009: `DW_STUN_SELF_ADDR`: the tunnel host's own game is reported at its slot address (see `games/BLUS31011.md`).
+- 0010: PooledStorage (58) answered by the logging stub (BO2 calls it at match start, probably Theater uploads).
 
 ## Status
 Black Ops II 1.19: login, lobby, stats and **Play Online** work (2026-10-23). Publisher files go in

@@ -1,8 +1,8 @@
 From 50433b866dd9c7aef240414725c2f84d7f7d5176 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 03:46:54 -0700
-Subject: [PATCH 8/9] One address for auth + lobby (DW_ADDR); NAT discovery can
- stay on 127.0.0.1
+Subject: [PATCH 08/10] One address for auth + lobby (DW_ADDR); NAT discovery
+ can stay on 127.0.0.1
 
 DW_ADDR serves both on one TCP socket, routing a connection to the lobby once
 it's authenticated or when its message starts with service 7 (clients only
