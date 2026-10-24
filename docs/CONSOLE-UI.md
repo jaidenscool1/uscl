@@ -81,7 +81,7 @@ USCL (one install, one icon)
   public download. Themes draw their own icons and waves, or load them from the player's own files.
 
 ## Phases
-1. **Shell:** full-screen QML window, XMB theme, game list from `games.yml`, launch and return through a child
+1. **Shell** (done 2026-10-24, `uscl-shell/`): full-screen QML window, XMB theme, game list from `games.yml`, launch and return through a child
    `rpcs3`, controller navigation with sounds and startup chime. AppImage and installer ship it as the default
    app; Classic mode is one item away.
 2. **Settings and online:** the main settings, first-run setup, the Online/Friends columns (replacing the USCL

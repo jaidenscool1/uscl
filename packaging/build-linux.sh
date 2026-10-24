@@ -18,12 +18,17 @@ echo "== servers"
 (cd "$RPCN_SRC" && cargo build --release -q)
 (cd "$DW_SRC" && cargo build --release -q -p dw-server)
 
+echo "== home screen (uscl-shell)"
+cmake -S "$REPO/uscl-shell" -B "$REPO/uscl-shell/build-release" -G Ninja -DCMAKE_BUILD_TYPE=Release >/dev/null
+ninja -C "$REPO/uscl-shell/build-release"
+"$REPO/uscl-shell/build-release/uscl" --self-test
+
 echo "== USCL (RPCS3)"
 ninja -C "$RPCS3_BUILD"
 DESTDIR="$APPDIR" ninja -C "$RPCS3_BUILD" install >/dev/null
 
 BIN=$APPDIR/usr/bin
-install -m755 "$REPO/uscl-bridge/target/release/uscl-bridge" "$RPCN_SRC/target/release/rpcn" "$DW_SRC/target/release/dw-server" "$BIN/"
+install -m755 "$REPO/uscl-bridge/target/release/uscl-bridge" "$RPCN_SRC/target/release/rpcn" "$DW_SRC/target/release/dw-server" "$REPO/uscl-shell/build-release/uscl" "$BIN/"
 mv "$BIN/rpcn" "$BIN/uscl-rpcn"
 cp "$(find "$REPO/uscl-bridge/target/release/build" -name libsteam_api.so | head -1)" "$BIN/"   # the bridge loads it from its own folder
 
@@ -59,12 +64,26 @@ chmod +x "$OUT/qmake"; export QMAKE=$OUT/qmake
 export EXTRA_PLATFORM_PLUGINS="libqwayland.so"
 export EXTRA_QT_PLUGINS="svg;wayland-decoration-client;wayland-graphics-integration-client;wayland-shell-integration"
 cd "$OUT"
-linuxdeploy --appdir "$APPDIR" --plugin qt --executable "$BIN/uscl-rpcn" --executable "$BIN/dw-server"
+# Qt Quick draws with OpenGL on Wayland through this plugin, which the Qt plugin for linuxdeploy leaves out
+mkdir -p "$APPDIR/usr/plugins"
+cp -r "$QT_PLUGINS/wayland-graphics-integration-client" "$APPDIR/usr/plugins/"
+export QML_SOURCES_PATHS="$REPO/uscl-shell/qml"   # so the Qt plugin bundles the QML modules the home screen imports
+linuxdeploy --appdir "$APPDIR" --plugin qt --executable "$BIN/uscl" --executable "$BIN/uscl-rpcn" --executable "$BIN/dw-server" \
+  --deploy-deps-only "$APPDIR/usr/plugins/wayland-graphics-integration-client"
 # same cleanup as RPCS3's .ci/deploy-linux.sh: these break other distros / gamescope
 rm -f "$APPDIR"/usr/lib/libwayland-client.so* "$APPDIR"/usr/lib/libvulkan.so* \
   "$APPDIR"/usr/lib/libQt6VirtualKeyboard.so* "$APPDIR"/usr/plugins/platforminputcontexts/libqtvirtualkeyboardplugin.so*
-# AppRun must start rpcs3 by its real path: through a symlink Qt looks for qt.conf/plugins in the AppImage root
-rm -f "$APPDIR/AppRun"; printf '#!/bin/sh\nexec "$(dirname "$(readlink -f "$0")")/usr/bin/rpcs3" "$@"\n' > "$APPDIR/AppRun"
+# AppRun starts programs by their real path: through a symlink Qt looks for qt.conf/plugins in the AppImage root
+# The home screen by default; --classic or a game file go straight to RPCS3
+rm -f "$APPDIR/AppRun"; cat > "$APPDIR/AppRun" <<'RUN'
+#!/bin/sh
+bin="$(dirname "$(readlink -f "$0")")/usr/bin"
+case "$1" in
+  --classic) shift; exec "$bin/rpcs3" "$@" ;;
+  ?*) [ -e "$1" ] && exec "$bin/rpcs3" "$@" ;;
+esac
+exec "$bin/uscl" "$@"
+RUN
 chmod +x "$APPDIR/AppRun"
 # not linuxdeploy again: that would replace the AppRun launcher the Qt plugin made
 appimagetool "$APPDIR" "$OUTPUT.new" && mv -f "$OUTPUT.new" "$OUTPUT"   # mv replaces it even while it is running

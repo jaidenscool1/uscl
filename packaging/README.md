@@ -1,6 +1,6 @@
 # Packaging USCL
 
-One program: our RPCS3 build (`uscl-rpcs3` patches) with the **USCL > Online** panel, plus `uscl-rpcn`,
+One program: the XMB home screen (`uscl-shell`, what USCL opens to), our RPCS3 build (`uscl-rpcs3` patches) with the **USCL > Online** panel, plus `uscl-rpcn`,
 `dw-server` (uscl-dw) and `uscl-bridge` next to it, and the server data they start from.
 
 ## Linux: AppImage
@@ -11,7 +11,8 @@ Output `build/USCL-x86_64.AppImage`. The RPCS3 build dir is a configured `cmake 
 with our patches (see `uscl-rpcs3/README.md`). Needs Qt 6's `qmake6`, cargo and python3; linuxdeploy and
 appimagetool are downloaded to `~/.cache/uscl-build`.
 
-Players install it with `packaging/linux/install.sh USCL-x86_64.AppImage` (copies it to `~/Applications`, adds
+The AppImage starts the home screen; `USCL-x86_64.AppImage --classic` opens the RPCS3 window, and a game file
+as the argument boots it in RPCS3. Players install it with `packaging/linux/install.sh USCL-x86_64.AppImage` (copies it to `~/Applications`, adds
 USCL to the app menu; `--remove` undoes that), or just run the AppImage.
 
 ## Windows: installer

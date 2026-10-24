@@ -86,6 +86,19 @@ jobs:
           cd rpcn; cargo build --release; cd ..
           cd obde; cargo build --release -p dw-server; cd ..
 
+      - name: Compile home screen (uscl-shell)
+        shell: pwsh
+        run: |
+          # SDL3 to match RPCS3's (3rdparty/libsdl-org/SDL)
+          curl.exe -fsSLo sdl3.zip https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-devel-3.4.18-VC.zip
+          Expand-Archive sdl3.zip -DestinationPath sdl3
+          $sdl = (Get-ChildItem sdl3 -Directory | Select-Object -First 1).FullName
+          cmake -S uscl/uscl-shell -B shell-build -A x64 "-DCMAKE_PREFIX_PATH=$env:QTDIR" "-DSDL3_DIR=$sdl/cmake"
+          cmake --build shell-build --config Release
+          shell-build/Release/uscl.exe --self-test
+          if ($LASTEXITCODE) { exit 1 }
+          Copy-Item "$sdl/lib/x64/SDL3.dll" shell-build/Release/
+
       - name: Stage files
         run: |
           S=stage; B=rpcs3/bin
@@ -96,6 +109,8 @@ jobs:
           curl -fsSL 'https://rpcs3.net/compatibility?api=v1&export' | iconv -t UTF-8 > $S/GuiConfigs/compat_database.dat || true
           cp uscl/uscl-bridge/target/release/uscl-bridge.exe obde/target/release/dw-server.exe $S/
           cp rpcn/target/release/rpcn.exe $S/uscl-rpcn.exe
+          cp shell-build/Release/uscl.exe shell-build/Release/SDL3.dll $S/
+          "$QTDIR/bin/windeployqt.exe" --release --no-translations --qmldir uscl/uscl-shell/qml $S/uscl.exe
           cp "$(find uscl/uscl-bridge/target/release/build -name steam_api64.dll | head -1)" $S/
           # same data templates as packaging/build-linux.sh; the USCL panel looks for them in uscl-data
           D=$S/uscl-data; mkdir -p $D/rpcn $D/dw/storage/publisher/18396

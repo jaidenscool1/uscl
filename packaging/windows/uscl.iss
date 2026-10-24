@@ -26,8 +26,9 @@ Source: "{#Stage}\*"; DestDir: "{app}"; Excludes: "vc_redist.x64.exe"; Flags: re
 Source: "{#Stage}\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall skipifsourcedoesntexist
 
 [Icons]
-Name: "{autoprograms}\USCL"; Filename: "{app}\rpcs3.exe"
-Name: "{autodesktop}\USCL"; Filename: "{app}\rpcs3.exe"; Tasks: desktopicon
+Name: "{autoprograms}\USCL"; Filename: "{app}\uscl.exe"; IconFilename: "{app}\rpcs3.exe"
+Name: "{autoprograms}\USCL (classic window)"; Filename: "{app}\rpcs3.exe"
+Name: "{autodesktop}\USCL"; Filename: "{app}\uscl.exe"; IconFilename: "{app}\rpcs3.exe"; Tasks: desktopicon
 
 [Tasks]
 Name: desktopicon; Description: "Create a desktop shortcut"
@@ -35,7 +36,7 @@ Name: desktopicon; Description: "Create a desktop shortcut"
 [Run]
 ; the Visual C++ runtime RPCS3 needs; asks for admin only when it isn't installed yet
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing the Visual C++ runtime..."; Flags: waituntilterminated skipifdoesntexist shellexec; Check: NeedsVCRedist
-Filename: "{app}\rpcs3.exe"; Description: "Start USCL"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\uscl.exe"; Description: "Start USCL"; Flags: nowait postinstall skipifsilent
 
 [Code]
 function NeedsVCRedist: Boolean;
