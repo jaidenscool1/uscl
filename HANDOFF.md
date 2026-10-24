@@ -15,7 +15,7 @@ PRs #3 → #1 → #4 → #5 (all approved by the other agent). Then retarget #5 
 | uscl-rpcn (patches 0001–0004) | account auto-create, P2P addresses for the tunnel, auto-friend | – |
 | Minecraft (BLUS31426) | two RPCS3 copies on one PC join the same world (normal RPCN) | the same join from a second PC over Steam |
 | Skate 3 (BLUS30464) | community server via the bridge, untested; joiner's black screen unsolved | black screen first |
-| Black Ops II (BLUS31011) | our Demonware (`uscl-dw`, patches 0001–0004): PS3 login, lobby, stats, class sets, profiles and Play Online work (online data wad, `uscl-dw/bo2-wad/`) | a real match; fuller playlists; unknown service 32 |
+| Black Ops II (BLUS31011) | our Demonware (`uscl-dw`, patches 0001–0004): PS3 login, lobby, stats, playlists, matchmaking, NAT discovery: two copies played one match on one PC (`tools/autotest/`) | two PCs over the tunnel; service 32, PooledStorage |
 
 ### Black Ops II: read this before continuing
 Solved 2026-10-23 (part 4 of the notes): the missing checks were the wad's `playlists_mp.info` and `leagues.info`.

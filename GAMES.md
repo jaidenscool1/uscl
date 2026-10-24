@@ -15,7 +15,7 @@ own = the publisher's own servers · ? = not profiled yet
 |---|---|---|---|---|---|
 | Minecraft: PlayStation 3 Edition | [BLUS31426](games/BLUS31426.md) | 1.84 | PSN (Matching2) | 🧪 two copies on one PC join the same world and see each other (2026-10-23) | the same join from a second PC over Steam |
 | Skate 3 | [BLUS30464](games/BLUS30464.md) | 1.05 + online EBOOT | Blaze (community server) + PSN invites | 🚧 bridge carries the server's ports (`host skate3`), untested | fix the joiner's black screen, then a two-PC test |
-| Call of Duty: Black Ops II | [BLUS31011](games/BLUS31011.md) | 1.19 | Demonware + PSN friends/invites | 🧪 our own Demonware (`uscl-dw`): login, playlists, matchmaking, NAT discovery; two copies on one PC matched into one lobby and a match started (the joiner dropped at match start) | fix the joiner's drop, then two PCs over the tunnel |
+| Call of Duty: Black Ops II | [BLUS31011](games/BLUS31011.md) | 1.19 | Demonware + PSN friends/invites | 🧪 our own Demonware (`uscl-dw`): two copies on one PC matchmade and played the same Team Deathmatch (NAT Open, no Activision servers); one PC can't sustain two copies for long | two PCs over the Steam tunnel |
 
 ## Next up
 Ordered by how much existing work each one reuses. Serials and services marked `?` are from memory: confirm them
