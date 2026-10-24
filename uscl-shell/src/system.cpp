@@ -1,10 +1,13 @@
 #include "system.h"
 #include "games.h"
 #include "launcher.h"
+#include "online.h"
 
 #include <QDir>
 #include <QFileInfo>
+#include <QNetworkInformation>
 #include <QNetworkReply>
+#include <QSysInfo>
 #include <QRegularExpression>
 #include <QStandardPaths>
 
@@ -12,8 +15,116 @@
 
 namespace
 {
+	QString rpcs3Config()
+	{
+#ifdef _WIN32
+		return GameModel::rpcs3ConfigDir() + "config/config.yml";
+#else
+		return GameModel::rpcs3ConfigDir() + "config.yml";
+#endif
+	}
+
+	QString readText(const QString& path)
+	{
+		QFile f(path);
+		return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
+	}
+
 	// Sony's list of the current PS3 system software, US region
 	constexpr auto update_list = "http://fus01.ps3.update.playstation.net/update/ps3/list/us/ps3-updatelist.txt";
+}
+
+System::System(QObject* parent)
+	: QObject(parent)
+{
+	QNetworkInformation::loadDefaultBackend();
+	if (QNetworkInformation* n = QNetworkInformation::instance())
+		connect(n, &QNetworkInformation::reachabilityChanged, this, &System::statusChanged);
+	connect(&m_poll, &QTimer::timeout, this, &System::pollStatus);
+	m_poll.start(5000);
+	pollStatus();
+}
+
+QString System::version()
+{
+	return QStringLiteral(USCL_VERSION);
+}
+
+int System::internet() const
+{
+	const QNetworkInformation* n = QNetworkInformation::instance();
+	if (!n || n->reachability() == QNetworkInformation::Reachability::Unknown)
+		return -1;
+	return n->reachability() == QNetworkInformation::Reachability::Online ? 1 : 0;
+}
+
+void System::pollStatus()
+{
+	int level = -1;
+	bool charging = false;
+#ifdef __linux__
+	for (const QString& bat : QDir("/sys/class/power_supply").entryList({"BAT*"}, QDir::Dirs | QDir::System))
+	{
+		const QString cap = readText("/sys/class/power_supply/" + bat + "/capacity").trimmed();
+		if (!cap.isEmpty())
+		{
+			level = cap.toInt();
+			charging = readText("/sys/class/power_supply/" + bat + "/status").trimmed() != "Discharging";
+			break;
+		}
+	}
+#endif
+	if (level != m_battery || charging != m_charging)
+	{
+		m_battery = level;
+		m_charging = charging;
+		emit statusChanged();
+	}
+}
+
+QString System::firmwareVersion() const
+{
+	// "release:04.9300:" -> 4.93
+	static const QRegularExpression re("release:0*(\\d+)\\.(\\d\\d)");
+	const auto m = re.match(readText(GameModel::rpcs3ConfigDir() + "dev_flash/vsh/etc/version.txt"));
+	return m.hasMatch() ? m.captured(1) + "." + m.captured(2) : QString();
+}
+
+QString System::rpcs3Value(const QString& section, const QString& key) const
+{
+	return Online::yamlValue(readText(rpcs3Config()), section, key);
+}
+
+bool System::setRpcs3Value(const QString& section, const QString& key, const QString& value)
+{
+	const QString text = Online::setYamlValue(readText(rpcs3Config()), section, key, value);
+	QFile f(rpcs3Config());
+	return f.open(QIODevice::WriteOnly | QIODevice::Truncate) && f.write(text.toUtf8()) >= 0;
+}
+
+QString System::info() const
+{
+	QString cpu = QSysInfo::currentCpuArchitecture();
+#ifdef __linux__
+	for (const QString& line : readText("/proc/cpuinfo").split('\n'))
+	{
+		if (line.startsWith("model name"))
+		{
+			cpu = line.section(':', 1).trimmed();
+			break;
+		}
+	}
+	const QString mem = readText("/proc/meminfo").section('\n', 0, 0).section(':', 1).trimmed().section(' ', 0, 0);
+	const QString ram = mem.isEmpty() ? QString() : QString::number(qRound(mem.toDouble() / 1024 / 1024)) + " GB";
+#else
+	const QString ram;
+#endif
+	QStringList lines{tr("USCL: %1").arg(version()), tr("PS3 system software: %1").arg(firmwareVersion().isEmpty() ? tr("not installed") : firmwareVersion()),
+	                  tr("Operating system: %1").arg(QSysInfo::prettyProductName()), tr("Processor: %1").arg(cpu)};
+	if (!ram.isEmpty())
+		lines << tr("Memory: %1").arg(ram);
+	lines << tr("Settings folder: %1").arg(GameModel::rpcs3ConfigDir());
+	return lines.join('\n');
 }
 
 QString System::onlineName() const

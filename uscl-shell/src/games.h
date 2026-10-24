@@ -32,6 +32,8 @@ public:
 	// Add Games: finds every PS3 game under a folder (disc folders, installed games, ISOs) and adds the new ones
 	// to RPCS3's games.yml; scanFinished reports how many were new
 	Q_INVOKABLE void scanFolder(const QString& path);
+	// takes a game off the list (games.yml); its files stay where they are
+	Q_INVOKABLE void remove(const QString& serial);
 	bool scanning() const { return m_scanning; }
 	// for the folder browser: drives / home, and the folders inside one
 	Q_INVOKABLE static QVariantList roots();

@@ -3,7 +3,6 @@ import QtQuick
 // First start: online name (Steam's by default), PS3 system software, games. Controller only.
 Item {
     id: setup
-    property real u: 1
     property bool open: false
     property int step: 0
     property int current: 0
@@ -93,49 +92,60 @@ Item {
     opacity: open ? 1 : 0
     Behavior on opacity { NumberAnimation { duration: 300 } }
 
-    Rectangle { anchors.fill: parent; color: "#55000000" }
+    // PS3 setup screens: the background stays, framed by two thin lines, text and choices centred
+    Rectangle { anchors.fill: parent; color: "#66000000" }
+    Rectangle { y: 250; width: parent.width; height: 2; color: "#50ffffff" }
+    Rectangle { y: 890; width: parent.width; height: 2; color: "#50ffffff" }
 
     Column {
         id: content
-        x: parent.width * 0.2; y: parent.height * 0.2
-        width: parent.width * 0.6
-        spacing: 26 * setup.u
-
-        Text {   // step dots
+        width: 1200
+        x: (parent.width - width) / 2; y: 290
+        spacing: 22
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter
             text: setup.steps.map(function(s, i) { return i === setup.step ? "●" : "○" }).join("  ")
-            color: "#b0ffffff"; font.pixelSize: 22 * setup.u
+            color: "#90ffffff"; font.pixelSize: 18
         }
-        Text { text: setup.heading; color: "white"; font.pixelSize: 56 * setup.u; font.weight: Font.Light }
-        Text { width: parent.width; text: setup.body; color: "#e0ffffff"; font.pixelSize: 28 * setup.u; wrapMode: Text.Wrap; lineHeight: 1.25 }
+        Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; text: setup.heading; color: "white"; font.pixelSize: 40 }
+        Text {
+            width: parent.width; horizontalAlignment: Text.AlignHCenter
+            text: setup.body; color: "#d8ffffff"; font.pixelSize: 27; wrapMode: Text.Wrap; lineHeight: 1.2
+        }
         Rectangle {   // download / install progress
             visible: setup.stepName === "firmware" && system.firmwareBusy
-            width: parent.width; height: 10 * setup.u; radius: height / 2; color: "#33ffffff"
-            Rectangle { width: parent.width * system.firmwareProgress; height: parent.height; radius: parent.radius; color: "white" }
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: 800; height: 14; radius: 7; color: "#33ffffff"
+            Rectangle { width: parent.width * system.firmwareProgress; height: parent.height; radius: 7; color: "white" }
         }
-        Text { visible: setup.note !== ""; text: setup.note; color: "#ffb0b0"; font.pixelSize: 24 * setup.u }
-        Item { width: 1; height: 10 * setup.u }
+        Text { visible: setup.note !== ""; width: parent.width; horizontalAlignment: Text.AlignHCenter; text: setup.note; color: "#ffb0b0"; font.pixelSize: 25 }
+        Item { width: 1; height: 6 }
         Repeater {
             model: setup.opts
-            delegate: Rectangle {
+            delegate: Item {
                 id: opt
                 required property var modelData
                 required property int index
                 readonly property bool sel: index === setup.current
-                width: content.width; height: (modelData.subtitle ? 92 : 70) * setup.u
-                radius: 8 * setup.u
-                color: sel ? "#33ffffff" : "#14ffffff"
-                border.color: sel ? "#a0ffffff" : "transparent"
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: 760; height: modelData.subtitle ? 84 : 64
+                BorderImage {
+                    anchors.fill: parent; visible: opt.sel
+                    source: "qrc:/qt/qml/Uscl/xmb/ui/focus_bar.png"
+                    border { left: 40; right: 120 }
+                }
                 Column {
                     anchors.verticalCenter: parent.verticalCenter
-                    x: 26 * setup.u; width: parent.width - 52 * setup.u
-                    Text { width: parent.width; text: opt.modelData.title; color: "white"; font.pixelSize: 30 * setup.u; elide: Text.ElideRight }
+                    x: 40; width: parent.width - 80
+                    Text { width: parent.width; text: opt.modelData.title; color: opt.sel ? "white" : "#b4ffffff"; font.pixelSize: 29; elide: Text.ElideRight }
                     Text {
                         visible: !!opt.modelData.subtitle
                         width: parent.width; text: opt.modelData.subtitle || ""
-                        color: "#b0ffffff"; font.pixelSize: 22 * setup.u; elide: Text.ElideMiddle
+                        color: "#a0ffffff"; font.pixelSize: 21; elide: Text.ElideMiddle
                     }
                 }
             }
         }
     }
+    Hints { y: 906; anchors.horizontalCenter: parent.horizontalCenter }
 }

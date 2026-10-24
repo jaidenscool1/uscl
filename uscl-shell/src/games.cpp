@@ -376,3 +376,21 @@ QVariantList GameModel::folders(const QString& path)
 		out << QVariantMap{{"name", f.fileName()}, {"path", f.absoluteFilePath()}};
 	return out;
 }
+
+void GameModel::remove(const QString& serial)
+{
+	QFile yml(gamesYmlPath());
+	if (!yml.open(QIODevice::ReadOnly))
+		return;
+	QByteArrayList kept;
+	for (const QByteArray& line : yml.readAll().split('\n'))
+	{
+		if (!line.startsWith(serial.toUtf8() + ":"))
+			kept << line;
+	}
+	yml.close();
+	if (yml.open(QIODevice::WriteOnly | QIODevice::Truncate))
+		yml.write(kept.join('\n'));
+	yml.close();
+	reload();
+}

@@ -3,7 +3,6 @@ import QtQuick
 // Typing a name with the keyboard: Enter saves, Esc (or ○) cancels
 Item {
     id: prompt
-    property real u: 1
     property bool open: false
     property string heading: ""
     property string error: ""
@@ -28,33 +27,34 @@ Item {
     visible: opacity > 0
     opacity: open ? 1 : 0
     Behavior on opacity { NumberAnimation { duration: 180 } }
-    Rectangle { anchors.fill: parent; color: "#88000000" }
 
-    Rectangle {
-        anchors.centerIn: parent
-        width: parent.width * 0.45; height: 330 * u
-        radius: 12 * u
-        color: "#f0101018"; border.color: "#40ffffff"
-        Column {
-            x: 48 * u; y: 44 * u; width: parent.width - 96 * u
-            spacing: 22 * u
-            Text { text: prompt.heading; color: "white"; font.pixelSize: 34 * u }
-            Rectangle {
-                width: parent.width; height: 70 * u; radius: 8 * u
-                color: "#22ffffff"; border.color: "#80ffffff"
-                TextInput {
-                    id: input
-                    anchors.fill: parent; anchors.margins: 16 * u
-                    verticalAlignment: TextInput.AlignVCenter
-                    color: "white"; font.pixelSize: 30 * u
-                    selectionColor: "#80ffffff"
-                    maximumLength: 16
-                    onAccepted: prompt.submit()
-                    Keys.onEscapePressed: { prompt.sound("back"); prompt.close() }
-                }
+    Rectangle { anchors.fill: parent; color: "#c8000000" }
+    Rectangle { y: 250; width: parent.width; height: 2; color: "#50ffffff" }
+    Rectangle { y: 890; width: parent.width; height: 2; color: "#50ffffff" }
+    Column {
+        width: 1000
+        x: (parent.width - width) / 2; y: 300
+        spacing: 26
+        Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; text: prompt.heading; color: "#b4ffffff"; font.pixelSize: 25 }
+        Rectangle { anchors.horizontalCenter: parent.horizontalCenter; width: 1000; height: 2; color: "#40ffffff" }
+        BorderImage {
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: 700; height: 76
+            source: "qrc:/qt/qml/Uscl/xmb/ui/button_focus.png"
+            border { left: 14; right: 14; top: 14; bottom: 14 }
+            TextInput {
+                id: input
+                anchors.fill: parent; anchors.margins: 18
+                horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
+                color: "white"; font.pixelSize: 34
+                selectionColor: "#80ffffff"
+                maximumLength: 16
+                onAccepted: prompt.submit()
+                Keys.onEscapePressed: { prompt.sound("back"); prompt.close() }
             }
-            Text { text: prompt.error; visible: text !== ""; color: "#ffb0b0"; font.pixelSize: 22 * u }
-            Text { text: qsTr("Letters, numbers, - and _ (3 to 16).  Enter saves, Esc cancels."); color: "#b0ffffff"; font.pixelSize: 22 * u }
         }
+        Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; text: prompt.error; visible: text !== ""; color: "#ffb0b0"; font.pixelSize: 25 }
+        Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; text: qsTr("Letters, numbers, - and _ (3 to 16). Type with the keyboard, Enter saves."); color: "#a0ffffff"; font.pixelSize: 23 }
     }
+    Hints { y: 906; anchors.horizontalCenter: parent.horizontalCenter; accept: qsTr("Save") }
 }

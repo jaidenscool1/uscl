@@ -20,18 +20,22 @@ qt_add_executable(uscl
     src/online.cpp src/online.h
 )
 
+# the JStationX XMB artwork (tools/xmb_assets.py)
+file(GLOB_RECURSE XMB_ASSETS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS xmb/*.png)
+
 qt_add_qml_module(uscl
     URI Uscl
     QML_FILES
         qml/Main.qml
         qml/Background.qml
         qml/Xmb.qml
-        qml/XmbItem.qml
-        qml/SidePanel.qml
-        qml/StatusPill.qml
-        qml/Icon.qml
+        qml/Page.qml
+        qml/OptionsPanel.qml
+        qml/Dialog.qml
+        qml/Hints.qml
+        qml/Notice.qml
+        qml/ClockBox.qml
         qml/Setup.qml
-        qml/Toast.qml
         qml/TextPrompt.qml
     RESOURCES
         fonts/MaterialDesignIcons.ttf
@@ -46,11 +50,13 @@ qt_add_qml_module(uscl
         sounds/xmb/notify.wav
         sounds/xmb/select.wav
         sounds/xmb/startup.wav
-        # compiled from wave.frag, so builds don't need Qt Shader Tools:
-        # qsb --glsl "100es,120,150" --hlsl 50 --msl 12 -o shaders/wave.frag.qsb shaders/wave.frag
-        shaders/wave.frag.qsb
+        # compiled from tint.frag, so builds don't need Qt Shader Tools:
+        # qsb --glsl "100es,120,150" --hlsl 50 --msl 12 -o shaders/tint.frag.qsb shaders/tint.frag
+        shaders/tint.frag.qsb
+        ${XMB_ASSETS}
 )
 
+target_compile_definitions(uscl PRIVATE USCL_VERSION="0.3.0")
 target_link_libraries(uscl PRIVATE Qt6::Quick Qt6::Multimedia Qt6::Network SDL3::SDL3)
 
 set_target_properties(uscl PROPERTIES WIN32_EXECUTABLE ON)
