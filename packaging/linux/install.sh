@@ -13,8 +13,8 @@ SRC=${1:-$(ls "$(dirname "$0")"/USCL*.AppImage 2>/dev/null | head -1)}
 mkdir -p "$(dirname "$DEST")" "$(dirname "$DESKTOP")" "$(dirname "$ICON")"
 install -m755 "$SRC" "$DEST"
 # the icon from inside the AppImage
-TMP=$(mktemp -d); (cd "$TMP" && "$DEST" --appimage-extract '*.svg' >/dev/null 2>&1 || true)
-cp "$(find "$TMP/squashfs-root" -maxdepth 1 -name '*.svg' | head -1)" "$ICON" 2>/dev/null || true; rm -rf "$TMP"
+TMP=$(mktemp -d); (cd "$TMP" && "$DEST" --appimage-extract 'usr/share/icons/hicolor/scalable/apps/*.svg' >/dev/null 2>&1 || true)
+cp "$(find "$TMP/squashfs-root" -name '*.svg' | head -1)" "$ICON" 2>/dev/null || true; rm -rf "$TMP"
 cat > "$DESKTOP" <<DESK
 [Desktop Entry]
 Type=Application
