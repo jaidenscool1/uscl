@@ -15,7 +15,7 @@ PRs #3 → #1 → #4 → #5 (all approved by the other agent). Then retarget #5 
 | uscl-rpcn (patches 0001–0004) | account auto-create, P2P addresses for the tunnel, auto-friend | – |
 | Minecraft (BLUS31426) | two RPCS3 copies on one PC join the same world (normal RPCN) | the same join from a second PC over Steam |
 | Skate 3 (BLUS30464) | community server via the bridge, untested; joiner's black screen unsolved | black screen first |
-| Black Ops II (BLUS31011) | our Demonware (`uscl-dw`, patches 0001–0004): PS3 login, lobby, stats, playlists, matchmaking, NAT discovery: two copies played one match on one PC (`tools/autotest/`) | two PCs over the tunnel; service 32, PooledStorage |
+| Black Ops II (BLUS31011) | our Demonware (`uscl-dw`, patches 0001–0004): PS3 login, lobby, stats, playlists, matchmaking, NAT discovery; two copies played one match on one PC (`tools/autotest/`); tunnel support written (`host bo2`, uscl-dw 0008/0009) | two-PC test: steps in `games/BLUS31011.md` "Over the session tunnel" |
 
 ### Black Ops II: read this before continuing
 Solved 2026-10-23 (part 4 of the notes): the missing checks were the wad's `playlists_mp.info` and `leagues.info`.
@@ -48,7 +48,8 @@ Alternatives if it stays stuck: the open-bitdemon-emulator community, or BO2's L
   the 16-byte file BO2 needs; `largeheatmap.raw.off` is disabled on purpose), RPCS3 configs `rpcs3-test`
   (uscltest, Minecraft 1.84), `rpcs3-test2` (uscltest2, bound to 127.0.0.2), `rpcs3-bo2` (BO2 1.19, IP swap list to
   our Demonware, a debug-only patch that disables BO2's hang watchdog), `rpcs3-probe` (network off).
-- Run our Demonware: `cd ~/.local/share/uscl/dw && DW_AUTH_ADDR=127.0.0.1:3074 DW_LOBBY_ADDR=127.0.0.2:3074
-  RUST_LOG=info ~/src/obde-uscl/target/release/dw-server`.
+- Run our Demonware: `cd ~/.local/share/uscl/dw && DW_ADDR=127.0.0.1:3074 DW_STUN_ADDR=127.0.0.1:3074
+  DW_STUN_ALT_ADDR=127.0.0.1:3077 RUST_LOG=info ~/src/obde-uscl/target/release/dw-server` (configs rpcs3-bo2/a/b point
+  every Demonware name at 127.0.0.1; add `DW_STUN_SELF_ADDR=127.0.0.1:39001` only behind the tunnel).
 - Updates: `~/Downloads/GAME_DUMPS/updates/<serial>/` (Sony PKGs, SHA-1 verified; Sony's hash skips the last 32
   bytes).
