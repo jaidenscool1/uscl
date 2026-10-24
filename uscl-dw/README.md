@@ -33,6 +33,8 @@ need the bridge to carry it (not done yet).
 - 0005: Matchmaking service (21): hosts create/update/delete sessions, searches return other players' open
   sessions (in memory; the title's own fields are passed through unchanged).
 - 0006: NAT discovery (`cod7-stun`, UDP): `DW_STUN_ADDR` / `DW_STUN_ALT_ADDR`, replies like the live servers.
+- 0007: NAT discovery passes the open-NAT test (mode 3 answered from the second server's IP, port+1; also
+  listens on port+1), so titles report NAT Open; matchmaking removes a host's sessions when its connection closes.
 
 ## Status
 Black Ops II 1.19: login, lobby, stats and **Play Online** work (2026-10-23). Publisher files go in
