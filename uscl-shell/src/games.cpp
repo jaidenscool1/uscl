@@ -139,6 +139,42 @@ QMap<QString, QString> GameModel::readGamesYml(const QByteArray& yml)
 	return out;
 }
 
+QString GameModel::gameHash(const QString& path, const QString& serial)
+{
+	// shortcut: only EBOOT.BIN, the one file an ISO and a disc folder of the same game always share; add the
+	// game's other executables (USRDIR/*.self) if mismatched copies get through
+	QByteArray eboot;
+	QFile update(rpcs3ConfigDir() + "dev_hdd0/game/" + serial + "/USRDIR/EBOOT.BIN");
+	if (!serial.isEmpty() && update.open(QIODevice::ReadOnly))
+	{
+		eboot = update.readAll();
+	}
+	else if (path.endsWith(".iso", Qt::CaseInsensitive))
+	{
+		eboot = readIsoFile(path, {"PS3_GAME", "USRDIR", "EBOOT.BIN"});
+	}
+	else
+	{
+		const QFileInfo info(path);
+		QDir dir(info.isDir() ? path : info.absolutePath());
+		for (int up = 0; up < 3 && eboot.isEmpty(); up++)
+		{
+			for (const QString& sub : {QStringLiteral("PS3_GAME/USRDIR/"), QStringLiteral("USRDIR/"), QString()})
+			{
+				QFile f(dir.filePath(sub + "EBOOT.BIN"));
+				if (f.open(QIODevice::ReadOnly))
+				{
+					eboot = f.readAll();
+					break;
+				}
+			}
+			if (!dir.cdUp())
+				break;
+		}
+	}
+	return eboot.isEmpty() ? QString() : QString::fromLatin1(QCryptographicHash::hash(eboot, QCryptographicHash::Sha256).toHex().left(16));
+}
+
 bool GameModel::describe(const QString& path, Game& game) const
 {
 	const QFileInfo info(path);

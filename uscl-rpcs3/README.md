@@ -30,6 +30,10 @@ Then build as in RPCS3's `BUILDING.md`.
   IP swap list; "Host"/"Join" start `uscl-rpcn`, `dw-server` and `uscl-bridge` from next to the executable, with
   data copied from `share/uscl` (Linux) or `uscl-data` (Windows) into the settings folder, and make RPCN's
   certificate the first time. Packaging: `packaging/` in this repo.
+- 0005: Open on a folder that isn't a game adds every game inside it (all subfolders).
+- 0006: `USCL_ONLINE=1` runs the game unmodified: no game patches (`patch.yml`), GDB server or logpoints. The home
+  screen sets it for games started during an online session. Anyone can build without it, so it keeps honest
+  players honest; bans are the real defence (see `uscl-bridge/src/tunnel.rs`).
 
 ## Building (Arch, 2026-10)
 The bundled LLVM doesn't compile with GCC 16's libstdc++ and `llvm-ar` isn't installed, so the debugging build is

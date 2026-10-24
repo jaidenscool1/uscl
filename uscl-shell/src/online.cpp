@@ -16,6 +16,8 @@
 #include <QTcpServer>
 #include <QUdpSocket>
 
+#include <algorithm>
+
 namespace
 {
 	// Our Demonware serves auth, lobby and NAT discovery on 127.0.0.1 (uscl-dw/README.md)
@@ -337,7 +339,11 @@ void Online::setState(const QString& state, const QString& message)
 	m_state = state;
 	m_message = message;
 	if (state == "off" || state == "starting" || state == "waiting")
+	{
 		m_session.clear();
+		m_players.clear();
+		m_host_game.clear();
+	}
 	emit stateChanged();
 }
 
@@ -361,6 +367,20 @@ bool Online::start(service s, const QString& tool, const QStringList& args, cons
 					m_state = m.captured(2);
 					m_message.clear();
 					emit stateChanged();
+				}
+				else if (line.startsWith("uscl-bridge: players "))
+				{
+					m_players = QJsonDocument::fromJson(line.mid(21).toUtf8()).array().toVariantList();
+					emit stateChanged();
+				}
+				else if (line.startsWith("uscl-bridge: game "))
+				{
+					m_host_game = line.mid(18).trimmed();
+					emit stateChanged();
+				}
+				else if (line == "FAIL: the host removed you from the session")
+				{
+					m_message = tr("The host removed you from the session.");
 				}
 				else if (line.startsWith("FAIL:") || line.startsWith("Steam init failed") || line.startsWith("bind "))
 				{
@@ -393,7 +413,7 @@ bool Online::start(service s, const QString& tool, const QStringList& args, cons
 	return true;
 }
 
-void Online::host(const QString& serial, const QString& title)
+void Online::host(const QString& serial, const QString& title, const QString& path)
 {
 	if (m_state != "off")
 		return;
@@ -439,7 +459,13 @@ void Online::host(const QString& serial, const QString& title)
 	QStringList args{"host"};
 	if (*p.bridge)
 		args << p.bridge;
-	start(bridge, toolPath("uscl-bridge"), args, QCoreApplication::applicationDirPath(), env);
+	QProcessEnvironment bridge_env = env;
+	QFile::remove(data + "/kicks.txt"); // kicks last one session
+	bridge_env.insert("USCL_BANS", data + "/bans.txt");
+	bridge_env.insert("USCL_KICKS", data + "/kicks.txt");
+	if (!serial.isEmpty())
+		bridge_env.insert("USCL_GAME", serial + " " + GameModel::gameHash(path, serial));
+	start(bridge, toolPath("uscl-bridge"), args, QCoreApplication::applicationDirPath(), bridge_env);
 }
 
 void Online::join(const QString& session)
@@ -452,6 +478,68 @@ void Online::join(const QString& session)
 	if (!session.isEmpty())
 		args << session;
 	start(bridge, toolPath("uscl-bridge"), args, QCoreApplication::applicationDirPath(), QProcessEnvironment::systemEnvironment());
+}
+
+namespace
+{
+	// "<steam id> <name>" per line
+	bool appendLine(const QString& file, const QString& id, const QString& name)
+	{
+		static const QRegularExpression digits("^\\d{1,20}$");
+		if (!digits.match(id).hasMatch())
+			return false;
+		QDir().mkpath(QFileInfo(file).absolutePath());
+		QFile f(file);
+		return f.open(QIODevice::Append) && f.write((id + " " + QString(name).simplified() + "\n").toUtf8()) > 0;
+	}
+}
+
+void Online::kick(const QString& id, const QString& name)
+{
+	appendLine(dataDir() + "/kicks.txt", id, name);
+}
+
+void Online::ban(const QString& id, const QString& name)
+{
+	const QVariantList current = bans();
+	if (std::any_of(current.begin(), current.end(), [&](const QVariant& b) { return b.toMap()["id"] == id; }))
+		return;
+	if (appendLine(dataDir() + "/bans.txt", id, name))
+		emit bansChanged();
+}
+
+void Online::unban(const QString& id)
+{
+	QFile f(dataDir() + "/bans.txt");
+	if (!f.open(QIODevice::ReadOnly))
+		return;
+	QStringList keep;
+	for (const QString& line : QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts))
+	{
+		if (line.section(' ', 0, 0) != id)
+			keep << line;
+	}
+	f.close();
+	if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+	{
+		f.write((keep.join('\n') + (keep.isEmpty() ? "" : "\n")).toUtf8());
+		emit bansChanged();
+	}
+}
+
+QVariantList Online::bans() const
+{
+	QVariantList out;
+	QFile f(dataDir() + "/bans.txt");
+	if (f.open(QIODevice::ReadOnly))
+	{
+		for (const QString& line : QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts))
+		{
+			if (!line.startsWith('#'))
+				out << QVariantMap{{"id", line.section(' ', 0, 0)}, {"name", line.section(' ', 1)}};
+		}
+	}
+	return out;
 }
 
 void Online::stop()

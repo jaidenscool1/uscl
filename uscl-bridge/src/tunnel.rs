@@ -12,7 +12,14 @@
 //! Forwards (`host skate3` or `host tcp:42100,udp:17001-17064`): for games that play through a community server.
 //! The host runs that server; members' bridges listen on the same 127.0.0.1 ports (lobby data "fwd") and carry the
 //! traffic to it, so members point the game at 127.0.0.1. The host only ever connects to ports on its own list.
+//!
+//! Removing players: the host reads Steam IDs from USCL_BANS (for good) and USCL_KICKS (this session), one per
+//! line, and lists the ones in the lobby in lobby data "removed". Every bridge drops their traffic both ways and
+//! closes their connections; a removed player's own bridge leaves. Steam IDs come from Steam's authenticated
+//! connections, so a removed player can't come back under a new name. USCL_GAME ("<serial> <hash>") goes in
+//! lobby data "game" so members can check they run the same game files as the host.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -176,6 +183,19 @@ fn bind_udp(port: u16) -> Result<UdpSocket, String> {
     Ok(s)
 }
 
+/// Steam IDs, one per line ("<id> <name>", # comments): ban and kick lists, and lobby data "removed".
+fn parse_ids(text: &str) -> HashSet<u64> {
+    text.split([',', '\n'])
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|w| !w.starts_with('#'))
+        .filter_map(|w| w.parse().ok())
+        .collect()
+}
+
+fn read_ids(var: &str) -> HashSet<u64> {
+    std::env::var(var).ok().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| parse_ids(&t)).unwrap_or_default()
+}
+
 /// Wait for a one-shot Steam call result.
 fn wait<T>(client: &Client, rx: &std::sync::mpsc::Receiver<T>, what: &str) -> Result<T, String> {
     for _ in 0..400 {
@@ -189,7 +209,7 @@ fn wait<T>(client: &Client, rx: &std::sync::mpsc::Receiver<T>, what: &str) -> Re
 }
 
 /// A new session lobby. `slots` carry over when Steam dropped the old one, so members keep their ports.
-fn create_session(client: &Client, slots: &HashMap<u64, u16>, fwd: &[(bool, u16)], sudp: &[u16]) -> Result<LobbyId, String> {
+fn create_session(client: &Client, slots: &HashMap<u64, u16>, fwd: &[(bool, u16)], sudp: &[u16], game: &str) -> Result<LobbyId, String> {
     let mm = client.matchmaking();
     let (t, r) = channel();
     mm.create_lobby(LobbyType::FriendsOnly, 250, move |res| {
@@ -200,6 +220,7 @@ fn create_session(client: &Client, slots: &HashMap<u64, u16>, fwd: &[(bool, u16)
     mm.set_lobby_data(lobby, "fwd", &fwd_spec(fwd));
     let sudp: Vec<String> = sudp.iter().map(|p| format!("sudp:{p}")).collect();
     mm.set_lobby_data(lobby, "sudp", &sudp.join(","));
+    mm.set_lobby_data(lobby, "game", game);
     for (id, slot) in slots {
         mm.set_lobby_data(lobby, &format!("slot:{id}"), &slot.to_string());
     }
@@ -245,6 +266,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
     let mm = client.matchmaking();
     let net = client.networking_messages();
     let me = client.user().steam_id();
+    let game = std::env::var("USCL_GAME").unwrap_or_default();
     let (tx, rx) = channel::<Ev>();
 
     // Bind before touching Steam so a port clash (RPCN or another bridge already running) fails fast.
@@ -272,7 +294,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
     let mut slot_of: HashMap<u64, u16> = HashMap::new();
     let mut lobby = if host {
         slot_of.insert(me.raw(), 1);
-        create_session(&client, &slot_of, &fwd, &sudp)?
+        create_session(&client, &slot_of, &fwd, &sudp, &game)?
     } else {
         match join {
             Some(id) => join_session(&client, id)?,
@@ -375,7 +397,12 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
         }
     }
 
+    // players the host removed (see the top of this file)
+    let removed: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
     let send = |peer: u64, ch: u32, data: &[u8], reliable: bool| {
+        if removed.borrow().contains(&peer) {
+            return;
+        }
         let flags = if reliable { SendFlags::RELIABLE_NO_NAGLE } else { SendFlags::UNRELIABLE_NO_NAGLE };
         let _ = net.send_message_to_user(
             NetworkingIdentity::new_steam_id(SteamId::from_raw(peer)),
@@ -394,6 +421,8 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
     let mut last_check = Instant::now();
     let mut host_gone = false;
     let mut members: HashSet<u64> = HashSet::new();
+    let mut players = String::new();
+    let mut host_game = String::new();
     // a request can beat the lobby update that makes its sender a member, so it waits here a little
     let mut pending: Vec<(SessionRequest, Instant)> = Vec::new();
     let mut buf = vec![0u8; 65536];
@@ -442,6 +471,19 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
             changed = false;
             let list = mm.lobby_members(lobby);
             members = list.iter().map(|m| m.raw()).collect();
+            let now: Vec<_> = list.iter().map(|m| serde_json::json!({"id": m.raw().to_string(), "name": client.friends().get_friend(*m).name(), "me": *m == me})).collect();
+            let now = serde_json::Value::from(now).to_string();
+            if now != players {
+                println!("uscl-bridge: players {now}");
+                players = now;
+            }
+            if !host {
+                let g = mm.lobby_data(lobby, "game").unwrap_or_default();
+                if g != host_game {
+                    println!("uscl-bridge: game {g}");
+                    host_game = g;
+                }
+            }
             for m in &list {
                 let key = format!("slot:{}", m.raw());
                 let mut slot = mm.lobby_data(lobby, &key).and_then(|v| v.parse::<u16>().ok());
@@ -466,8 +508,36 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
         if last_check.elapsed() > Duration::from_secs(2) {
             last_check = Instant::now();
             let list = mm.lobby_members(lobby);
+            let now = if host {
+                let mut ids = read_ids("USCL_BANS");
+                ids.extend(read_ids("USCL_KICKS"));
+                ids.remove(&me.raw());
+                let in_lobby: Vec<String> = list.iter().filter(|m| ids.contains(&m.raw())).map(|m| m.raw().to_string()).collect();
+                if mm.lobby_data(lobby, "removed").unwrap_or_default() != in_lobby.join(",") {
+                    mm.set_lobby_data(lobby, "removed", &in_lobby.join(","));
+                }
+                ids
+            } else {
+                parse_ids(&mm.lobby_data(lobby, "removed").unwrap_or_default())
+            };
+            if now.contains(&me.raw()) {
+                mm.leave_lobby(lobby);
+                return Err("the host removed you from the session".into());
+            }
+            if now != *removed.borrow() {
+                // their connections to the host's servers end here
+                tcp.retain(|(peer, _), s| {
+                    let keep = !now.contains(peer);
+                    if !keep {
+                        let _ = s.shutdown(Shutdown::Both);
+                    }
+                    keep
+                });
+                fwd_host.retain(|(peer, _), _| !now.contains(peer));
+                *removed.borrow_mut() = now;
+            }
             if host && !list.contains(&me) {
-                match create_session(&client, &slot_of, &fwd, &sudp) {
+                match create_session(&client, &slot_of, &fwd, &sudp, &game) {
                     Ok(l) => {
                         lobby = l;
                         changed = true;
@@ -493,7 +563,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
 
         let mut waiting = Vec::new();
         for (req, since) in pending.drain(..) {
-            if req.remote().steam_id().is_some_and(|id| members.contains(&id.raw())) {
+            if req.remote().steam_id().is_some_and(|id| members.contains(&id.raw()) && !removed.borrow().contains(&id.raw())) {
                 req.accept();
             } else if since.elapsed() < Duration::from_secs(10) {
                 waiting.push((req, since));
@@ -563,6 +633,9 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
 
         for m in net.receive_messages_on_channel(CH_UDP, 256) {
             let Some(peer) = m.identity_peer().steam_id().map(|s| s.raw()) else { continue };
+            if removed.borrow().contains(&peer) {
+                continue;
+            }
             if let [UDP_FWD, a, b, d @ ..] = m.data() {
                 let port = u16::from_be_bytes([*a, *b]);
                 if host && members.contains(&peer) && fwd.contains(&(true, port)) {
@@ -613,6 +686,9 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
 
         for m in net.receive_messages_on_channel(CH_TCP, 256) {
             let Some(peer) = m.identity_peer().steam_id().map(|s| s.raw()) else { continue };
+            if removed.borrow().contains(&peer) {
+                continue;
+            }
             let Some((id, op, d)) = parse_tcp_frame(m.data()) else { continue };
             match op {
                 TCP_OPEN if host => match match d {
@@ -681,6 +757,14 @@ mod tests {
         assert_eq!(parse_forwards("bo2").unwrap(), vec![(false, 3074)]);
         assert_eq!(parse_slot_udp("skate3"), Vec::<u16>::new());
         assert_eq!(slot_frame(3074, b"x"), [UDP_SLOT, 0x0c, 0x02, b'x']);
+    }
+
+    #[test]
+    fn ids() {
+        let bans = "# USCL bans\n76561198000000001 Cheater One\n\n76561198000000002\nnot-an-id\n";
+        assert_eq!(parse_ids(bans), HashSet::from([76561198000000001, 76561198000000002]));
+        assert_eq!(parse_ids("76561198000000003,76561198000000004"), HashSet::from([76561198000000003, 76561198000000004]));
+        assert!(parse_ids("").is_empty());
     }
 
     #[test]

@@ -21,6 +21,12 @@ class Online : public QObject
 	Q_PROPERTY(QString friendsError READ friendsError NOTIFY friendsChanged)
 	Q_PROPERTY(QVariantList tests READ tests NOTIFY testsChanged)
 	Q_PROPERTY(QString steamName READ steamName CONSTANT)
+	// everyone in the session: [{id (Steam ID), name, me}]
+	Q_PROPERTY(QVariantList players READ players NOTIFY stateChanged)
+	// joined: the host's game, "<serial> <gameHash>" (empty: the host didn't say)
+	Q_PROPERTY(QString hostGame READ hostGame NOTIFY stateChanged)
+	// players banned from sessions this PC hosts: [{id, name}]
+	Q_PROPERTY(QVariantList bans READ bans NOTIFY bansChanged)
 
 public:
 	explicit Online(QObject* parent = nullptr);
@@ -35,17 +41,25 @@ public:
 	QString friendsError() const { return m_friends_error; }
 	QVariantList tests() const { return m_tests; }
 	QString steamName() const;
+	QVariantList players() const { return m_players; }
+	QString hostGame() const { return m_host_game; }
+	QVariantList bans() const;
 
 	// Online name + RPCS3 network settings (RPCN on the session tunnel, Demonware names to our server)
 	Q_INVOKABLE bool setup(const QString& name);
 	Q_INVOKABLE static bool validName(const QString& name);
 	// serial: the game the session is for (picks which servers run); title is shown in the menu
-	Q_INVOKABLE void host(const QString& serial, const QString& title);
+	Q_INVOKABLE void host(const QString& serial, const QString& title, const QString& path);
 	// empty session: wait for a Steam invite (or the one session a friend is in)
 	Q_INVOKABLE void join(const QString& session);
 	Q_INVOKABLE void stop();
 	Q_INVOKABLE void refreshFriends();
 	Q_INVOKABLE void testConnection();
+	// host: take a player out of this session (kick) or out of every session this PC hosts (ban); bans are
+	// keyed by Steam ID, so a new name doesn't get around them. The bridge applies both within 2 seconds.
+	Q_INVOKABLE void kick(const QString& id, const QString& name);
+	Q_INVOKABLE void ban(const QString& id, const QString& name);
+	Q_INVOKABLE void unban(const QString& id);
 
 	// Exposed for the self-test
 	static QString sanitizeName(const QString& persona);
@@ -57,6 +71,7 @@ signals:
 	void stateChanged();
 	void friendsChanged();
 	void testsChanged();
+	void bansChanged();
 
 private:
 	enum service { rpcn, demonware, bridge };
@@ -69,7 +84,8 @@ private:
 	static QString rpcs3File(const QString& name);
 
 	std::array<QProcess*, 3> m_services{};
-	QString m_state = "off", m_session, m_game, m_message;
+	QString m_state = "off", m_session, m_game, m_message, m_host_game;
+	QVariantList m_players;
 	QProcess m_friends_proc;
 	QVariantList m_friends;
 	QString m_friends_error;

@@ -10,6 +10,9 @@
 #include <QScreen>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QCryptographicHash>
+#include <QDir>
+#include <QTemporaryDir>
 #include <QTemporaryFile>
 #include <QtEndian>
 
@@ -122,6 +125,20 @@ namespace
 			QByteArray bad = sig;
 			bad[10] = char(bad[10] ^ 1);
 			check(Updater::signatureOk({}, sig, pk) && !Updater::signatureOk({}, bad, pk) && !Updater::signatureOk("x", sig, pk), "update signature");
+		}
+
+		{
+			QTemporaryDir dir;
+			QDir().mkpath(dir.filePath("PS3_GAME/USRDIR"));
+			QFile eboot(dir.filePath("PS3_GAME/USRDIR/EBOOT.BIN"));
+			check(eboot.open(QIODevice::WriteOnly) && eboot.write("eboot") == 5, "temp EBOOT.BIN");
+			eboot.close();
+			const QString want = QString::fromLatin1(QCryptographicHash::hash("eboot", QCryptographicHash::Sha256).toHex().left(16));
+			check(GameModel::gameHash(dir.path(), "BLUS99999") == want && GameModel::gameHash(eboot.fileName(), "BLUS99999") == want &&
+			          GameModel::gameHash(dir.filePath("PS3_GAME"), "") == want,
+			      "game hash (disc folder, EBOOT, PS3_GAME)");
+			QTemporaryDir empty;
+			check(GameModel::gameHash(empty.path(), "BLUS99999").isEmpty(), "game hash without EBOOT.BIN");
 		}
 
 		std::fprintf(stderr, failed ? "self-test: %d failed\n" : "self-test: ok\n", failed);

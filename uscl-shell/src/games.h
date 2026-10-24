@@ -42,6 +42,10 @@ public:
 	static QMap<QString, QString> findGames(const QString& path);
 	static QString ymlLine(const QString& serial, const QString& path);
 
+	// The executable the game boots (an installed update's, else the disc's), as a short SHA-256: online sessions
+	// check that everyone runs the same game files. Empty when there's no EBOOT.BIN to read.
+	Q_INVOKABLE static QString gameHash(const QString& path, const QString& serial);
+
 	// RPCS3's settings folder: ~/.config/uscl on Linux, the folder of rpcs3.exe on Windows
 	static QString rpcs3ConfigDir();
 

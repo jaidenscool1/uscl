@@ -1,0 +1,70 @@
+From ee18812132f4fc830417cdcb8662e8def1ad93d2 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 16:10:28 -0700
+Subject: [PATCH] USCL: USCL_ONLINE runs the game unmodified (no game patches,
+ GDB server or logpoints)
+
+USCL sets it for games started during an online session.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Utilities/bin_patch.cpp      | 7 +++++++
+ rpcs3/Emu/Cell/PPUThread.cpp | 5 +++++
+ rpcs3/Emu/GDB.cpp            | 7 +++++++
+ 3 files changed, 19 insertions(+)
+
+diff --git a/Utilities/bin_patch.cpp b/Utilities/bin_patch.cpp
+index 0d4eb2e..61f92dc 100644
+--- a/Utilities/bin_patch.cpp
++++ b/Utilities/bin_patch.cpp
+@@ -1467,6 +1467,13 @@ void patch_engine::apply(std::vector<u32>& applied_total, const std::string& nam
+ 		return;
+ 	}
+ 
++	// USCL: games started for an online session run unmodified
++	if (std::getenv("USCL_ONLINE"))
++	{
++		patch_log.notice("Online session: game patches are off");
++		return;
++	}
++
+ 	const patch_container& container = ::at32(m_map, name);
+ 	const std::string& serial = Emu.GetTitleID();
+ 	const std::string& app_version = Emu.GetAppVersion();
+diff --git a/rpcs3/Emu/Cell/PPUThread.cpp b/rpcs3/Emu/Cell/PPUThread.cpp
+index 92e487b..bb4c2e8 100644
+--- a/rpcs3/Emu/Cell/PPUThread.cpp
++++ b/rpcs3/Emu/Cell/PPUThread.cpp
+@@ -1306,6 +1306,11 @@ static void ppu_logpoint(ppu_thread& ppu, ppu_opcode_t op, be_t<u32>* this_op, p
+ static void ppu_install_logpoints()
+ {
+ 	const char* path = std::getenv("USCL_LOGPOINTS");
++	if (path && std::getenv("USCL_ONLINE"))
++	{
++		ppu_log.error("USCL_LOGPOINTS is off in an online session");
++		return;
++	}
+ 	if (!path || g_cfg.core.ppu_decoder == ppu_decoder_type::llvm)
+ 	{
+ 		if (path) ppu_log.error("USCL_LOGPOINTS needs the PPU interpreter");
+diff --git a/rpcs3/Emu/GDB.cpp b/rpcs3/Emu/GDB.cpp
+index 833ee73..969a22f 100644
+--- a/rpcs3/Emu/GDB.cpp
++++ b/rpcs3/Emu/GDB.cpp
+@@ -130,6 +130,13 @@ void gdb_thread::start_server()
+ 		return;
+ 	}
+ 
++	// USCL: no debugger attached to a game in an online session
++	if (std::getenv("USCL_ONLINE"))
++	{
++		GDB.notice("GDB Server is off in an online session.");
++		return;
++	}
++
+ 	// Try to detect socket type
+ 	std::smatch match;
+ 
+-- 
+2.56.0
+

@@ -12,6 +12,10 @@ so a crash brings you back here. Settings → All Settings opens the classic RPC
   everything inside it (disc folders, ISOs, installed games) and adds what it finds to RPCS3's `games.yml`.
 - **Network:** host a session for a game (the right servers start by themselves: our Demonware for Black Ops II),
   join by Steam invite, leave, and Test Connection (USCL files, online settings, ports, a Steam lobby round trip).
+  The host sees who's in the session and can kick (this session) or ban (every session this PC hosts, by Steam
+  ID: `<settings>/uscl/bans.txt`); Banned Players lists and lifts bans. Games started in a session run with
+  `USCL_ONLINE` (no game patches or debugger), and a joining player's game must match the host's (same
+  EBOOT.BIN, so the same update) before it starts.
 - **Friends:** your online Steam friends (`uscl-bridge friends`); ✕ on one in a USCL session joins it.
 - **Settings:** online name, theme (the 14 JStationX colours), menu sounds, controllers, system software,
   All Settings (the classic RPCS3 window).

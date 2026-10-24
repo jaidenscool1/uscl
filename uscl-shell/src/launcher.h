@@ -18,7 +18,7 @@ public:
 	bool running() const { return m_process.state() != QProcess::NotRunning; }
 	QString title() const { return m_title; }
 
-	Q_INVOKABLE bool startGame(const QString& path, const QString& title);
+	Q_INVOKABLE bool startGame(const QString& path, const QString& title, bool online);
 	Q_INVOKABLE bool openClassic();
 	Q_INVOKABLE void stop();
 	// Gives RPCS3 a player per connected controller (SDL names, same library as ours). A player that already
@@ -34,7 +34,7 @@ signals:
 	void finished(bool crashed, const QString& details);
 
 private:
-	bool start(const QStringList& args, const QString& title);
+	bool start(const QStringList& args, const QString& title, bool online);
 
 	QProcess m_process;
 	QString m_title;

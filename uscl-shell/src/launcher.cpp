@@ -52,10 +52,17 @@ bool Launcher::coreFound()
 	return QFileInfo(corePath()).isExecutable();
 }
 
-bool Launcher::start(const QStringList& args, const QString& title)
+bool Launcher::start(const QStringList& args, const QString& title, bool online)
 {
 	if (running())
 		return false;
+	// in an online session RPCS3 runs the game unmodified: no game patches, debugger or logpoints (uscl-rpcs3 0006)
+	QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+	if (online)
+		env.insert("USCL_ONLINE", "1");
+	else
+		env.remove("USCL_ONLINE");
+	m_process.setProcessEnvironment(env);
 	m_tail.clear();
 	m_title = title;
 	m_stopping = false;
@@ -64,14 +71,14 @@ bool Launcher::start(const QStringList& args, const QString& title)
 	return true;
 }
 
-bool Launcher::startGame(const QString& path, const QString& title)
+bool Launcher::startGame(const QString& path, const QString& title, bool online)
 {
-	return start({"--no-gui", "--fullscreen", path}, title);
+	return start({"--no-gui", "--fullscreen", path}, title, online);
 }
 
 bool Launcher::openClassic()
 {
-	return start({}, tr("All Settings"));
+	return start({}, tr("All Settings"), false);
 }
 
 void Launcher::stop()

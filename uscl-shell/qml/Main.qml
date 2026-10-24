@@ -70,9 +70,31 @@ Window {
                         { buttons: [{ title: qsTr("Yes"), action: function() { openPage(systemUpdatePage, ic("it_update"), 1) } }, { title: qsTr("No") }] })
             return
         }
+        // joined: the host's game files must match ours (same update, nothing changed)
+        if (online.state === "joined" && online.hostGame) {
+            var host = online.hostGame.split(" ")
+            if (host[0] !== g.serial) {
+                dialog.confirm(qsTr("Online Session"), qsTr("The host is playing %1, not this game. Start it anyway?").arg(gameTitle(host[0])), function() { startGame(g) })
+                return
+            }
+            if (host[1] && games.gameHash(g.path, g.serial) !== host[1]) {
+                sound("error")
+                dialog.show(qsTr("Online Session"), qsTr("Your copy of %1 doesn't match the host's: a different update, or changed game files. Install the same update as the host to play together.").arg(g.title))
+                return
+            }
+        }
+        startGame(g)
+    }
+    function startGame(g) {
         if (prefs.autoControllers) launcher.prepareInput(gamepad.names)
         if (prefs.autoScale) system.setRpcs3Value("Video", "Resolution Scale", String(autoScaleValue))
-        launcher.startGame(g.path, g.title)
+        // shortcut: a game started before the session runs as it started (patches on); restart it to play online
+        launcher.startGame(g.path, g.title, online.state !== "off")
+    }
+    function gameTitle(serial) {
+        for (var i = 0; i < games.count; i++)
+            if (games.get(i).serial === serial) return games.get(i).title
+        return serial
     }
     readonly property int autoScaleValue: system.recommendedScale(Screen.height * Screen.devicePixelRatio)
     function gameInfo(g) {
@@ -123,11 +145,19 @@ Window {
             var o = []
             for (var i = 0; i < games.count; i++) {
                 let g = games.get(i)
-                o.push({ title: g.title, action: function() { online.host(g.serial, g.title) } })
+                o.push({ title: g.title, action: function() { online.host(g.serial, g.title, g.path) } })
             }
-            o.push({ title: qsTr("Another Game (PSN)"), action: function() { online.host("", "") } })
+            o.push({ title: qsTr("Another Game (PSN)"), action: function() { online.host("", "", "") } })
             options.show(o, 0)
         })
+    }
+    function removePlayer(p) {
+        options.show([
+            { title: qsTr("Kick from This Session"), action: function() {
+                dialog.confirm(qsTr("Kick"), qsTr("Remove %1 from this session? They can join your next one.").arg(p.name), function() { online.kick(p.id, p.name) }) } },
+            { title: qsTr("Ban"), action: function() {
+                dialog.confirm(qsTr("Ban"), qsTr("Remove %1 and keep them out of every session you host? Bans follow their Steam account.").arg(p.name), function() { online.ban(p.id, p.name) }) } }
+        ], 0)
     }
     function testConnection() {
         online.testConnection()
@@ -391,7 +421,7 @@ Window {
     readonly property int friendsCat: 4
     property var cats: {
         games.count; games.scanning; system.onlineName; system.firmwareInstalled; system.firmwareVersion; gamepad.count; prefs.avatar
-        online.state; online.session; online.message; online.friends; online.friendsLoading; online.friendsError; cfgTick
+        online.state; online.session; online.message; online.friends; online.friendsLoading; online.friendsError; online.players; online.bans; cfgTick
         updater.state; updater.progress
         return buildCats()
     }
@@ -410,7 +440,7 @@ Window {
                 action: function() { play(g) },
                 options: function() {
                     return [{ title: qsTr("Start"), action: function() { play(g) } },
-                            { title: qsTr("Host Online Session"), action: function() { needsName(function() { online.host(g.serial, g.title) }) } },
+                            { title: qsTr("Host Online Session"), action: function() { needsName(function() { online.host(g.serial, g.title, g.path) }) } },
                             { title: qsTr("Information"), action: function() { dialog.show(qsTr("Information"), gameInfo(g)) } },
                             { title: qsTr("Remove from List"), action: function() {
                                 dialog.confirm(qsTr("Remove"), qsTr("Take %1 off the list? The game's files stay where they are.").arg(g.title), function() { games.remove(g.serial) })
@@ -432,6 +462,20 @@ Window {
             network.push({ title: qsTr("Host a Session"), icon: ic("it_host"), desc: qsTr("Friends join you over Steam"), action: hostPicker },
                          { title: qsTr("Join by Steam Invite"), icon: ic("it_join"), desc: qsTr("Accept an invite in Steam, or join the one session a friend is in"),
                            action: function() { needsName(function() { online.join("") }) } })
+        online.players.forEach(function(p) {
+            if (p.me) return
+            network.push({ title: p.name, icon: ic("it_person"), disabled: online.state !== "hosting",
+                           desc: online.state === "hosting" ? qsTr("In your session: ✕ to remove") : qsTr("In this session"),
+                           action: function() { removePlayer(p) } })
+        })
+        if (online.bans.length)
+            network.push({ title: qsTr("Banned Players"), icon: ic("it_person"), desc: qsTr("%n player(s) can't join sessions you host", "", online.bans.length),
+                           action: function() {
+                               options.show(online.bans.map(function(b) {
+                                   return { title: qsTr("Unban %1").arg(b.name || b.id), action: function() {
+                                       dialog.confirm(qsTr("Banned Players"), qsTr("Let %1 join your sessions again?").arg(b.name || b.id), function() { online.unban(b.id) }) } }
+                               }), 0)
+                           } })
         network.push({ title: qsTr("Internet Connection Test"), icon: ic("it_nettest"), desc: qsTr("Check that this system can play online"), action: testConnection },
                      { title: qsTr("User's Guide"), icon: ic("it_help"), desc: qsTr("How to use this system"), action: guide })
 
