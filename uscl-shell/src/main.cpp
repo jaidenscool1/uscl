@@ -79,7 +79,7 @@ namespace
 		check(GameModel::readIsoFile(tmp.fileName(), {"PS3_GAME", "ICON0.PNG"}).isEmpty(), "ISO 9660 missing file");
 
 		// online names from Steam persona names
-		check(Online::sanitizeName("Jeffery Epstein") == "Jeffery_Epstein", "name: spaces");
+		check(Online::sanitizeName("Player One") == "Player_One", "name: spaces");
 		check(Online::sanitizeName("ab") == "abPlayer", "name: too short");
 		check(Online::sanitizeName("Zoë ★ the Great Destroyer") == "Zo_the_Great_Des", "name: symbols, length");
 		check(Online::personaFromVdf("\"users\"\n{\n\t\"1\"\n\t{\n\t\t\"PersonaName\"\t\t\"Old\"\n\t\t\"timestamp\"\t\t\"5\"\n\t}\n"
@@ -115,6 +115,14 @@ namespace
 		check(Updater::compareVersions("v0.4.0", "0.3.9") > 0 && Updater::compareVersions("0.3.0", "0.3.0-test") > 0 &&
 		      Updater::compareVersions("v0.3.0-test", "0.3.0") < 0 && Updater::compareVersions("v1.0", "1.0.0") == 0 &&
 		      Updater::compareVersions("0.10.0", "0.9.9") > 0, "version compare");
+		{
+			// RFC 8032 Ed25519 test 1 (empty message): the real key check uses the same function
+			const QByteArray pk = QByteArray::fromHex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+			const QByteArray sig = QByteArray::fromHex("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b");
+			QByteArray bad = sig;
+			bad[10] = char(bad[10] ^ 1);
+			check(Updater::signatureOk({}, sig, pk) && !Updater::signatureOk({}, bad, pk) && !Updater::signatureOk("x", sig, pk), "update signature");
+		}
 
 		std::fprintf(stderr, failed ? "self-test: %d failed\n" : "self-test: ok\n", failed);
 		return failed ? 1 : 0;

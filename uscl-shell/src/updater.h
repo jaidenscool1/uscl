@@ -6,7 +6,8 @@
 
 // USCL updates, like RPCS3's updater: asks GitHub for the newest release of the public releases repo
 // (USCL_RELEASES), and when it's newer than this build, downloads the installer (Windows) or AppImage (Linux),
-// checks its SHA-256 when the release has one, and installs it. The home screen asks the player first.
+// checks it against the release's SHA-256 file, which must carry a valid signature from the USCL update key,
+// and installs it. Unsigned or tampered releases are refused. The home screen asks the player first.
 class Updater : public QObject
 {
 	Q_OBJECT
@@ -35,6 +36,8 @@ public:
 	// <0 a older, 0 same, >0 a newer; "v0.4.0" > "0.3.9" > "0.3.0-test" < "0.3.0"
 	static int compareVersions(const QString& a, const QString& b);
 	static QString assetName();
+	// the release's "<sha256>  <file>" line, signed with the USCL update key (Ed25519)
+	static bool signatureOk(const QByteArray& message, const QByteArray& signature, const QByteArray& publicKey);
 
 signals:
 	void changed();
@@ -45,7 +48,8 @@ private:
 	QNetworkAccessManager m_net;
 	QString m_state = "idle", m_latest, m_notes, m_message;
 	double m_progress = 0;
-	QString m_url, m_sha_url, m_expected_sha;
+	QString m_url, m_sha_url, m_sig_url, m_expected_sha;
+	void fetchBinary();
 	qint64 m_size = 0;
 	QFile m_file;
 };

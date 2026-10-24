@@ -10,6 +10,9 @@ defaults:
   run:
     shell: bash
 
+permissions:
+  contents: write   # the draft release; nothing else
+
 jobs:
   installer:
     runs-on: windows-2025-vs2026
@@ -141,16 +144,15 @@ jobs:
           path: artifacts/USCL-Setup.exe*
           if-no-files-found: error
 
-      # USCL updates itself from the public releases repo (this source repo is private). Needs a token with
-      # write access to it in the RELEASES_TOKEN secret; without one the release step is skipped.
-      - name: Publish release
+      # A draft release: USCL ignores it until packaging/sign-release.sh (run on the maintainer's PC, where
+      # the update signing key lives) has checked and signed it and published it.
+      - name: Upload draft release
         if: github.ref_type == 'tag'
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
-          RELEASES_REPO: jaidenscool1/uscl-releases
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then echo "no RELEASES_TOKEN secret: not publishing"; exit 0; fi
+          cd uscl
           pre=""; case "${{ github.ref_name }}" in *-*) pre="--prerelease";; esac
-          gh release view "${{ github.ref_name }}" --repo "$RELEASES_REPO" >/dev/null 2>&1 || \
-            gh release create "${{ github.ref_name }}" --repo "$RELEASES_REPO" $pre --title "USCL ${{ github.ref_name }}" --notes "USCL ${{ github.ref_name }}"
-          gh release upload "${{ github.ref_name }}" artifacts/USCL-Setup.exe artifacts/USCL-Setup.exe.sha256 --repo "$RELEASES_REPO" --clobber
+          gh release view "${{ github.ref_name }}" >/dev/null 2>&1 || \
+            gh release create "${{ github.ref_name }}" --draft $pre --title "USCL ${{ github.ref_name }}" --notes "USCL ${{ github.ref_name }}"
+          gh release upload "${{ github.ref_name }}" ../artifacts/USCL-Setup.exe ../artifacts/USCL-Setup.exe.sha256 --clobber

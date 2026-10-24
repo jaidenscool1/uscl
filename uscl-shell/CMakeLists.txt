@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(uscl-shell LANGUAGES CXX)
+project(uscl-shell LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,6 +20,7 @@ qt_add_executable(uscl
     src/system.cpp src/system.h
     src/online.cpp src/online.h
     src/updater.cpp src/updater.h
+    third_party/tweetnacl/tweetnacl.c
 )
 
 # the JStationX XMB artwork (tools/xmb_assets.py)
@@ -63,8 +64,10 @@ qt_add_qml_module(uscl
 
 # the release tag sets the version (CI: -DUSCL_VERSION=${tag}); updates come from the public releases repo
 set(USCL_VERSION "0.3.0" CACHE STRING "USCL version")
-set(USCL_RELEASES "jaidenscool1/uscl-releases" CACHE STRING "GitHub repo USCL updates come from")
-target_compile_definitions(uscl PRIVATE USCL_VERSION="${USCL_VERSION}" USCL_RELEASES="${USCL_RELEASES}")
+set(USCL_RELEASES "jaidenscool1/uscl" CACHE STRING "GitHub repo USCL updates come from")
+# Ed25519 public key that every update must be signed with (the private key is a CI secret, see packaging/README.md)
+set(USCL_UPDATE_KEY "96108d612f3d53ba337cdaa6e383ac73f2c05ab0a4402e2e4ca1a9525771892a" CACHE STRING "update signing public key (hex)")
+target_compile_definitions(uscl PRIVATE USCL_VERSION="${USCL_VERSION}" USCL_RELEASES="${USCL_RELEASES}" USCL_UPDATE_KEY="${USCL_UPDATE_KEY}")
 if(Vulkan_FOUND)
     target_include_directories(uscl PRIVATE ${Vulkan_INCLUDE_DIRS})
 endif()

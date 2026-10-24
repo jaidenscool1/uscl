@@ -14,6 +14,13 @@
 #include <QStandardPaths>
 
 #include <cstdio>
+#include <cstdlib>
+
+extern "C" {
+#include "../third_party/tweetnacl/tweetnacl.h"
+// TweetNaCl wants this for key generation, which USCL never does; verifying needs no randomness
+void randombytes(unsigned char*, unsigned long long) { std::abort(); }
+}
 
 namespace
 {
@@ -96,7 +103,7 @@ void Updater::check(bool testing)
 		{
 			if (rel["draft"].toBool() || (rel["prerelease"].toBool() && !testing))
 				continue;
-			QString url, sha_url;
+			QString url, sha_url, sig_url;
 			qint64 size = 0;
 			for (const QJsonValue& asset : rel["assets"].toArray())
 			{
@@ -109,6 +116,10 @@ void Updater::check(bool testing)
 				{
 					sha_url = asset["browser_download_url"].toString();
 				}
+				else if (asset["name"].toString() == assetName() + ".sha256.sig")
+				{
+					sig_url = asset["browser_download_url"].toString();
+				}
 			}
 			if (url.isEmpty())
 				continue;
@@ -119,6 +130,7 @@ void Updater::check(bool testing)
 			m_notes = rel["body"].toString().trimmed();
 			m_url = url;
 			m_sha_url = sha_url;
+			m_sig_url = sig_url;
 			m_size = size;
 			setState("available");
 			return;
@@ -127,12 +139,49 @@ void Updater::check(bool testing)
 	});
 }
 
+bool Updater::signatureOk(const QByteArray& message, const QByteArray& signature, const QByteArray& publicKey)
+{
+	if (signature.size() != 64 || publicKey.size() != 32)
+		return false;
+	const QByteArray signed_message = signature + message;
+	QByteArray out(signed_message.size(), '\0');
+	unsigned long long out_len = 0;
+	return crypto_sign_open(reinterpret_cast<unsigned char*>(out.data()), &out_len, reinterpret_cast<const unsigned char*>(signed_message.constData()),
+	                        signed_message.size(), reinterpret_cast<const unsigned char*>(publicKey.constData())) == 0;
+}
+
 void Updater::download()
 {
-	if (m_state != "available" && m_state != "error")
+	if ((m_state != "available" && m_state != "error") || m_url.isEmpty())
 		return;
-	if (m_url.isEmpty())
+	if (m_sha_url.isEmpty() || m_sig_url.isEmpty())
+	{
+		setState("error", tr("This update isn't signed, so USCL won't install it."));
 		return;
+	}
+	m_progress = 0;
+	setState("downloading");
+	// the small signed checksum first: nothing big is fetched for a release that doesn't check out
+	QNetworkReply* sha = m_net.get(githubRequest(m_sha_url));
+	connect(sha, &QNetworkReply::finished, this, [this, sha] {
+		sha->deleteLater();
+		const QByteArray sha_text = sha->readAll();
+		QNetworkReply* sig = m_net.get(githubRequest(m_sig_url));
+		connect(sig, &QNetworkReply::finished, this, [this, sig, sha_text] {
+			sig->deleteLater();
+			if (!signatureOk(sha_text, sig->readAll(), QByteArray::fromHex(USCL_UPDATE_KEY)))
+			{
+				setState("error", tr("This update's signature doesn't match. USCL won't install it."));
+				return;
+			}
+			m_expected_sha = QString::fromLatin1(sha_text).section(QRegularExpression("\\s"), 0, 0).trimmed().toLower();
+			fetchBinary();
+		});
+	});
+}
+
+void Updater::fetchBinary()
+{
 	const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/update";
 	QDir().mkpath(dir);
 	m_file.setFileName(dir + "/" + assetName() + ".part");
@@ -140,18 +189,6 @@ void Updater::download()
 	{
 		setState("error", tr("Couldn't save the update."));
 		return;
-	}
-	m_progress = 0;
-	m_expected_sha.clear();
-	setState("downloading");
-
-	if (!m_sha_url.isEmpty())
-	{
-		QNetworkReply* sha = m_net.get(githubRequest(m_sha_url));
-		connect(sha, &QNetworkReply::finished, this, [this, sha] {
-			sha->deleteLater();
-			m_expected_sha = QString::fromLatin1(sha->readAll()).section(QRegularExpression("\\s"), 0, 0).trimmed().toLower();
-		});
 	}
 	QNetworkReply* reply = m_net.get(githubRequest(m_url));
 	connect(reply, &QNetworkReply::readyRead, this, [this, reply] { m_file.write(reply->readAll()); });
@@ -166,23 +203,17 @@ void Updater::download()
 		reply->deleteLater();
 		m_file.write(reply->readAll());
 		m_file.close();
-		if (reply->error() != QNetworkReply::NoError || (m_size > 0 && m_file.size() != m_size))
+		QFile f(m_file.fileName());
+		QCryptographicHash hash(QCryptographicHash::Sha256);
+		const bool complete = reply->error() == QNetworkReply::NoError && (m_size <= 0 || m_file.size() == m_size);
+		if (!complete || !f.open(QIODevice::ReadOnly) || !hash.addData(&f) || QString::fromLatin1(hash.result().toHex()) != m_expected_sha)
 		{
+			f.close();
 			m_file.remove();
-			setState("error", tr("The download didn't finish. Try again."));
+			setState("error", complete ? tr("The download doesn't match its signed checksum. Try again.") : tr("The download didn't finish. Try again."));
 			return;
 		}
-		if (!m_sha_url.isEmpty())
-		{
-			QFile f(m_file.fileName());
-			QCryptographicHash hash(QCryptographicHash::Sha256);
-			if (!f.open(QIODevice::ReadOnly) || !hash.addData(&f) || QString::fromLatin1(hash.result().toHex()) != m_expected_sha)
-			{
-				m_file.remove();
-				setState("error", tr("The update didn't pass its check. Try again."));
-				return;
-			}
-		}
+		f.close();
 		const QString final_path = m_file.fileName().chopped(5);
 		QFile::remove(final_path);
 		m_file.rename(final_path);
