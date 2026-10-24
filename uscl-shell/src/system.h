@@ -22,6 +22,10 @@ class System : public QObject
 	// internet reachable: 1 yes, 0 no, -1 unknown
 	Q_PROPERTY(int internet READ internet NOTIFY statusChanged)
 	Q_PROPERTY(QString version READ version CONSTANT)
+	// the graphics card RPCS3 will use (best Vulkan device), for Automatic resolution scale
+	Q_PROPERTY(QString gpu READ gpu CONSTANT)
+	Q_PROPERTY(int vramMB READ vramMB CONSTANT)
+	Q_PROPERTY(bool discreteGpu READ discreteGpu CONSTANT)
 
 public:
 	explicit System(QObject* parent = nullptr);
@@ -36,6 +40,14 @@ public:
 	bool charging() const { return m_charging; }
 	int internet() const;
 	static QString version();
+	QString gpu() const { return m_gpu; }
+	int vramMB() const { return m_vram_mb; }
+	bool discreteGpu() const { return m_discrete; }
+	// Resolution Scale (%) for this PC: what the graphics card can carry, no sharper than the screen shows
+	Q_INVOKABLE int recommendedScale(int screenHeight) const { return scaleFor(m_discrete, m_vram_mb, screenHeight); }
+	static int scaleFor(bool discrete, int vram_mb, int screen_height);
+	// menu sound: the player's own WAV in <settings>/sounds/ when there is one, else the built-in one
+	Q_INVOKABLE QString soundUrl(const QString& name) const;
 
 	// RPCS3's config.yml, one key of a top-level section (Video, Audio, System, ...)
 	Q_INVOKABLE QString rpcs3Value(const QString& section, const QString& key) const;
@@ -72,4 +84,8 @@ private:
 	int m_battery = -1;
 	bool m_charging = false;
 	void pollStatus();
+	void detectGpu();
+	QString m_gpu;
+	int m_vram_mb = 0;
+	bool m_discrete = false;
 };

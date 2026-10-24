@@ -1,7 +1,11 @@
 #include "launcher.h"
+#include "games.h"
 
 #include <QCoreApplication>
+#include <QDir>
+#include <QFile>
 #include <QFileInfo>
+#include <QMap>
 #include <QTimer>
 
 Launcher::Launcher(QObject* parent)
@@ -80,4 +84,82 @@ void Launcher::stop()
 		if (running())
 			m_process.kill();
 	});
+}
+
+namespace
+{
+	QString resource(const QString& name)
+	{
+		QFile f(":/qt/qml/Uscl/input/" + name);
+		return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
+	}
+}
+
+QString Launcher::inputYml(const QString& current, const QStringList& pads)
+{
+	// split into "Player N Input:" blocks
+	QMap<int, QString> blocks;
+	int player = 0;
+	for (const QString& line : current.split('\n'))
+	{
+		if (line.startsWith("Player ") && line.endsWith(" Input:"))
+			player = line.section(' ', 1, 1).toInt();
+		if (player > 0 && !line.isEmpty())
+			blocks[player] += line + '\n';
+	}
+
+	const QString sdl = resource("sdl_player.yml"), none = resource("null_player.yml");
+	QMap<QString, int> seen;
+	for (int i = 1; i <= 7; i++)
+	{
+		const QString head = QString("Player %1 Input:\n").arg(i);
+		if (i <= pads.size())
+		{
+			// RPCS3's SDL handler numbers controllers that share a name: "Name 1", "Name 2"
+			const QString device = pads[i - 1] + " " + QString::number(++seen[pads[i - 1]]);
+			const QString dev_line = "  Device: \"" + QString(device).replace("\"", "\\\"") + "\"";
+			QStringList lines = blocks.value(i).split('\n');
+			if (lines.size() > 2 && lines[1] == "  Handler: SDL" && lines[2].startsWith("  Device:"))
+			{
+				lines[2] = dev_line;
+				blocks[i] = lines.join('\n');
+			}
+			else
+			{
+				blocks[i] = head + "  Handler: SDL\n" + dev_line + "\n" + sdl;
+			}
+		}
+		else if (!blocks.contains(i))
+		{
+			blocks[i] = head + "  Handler: \"Null\"\n  Device: \"Null\"\n" + none;
+		}
+		if (!blocks[i].endsWith('\n'))
+			blocks[i] += '\n';
+	}
+	QString out;
+	for (int i = 1; i <= 7; i++)
+		out += blocks[i];
+	return out;
+}
+
+bool Launcher::prepareInput(const QStringList& pads)
+{
+	if (pads.isEmpty())
+		return true; // keyboard players keep whatever is set
+#ifdef _WIN32
+	const QString dir = GameModel::rpcs3ConfigDir() + "config/input_configs/";
+#else
+	const QString dir = GameModel::rpcs3ConfigDir() + "input_configs/";
+#endif
+	QDir().mkpath(dir + "global");
+	QFile active(dir + "active_input_configurations.yml");
+	if (!active.exists() && active.open(QIODevice::WriteOnly))
+		active.write("Active Configurations:\n  global: Default\n");
+	QFile f(dir + "global/Default.yml");
+	const QString current = f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
+	f.close();
+	const QString next = inputYml(current, pads);
+	if (next == current)
+		return true;
+	return f.open(QIODevice::WriteOnly | QIODevice::Truncate) && f.write(next.toUtf8()) >= 0;
 }

@@ -8,6 +8,12 @@
 #include <QNetworkInformation>
 #include <QNetworkReply>
 #include <QSysInfo>
+#include <QUrl>
+#include <QtGui/qtguiglobal.h>
+#if QT_CONFIG(vulkan)
+#include <QVulkanFunctions>
+#include <QVulkanInstance>
+#endif
 #include <QRegularExpression>
 #include <QStandardPaths>
 
@@ -43,6 +49,57 @@ System::System(QObject* parent)
 	connect(&m_poll, &QTimer::timeout, this, &System::pollStatus);
 	m_poll.start(5000);
 	pollStatus();
+	detectGpu();
+}
+
+void System::detectGpu()
+{
+#if QT_CONFIG(vulkan)
+	QVulkanInstance inst;
+	if (!inst.create())
+		return;
+	QVulkanFunctions* f = inst.functions();
+	uint32_t n = 0;
+	f->vkEnumeratePhysicalDevices(inst.vkInstance(), &n, nullptr);
+	std::vector<VkPhysicalDevice> devices(n);
+	f->vkEnumeratePhysicalDevices(inst.vkInstance(), &n, devices.data());
+	for (VkPhysicalDevice d : devices)
+	{
+		VkPhysicalDeviceProperties p;
+		f->vkGetPhysicalDeviceProperties(d, &p);
+		VkPhysicalDeviceMemoryProperties m;
+		f->vkGetPhysicalDeviceMemoryProperties(d, &m);
+		VkDeviceSize vram = 0;
+		for (uint32_t i = 0; i < m.memoryHeapCount; i++)
+		{
+			if (m.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+				vram = std::max(vram, m.memoryHeaps[i].size);
+		}
+		const bool discrete = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+		const int mb = int(vram / (1024 * 1024));
+		// best card: a discrete one first, then the most video memory (what RPCS3 picks on most PCs)
+		if (m_gpu.isEmpty() || (discrete && !m_discrete) || (discrete == m_discrete && mb > m_vram_mb))
+		{
+			m_gpu = QString::fromUtf8(p.deviceName);
+			m_vram_mb = mb;
+			m_discrete = discrete;
+		}
+	}
+#endif
+}
+
+int System::scaleFor(bool discrete, int vram_mb, int screen_height)
+{
+	// PS3 games render at 720p: 150% is 1080p, 200% 1440p, 300% 4K
+	const int gpu = !discrete || vram_mb < 3500 ? 100 : vram_mb < 6000 ? 150 : vram_mb < 10000 ? 200 : 300;
+	const int screen = screen_height <= 800 ? 100 : screen_height <= 1100 ? 150 : screen_height <= 1500 ? 200 : 300;
+	return std::min(gpu, screen);
+}
+
+QString System::soundUrl(const QString& name) const
+{
+	const QString own = GameModel::rpcs3ConfigDir() + "sounds/" + name + ".wav";
+	return QFileInfo::exists(own) ? QUrl::fromLocalFile(own).toString() : "qrc:/qt/qml/Uscl/sounds/xmb/" + name + ".wav";
 }
 
 QString System::version()
@@ -123,6 +180,8 @@ QString System::info() const
 	                  tr("Operating system: %1").arg(QSysInfo::prettyProductName()), tr("Processor: %1").arg(cpu)};
 	if (!ram.isEmpty())
 		lines << tr("Memory: %1").arg(ram);
+	if (!m_gpu.isEmpty())
+		lines << tr("Graphics: %1 (%2 GB)").arg(m_gpu).arg(qRound(m_vram_mb / 1024.0));
 	lines << tr("Settings folder: %1").arg(GameModel::rpcs3ConfigDir());
 	return lines.join('\n');
 }
@@ -259,3 +318,4 @@ void System::downloadFirmware()
 		});
 	});
 }
+

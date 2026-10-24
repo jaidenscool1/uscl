@@ -36,14 +36,14 @@ void Gamepad::refreshPads()
 {
 	int n = 0;
 	SDL_JoystickID* ids = SDL_GetGamepads(&n);
-	m_name.clear();
+	m_names.clear();
 	for (int i = 0; i < n; i++)
 	{
 		if (!SDL_GetGamepadFromID(ids[i]))
 			SDL_OpenGamepad(ids[i]);
-		if (m_name.isEmpty())
-			m_name = QString::fromUtf8(SDL_GetGamepadNameForID(ids[i]));
+		m_names << QString::fromUtf8(SDL_GetGamepadNameForID(ids[i]));
 	}
+	m_name = m_names.value(0);
 	SDL_free(ids);
 	m_count = n;
 	emit countChanged();

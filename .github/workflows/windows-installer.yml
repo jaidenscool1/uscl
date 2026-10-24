@@ -95,9 +95,11 @@ jobs:
           $sdl = (Get-ChildItem sdl3 -Directory | Select-Object -First 1).FullName
           cmake -S uscl/uscl-shell -B shell-build -A x64 "-DCMAKE_PREFIX_PATH=$env:QTDIR" "-DSDL3_DIR=$sdl/cmake"
           cmake --build shell-build --config Release
-          shell-build/Release/uscl.exe --self-test
-          if ($LASTEXITCODE) { exit 1 }
           Copy-Item "$sdl/lib/x64/SDL3.dll" shell-build/Release/
+          # a GUI-subsystem exe: wait for it explicitly; Qt's DLLs aren't deployed next to it yet
+          $env:PATH = "$env:QTDIR\bin;$env:PATH"
+          $t = Start-Process shell-build/Release/uscl.exe -ArgumentList "--self-test" -Wait -PassThru -NoNewWindow
+          if ($t.ExitCode -ne 0) { Write-Error "uscl self-test failed"; exit 1 }
 
       - name: Stage files
         run: |

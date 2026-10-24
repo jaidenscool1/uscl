@@ -42,7 +42,18 @@ are read from each game's `PARAM.SFO` / `ICON0.PNG`, inside ISOs too.
 `shaders/wave.frag.qsb` is compiled from `wave.frag` (command in CMakeLists.txt); rebuild it after changing
 the shader.
 
+## Automatic setup on every PC
+- **Controllers:** when a game starts, every connected controller becomes a player in RPCS3 (Settings →
+  Accessory Settings → Automatic Controller Setup). A player already on a controller only gets its device updated,
+  so custom button mappings stay.
+- **Resolution scale:** Automatic (Settings → Game Settings → Resolution Scale) picks it from the best Vulkan
+  graphics card and the screen: integrated or under 3.5 GB 100%, under 6 GB 150%, under 10 GB 200%, else 300%,
+  never sharper than the screen (1080p 150%, 1440p 200%, 4K 300%). `uscl --hardware` prints what it sees.
+
 ## Assets
+Personal sounds: WAVs in `<settings folder>/sounds/` (cursor, select, category, back, error, notify, startup)
+replace the built-in ones on that PC only; they are never packaged.
+
 Sounds: the player's own XMB sounds (JStationX `resource.uisounds.xmb`, synthesized originals). Fonts: Noto Sans,
 Roboto Thin (licences in `fonts/`), Material Design Icons (Pictogrammers, free licence). The background is drawn
 by the shader; no console maker's artwork is included.

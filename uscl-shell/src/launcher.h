@@ -21,6 +21,10 @@ public:
 	Q_INVOKABLE bool startGame(const QString& path, const QString& title);
 	Q_INVOKABLE bool openClassic();
 	Q_INVOKABLE void stop();
+	// Gives RPCS3 a player per connected controller (SDL names, same library as ours). A player that already
+	// uses a controller only gets its device updated, so custom button mappings stay.
+	Q_INVOKABLE static bool prepareInput(const QStringList& pads);
+	static QString inputYml(const QString& current, const QStringList& pads);
 	Q_INVOKABLE static bool coreFound();
 	static QString corePath();
 

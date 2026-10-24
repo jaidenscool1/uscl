@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Quick Multimedia Network)
 find_package(SDL3 REQUIRED CONFIG)
+find_package(Vulkan QUIET)   # headers only: the GPU check for Automatic resolution scale
 qt_standard_project_setup(REQUIRES 6.5)
 if(QT_KNOWN_POLICY_QTP0004)
     qt_policy(SET QTP0004 NEW)
@@ -53,10 +54,15 @@ qt_add_qml_module(uscl
         # compiled from tint.frag, so builds don't need Qt Shader Tools:
         # qsb --glsl "100es,120,150" --hlsl 50 --msl 12 -o shaders/tint.frag.qsb shaders/tint.frag
         shaders/tint.frag.qsb
+        input/sdl_player.yml
+        input/null_player.yml
         ${XMB_ASSETS}
 )
 
 target_compile_definitions(uscl PRIVATE USCL_VERSION="0.3.0")
+if(Vulkan_FOUND)
+    target_include_directories(uscl PRIVATE ${Vulkan_INCLUDE_DIRS})
+endif()
 target_link_libraries(uscl PRIVATE Qt6::Quick Qt6::Multimedia Qt6::Network SDL3::SDL3)
 
 set_target_properties(uscl PROPERTIES WIN32_EXECUTABLE ON)

@@ -33,6 +33,8 @@ Window {
         property bool clock24: false
         property string dateFormat: "MM/dd/yy"
         property string avatar: "uscl"
+        property bool autoScale: true        // Resolution Scale follows this PC's graphics card and screen
+        property bool autoControllers: true  // every connected controller becomes a player
     }
 
     // re-read RPCS3's config after a change (the rows read it through this)
@@ -65,8 +67,11 @@ Window {
                         { buttons: [{ title: qsTr("Yes"), action: function() { openPage(systemUpdatePage, ic("it_update"), 1) } }, { title: qsTr("No") }] })
             return
         }
+        if (prefs.autoControllers) launcher.prepareInput(gamepad.names)
+        if (prefs.autoScale) system.setRpcs3Value("Video", "Resolution Scale", String(autoScaleValue))
         launcher.startGame(g.path, g.title)
     }
+    readonly property int autoScaleValue: system.recommendedScale(Screen.height * Screen.devicePixelRatio)
     function gameInfo(g) {
         return qsTr("%1\n\nSerial: %2      Console: %3\n%4").arg(g.title).arg(g.serial).arg(g.console).arg(g.path)
     }
@@ -175,8 +180,12 @@ Window {
             rpcs3Row("Video", "Renderer", qsTr("Renderer"), qsTr("How games are drawn. Vulkan is fastest on most PCs."), [["Vulkan", "Vulkan"], ["OpenGL", "OpenGL"]]),
             rpcs3Row("Video", "Resolution", qsTr("Output Resolution"), qsTr("The resolution games think they run at. Most games look best at 720p."),
                      [["720p (1280x720)", "1280x720"], ["1080p (1920x1080)", "1920x1080"], ["480p (720x480)", "720x480"], ["576p (720x576)", "720x576"]]),
-            rpcs3Row("Video", "Resolution Scale", qsTr("Resolution Scale"), qsTr("Renders games sharper than the PS3 could. Higher needs a faster graphics card."),
-                     [["50%", "50"], ["100% (native)", "100"], ["150%", "150"], ["200%", "200"], ["250%", "250"], ["300% (4K)", "300"]]),
+            choiceRow(qsTr("Resolution Scale"),
+                      system.gpu ? qsTr("Automatic picks %1% for %2 on this screen").arg(autoScaleValue).arg(system.gpu) : qsTr("Renders games sharper than the PS3 could"),
+                      [[qsTr("Automatic (this PC: %1%)").arg(autoScaleValue), "auto"], ["50%", "50"], ["100% (native)", "100"], ["150% (1080p)", "150"],
+                       ["200% (1440p)", "200"], ["250%", "250"], ["300% (4K)", "300"]],
+                      function() { cfgTick; return prefs.autoScale ? "auto" : system.rpcs3Value("Video", "Resolution Scale") },
+                      function(v) { prefs.autoScale = v === "auto"; system.setRpcs3Value("Video", "Resolution Scale", v === "auto" ? String(autoScaleValue) : v) }),
             rpcs3Row("Video", "Frame limit", qsTr("Frame Limit"), qsTr("Caps the frame rate. Auto matches what the game expects."),
                      [[qsTr("Auto"), "Auto"], [qsTr("Off"), "Off"], ["30", "30"], ["50", "50"], ["60", "60"], ["120", "120"], [qsTr("Display rate"), "Display"], [qsTr("PS3 native"), "PS3 Native"]]),
             rpcs3Row("Video", "Anisotropic Filter Override", qsTr("Texture Filtering"), qsTr("Sharper textures at an angle. Auto lets each game decide."),
@@ -230,6 +239,7 @@ Window {
         return [
             { title: qsTr("Controllers"), value: gamepad.count ? gamepad.name : qsTr("None connected"),
               help: gamepad.count > 1 ? qsTr("%1 controllers connected").arg(gamepad.count) : qsTr("Connect a controller by USB or Bluetooth"), disabled: !gamepad.count },
+            prefRow("autoControllers", qsTr("Automatic Controller Setup"), qsTr("Each connected controller becomes a player when a game starts"), [[qsTr("On"), true], [qsTr("Off"), false]]),
             { title: qsTr("Button Assignments"), help: qsTr("Set up which buttons do what (classic window → Pads)"), action: classic },
             allSettingsRow()
         ]
@@ -400,13 +410,13 @@ Window {
 
     readonly property var sounds: ({ cursor: sCursor, category: sCategory, select: sSelect, back: sBack, error: sError, notify: sNotify })
     function sound(name) { if (prefs.sounds && sounds[name]) sounds[name].play() }
-    SoundEffect { id: sCursor; source: "qrc:/qt/qml/Uscl/sounds/xmb/cursor.wav" }
-    SoundEffect { id: sCategory; source: "qrc:/qt/qml/Uscl/sounds/xmb/category.wav" }
-    SoundEffect { id: sSelect; source: "qrc:/qt/qml/Uscl/sounds/xmb/select.wav" }
-    SoundEffect { id: sBack; source: "qrc:/qt/qml/Uscl/sounds/xmb/back.wav" }
-    SoundEffect { id: sError; source: "qrc:/qt/qml/Uscl/sounds/xmb/error.wav" }
-    SoundEffect { id: sNotify; source: "qrc:/qt/qml/Uscl/sounds/xmb/notify.wav" }
-    SoundEffect { id: sStartup; source: "qrc:/qt/qml/Uscl/sounds/xmb/startup.wav" }
+    SoundEffect { id: sCursor; source: system.soundUrl("cursor") }
+    SoundEffect { id: sCategory; source: system.soundUrl("category") }
+    SoundEffect { id: sSelect; source: system.soundUrl("select") }
+    SoundEffect { id: sBack; source: system.soundUrl("back") }
+    SoundEffect { id: sError; source: system.soundUrl("error") }
+    SoundEffect { id: sNotify; source: system.soundUrl("notify") }
+    SoundEffect { id: sStartup; source: system.soundUrl("startup") }
 
     // ---------------------------------------------------------------- input: whatever is on top gets it
 

@@ -6,6 +6,7 @@
 
 #include <QFontDatabase>
 #include <QGuiApplication>
+#include <QScreen>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QTemporaryFile>
@@ -98,6 +99,18 @@ namespace
 		      "http://x.y/b/PS3UPDAT.PUP", "Sony update list");
 		check(GameModel::readGamesYml(GameModel::ymlLine("BLUS1", "/a/it's/b.iso").toUtf8()).value("BLUS1") == "/a/it's/b.iso", "games.yml write");
 
+		check(System::scaleFor(true, 12000, 2160) == 300 && System::scaleFor(true, 8000, 2160) == 200 && System::scaleFor(true, 8000, 1080) == 150 &&
+		      System::scaleFor(false, 16000, 2160) == 100 && System::scaleFor(true, 2000, 1080) == 100, "resolution scale");
+		{
+			const QString first = Launcher::inputYml("", {"Pad A", "Pad A"});
+			check(first.contains("Player 1 Input:\n  Handler: SDL\n  Device: \"Pad A 1\"") && first.contains("Device: \"Pad A 2\"") &&
+			      first.contains("Player 7 Input:\n  Handler: \"Null\""), "input config from scratch");
+			// a player already on a controller keeps its mapping, only the device changes
+			const QString custom = QString(first).replace("Cross: South", "Cross: North");
+			const QString next = Launcher::inputYml(custom, {"Pad B"});
+			check(next.contains("Device: \"Pad B 1\"") && next.contains("Cross: North") && next.contains("Device: \"Pad A 2\""), "input config keeps mapping");
+		}
+
 		std::fprintf(stderr, failed ? "self-test: %d failed\n" : "self-test: ok\n", failed);
 		return failed ? 1 : 0;
 	}
@@ -112,6 +125,17 @@ int main(int argc, char* argv[])
 
 	if (app.arguments().contains("--self-test"))
 		return selfTest();
+
+	if (app.arguments().contains("--hardware"))
+	{
+		// what Automatic resolution scale sees on this PC
+		System sys;
+		const QScreen* screen = QGuiApplication::primaryScreen();
+		const int height = screen ? qRound(screen->size().height() * screen->devicePixelRatio()) : 1080;
+		std::printf("graphics: %s (%s, %d MB)\nscreen height: %d\nresolution scale: %d%%\n", qPrintable(sys.gpu().isEmpty() ? "none found" : sys.gpu()),
+		            sys.discreteGpu() ? "discrete" : "integrated", sys.vramMB(), height, sys.recommendedScale(height));
+		return 0;
+	}
 
 	for (const char* font : {"MaterialDesignIcons.ttf", "NotoSans-Regular.ttf", "NotoSans-Light.ttf", "Roboto-Thin.ttf"})
 		QFontDatabase::addApplicationFont(QString(":/qt/qml/Uscl/fonts/") + font);
