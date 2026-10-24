@@ -36,6 +36,7 @@ const UDP_RPCN: u8 = 0;
 const UDP_P2P: u8 = 1;
 const UDP_FWD: u8 = 2; // [port u16 BE][data]
 const UDP_P2P_PORT: u8 = 3; // [sender's local port u16 BE][data]: delivered to the same port on the other side
+const UDP_SLOT: u8 = 4; // [server port u16 BE][data]: member <-> host's server, sent from the member's slot port
 const TCP_OPEN: u8 = 0; // payload: empty = RPCN, or a forwarded port u16 BE
 const TCP_DATA: u8 = 1;
 const TCP_CLOSE: u8 = 2;
@@ -45,6 +46,9 @@ fn preset(name: &str) -> Option<&'static str> {
     match name {
         // Skate3BlazeServer: Blaze, HTTP, one UDP relay per lobby at 17000 + game id
         "skate3" => Some("tcp:42100,tcp:80,udp:17001-17064"),
+        // uscl-dw on DW_ADDR / DW_STUN_ADDR 127.0.0.1:3074 (+ alt 3077, 3078): login + lobby over TCP, and NAT
+        // discovery through each member's slot port, so it reports the address other players reach them at
+        "bo2" => Some("tcp:3074,sudp:3074,sudp:3077-3078"),
         _ => None,
     }
 }
@@ -56,7 +60,7 @@ pub fn parse_forwards(spec: &str) -> Result<Vec<(bool, u16)>, String> {
     for item in spec.split(',').filter(|i| !i.is_empty()) {
         let bad = || format!("bad forward `{item}` (want tcp:PORT, udp:PORT or udp:FIRST-LAST, or a preset: skate3)");
         let (proto, ports) = item.split_once(':').ok_or_else(bad)?;
-        let udp = match proto { "tcp" => false, "udp" => true, _ => return Err(bad()) };
+        let udp = match proto { "tcp" => false, "udp" => true, "sudp" => continue, _ => return Err(bad()) };
         let (a, b) = ports.split_once('-').unwrap_or((ports, ports));
         let (a, b): (u16, u16) = (a.parse().map_err(|_| bad())?, b.parse().map_err(|_| bad())?);
         if a == 0 || b < a {
@@ -68,6 +72,30 @@ pub fn parse_forwards(spec: &str) -> Result<Vec<(bool, u16)>, String> {
         return Err("more than 512 forwarded ports".into());
     }
     Ok(out)
+}
+
+/// "sudp:3074,sudp:3077-3078" items of a forward spec: UDP to the host's server that leaves the host from the
+/// member's slot port (so the server sees the member's tunnel address). Members bind them; the host's server owns them.
+pub fn parse_slot_udp(spec: &str) -> Vec<u16> {
+    let spec = preset(spec).unwrap_or(spec);
+    let mut out = Vec::new();
+    for item in spec.split(',') {
+        let Some(ports) = item.strip_prefix("sudp:") else { continue };
+        let (a, b) = ports.split_once('-').unwrap_or((ports, ports));
+        if let (Ok(a), Ok(b)) = (a.parse::<u16>(), b.parse::<u16>()) {
+            if a != 0 && a <= b && b - a < 16 {
+                out.extend(a..=b);
+            }
+        }
+    }
+    out
+}
+
+fn slot_frame(port: u16, data: &[u8]) -> Vec<u8> {
+    let mut f = vec![UDP_SLOT];
+    f.extend_from_slice(&port.to_be_bytes());
+    f.extend_from_slice(data);
+    f
 }
 
 fn fwd_spec(fwd: &[(bool, u16)]) -> String {
@@ -161,7 +189,7 @@ fn wait<T>(client: &Client, rx: &std::sync::mpsc::Receiver<T>, what: &str) -> Re
 }
 
 /// A new session lobby. `slots` carry over when Steam dropped the old one, so members keep their ports.
-fn create_session(client: &Client, slots: &HashMap<u64, u16>, fwd: &[(bool, u16)]) -> Result<LobbyId, String> {
+fn create_session(client: &Client, slots: &HashMap<u64, u16>, fwd: &[(bool, u16)], sudp: &[u16]) -> Result<LobbyId, String> {
     let mm = client.matchmaking();
     let (t, r) = channel();
     mm.create_lobby(LobbyType::FriendsOnly, 250, move |res| {
@@ -170,6 +198,8 @@ fn create_session(client: &Client, slots: &HashMap<u64, u16>, fwd: &[(bool, u16)
     let lobby = wait(client, &r, "lobby creation")?.map_err(|e| format!("create_lobby: {e:?}"))?;
     mm.set_lobby_data(lobby, "uscl", "session");
     mm.set_lobby_data(lobby, "fwd", &fwd_spec(fwd));
+    let sudp: Vec<String> = sudp.iter().map(|p| format!("sudp:{p}")).collect();
+    mm.set_lobby_data(lobby, "sudp", &sudp.join(","));
     for (id, slot) in slots {
         mm.set_lobby_data(lobby, &format!("slot:{id}"), &slot.to_string());
     }
@@ -208,7 +238,9 @@ fn friend_sessions(client: &Client) -> Vec<(LobbyId, String)> {
 }
 
 /// `join`: None joins the one session a friend is in, or a Steam invite, whichever comes first.
-pub fn run(client: Client, host: bool, join: Option<LobbyId>, fwd: Vec<(bool, u16)>) -> Result<(), String> {
+pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Result<(), String> {
+    let fwd = parse_forwards(spec)?;
+    let sudp = parse_slot_udp(spec);
     client.networking_utils().init_relay_network_access();
     let mm = client.matchmaking();
     let net = client.networking_messages();
@@ -240,7 +272,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, fwd: Vec<(bool, u1
     let mut slot_of: HashMap<u64, u16> = HashMap::new();
     let mut lobby = if host {
         slot_of.insert(me.raw(), 1);
-        create_session(&client, &slot_of, &fwd)?
+        create_session(&client, &slot_of, &fwd, &sudp)?
     } else {
         match join {
             Some(id) => join_session(&client, id)?,
@@ -306,6 +338,18 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, fwd: Vec<(bool, u1
 
     // Forwards: the host connects to its own list only; a member listens on the host's list.
     let fwd = if host { fwd } else { parse_forwards(&mm.lobby_data(lobby, "fwd").unwrap_or_default())? };
+    let sudp = if host { sudp } else { parse_slot_udp(&mm.lobby_data(lobby, "sudp").unwrap_or_default()) };
+    // member: our sockets on the server's ports, and the game socket that last used them
+    let mut slot_udp: HashMap<u16, UdpSocket> = HashMap::new();
+    let mut slot_game: Option<SocketAddr> = None;
+    if !host {
+        for &port in &sudp {
+            match bind_udp(port) {
+                Ok(sock) => { slot_udp.insert(port, sock); }
+                Err(e) => eprintln!("uscl-bridge: {e}"),
+            }
+        }
+    }
     let mut fwd_udp: HashMap<u16, (UdpSocket, Option<SocketAddr>)> = HashMap::new(); // member: port -> socket, game's address
     let mut fwd_host: HashMap<(u64, u16), UdpSocket> = HashMap::new(); // host: one socket per member and port
     if !host && !fwd.is_empty() {
@@ -423,7 +467,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, fwd: Vec<(bool, u1
             last_check = Instant::now();
             let list = mm.lobby_members(lobby);
             if host && !list.contains(&me) {
-                match create_session(&client, &slot_of, &fwd) {
+                match create_session(&client, &slot_of, &fwd, &sudp) {
                     Ok(l) => {
                         lobby = l;
                         changed = true;
@@ -475,6 +519,12 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, fwd: Vec<(bool, u1
         for (&slot, sock) in &socks {
             while let Ok((n, src)) = sock.recv_from(&mut buf) {
                 let from_rpcn = host && src.port() == HOST_RPCN_UDP;
+                if host && sudp.contains(&src.port()) && Some(slot) != my_slot {
+                    if let Some(&peer) = member_at.get(&slot) {
+                        send(peer, CH_UDP, &slot_frame(src.port(), &buf[..n]), false);
+                    }
+                    continue;
+                }
                 if from_rpcn && Some(slot) == my_slot {
                     let _ = rpcn_sock.send_to(&buf[..n], local(RPCS3_P2P));
                 } else if Some(slot) != my_slot {
@@ -487,6 +537,14 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, fwd: Vec<(bool, u1
                         send(peer, CH_UDP, &f, false);
                     }
                 }
+            }
+        }
+
+        // Slot UDP, member side: the game's request to the server, carried to the host
+        for (&port, sock) in &slot_udp {
+            while let Ok((n, src)) = sock.recv_from(&mut buf) {
+                slot_game = Some(src);
+                send(host_id.raw(), CH_UDP, &slot_frame(port, &buf[..n]), false);
             }
         }
 
@@ -519,6 +577,21 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, fwd: Vec<(bool, u1
                 } else if peer == host_id.raw() {
                     if let Some((sock, Some(game))) = fwd_udp.get(&port) {
                         let _ = sock.send_to(d, *game);
+                    }
+                }
+                continue;
+            }
+            if let [UDP_SLOT, a, b, d @ ..] = m.data() {
+                let port = u16::from_be_bytes([*a, *b]);
+                if host && sudp.contains(&port) {
+                    // to the server from the member's slot port
+                    if let Some(sock) = slot_of.get(&peer).and_then(|s| socks.get(s)) {
+                        let _ = sock.send_to(d, local(port));
+                    }
+                } else if peer == host_id.raw() {
+                    // the server's answer, from the same port it came from on the host
+                    if let (Some(sock), Some(game)) = (slot_udp.get(&port), slot_game) {
+                        let _ = sock.send_to(d, game);
                     }
                 }
                 continue;
@@ -600,6 +673,14 @@ mod tests {
         for port in [RPCN_TCP, RPCN_UDP, HOST_RPCN_UDP, SLOT_BASE + 1, 80, 22] {
             assert!(!p2p_port_ok(port), "{port}");
         }
+    }
+
+    #[test]
+    fn slot_udp_forwards() {
+        assert_eq!(parse_slot_udp("bo2"), vec![3074, 3077, 3078]);
+        assert_eq!(parse_forwards("bo2").unwrap(), vec![(false, 3074)]);
+        assert_eq!(parse_slot_udp("skate3"), Vec::<u16>::new());
+        assert_eq!(slot_frame(3074, b"x"), [UDP_SLOT, 0x0c, 0x02, b'x']);
     }
 
     #[test]

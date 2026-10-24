@@ -1,7 +1,7 @@
 From 5f8893e575eae01984551860bec73888e15aea67 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 13:01:30 -0700
-Subject: [PATCH 1/8] PS3 login (Ps3ForMmpRequest) for Black Ops II; bind
+Subject: [PATCH 1/9] PS3 login (Ps3ForMmpRequest) for Black Ops II; bind
  auth/lobby to any address
 
 The game puts a random 24-byte key in its PSN ticket's cookie; the reply

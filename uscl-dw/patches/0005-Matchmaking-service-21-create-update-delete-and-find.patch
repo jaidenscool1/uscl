@@ -1,7 +1,7 @@
 From eba71f06100c25827907b79678b64311c312dfe9 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 16:18:02 -0700
-Subject: [PATCH 5/8] Matchmaking service (21): create, update, delete and find
+Subject: [PATCH 5/9] Matchmaking service (21): create, update, delete and find
  sessions
 
 Sessions are kept in memory; the title's own fields are stored as raw typed
