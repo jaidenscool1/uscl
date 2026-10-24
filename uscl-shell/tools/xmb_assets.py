@@ -35,6 +35,55 @@ ICONS = {
 }
 
 
+def uscl_logo(ru, h=110):
+    """'USCL' boot logotype in the style of the JStationX 'JSX' one (render_ui.jsx_logo): wide, thin,
+    geometric strokes, the PS3-style S, the same soft glow."""
+    from PIL import Image, ImageDraw, ImageFilter
+    import numpy as np
+    k = 4
+    H = h * k
+    t = int(H * 0.13)                      # stroke thickness
+    gap = int(H * 0.42)
+    w = int(H * 1.05)                      # U, C and L
+    wS = int(H * 1.25)
+    W = 3 * w + wS + 3 * gap + t
+    img = Image.new("L", (W, H), 0)
+    d = ImageDraw.Draw(img)
+    r = int(H * 0.30)                      # corner radius
+    # U: two stems joined by a round bottom
+    x = 0
+    d.rectangle([x, 0, x + t, H - w // 2], fill=255)
+    d.rectangle([x + w - t, 0, x + w, H - w // 2], fill=255)
+    d.arc([x, H - w, x + w, H - 1], start=0, end=180, fill=255, width=t)
+    # S: the PS3 logo's S, as in jsx_logo
+    x1 = x + w + gap
+    sx = x1 + int(wS * 0.36)
+    d.rectangle([sx + r, 0, x1 + wS, t], fill=255)
+    d.arc([sx, 0, sx + 2 * r, 2 * r], start=180, end=270, fill=255, width=t)
+    d.rectangle([sx, r, sx + t, H - r], fill=255)
+    d.arc([sx + t - 2 * r, H - 2 * r, sx + t, H], start=0, end=90, fill=255, width=t)
+    d.rectangle([x1, H - t, sx + t - r, H], fill=255)
+    # C: open to the right, rounded corners
+    x2 = x1 + wS + gap
+    d.rectangle([x2 + r, 0, x2 + w, t], fill=255)
+    d.arc([x2, 0, x2 + 2 * r, 2 * r], start=180, end=270, fill=255, width=t)
+    d.rectangle([x2, r, x2 + t, H - r], fill=255)
+    d.arc([x2, H - 2 * r, x2 + 2 * r, H], start=90, end=180, fill=255, width=t)
+    d.rectangle([x2 + r, H - t, x2 + w, H], fill=255)
+    # L: stem and foot
+    x3 = x2 + w + gap
+    d.rectangle([x3, 0, x3 + t, H], fill=255)
+    d.rectangle([x3, H - t, x3 + w, H], fill=255)
+    small = img.resize((W // k, h), Image.LANCZOS)
+    logo = ru.rgba(np.asarray(small, dtype=np.float32) / 255)
+    glow = ru.rgba(np.asarray(small.filter(ImageFilter.GaussianBlur(6)), dtype=np.float32) / 255 * 0.45)
+    pad = 24
+    canvas = Image.new("RGBA", (logo.width + 2 * pad, logo.height + 2 * pad), (0, 0, 0, 0))
+    canvas.alpha_composite(glow, (pad, pad))
+    canvas.alpha_composite(logo, (pad, pad))
+    return canvas
+
+
 def main():
     if not os.path.isdir(SRC):
         sys.exit(f"{SRC} not found: build kodi-xmb first (tools/bg_lab.py build2, render_assets.py, render_ui.py)")
@@ -67,6 +116,7 @@ def main():
         ("pet", 0xE91D, (0xe0, 0xc0, 0x98), (0x70, 0x48, 0x20)),
     ]:
         ru.user_orb(top=top, deep=deep, glyph_cp=cp).save(os.path.join(ru.OUT, f"{name}.png"))
+    uscl_logo(ru).save(os.path.join(OUT, "ui", "uscl_logo.png"))
     shutil.copy(os.path.join(KODI, "third_party", "MaterialIcons-LICENSE.txt"), os.path.join(OUT, "MaterialIcons-LICENSE.txt"))
     print("assets in", OUT)
 

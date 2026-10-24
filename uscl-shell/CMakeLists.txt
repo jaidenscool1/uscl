@@ -36,6 +36,7 @@ qt_add_qml_module(uscl
         qml/Hints.qml
         qml/Notice.qml
         qml/ClockBox.qml
+        qml/Boot.qml
         qml/Setup.qml
         qml/TextPrompt.qml
     RESOURCES

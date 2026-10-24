@@ -35,6 +35,7 @@ Window {
         property string avatar: "uscl"
         property bool autoScale: true        // Resolution Scale follows this PC's graphics card and screen
         property bool autoControllers: true  // every connected controller becomes a player
+        property bool bootScreen: true
     }
 
     // re-read RPCS3's config after a change (the rows read it through this)
@@ -226,6 +227,7 @@ Window {
               action: function() { options.show([{ title: "PlayStation 3 (XMB)", checked: true }, { title: "PlayStation 4", disabled: true },
                                                  { title: "Xbox 360 Classic", disabled: true }, { title: "Xbox 360 (2012)", disabled: true }]) } },
             prefRow("bgColor", qsTr("Background Color"), qsTr("Automatic follows the month, like the PS3."), colors),
+            prefRow("bootScreen", qsTr("Boot Screen"), qsTr("The USCL logo and health warning when USCL starts (✕ skips it)."), [[qsTr("On"), true], [qsTr("Off"), false]]),
             prefRow("nightShade", qsTr("Darker at Night"), qsTr("The background dims in the evening and at night."), [[qsTr("On"), true], [qsTr("Off"), false]])
         ]
     }
@@ -408,7 +410,7 @@ Window {
 
     // ---------------------------------------------------------------- sounds
 
-    readonly property var sounds: ({ cursor: sCursor, category: sCategory, select: sSelect, back: sBack, error: sError, notify: sNotify })
+    readonly property var sounds: ({ cursor: sCursor, category: sCategory, select: sSelect, back: sBack, error: sError, notify: sNotify, startup: sStartup })
     function sound(name) { if (prefs.sounds && sounds[name]) sounds[name].play() }
     SoundEffect { id: sCursor; source: system.soundUrl("cursor") }
     SoundEffect { id: sCategory; source: system.soundUrl("category") }
@@ -421,7 +423,8 @@ Window {
     // ---------------------------------------------------------------- input: whatever is on top gets it
 
     function input(b) {
-        if (launcher.running || intro.running) return
+        if (launcher.running) return
+        if (boot.running) { if (b === "accept") boot.skip(); return }
         if (prompt.open) prompt.pad(b)
         else if (dialog.open) dialog.input(b)
         else if (options.open) options.input(b)
@@ -501,7 +504,7 @@ Window {
                 cats: root.cats
                 cat: prefs.xmbCategory
                 // the crossbar slides out to the left while an inner screen is open
-                opacity: root.topPage || setup.open ? 0 : 1
+                opacity: root.topPage || setup.open || boot.running ? 0 : 1
                 transform: Translate { x: root.topPage ? -120 : 0; Behavior on x { NumberAnimation { duration: 200; easing.type: Easing.OutSine } } }
                 Behavior on opacity { NumberAnimation { duration: 200 } }
                 onCatChanged: {
@@ -542,6 +545,8 @@ Window {
                 clock24: prefs.clock24
                 dateFormat: prefs.dateFormat
                 visible: !options.open
+                opacity: boot.running ? 0 : 1
+                Behavior on opacity { NumberAnimation { duration: 400 } }
             }
 
             Notice { id: notice; x: stage.width - 40 - width; y: 124 }
@@ -580,19 +585,17 @@ Window {
                 }
             }
 
-            // startup: the crossbar fades in over the background with the chime
-            Rectangle {
-                anchors.fill: parent
-                color: "black"
-                SequentialAnimation on opacity {
-                    id: intro
-                    PauseAnimation { duration: 300 }
-                    NumberAnimation { from: 1; to: 0; duration: 1200; easing.type: Easing.InOutSine }
-                    ScriptAction { script: if (!prefs.setupDone) setup.start() }
-                }
+            // startup: the boot screen, then the crossbar
+            Boot {
+                id: boot
+                onChime: root.sound("startup")
+                onFinished: if (!prefs.setupDone) setup.start()
             }
         }
     }
 
-    Component.onCompleted: if (prefs.sounds) sStartup.play()
+    Component.onCompleted: {
+        if (prefs.bootScreen) boot.start()
+        else { boot.quick(); sound("startup") }
+    }
 }
