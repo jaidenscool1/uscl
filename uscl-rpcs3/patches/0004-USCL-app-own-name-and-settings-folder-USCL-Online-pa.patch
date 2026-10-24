@@ -1,0 +1,660 @@
+From db8f14dd9e53988130fb7de3de615eef0929c26c Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 10:26:40 -0700
+Subject: [PATCH 4/4] USCL app: own name and settings folder, USCL > Online
+ panel (set up, host/join, services)
+
+The window title and app name say USCL, and settings/cache live in
+~/.config/uscl and ~/.cache/uscl so a regular RPCS3 stays untouched.
+USCL > Online... sets this PC up for online play (RPCN on the session
+tunnel, Demonware names to our server) and hosts or joins a Steam session
+by starting uscl-rpcn, dw-server and uscl-bridge from next to the
+executable (data templates from share/uscl or uscl-data).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Utilities/File.cpp            |   4 +-
+ rpcs3/rpcs3.cpp               |   4 +-
+ rpcs3/rpcs3.vcxproj           |  17 ++
+ rpcs3/rpcs3.vcxproj.filters   |  12 ++
+ rpcs3/rpcs3qt/CMakeLists.txt  |   1 +
+ rpcs3/rpcs3qt/main_window.cpp |  15 +-
+ rpcs3/rpcs3qt/main_window.h   |   4 +
+ rpcs3/rpcs3qt/uscl_dialog.cpp | 362 ++++++++++++++++++++++++++++++++++
+ rpcs3/rpcs3qt/uscl_dialog.h   |  65 ++++++
+ 9 files changed, 479 insertions(+), 5 deletions(-)
+ create mode 100644 rpcs3/rpcs3qt/uscl_dialog.cpp
+ create mode 100644 rpcs3/rpcs3qt/uscl_dialog.h
+
+diff --git a/Utilities/File.cpp b/Utilities/File.cpp
+index 8a61b7d..81734e5 100644
+--- a/Utilities/File.cpp
++++ b/Utilities/File.cpp
+@@ -2688,7 +2688,7 @@ const std::string& fs::get_config_dir([[maybe_unused]] bool get_config_subdirect
+ 		else // Just in case
+ 			dir = "./config";
+ 
+-		dir += "/rpcs3/";
++		dir += "/uscl/"; // USCL: own settings, separate from a regular RPCS3
+ 
+ 		if (!create_path(dir))
+ 		{
+@@ -2738,7 +2738,7 @@ const std::string& fs::get_cache_dir()
+ 		else // Just in case
+ 			dir = "./cache";
+ 
+-		dir += "/rpcs3/";
++		dir += "/uscl/"; // USCL: own settings, separate from a regular RPCS3
+ 
+ 		if (!create_path(dir))
+ 		{
+diff --git a/rpcs3/rpcs3.cpp b/rpcs3/rpcs3.cpp
+index 78154f6..974de51 100644
+--- a/rpcs3/rpcs3.cpp
++++ b/rpcs3/rpcs3.cpp
+@@ -802,8 +802,8 @@ int run_rpcs3(int argc, char** argv)
+ 
+ 	QScopedPointer<QCoreApplication> app(create_application(qt_argv));
+ 	app->setApplicationVersion(QString::fromStdString(rpcs3::get_version().to_string()));
+-	app->setApplicationName("RPCS3");
+-	app->setOrganizationName("RPCS3");
++	app->setApplicationName("USCL");
++	app->setOrganizationName("USCL");
+ 
+ 	// Command line args
+ 	static QCommandLineParser parser;
+diff --git a/rpcs3/rpcs3.vcxproj b/rpcs3/rpcs3.vcxproj
+index 0bc5955..ee884eb 100644
+--- a/rpcs3/rpcs3.vcxproj
++++ b/rpcs3/rpcs3.vcxproj
+@@ -435,6 +435,9 @@
+     <ClCompile Include="QTGeneratedFiles\Debug\moc_rpcn_settings_dialog.cpp">
+       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+     </ClCompile>
++    <ClCompile Include="QTGeneratedFiles\Debug\moc_uscl_dialog.cpp">
++      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
++    </ClCompile>
+     <ClCompile Include="QTGeneratedFiles\Debug\moc_rsx_debugger.cpp">
+       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+     </ClCompile>
+@@ -753,6 +756,9 @@
+     <ClCompile Include="QTGeneratedFiles\Release\moc_rpcn_settings_dialog.cpp">
+       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+     </ClCompile>
++    <ClCompile Include="QTGeneratedFiles\Release\moc_uscl_dialog.cpp">
++      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
++    </ClCompile>
+     <ClCompile Include="QTGeneratedFiles\Release\moc_rsx_debugger.cpp">
+       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+     </ClCompile>
+@@ -918,6 +924,7 @@
+     <ClCompile Include="rpcs3qt\recvmessage_dialog_frame.cpp" />
+     <ClCompile Include="rpcs3qt\render_creator.cpp" />
+     <ClCompile Include="rpcs3qt\rpcn_settings_dialog.cpp" />
++    <ClCompile Include="rpcs3qt\uscl_dialog.cpp" />
+     <ClCompile Include="rpcs3qt\screenshot_item.cpp" />
+     <ClCompile Include="rpcs3qt\screenshot_manager_dialog.cpp" />
+     <ClCompile Include="rpcs3qt\screenshot_preview.cpp" />
+@@ -1606,6 +1613,16 @@
+       <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">.\QTGeneratedFiles\$(ConfigurationName)\moc_%(Filename).cpp</Outputs>
+       <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">"$(QTDIR)\bin\moc.exe"  "%(FullPath)" -o ".\QTGeneratedFiles\$(ConfigurationName)\moc_%(Filename).cpp"  -D_WINDOWS -DUNICODE -DWIN32 -DWIN64 -DWITH_DISCORD_RPC -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB -DNDEBUG -DQT_CONCURRENT_LIB -D%(PreprocessorDefinitions) "-I.\..\3rdparty\wolfssl\wolfssl" "-I.\..\3rdparty\curl\curl\include" "-I.\..\3rdparty\libusb\libusb\libusb" "-I$(VULKAN_SDK)\Include" "-I$(QTDIR)\include" "-I$(QTDIR)\include\QtWidgets" "-I$(QTDIR)\include\QtGui" "-I$(QTDIR)\include\QtCore" "-I.\release" "-I.\QTGeneratedFiles\$(ConfigurationName)" "-I.\QTGeneratedFiles" "-I$(QTDIR)\include\QtConcurrent"</Command>
+     </CustomBuild>
++    <CustomBuild Include="rpcs3qt\uscl_dialog.h">
++      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(QTDIR)\bin\moc.exe;%(FullPath)</AdditionalInputs>
++      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Moc%27ing %(Identity)...</Message>
++      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">.\QTGeneratedFiles\$(ConfigurationName)\moc_%(Filename).cpp</Outputs>
++      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">"$(QTDIR)\bin\moc.exe"  "%(FullPath)" -o ".\QTGeneratedFiles\$(ConfigurationName)\moc_%(Filename).cpp"  -D_WINDOWS -DUNICODE -DWIN32 -DWIN64 -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB -DQT_CONCURRENT_LIB -D%(PreprocessorDefinitions) "-I.\..\3rdparty\protobuf\protobuf\src" "-I.\..\3rdparty\wolfssl\wolfssl" "-I.\..\3rdparty\curl\curl\include" "-I.\..\3rdparty\libusb\libusb\libusb" "-I$(VULKAN_SDK)\Include" "-I$(QTDIR)\include" "-I$(QTDIR)\include\QtWidgets" "-I$(QTDIR)\include\QtGui" "-I$(QTDIR)\include\QtCore" "-I.\debug" "-I.\QTGeneratedFiles\$(ConfigurationName)" "-I.\QTGeneratedFiles" "-I$(QTDIR)\include\QtConcurrent"</Command>
++      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(QTDIR)\bin\moc.exe;%(FullPath)</AdditionalInputs>
++      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Moc%27ing %(Identity)...</Message>
++      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">.\QTGeneratedFiles\$(ConfigurationName)\moc_%(Filename).cpp</Outputs>
++      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">"$(QTDIR)\bin\moc.exe"  "%(FullPath)" -o ".\QTGeneratedFiles\$(ConfigurationName)\moc_%(Filename).cpp"  -D_WINDOWS -DUNICODE -DWIN32 -DWIN64 -DWITH_DISCORD_RPC -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB -DNDEBUG -DQT_CONCURRENT_LIB -D%(PreprocessorDefinitions) "-I.\..\3rdparty\wolfssl\wolfssl" "-I.\..\3rdparty\curl\curl\include" "-I.\..\3rdparty\libusb\libusb\libusb" "-I$(VULKAN_SDK)\Include" "-I$(QTDIR)\include" "-I$(QTDIR)\include\QtWidgets" "-I$(QTDIR)\include\QtGui" "-I$(QTDIR)\include\QtCore" "-I.\release" "-I.\QTGeneratedFiles\$(ConfigurationName)" "-I.\QTGeneratedFiles" "-I$(QTDIR)\include\QtConcurrent"</Command>
++    </CustomBuild>
+     <CustomBuild Include="rpcs3qt\clans_settings_dialog.h">
+       <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(QTDIR)\bin\moc.exe;%(FullPath)</AdditionalInputs>
+       <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Moc%27ing %(Identity)...</Message>
+diff --git a/rpcs3/rpcs3.vcxproj.filters b/rpcs3/rpcs3.vcxproj.filters
+index 28a36d4..e321d62 100644
+--- a/rpcs3/rpcs3.vcxproj.filters
++++ b/rpcs3/rpcs3.vcxproj.filters
+@@ -900,9 +900,15 @@
+     <ClCompile Include="QTGeneratedFiles\Debug\moc_rpcn_settings_dialog.cpp">
+       <Filter>Generated Files\Debug</Filter>
+     </ClCompile>
++    <ClCompile Include="QTGeneratedFiles\Debug\moc_uscl_dialog.cpp">
++      <Filter>Generated Files\Debug</Filter>
++    </ClCompile>
+     <ClCompile Include="QTGeneratedFiles\Release\moc_rpcn_settings_dialog.cpp">
+       <Filter>Generated Files\Release</Filter>
+     </ClCompile>
++    <ClCompile Include="QTGeneratedFiles\Release\moc_uscl_dialog.cpp">
++      <Filter>Generated Files\Release</Filter>
++    </ClCompile>
+     <ClCompile Include="QTGeneratedFiles\Debug\moc_localized_emu.cpp">
+       <Filter>Generated Files\Debug</Filter>
+     </ClCompile>
+@@ -945,6 +951,9 @@
+     <ClCompile Include="rpcs3qt\rpcn_settings_dialog.cpp">
+       <Filter>Gui\rpcn</Filter>
+     </ClCompile>
++    <ClCompile Include="rpcs3qt\uscl_dialog.cpp">
++      <Filter>Gui\rpcn</Filter>
++    </ClCompile>
+     <ClCompile Include="rpcs3qt\sendmessage_dialog_frame.cpp">
+       <Filter>Gui\message dialog</Filter>
+     </ClCompile>
+@@ -1864,6 +1873,9 @@
+     <CustomBuild Include="rpcs3qt\rpcn_settings_dialog.h">
+       <Filter>Gui\rpcn</Filter>
+     </CustomBuild>
++    <CustomBuild Include="rpcs3qt\uscl_dialog.h">
++      <Filter>Gui\rpcn</Filter>
++    </CustomBuild>
+     <CustomBuild Include="rpcs3qt\clans_settings_dialog.h">
+       <Filter>Gui\rpcn</Filter>
+     </CustomBuild>
+diff --git a/rpcs3/rpcs3qt/CMakeLists.txt b/rpcs3/rpcs3qt/CMakeLists.txt
+index 0220757..9da45f5 100644
+--- a/rpcs3/rpcs3qt/CMakeLists.txt
++++ b/rpcs3/rpcs3qt/CMakeLists.txt
+@@ -95,6 +95,7 @@ add_library(rpcs3_ui STATIC
+     recvmessage_dialog_frame.cpp
+     render_creator.cpp
+     rpcn_settings_dialog.cpp
++    uscl_dialog.cpp
+     rsx_debugger.cpp
+     save_data_dialog.cpp
+     save_data_info_dialog.cpp
+diff --git a/rpcs3/rpcs3qt/main_window.cpp b/rpcs3/rpcs3qt/main_window.cpp
+index 3752d38..bd3dd90 100644
+--- a/rpcs3/rpcs3qt/main_window.cpp
++++ b/rpcs3/rpcs3qt/main_window.cpp
+@@ -12,6 +12,7 @@
+ #include "log_frame.h"
+ #include "settings_dialog.h"
+ #include "rpcn_settings_dialog.h"
++#include "uscl_dialog.h"
+ #include "clans_settings_dialog.h"
+ #include "auto_pause_settings_dialog.h"
+ #include "cg_disasm_window.h"
+@@ -214,7 +215,19 @@ void main_window::Init()
+ 	CreateConnects();
+ 
+ 	setMinimumSize(350, minimumSizeHint().height());    // seems fine on win 10
+-	setWindowTitle(QString::fromStdString("RPCS3 " + rpcs3::get_verbose_version()));
++	setWindowTitle(QString::fromStdString("USCL (RPCS3 " + rpcs3::get_verbose_version() + ")"));
++
++	// USCL: online with Steam friends (rpcs3qt/uscl_dialog.cpp); kept for the window's lifetime so its services keep running
++	QMenu* uscl_menu = new QMenu(tr("USCL"), this);
++	ui->menuBar->insertMenu(ui->menuHelp->menuAction(), uscl_menu);
++	connect(uscl_menu->addAction(tr("Online...")), &QAction::triggered, this, [this]()
++	{
++		if (!m_uscl_dialog)
++			m_uscl_dialog = new uscl_dialog(m_emu_settings, this);
++		m_uscl_dialog->show();
++		m_uscl_dialog->raise();
++		m_uscl_dialog->activateWindow();
++	});
+ 
+ 	Q_EMIT RequestGlobalStylesheetChange();
+ 	ConfigureGuiFromSettings();
+diff --git a/rpcs3/rpcs3qt/main_window.h b/rpcs3/rpcs3qt/main_window.h
+index 8aa57c4..f30d818 100644
+--- a/rpcs3/rpcs3qt/main_window.h
++++ b/rpcs3/rpcs3qt/main_window.h
+@@ -38,10 +38,14 @@ namespace Ui
+ 	class main_window;
+ }
+ 
++class uscl_dialog;
++
+ class main_window : public QMainWindow
+ {
+ 	Q_OBJECT
+ 
++	uscl_dialog* m_uscl_dialog = nullptr;
++
+ 	std::unique_ptr<Ui::main_window> ui;
+ 
+ 	bool m_is_list_mode = true;
+diff --git a/rpcs3/rpcs3qt/uscl_dialog.cpp b/rpcs3/rpcs3qt/uscl_dialog.cpp
+new file mode 100644
+index 0000000..515edf4
+--- /dev/null
++++ b/rpcs3/rpcs3qt/uscl_dialog.cpp
+@@ -0,0 +1,362 @@
++#include "stdafx.h"
++#include "uscl_dialog.h"
++#include "emu_settings.h"
++#include "emu_settings_type.h"
++
++#include "Emu/NP/rpcn_config.h"
++#include "Utilities/File.h"
++
++#include <QComboBox>
++#include <QCoreApplication>
++#include <QDir>
++#include <QDirIterator>
++#include <QFileInfo>
++#include <QFormLayout>
++#include <QGroupBox>
++#include <QHBoxLayout>
++#include <QLabel>
++#include <QLineEdit>
++#include <QMessageBox>
++#include <QPlainTextEdit>
++#include <QPushButton>
++#include <QRandomGenerator>
++#include <QRegularExpression>
++#include <QVBoxLayout>
++
++LOG_CHANNEL(uscl_log, "USCL");
++
++namespace
++{
++	// Our Demonware serves auth, lobby and NAT discovery on 127.0.0.1 (uscl-dw/README.md in the USCL repo).
++	constexpr auto swap_list =
++		"ops2-ps3-auth.prod.demonware.net=127.0.0.1&&ops2-ps3-lobby.prod.demonware.net=127.0.0.1"
++		"&&cod7-stun.us.demonware.net=127.0.0.1&&cod7-stun.eu.demonware.net=127.0.0.1"
++		"&&cod7-stun.jp.demonware.net=127.0.0.1&&cod7-stun.au.demonware.net=127.0.0.1&&stun.us.demonware.net=127.0.0.1";
++
++	struct game_preset
++	{
++		const char* label;
++		const char* bridge_preset; // uscl-bridge host <preset>
++		bool demonware;
++	};
++
++	constexpr game_preset presets[] = {
++		{QT_TRANSLATE_NOOP("uscl_dialog", "Any game that uses PSN (Minecraft, ...)"), "", false},
++		{QT_TRANSLATE_NOOP("uscl_dialog", "Call of Duty: Black Ops II"), "bo2", true},
++		{QT_TRANSLATE_NOOP("uscl_dialog", "Skate 3 (community server, run it yourself)"), "skate3", false},
++	};
++
++	// Copy the files of a template folder that don't exist yet in the destination.
++	void copy_missing(const QString& from, const QString& to)
++	{
++		QDirIterator it(from, QDir::Files, QDirIterator::Subdirectories);
++		while (it.hasNext())
++		{
++			const QString src = it.next();
++			const QString dst = to + "/" + QDir(from).relativeFilePath(src);
++			if (!QFileInfo::exists(dst))
++			{
++				QDir().mkpath(QFileInfo(dst).absolutePath());
++				QFile::copy(src, dst);
++			}
++		}
++	}
++}
++
++uscl_dialog::uscl_dialog(std::shared_ptr<emu_settings> emu_settings, QWidget* parent)
++	: QDialog(parent)
++	, m_emu_settings(std::move(emu_settings))
++{
++	setWindowTitle(tr("USCL Online"));
++	setObjectName("uscl_dialog");
++
++	QLabel* intro = new QLabel(tr("Play online with your Steam friends. One player hosts a session and the others join it. "
++		"USCL carries everything over Steam, so nobody needs to forward ports."));
++	intro->setWordWrap(true);
++
++	// 1. This PC
++	QGroupBox* setup_box = new QGroupBox(tr("1. Set up this PC (once)"));
++	// RPCN makes up an "RPCS3_..." name when there is none; ask for a real one instead
++	const QString npid = QString::fromStdString(g_cfg_rpcn.get_npid());
++	m_name = new QLineEdit(npid.startsWith("RPCS3_") ? QString() : npid);
++	m_name->setPlaceholderText(tr("3-16 letters, digits, - or _"));
++	QPushButton* apply = new QPushButton(tr("Save and set up"));
++	QFormLayout* setup_layout = new QFormLayout(setup_box);
++	setup_layout->addRow(tr("Online name:"), m_name);
++	setup_layout->addRow(apply);
++
++	// 2. Session
++	QGroupBox* session_box = new QGroupBox(tr("2. Play"));
++	m_game = new QComboBox();
++	for (const game_preset& p : presets)
++		m_game->addItem(tr(p.label));
++	m_host = new QPushButton(tr("Host a session"));
++	m_session = new QLineEdit();
++	m_session->setPlaceholderText(tr("Session number (leave empty to accept a friend's Steam invite)"));
++	m_join = new QPushButton(tr("Join a session"));
++	m_stop = new QPushButton(tr("Stop"));
++	m_session_label = new QLabel(tr("Not in a session."));
++	m_session_label->setWordWrap(true);
++	m_session_label->setMinimumHeight(m_session_label->fontMetrics().lineSpacing() * 2); // the dialog does not grow when the text wraps
++	m_session_label->setTextInteractionFlags(Qt::TextSelectableByMouse);
++	QFormLayout* session_layout = new QFormLayout(session_box);
++	session_layout->addRow(tr("Game:"), m_game);
++	session_layout->addRow(m_host);
++	session_layout->addRow(tr("Join:"), m_session);
++	session_layout->addRow(m_join);
++	session_layout->addRow(m_session_label);
++	session_layout->addRow(m_stop);
++
++	// Services
++	QGroupBox* services_box = new QGroupBox(tr("Services"));
++	QVBoxLayout* services_layout = new QVBoxLayout(services_box);
++	for (int i = 0; i < service_count; i++)
++	{
++		const service s = static_cast<service>(i);
++		m_services[i].status = new QLabel();
++		QPushButton* log_button = new QPushButton(tr("Log"));
++		connect(log_button, &QPushButton::clicked, this, [this, s]() { show_log(s); });
++		QHBoxLayout* row = new QHBoxLayout();
++		row->addWidget(new QLabel(service_name(s)));
++		row->addStretch();
++		row->addWidget(m_services[i].status);
++		row->addWidget(log_button);
++		services_layout->addLayout(row);
++	}
++
++	QVBoxLayout* layout = new QVBoxLayout(this);
++	layout->addWidget(intro);
++	layout->addWidget(setup_box);
++	layout->addWidget(session_box);
++	layout->addWidget(services_box);
++
++	connect(apply, &QPushButton::clicked, this, &uscl_dialog::apply_online_settings);
++	connect(m_host, &QPushButton::clicked, this, &uscl_dialog::host_session);
++	connect(m_join, &QPushButton::clicked, this, &uscl_dialog::join_session);
++	connect(m_stop, &QPushButton::clicked, this, &uscl_dialog::stop_all);
++
++	update_status();
++}
++
++uscl_dialog::~uscl_dialog()
++{
++	stop_all();
++}
++
++QString uscl_dialog::service_name(service s)
++{
++	switch (s)
++	{
++	case rpcn: return tr("Online server (RPCN)");
++	case demonware: return tr("Call of Duty server (Demonware)");
++	case bridge: return tr("Steam connection");
++	default: return {};
++	}
++}
++
++QString uscl_dialog::tool_path(const QString& name)
++{
++#ifdef _WIN32
++	return QCoreApplication::applicationDirPath() + "/" + name + ".exe";
++#else
++	return QCoreApplication::applicationDirPath() + "/" + name;
++#endif
++}
++
++QString uscl_dialog::data_dir()
++{
++	return QString::fromStdString(fs::get_config_dir()) + "uscl";
++}
++
++QString uscl_dialog::template_dir()
++{
++	// Linux packages: usr/bin + usr/share/uscl. Windows: uscl-data next to the executable.
++	for (const QString& dir : {QCoreApplication::applicationDirPath() + "/../share/uscl", QCoreApplication::applicationDirPath() + "/uscl-data"})
++	{
++		if (QFileInfo(dir).isDir())
++			return dir;
++	}
++	return {};
++}
++
++void uscl_dialog::apply_online_settings()
++{
++	const QString name = m_name->text().trimmed();
++	if (!QRegularExpression("^[A-Za-z0-9_-]{3,16}$").match(name).hasMatch())
++	{
++		QMessageBox::warning(this, tr("Online name"), tr("Pick a name of 3 to 16 letters, digits, - or _."));
++		return;
++	}
++
++	// RPCS3 network settings: online through RPCN, Demonware names to our server
++	m_emu_settings->LoadSettings();
++	m_emu_settings->SetSetting(emu_settings_type::InternetStatus, "Connected");
++	m_emu_settings->SetSetting(emu_settings_type::PSNStatus, "RPCN");
++	m_emu_settings->SetSetting(emu_settings_type::BindAddress, "0.0.0.0");
++	m_emu_settings->SetSetting(emu_settings_type::IpSwapList, swap_list);
++	m_emu_settings->SaveSettings();
++
++	// RPCN account on the session's server (127.0.0.1 through the Steam connection); created on first login
++	g_cfg_rpcn.load();
++	g_cfg_rpcn.add_host("USCL", "127.0.0.1");
++	g_cfg_rpcn.set_host("127.0.0.1");
++	g_cfg_rpcn.set_npid(name.toStdString());
++	if (g_cfg_rpcn.get_password().empty())
++	{
++		g_cfg_rpcn.set_password(QString::number(QRandomGenerator::system()->generate64(), 36).toStdString());
++	}
++	g_cfg_rpcn.save();
++
++	uscl_log.success("Online settings applied for %s", name.toStdString());
++	QMessageBox::information(this, tr("USCL"), tr("This PC is set up. If a game is running, restart it so it uses the new settings."));
++}
++
++bool uscl_dialog::start(service s, const QString& program, const QStringList& args, const QString& work_dir, const QProcessEnvironment& env)
++{
++	service_state& st = m_services[s];
++	if (st.process && st.process->state() != QProcess::NotRunning)
++		return true;
++
++	if (!QFileInfo(program).isExecutable())
++	{
++		QMessageBox::critical(this, tr("USCL"), tr("%0 is missing:\n%1\nReinstall USCL.").arg(service_name(s), program));
++		return false;
++	}
++
++	QDir().mkpath(work_dir);
++	st.log.clear();
++	if (!st.process)
++	{
++		st.process = new QProcess(this);
++		st.process->setProcessChannelMode(QProcess::MergedChannels);
++		connect(st.process, &QProcess::readyRead, this, [this, s]()
++		{
++			const QString out = QString::fromUtf8(m_services[s].process->readAll());
++			m_services[s].log += out;
++			if (s != bridge)
++				return;
++			// "uscl-bridge: session 1097… (hosting); give friends this number or invite them from Steam"
++			const QRegularExpressionMatch m = QRegularExpression("session (\\d+) \\((hosting|joined)\\)").match(out);
++			if (m.hasMatch())
++			{
++				m_session_label->setText(m.captured(2) == "hosting"
++					? tr("Hosting session %0. Give friends this number or invite them from Steam.").arg(m.captured(1))
++					: tr("Joined session %0. Start the game and go online.").arg(m.captured(1)));
++			}
++		});
++		connect(st.process, &QProcess::stateChanged, this, &uscl_dialog::update_status);
++	}
++	st.process->setWorkingDirectory(work_dir);
++	st.process->setProcessEnvironment(env);
++	st.process->start(program, args);
++	uscl_log.notice("Started %s %s", program.toStdString(), args.join(' ').toStdString());
++	return true;
++}
++
++void uscl_dialog::host_session()
++{
++	const game_preset& p = presets[std::clamp(m_game->currentIndex(), 0, static_cast<int>(std::size(presets)) - 1)];
++	const QString data = data_dir();
++	if (const QString templates = template_dir(); !templates.isEmpty())
++	{
++		copy_missing(templates + "/rpcn", data + "/rpcn");
++		copy_missing(templates + "/dw", data + "/dw");
++	}
++
++	// RPCN needs a TLS certificate of its own; make one the first time this PC hosts
++	if (!QFileInfo::exists(data + "/rpcn/cert.pem"))
++	{
++		QProcess cert_gen;
++		cert_gen.setWorkingDirectory(data + "/rpcn");
++		cert_gen.start(tool_path("uscl-rpcn"), {"--cert-gen"});
++		if (!cert_gen.waitForFinished(30000) || !QFileInfo::exists(data + "/rpcn/cert.pem"))
++		{
++			uscl_log.error("Could not make the RPCN certificate: %s", cert_gen.readAll().toStdString());
++			QMessageBox::warning(this, tr("USCL"), tr("Could not set up the online server (certificate). See the RPCS3 log."));
++			return;
++		}
++	}
++
++	const QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
++	QProcessEnvironment rpcn_env = env;
++	rpcn_env.insert("USCL_LOCAL", "1");
++	if (!start(rpcn, tool_path("uscl-rpcn"), {}, data + "/rpcn", rpcn_env))
++		return;
++
++	if (p.demonware)
++	{
++		QProcessEnvironment dw_env = env;
++		dw_env.insert("DW_ADDR", "127.0.0.1:3074");
++		dw_env.insert("DW_STUN_ADDR", "127.0.0.1:3074");
++		dw_env.insert("DW_STUN_ALT_ADDR", "127.0.0.1:3077");
++		dw_env.insert("DW_STUN_SELF_ADDR", "127.0.0.1:39001"); // the host is slot 1
++		dw_env.insert("RUST_LOG", "info");
++		if (!start(demonware, tool_path("dw-server"), {}, data + "/dw", dw_env))
++			return;
++	}
++
++	QStringList args{"host"};
++	if (*p.bridge_preset)
++		args << p.bridge_preset;
++	start(bridge, tool_path("uscl-bridge"), args, QCoreApplication::applicationDirPath(), env);
++	m_session_label->setText(tr("Starting the session..."));
++}
++
++void uscl_dialog::join_session()
++{
++	QStringList args{"join"};
++	const QString id = m_session->text().trimmed();
++	if (!id.isEmpty())
++	{
++		if (!QRegularExpression("^\\d+$").match(id).hasMatch())
++		{
++			QMessageBox::warning(this, tr("USCL"), tr("The session number is the long number the host sees."));
++			return;
++		}
++		args << id;
++	}
++	start(bridge, tool_path("uscl-bridge"), args, QCoreApplication::applicationDirPath(), QProcessEnvironment::systemEnvironment());
++	m_session_label->setText(id.isEmpty() ? tr("Waiting for a friend's session or Steam invite...") : tr("Joining..."));
++}
++
++void uscl_dialog::stop_all()
++{
++	for (service_state& st : m_services)
++	{
++		if (st.process && st.process->state() != QProcess::NotRunning)
++		{
++			st.process->terminate();
++			if (!st.process->waitForFinished(3000))
++				st.process->kill();
++		}
++	}
++	if (m_session_label)
++		m_session_label->setText(tr("Not in a session."));
++}
++
++void uscl_dialog::update_status()
++{
++	bool any = false;
++	for (service_state& st : m_services)
++	{
++		const bool running = st.process && st.process->state() != QProcess::NotRunning;
++		any |= running;
++		st.status->setText(running ? tr("running") : tr("stopped"));
++	}
++	m_host->setEnabled(!any);
++	m_join->setEnabled(!any);
++	m_stop->setEnabled(any);
++}
++
++void uscl_dialog::show_log(service s)
++{
++	QDialog* dlg = new QDialog(this);
++	dlg->setAttribute(Qt::WA_DeleteOnClose);
++	dlg->setWindowTitle(service_name(s));
++	QPlainTextEdit* text = new QPlainTextEdit(m_services[s].log.isEmpty() ? tr("(nothing yet)") : m_services[s].log);
++	text->setReadOnly(true);
++	QVBoxLayout* layout = new QVBoxLayout(dlg);
++	layout->addWidget(text);
++	dlg->resize(700, 400);
++	dlg->show();
++}
+diff --git a/rpcs3/rpcs3qt/uscl_dialog.h b/rpcs3/rpcs3qt/uscl_dialog.h
+new file mode 100644
+index 0000000..69f0b32
+--- /dev/null
++++ b/rpcs3/rpcs3qt/uscl_dialog.h
+@@ -0,0 +1,65 @@
++#pragma once
++
++#include <QDialog>
++#include <QProcess>
++
++#include <array>
++#include <memory>
++
++class emu_settings;
++
++class QComboBox;
++class QLabel;
++class QLineEdit;
++class QPushButton;
++class QPlainTextEdit;
++
++// USCL: play online with friends over Steam. Sets RPCS3 up for USCL and runs the bundled services
++// (uscl-rpcn, our Demonware, uscl-bridge) that live next to the executable.
++class uscl_dialog : public QDialog
++{
++	Q_OBJECT
++
++public:
++	explicit uscl_dialog(std::shared_ptr<emu_settings> emu_settings, QWidget* parent = nullptr);
++	~uscl_dialog();
++
++private:
++	enum service : int
++	{
++		rpcn,
++		demonware,
++		bridge,
++		service_count
++	};
++
++	struct service_state
++	{
++		QProcess* process = nullptr;
++		QLabel* status = nullptr;
++		QString log;
++	};
++
++	void apply_online_settings();
++	void host_session();
++	void join_session();
++	void stop_all();
++	bool start(service s, const QString& program, const QStringList& args, const QString& work_dir, const QProcessEnvironment& env);
++	void update_status();
++	void show_log(service s);
++
++	static QString service_name(service s);
++	static QString tool_path(const QString& name);
++	static QString data_dir();
++	static QString template_dir();
++
++	std::array<service_state, service_count> m_services{};
++	QLineEdit* m_name = nullptr;
++	QComboBox* m_game = nullptr;
++	QLineEdit* m_session = nullptr;
++	std::shared_ptr<emu_settings> m_emu_settings;
++	QLabel* m_session_label = nullptr;
++	QPushButton* m_host = nullptr;
++	QPushButton* m_join = nullptr;
++	QPushButton* m_stop = nullptr;
++};
+-- 
+2.56.0
+

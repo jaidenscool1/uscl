@@ -24,6 +24,12 @@ Then build as in RPCS3's `BUILDING.md`.
   emulation; now the session ends and the game resumes). Reading/writing memory with `gdb` works with any decoder;
   breakpoints need the interpreter. A logpoint named `!...` writes all mapped game memory to `$USCL_MEMDUMP_DIR`
   (one file per range, named by start address) when hit.
+- 0004: the USCL app. Window title and app name say USCL, and settings/cache go to `~/.config/uscl` and
+  `~/.cache/uscl` (Windows: next to the exe, as RPCS3 does) so a regular RPCS3 is left alone. **USCL > Online...**
+  (`rpcs3qt/uscl_dialog.cpp`): "Save and set up" sets RPCN on the session tunnel, an online name and the Demonware
+  IP swap list; "Host"/"Join" start `uscl-rpcn`, `dw-server` and `uscl-bridge` from next to the executable, with
+  data copied from `share/uscl` (Linux) or `uscl-data` (Windows) into the settings folder, and make RPCN's
+  certificate the first time. Packaging: `packaging/` in this repo.
 
 ## Building (Arch, 2026-10)
 The bundled LLVM doesn't compile with GCC 16's libstdc++ and `llvm-ar` isn't installed, so the debugging build is

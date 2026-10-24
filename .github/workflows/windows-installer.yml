@@ -1,0 +1,120 @@
+name: windows-installer
+# Builds USCL-Setup.exe: RPCS3 + uscl-rpcs3 patches (MSVC, RPCS3's own CI steps), uscl-rpcn, uscl-dw, uscl-bridge.
+# Manual or on a v* tag only: a full RPCS3 build takes about an hour of runner time.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  installer:
+    runs-on: windows-2025-vs2026
+    env:
+      # from RPCS3's .github/workflows/rpcs3.yml at the commit our patches are made against
+      RPCS3_COMMIT: e53ac18
+      RPCN_COMMIT: 7a3c3c4
+      DW_COMMIT: 39391e7
+      COMPILER: msvc
+      QT_VER_MAIN: '6'
+      QT_VER: '6.12.0'
+      QT_VER_MSVC: 'msvc2022'
+      QT_DATE: '202609280346'
+      LLVM_VER: '22.1.8'
+      VULKAN_VER: '1.4.341.1'
+      VULKAN_SDK_SHA: 'bcf2d75aa9556889ab974858666e20b3655b6055a0db704ccb47279ff33b5bfe'
+      CCACHE_SHA: '859141059ac950e1e8cd042c66f842f26b9e3a62a1669a69fe6ba180cb58bbdf'
+      CCACHE_BIN_DIR: 'C:\ccache_bin'
+      CCACHE_DIR: 'C:\ccache'
+      DEPS_CACHE_DIR: ./dependency_cache
+      BUILD_REPOSITORY_NAME: ${{ github.repository }}
+      BUILD_SOURCEBRANCHNAME: ${{ github.ref_name }}
+      BUILD_SOURCEVERSION: ${{ github.sha }}
+      BUILD_ARTIFACTSTAGINGDIRECTORY: ${{ github.workspace }}/artifacts/
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: uscl
+
+      - name: Get RPCS3, RPCN and Demonware sources with our patches
+        run: |
+          git config --global user.name uscl-ci && git config --global user.email ci@uscl.invalid
+          git clone -q https://github.com/RPCS3/rpcs3.git rpcs3
+          git -C rpcs3 checkout -q $RPCS3_COMMIT && git -C rpcs3 am -q ../uscl/uscl-rpcs3/patches/*.patch
+          git clone -q https://github.com/RipleyTom/rpcn.git rpcn
+          git -C rpcn checkout -q $RPCN_COMMIT && git -C rpcn am -q ../uscl/uscl-rpcn/patches/*.patch
+          git clone -q https://github.com/Laupetin/open-bitdemon-emulator obde
+          git -C obde checkout -q $DW_COMMIT && git -C obde am -q ../uscl/uscl-dw/patches/*.patch
+
+      - uses: nuget/setup-nuget@v2
+      - name: Restore NuGet packages
+        working-directory: rpcs3
+        run: nuget restore rpcs3.sln
+
+      - name: Setup env
+        shell: pwsh
+        run: |
+          echo "QTDIR=C:\Qt\${{ env.QT_VER }}\${{ env.QT_VER_MSVC }}_64" >> ${{ github.env }}
+          echo "VULKAN_SDK=C:\VulkanSDK\${{ env.VULKAN_VER }}" >> ${{ github.env }}
+
+      - name: Download and unpack dependencies (RPCS3's scripts)
+        working-directory: rpcs3
+        run: |
+          .ci/get_keys-windows.sh
+          .ci/setup-windows.sh
+          .ci/setup-windows-ci-vars.sh win64 msvc
+          grep -v '^#' .ci/ci-vars.env | grep = >> "$GITHUB_ENV"
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Compile USCL (RPCS3)
+        working-directory: rpcs3
+        shell: pwsh
+        run: msbuild rpcs3.sln /p:Configuration=Release /v:minimal /p:Platform=x64 /p:PreferredToolArchitecture=x64 /p:UseMultiToolTask=true /p:CustomAfterMicrosoftCommonTargets="${{ github.workspace }}\rpcs3\buildfiles\msvc\ci_only.targets"
+
+      - name: Install protoc
+        run: choco install -y --no-progress protoc
+
+      - name: Compile servers
+        # pwsh, so the vendored OpenSSL build finds Strawberry Perl and not Git's
+        shell: pwsh
+        run: |
+          cd uscl/uscl-bridge; cargo build --release; cd ../..
+          cd rpcn; cargo build --release; cd ..
+          cd obde; cargo build --release -p dw-server; cd ..
+
+      - name: Stage files
+        run: |
+          S=stage; B=rpcs3/bin
+          rm -f $B/rpcs3.exp $B/rpcs3.lib $B/rpcs3.pdb
+          cp -r $B $S
+          mkdir -p $S/config/input_configs
+          curl -fsSL https://raw.githubusercontent.com/gabomdq/SDL_GameControllerDB/master/gamecontrollerdb.txt > $S/config/input_configs/gamecontrollerdb.txt
+          curl -fsSL 'https://rpcs3.net/compatibility?api=v1&export' | iconv -t UTF-8 > $S/GuiConfigs/compat_database.dat || true
+          cp uscl/uscl-bridge/target/release/uscl-bridge.exe obde/target/release/dw-server.exe $S/
+          cp rpcn/target/release/rpcn.exe $S/uscl-rpcn.exe
+          cp "$(find uscl/uscl-bridge/target/release/build -name steam_api64.dll | head -1)" $S/
+          # same data templates as packaging/build-linux.sh; the USCL panel looks for them in uscl-data
+          D=$S/uscl-data; mkdir -p $D/rpcn $D/dw/storage/publisher/18396
+          cp rpcn/{servers,server_redirs,scoreboards}.cfg $D/rpcn/
+          sed -e 's/^Port=.*/Port=31413/' -e 's/^Host=.*/Host=127.0.0.1/' -e 's/^HostIPv6=.*/HostIPv6=::1/' -e 's/^StatServerHost=.*/StatServerHost=127.0.0.1/' rpcn/rpcn.cfg > $D/rpcn/rpcn.cfg
+          python uscl/uscl-dw/bo2-wad/mkwad.py $D/dw/storage/publisher/18396/online_tu19_mp_english.wad \
+            uscl/uscl-dw/bo2-wad/leagues.info uscl/uscl-dw/bo2-wad/playlists_mp.info
+          ls $S
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) { choco install -y --no-progress innosetup }
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc /DStage="${{ github.workspace }}\stage" /O"${{ github.workspace }}\artifacts" uscl\packaging\windows\uscl.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: USCL-Setup
+          path: artifacts/USCL-Setup.exe
+          if-no-files-found: error

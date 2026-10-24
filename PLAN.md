@@ -82,6 +82,11 @@ Best candidate: **Minecraft** (4J Studios made both editions from one codebase, 
 updates around the same time). The test is to capture each edition's session traffic and compare.
 Treat it as research, not a feature.
 
+### One app for more consoles (later)
+The USCL program will later run Xbox 360 and PS4/PS5 games too (player, 2026-10-24). Until then, keep
+uscl-bridge, the servers and the USCL panel free of RPCS3-only assumptions (per-game presets, no RPCS3 config
+inside the bridge), so other emulator cores can sit next to RPCS3 in the same install.
+
 ## Phases
 1. **Survey**: profile every game you own. Pick the first FULL one (Minecraft). Done for the 4 owned games.
 2. **Bridge proof of concept**: uscl-bridge with lobby create/join/list and Rich Presence, driven from a small

@@ -1,7 +1,7 @@
 From ef2520dee8cee77f32e7c9a7481d9394bfa50b89 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 15:32:00 -0700
-Subject: [PATCH 3/3] USCL: GDB server survives a client leaving; '!' logpoints
+Subject: [PATCH 3/4] USCL: GDB server survives a client leaving; '!' logpoints
  dump game memory
 
 A closed connection or 'D' (detach) ended in a fatal error that froze
