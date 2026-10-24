@@ -36,6 +36,8 @@ Window {
         property bool autoScale: true        // Resolution Scale follows this PC's graphics card and screen
         property bool autoControllers: true  // every connected controller becomes a player
         property bool bootScreen: true
+        property bool autoUpdate: true
+        property bool testingUpdates: true   // pre-releases too (USCL is in testing)
     }
 
     // re-read RPCS3's config after a change (the rows read it through this)
@@ -150,6 +152,60 @@ Window {
             ? qsTr("D-pad or left stick: move     A: select     B: back     Y: options\nLB / RB: jump through long lists\nHold the Guide button during a game to quit back here.\nOnline: Network → Host a Session, or accept a Steam invite.")
             : qsTr("D-pad or left stick: move     ✕: select     ○: back     △: options\nL1 / R1: jump through long lists\nHold the PS button during a game to quit back here.\nOnline: Network → Host a Session, or accept a Steam invite."))
     }
+
+    // ---------------------------------------------------------------- USCL updates (like RPCS3's updater: ask, download, restart)
+
+    property string offeredVersion: ""
+    function checkUpdates(quiet) {
+        updateQuiet = quiet
+        updater.check(prefs.testingUpdates)
+    }
+    property bool updateQuiet: true
+    function updateStateText() {
+        switch (updater.state) {
+        case "checking": return qsTr("Checking...")
+        case "available": return qsTr("Version %1 available").arg(updater.latest)
+        case "downloading": return qsTr("Downloading... %1%").arg(Math.round(updater.progress * 100))
+        case "ready": return qsTr("Ready to install")
+        case "current": return qsTr("Up to date (%1)").arg(system.version)
+        case "error": case "unsupported": return updater.message
+        default: return system.version
+        }
+    }
+    function offerUpdate() {
+        offeredVersion = updater.latest
+        sound("notify")
+        var notes = updater.notes ? "\n\n" + updater.notes.split("\n").slice(0, 6).join("\n") : ""
+        dialog.show(qsTr("USCL Update"), qsTr("Version %1 is available. You have %2.").arg(updater.latest).arg(system.version) + notes,
+                    { buttons: [{ title: qsTr("Update Now"), action: startUpdate }, { title: qsTr("Later") }] })
+    }
+    function startUpdate() {
+        if (launcher.running || online.state !== "off") {
+            dialog.show(qsTr("USCL Update"), qsTr("Finish your game and leave the online session first, then update from Settings → System Update."))
+            return
+        }
+        updater.download()
+        dialog.show(qsTr("USCL Update"), "", {
+            live: function() { return updater.state === "error" ? updater.message : qsTr("Downloading version %1...").arg(updater.latest) },
+            progress: function() { return updater.state === "downloading" ? updater.progress : -1 }
+        })
+    }
+    function offerRestart() {
+        dialog.show(qsTr("USCL Update"), qsTr("Version %1 is downloaded. USCL restarts to install it.").arg(updater.latest),
+                    { buttons: [{ title: qsTr("Restart Now"), action: function() { online.stop(); updater.install() } }, { title: qsTr("Later") }] })
+    }
+    Connections {
+        target: updater
+        function onChanged() {
+            if (updater.state === "available" && updater.latest !== root.offeredVersion && !launcher.running) root.offerUpdate()
+            else if (updater.state === "ready") root.offerRestart()
+            else if (!root.updateQuiet && (updater.state === "current" || updater.state === "error" || updater.state === "unsupported")) {
+                root.updateQuiet = true
+                notice.show(updater.message, root.ic("it_update"))
+            }
+        }
+    }
+    Timer { interval: 6 * 3600 * 1000; repeat: true; running: prefs.autoUpdate; onTriggered: if (!launcher.running) root.checkUpdates(true) }
 
     // ---------------------------------------------------------------- settings rows
 
@@ -273,7 +329,15 @@ Window {
             { title: qsTr("Update via Internet"), help: qsTr("Downloads the latest PS3 system software from Sony and installs it"),
               action: function() { system.downloadFirmware(); firmwareProgress() } },
             { title: qsTr("Update via Storage Media"), help: qsTr("Installs a PS3UPDAT.PUP you already have"), action: installFromStorage },
-            { title: qsTr("Installed Version"), value: system.firmwareVersion || qsTr("None"), disabled: true, help: qsTr("USCL %1").arg(system.version) }
+            { title: qsTr("Installed Version"), value: system.firmwareVersion || qsTr("None"), disabled: true, help: qsTr("The PS3 system software on this PC") },
+            { title: qsTr("USCL Update"), value: updateStateText(), help: qsTr("USCL %1. Checks for a newer USCL and installs it").arg(system.version),
+              action: function() {
+                  if (updater.state === "available") offerUpdate()
+                  else if (updater.state === "ready") offerRestart()
+                  else checkUpdates(false)
+              } },
+            prefRow("autoUpdate", qsTr("Check for Updates Automatically"), qsTr("When USCL starts, and every few hours"), [[qsTr("On"), true], [qsTr("Off"), false]]),
+            prefRow("testingUpdates", qsTr("Update Channel"), qsTr("Testing also gets test builds before they're released"), [[qsTr("Testing"), true], [qsTr("Stable"), false]])
         ]
     }
     function profilePage() {
@@ -328,6 +392,7 @@ Window {
     property var cats: {
         games.count; games.scanning; system.onlineName; system.firmwareInstalled; system.firmwareVersion; gamepad.count; prefs.avatar
         online.state; online.session; online.message; online.friends; online.friendsLoading; online.friendsError; cfgTick
+        updater.state; updater.progress
         return buildCats()
     }
 
@@ -393,7 +458,8 @@ Window {
                 { title: qsTr("Turn Off System"), icon: ic("it_power"), desc: qsTr("Quit USCL and go back to the desktop"),
                   action: function() { dialog.confirm(qsTr("Turn Off System"), qsTr("Quit USCL?"), function() { online.stop(); Qt.quit() }) } } ] },
             { name: qsTr("Settings"), icon: ic("cat_settings"), items: [
-                settingsItem(qsTr("System Update"), system.firmwareInstalled ? qsTr("PS3 system software %1 installed").arg(system.firmwareVersion) : qsTr("Install the PS3 system software (games need it)"), "it_update", systemUpdatePage),
+                settingsItem(qsTr("System Update"), updater.state === "available" ? qsTr("USCL %1 is available").arg(updater.latest)
+                             : system.firmwareInstalled ? qsTr("PS3 system software %1 installed").arg(system.firmwareVersion) : qsTr("Install the PS3 system software (games need it)"), "it_update", systemUpdatePage),
                 settingsItem(qsTr("Game Settings"), qsTr("How games look and run: resolution, frame rate, upscaling"), "it_games", gameSettingsPage),
                 settingsItem(qsTr("Video Settings"), qsTr("Screen shape and stretching"), "it_display", videoSettingsPage),
                 settingsItem(qsTr("Sound Settings"), qsTr("Game volume, surround sound and menu sounds"), "it_sound", soundSettingsPage),
@@ -519,7 +585,7 @@ Window {
                 id: setup
                 visible: opacity > 0 && !root.topPage
                 onSound: function(name) { root.sound(name) }
-                onFinished: prefs.setupDone = true
+                onFinished: { prefs.setupDone = true; if (prefs.autoUpdate) root.checkUpdates(true) }
                 onTypeName: root.typeName(function() { setup.next() })
                 onBrowse: root.addGames()
             }
@@ -589,7 +655,10 @@ Window {
             Boot {
                 id: boot
                 onChime: root.sound("startup")
-                onFinished: if (!prefs.setupDone) setup.start()
+                onFinished: {
+                    if (!prefs.setupDone) setup.start()
+                    else if (prefs.autoUpdate) root.checkUpdates(true)
+                }
             }
         }
     }

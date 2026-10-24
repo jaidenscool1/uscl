@@ -7,7 +7,11 @@
 [Setup]
 AppId={{7B5F3C1E-0A44-4C55-9E1B-55C1A0D3F0A1}
 AppName=USCL
-AppVersion=0.1
+#ifndef Version
+  #define Version "0.0.0"
+#endif
+AppVersion={#Version}
+CloseApplications=yes
 AppPublisher=USCL
 DefaultDirName={localappdata}\Programs\USCL
 DefaultGroupName=USCL
@@ -37,6 +41,8 @@ Name: desktopicon; Description: "Create a desktop shortcut"
 ; the Visual C++ runtime RPCS3 needs; asks for admin only when it isn't installed yet
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing the Visual C++ runtime..."; Flags: waituntilterminated skipifdoesntexist shellexec; Check: NeedsVCRedist
 Filename: "{app}\uscl.exe"; Description: "Start USCL"; Flags: nowait postinstall skipifsilent
+; an update from inside USCL installs silently: start the new USCL when it's done
+Filename: "{app}\uscl.exe"; Flags: nowait; Check: WizardSilent
 
 [Code]
 function NeedsVCRedist: Boolean;

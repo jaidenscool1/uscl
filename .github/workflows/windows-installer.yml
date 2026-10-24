@@ -93,7 +93,9 @@ jobs:
           curl.exe -fsSLo sdl3.zip https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-devel-3.4.18-VC.zip
           Expand-Archive sdl3.zip -DestinationPath sdl3
           $sdl = (Get-ChildItem sdl3 -Directory | Select-Object -First 1).FullName
-          cmake -S uscl/uscl-shell -B shell-build -A x64 "-DCMAKE_PREFIX_PATH=$env:QTDIR" "-DSDL3_DIR=$sdl/cmake"
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          if ("${{ github.ref_type }}" -ne "tag") { $version = "0.0.0-dev" }
+          cmake -S uscl/uscl-shell -B shell-build -A x64 "-DCMAKE_PREFIX_PATH=$env:QTDIR" "-DSDL3_DIR=$sdl/cmake" "-DUSCL_VERSION=$version"
           cmake --build shell-build --config Release
           Copy-Item "$sdl/lib/x64/SDL3.dll" shell-build/Release/
           # a GUI-subsystem exe: wait for it explicitly; Qt's DLLs aren't deployed next to it yet
@@ -128,10 +130,27 @@ jobs:
           if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) { choco install -y --no-progress innosetup }
           $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
           if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
-          & $iscc /DStage="${{ github.workspace }}\stage" /O"${{ github.workspace }}\artifacts" uscl\packaging\windows\uscl.iss
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          & $iscc /DStage="${{ github.workspace }}\stage" /DVersion="$version" /O"${{ github.workspace }}\artifacts" uscl\packaging\windows\uscl.iss
+          # the updater checks this
+          (Get-FileHash artifacts\USCL-Setup.exe -Algorithm SHA256).Hash.ToLower() + "  USCL-Setup.exe" | Out-File -Encoding ascii -NoNewline artifacts\USCL-Setup.exe.sha256
 
       - uses: actions/upload-artifact@v4
         with:
           name: USCL-Setup
-          path: artifacts/USCL-Setup.exe
+          path: artifacts/USCL-Setup.exe*
           if-no-files-found: error
+
+      # USCL updates itself from the public releases repo (this source repo is private). Needs a token with
+      # write access to it in the RELEASES_TOKEN secret; without one the release step is skipped.
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          RELEASES_REPO: jaidenscool1/uscl-releases
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "no RELEASES_TOKEN secret: not publishing"; exit 0; fi
+          pre=""; case "${{ github.ref_name }}" in *-*) pre="--prerelease";; esac
+          gh release view "${{ github.ref_name }}" --repo "$RELEASES_REPO" >/dev/null 2>&1 || \
+            gh release create "${{ github.ref_name }}" --repo "$RELEASES_REPO" $pre --title "USCL ${{ github.ref_name }}" --notes "USCL ${{ github.ref_name }}"
+          gh release upload "${{ github.ref_name }}" artifacts/USCL-Setup.exe artifacts/USCL-Setup.exe.sha256 --repo "$RELEASES_REPO" --clobber

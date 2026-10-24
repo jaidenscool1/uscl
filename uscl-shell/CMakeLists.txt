@@ -19,6 +19,7 @@ qt_add_executable(uscl
     src/launcher.cpp src/launcher.h
     src/system.cpp src/system.h
     src/online.cpp src/online.h
+    src/updater.cpp src/updater.h
 )
 
 # the JStationX XMB artwork (tools/xmb_assets.py)
@@ -60,7 +61,10 @@ qt_add_qml_module(uscl
         ${XMB_ASSETS}
 )
 
-target_compile_definitions(uscl PRIVATE USCL_VERSION="0.3.0")
+# the release tag sets the version (CI: -DUSCL_VERSION=${tag}); updates come from the public releases repo
+set(USCL_VERSION "0.3.0" CACHE STRING "USCL version")
+set(USCL_RELEASES "jaidenscool1/uscl-releases" CACHE STRING "GitHub repo USCL updates come from")
+target_compile_definitions(uscl PRIVATE USCL_VERSION="${USCL_VERSION}" USCL_RELEASES="${USCL_RELEASES}")
 if(Vulkan_FOUND)
     target_include_directories(uscl PRIVATE ${Vulkan_INCLUDE_DIRS})
 endif()

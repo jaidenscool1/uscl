@@ -3,6 +3,7 @@
 #include "launcher.h"
 #include "online.h"
 #include "system.h"
+#include "updater.h"
 
 #include <QFontDatabase>
 #include <QGuiApplication>
@@ -111,6 +112,10 @@ namespace
 			check(next.contains("Device: \"Pad B 1\"") && next.contains("Cross: North") && next.contains("Device: \"Pad A 2\""), "input config keeps mapping");
 		}
 
+		check(Updater::compareVersions("v0.4.0", "0.3.9") > 0 && Updater::compareVersions("0.3.0", "0.3.0-test") > 0 &&
+		      Updater::compareVersions("v0.3.0-test", "0.3.0") < 0 && Updater::compareVersions("v1.0", "1.0.0") == 0 &&
+		      Updater::compareVersions("0.10.0", "0.9.9") > 0, "version compare");
+
 		std::fprintf(stderr, failed ? "self-test: %d failed\n" : "self-test: ok\n", failed);
 		return failed ? 1 : 0;
 	}
@@ -146,6 +151,7 @@ int main(int argc, char* argv[])
 	Launcher launcher;
 	System system;
 	Online online;
+	Updater updater;
 
 	QQmlApplicationEngine engine;
 	engine.rootContext()->setContextProperty("games", &games);
@@ -153,6 +159,7 @@ int main(int argc, char* argv[])
 	engine.rootContext()->setContextProperty("launcher", &launcher);
 	engine.rootContext()->setContextProperty("system", &system);
 	engine.rootContext()->setContextProperty("online", &online);
+	engine.rootContext()->setContextProperty("updater", &updater);
 	engine.rootContext()->setContextProperty("windowed", app.arguments().contains("--windowed"));
 	QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
 	engine.loadFromModule("Uscl", "Main");
