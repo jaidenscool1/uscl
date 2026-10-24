@@ -1,0 +1,106 @@
+From d3de4ea5eea0429c8836a109dc4d6c2124cfe088 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 16:10:27 -0700
+Subject: [PATCH 4/4] USCL: with USCL_LOCAL, a new account is friends with
+ every other account
+
+Everyone on the host's server is in the same Steam session, and Minecraft only lists friends' worlds.
+Online players get the same FriendNew notification as for an accepted friend request.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/server/client/cmd_account.rs | 36 +++++++++++++++++++++++++++++++-
+ src/server/database.rs           |  9 ++++++++
+ 2 files changed, 44 insertions(+), 1 deletion(-)
+
+diff --git a/src/server/client/cmd_account.rs b/src/server/client/cmd_account.rs
+index 04f6c1d..abed6a7 100644
+--- a/src/server/client/cmd_account.rs
++++ b/src/server/client/cmd_account.rs
+@@ -3,7 +3,7 @@
+ use std::sync::atomic::{AtomicU64, Ordering};
+ 
+ use crate::server::client::*;
+-use crate::server::database::DbError;
++use crate::server::database::{DbError, FriendStatus};
+ 
+ use lettre::{Message, SmtpTransport, Transport, message::Mailbox};
+ 
+@@ -73,6 +73,8 @@ impl Client {
+ 		let password = data.get_string(false);
+ 		let token = data.get_string(true);
+ 		let friend_userids: HashMap<i64, String>;
++		// USCL: friends made automatically by this login (account just created), told about it below
++		let mut uscl_new_friends: Vec<i64> = Vec::new();
+ 
+ 		if data.error() {
+ 			warn!("Error while extracting data from Login command");
+@@ -91,6 +93,16 @@ impl Client {
+ 				let avatar = "https://rpcs3.net/cdn/netplay/DefaultAvatar.png";
+ 				db.add_user(&login, &password, &login, avatar, &email, &email, false).map_err(|_| ErrorType::DbFail)?;
+ 				info!("USCL: created local account {}", login);
++				// Everyone on this server is in the same Steam session, and games like Minecraft only list
++				// friends' worlds, so every account is friends with every other one.
++				let new_id = db.get_user_id(&login).map_err(|_| ErrorType::DbFail)?;
++				let friend = FriendStatus::Friend as u8;
++				for (other_id, _) in db.uscl_all_users().map_err(|_| ErrorType::DbFail)? {
++					if other_id != new_id {
++						db.set_rel_status(new_id, other_id, friend, friend).map_err(|_| ErrorType::DbFail)?;
++						uscl_new_friends.push(other_id);
++					}
++				}
+ 			}
+ 
+ 			match db.check_user(&login, &password, &token, self.config.read().is_email_validated()) {
+@@ -191,6 +203,28 @@ impl Client {
+ 		}
+ 
+ 		if self.authentified {
++			// USCL: online players don't know the new account yet; same as an accepted friend request
++			if !uscl_new_friends.is_empty() {
++				let online: Vec<i64> = {
++					let client_infos = self.shared.client_infos.read();
++					uscl_new_friends
++						.iter()
++						.copied()
++						.filter(|id| match client_infos.get(id) {
++							Some(info) => {
++								info.friend_info.write().friends.insert(self.client_info.user_id, self.client_info.npid.clone());
++								true
++							}
++							None => false,
++						})
++						.collect()
++				};
++				let n = Client::create_new_friend_notification(&self.client_info.npid, true);
++				for id in online {
++					self.send_single_notification(&n, id).await;
++				}
++			}
++
+ 			// Notify friends that user has come Online
+ 			let notif = Client::create_friend_status_notification(&self.client_info.npid, timestamp, true);
+ 			self.send_notification(&notif, &friend_userids.keys().copied().collect()).await;
+diff --git a/src/server/database.rs b/src/server/database.rs
+index bb62989..1634043 100644
+--- a/src/server/database.rs
++++ b/src/server/database.rs
+@@ -1012,6 +1012,15 @@ impl Database {
+ 		Ok(res.unwrap())
+ 	}
+ 
++	/// USCL: every account except the placeholder for deleted users, as (user_id, username)
++	pub fn uscl_all_users(&self) -> Result<Vec<(i64, String)>, DbError> {
++		let mut stmt = self.conn.prepare("SELECT user_id, username FROM account WHERE username != ?1").map_err(|_| DbError::Internal)?;
++		let rows = stmt
++			.query_map(rusqlite::params![DELETED_USER_USERNAME], |r| Ok((r.get(0)?, r.get(1)?)))
++			.map_err(|_| DbError::Internal)?;
++		rows.collect::<Result<Vec<_>, _>>().map_err(|_| DbError::Internal)
++	}
++
+ 	pub fn get_user_id(&self, npid: &str) -> Result<i64, DbError> {
+ 		let res: rusqlite::Result<i64> = self
+ 			.conn
+-- 
+2.56.0
+

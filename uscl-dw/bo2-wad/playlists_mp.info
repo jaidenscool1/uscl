@@ -1,0 +1,329 @@
+version 1
+
+gametype tdm
+script tdm
+
+gametype hc_tdm
+script tdm
+rule setgametypesetting hardcoreMode 1
+
+gametype dm
+script dm
+
+gametype hc_dm
+script dm
+rule setgametypesetting hardcoreMode 1
+
+gametype dom
+script dom
+
+gametype hc_dom
+script dom
+rule setgametypesetting hardcoreMode 1
+
+gametype conf
+script conf
+
+gametype hc_conf
+script conf
+rule setgametypesetting hardcoreMode 1
+
+gametype koth
+script koth
+
+gametype hc_koth
+script koth
+rule setgametypesetting hardcoreMode 1
+
+gametype sd
+script sd
+
+gametype hc_sd
+script sd
+rule setgametypesetting hardcoreMode 1
+
+gametype dem
+script dem
+
+gametype hc_dem
+script dem
+rule setgametypesetting hardcoreMode 1
+
+gametype ctf
+script ctf
+
+gametype hc_ctf
+script ctf
+rule setgametypesetting hardcoreMode 1
+
+gametype hq
+script hq
+
+gametype hc_hq
+script hq
+rule setgametypesetting hardcoreMode 1
+
+gametype gun
+script gun
+
+gametype oic
+script oic
+
+gametype shrp
+script shrp
+
+gametype sas
+script sas
+
+maplist base
+mp_la
+mp_dockside
+mp_carrier
+mp_drone
+mp_express
+mp_hijacked
+mp_meltdown
+mp_overflow
+mp_nightclub
+mp_raid
+mp_slums
+mp_socotra
+mp_turbine
+mp_village
+
+maplist nuketown
+mp_nuketown_2020
+
+supercategory main
+name english "Matchmaking"
+filter playermatch
+
+category core
+name english "Core"
+filter playermatch
+supercategory main
+
+category hardcore
+name english "Hardcore"
+filter playermatch
+supercategory main
+
+category party
+name english "Party Games"
+filter playermatch
+supercategory main
+
+category uscl
+name english "USCL"
+filter playermatch
+supercategory main
+
+playlist 1
+name english "Team Deathmatch"
+description english "Team Deathmatch"
+category core
+maxparty 6
+ranked
+base,tdm,1
+
+playlist 2
+name english "Free-for-All"
+description english "Free-for-All"
+category core
+maxparty 1
+ranked
+base,dm,1
+
+playlist 3
+name english "Domination"
+description english "Domination"
+category core
+maxparty 6
+ranked
+base,dom,1
+
+playlist 4
+name english "Kill Confirmed"
+description english "Kill Confirmed"
+category core
+maxparty 6
+ranked
+base,conf,1
+
+playlist 5
+name english "Hardpoint"
+description english "Hardpoint"
+category core
+maxparty 6
+ranked
+base,koth,1
+
+playlist 6
+name english "Search and Destroy"
+description english "Search and Destroy"
+category core
+maxparty 6
+ranked
+base,sd,1
+
+playlist 7
+name english "Demolition"
+description english "Demolition"
+category core
+maxparty 6
+ranked
+base,dem,1
+
+playlist 8
+name english "Capture the Flag"
+description english "Capture the Flag"
+category core
+maxparty 6
+ranked
+base,ctf,1
+
+playlist 9
+name english "Headquarters"
+description english "Headquarters"
+category core
+maxparty 6
+ranked
+base,hq,1
+
+playlist 10
+name english "Hardcore Team Deathmatch"
+description english "Hardcore Team Deathmatch"
+category hardcore
+maxparty 6
+ranked
+base,hc_tdm,1
+
+playlist 11
+name english "Hardcore Free-for-All"
+description english "Hardcore Free-for-All"
+category hardcore
+maxparty 1
+ranked
+base,hc_dm,1
+
+playlist 12
+name english "Hardcore Domination"
+description english "Hardcore Domination"
+category hardcore
+maxparty 6
+ranked
+base,hc_dom,1
+
+playlist 13
+name english "Hardcore Kill Confirmed"
+description english "Hardcore Kill Confirmed"
+category hardcore
+maxparty 6
+ranked
+base,hc_conf,1
+
+playlist 14
+name english "Hardcore Hardpoint"
+description english "Hardcore Hardpoint"
+category hardcore
+maxparty 6
+ranked
+base,hc_koth,1
+
+playlist 15
+name english "Hardcore Search and Destroy"
+description english "Hardcore Search and Destroy"
+category hardcore
+maxparty 6
+ranked
+base,hc_sd,1
+
+playlist 16
+name english "Hardcore Demolition"
+description english "Hardcore Demolition"
+category hardcore
+maxparty 6
+ranked
+base,hc_dem,1
+
+playlist 17
+name english "Hardcore Capture the Flag"
+description english "Hardcore Capture the Flag"
+category hardcore
+maxparty 6
+ranked
+base,hc_ctf,1
+
+playlist 18
+name english "Hardcore Headquarters"
+description english "Hardcore Headquarters"
+category hardcore
+maxparty 6
+ranked
+base,hc_hq,1
+
+playlist 19
+name english "Gun Game"
+description english "Gun Game"
+category party
+maxparty 4
+ranked
+base,gun,1
+
+playlist 20
+name english "One in the Chamber"
+description english "One in the Chamber"
+category party
+maxparty 4
+ranked
+base,oic,1
+
+playlist 21
+name english "Sharpshooter"
+description english "Sharpshooter"
+category party
+maxparty 4
+ranked
+base,shrp,1
+
+playlist 22
+name english "Sticks and Stones"
+description english "Sticks and Stones"
+category party
+maxparty 4
+ranked
+base,sas,1
+
+playlist 23
+name english "Mosh Pit"
+description english "Mixed team modes on every base map"
+category uscl
+maxparty 6
+ranked
+base,tdm,1
+base,dom,1
+base,conf,1
+base,koth,1
+base,sd,1
+base,ctf,1
+
+playlist 24
+name english "Nuketown 24/7"
+description english "Team Deathmatch and Domination on Nuketown 2025"
+category uscl
+maxparty 6
+ranked
+nuketown,tdm,1
+nuketown,dom,1
+
+playlist 25
+name english "Hardcore Mosh Pit"
+description english "Mixed hardcore team modes"
+category uscl
+maxparty 6
+ranked
+base,hc_tdm,1
+base,hc_dom,1
+base,hc_conf,1
+base,hc_koth,1
+base,hc_sd,1
