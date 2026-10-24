@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "leagues": [
+    { "name": "USCL", "description": "USCL", "team_size": 1, "teams_allowed": false, "randoms_allowed": true }
+  ],
+  "divisions": [
+    { "name": "USCL", "description": "USCL", "skill_min": 0, "skill_max": 100000, "skill_avg": 1000 }
+  ]
+}

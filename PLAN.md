@@ -5,22 +5,27 @@ patching each game. Status: Steam bridge service working (see Phases).
 
 ## How it works
 PS3 games never talk to PSN directly. They call Sony's libraries (`sceNp*`). RPCS3 already answers those
-calls itself, backed by RPCN (its PSN replacement). RPCS3 lets you pick the RPCN host, so USCL runs a local
-RPCN-compatible server on each player's PC and points RPCS3 at 127.0.0.1:
+calls itself, backed by RPCN (its PSN replacement). USCL makes Steam the network between players:
 
 ```
-game ─sceNp*─▶ RPCS3 (official or uscl-rpcs3) ─RPCN protocol─▶ uscl-rpcn (local) ─JSON socket─▶ uscl-bridge ─▶ Steam
-                     ▲                                                              │
-                     └──── UDP game traffic ◀── local relay ports ◀── Steam P2P ◀───┘
+                       every player's PC                                       host's PC (Steam lobby owner)
+game ─sceNp*─▶ RPCS3 ─TCP 31313/UDP 3657─▶ uscl-bridge ══ Steam (Valve relay) ══▶ uscl-bridge ─▶ uscl-rpcn (31413/3757)
+                 ▲  game UDP to 127.0.0.1:39000+slot      │                  ▲
+                 └───────────────────────────────────────┴── straight to that member over Steam
 ```
 
-- **uscl-rpcn**: a fork of the RPCN server (RipleyTom/rpcn, Rust, AGPL-3.0; the fork stays AGPL). Login
-  accepts the local player automatically (identity = Steam account). Rooms are distributed: the room
-  creator's uscl-rpcn is authoritative. Room external data and the member list live in the Steam lobby. Ops
-  from other members (set member data, room messages) travel as lobby chat messages to the owner.
-- **Signaling**: RPCN normally hands RPCS3 the peer's real IP:port. uscl-rpcn hands out a local relay
-  address (127.0.0.1:port per peer). uscl-bridge forwards those UDP packets over SteamNetworkingMessages,
-  through Valve's relay, so no port forwarding is needed.
+- **Session** (decided 2026-10-22): a Steam lobby (up to 250). Its owner is the host and runs uscl-rpcn; every
+  member's bridge carries RPCS3's RPCN connection to it. All of RPCN (rooms, friends, presence, invites,
+  scores, TUS) works unchanged for every game RPCN supports, with any number of players the game allows.
+- **P2P**: each member gets a slot. To every RPCS3, member `s` is `127.0.0.1:39000+s`: the host's bridge sends
+  that member's RPCN UDP from that port (so RPCN hands it out as their address), and every bridge listens on
+  it and relays to that member. Game traffic goes member to member, not through the host. No port forwarding.
+- **Works everywhere RPCS3 runs with Steam**: only 127.0.0.1 and ports, no per-OS networking (Windows, Linux,
+  macOS, Steam Deck). Official RPCS3 works too; uscl-rpcs3 only adds game fixes and invite handling.
+- **Trade-off**: the session ends when the host leaves (the host is usually the world host anyway). A host-less
+  version (each player's uscl-rpcn owning its rooms, mirrored in lobbies) needs most of RPCN's room code
+  rebuilt across PCs; it stays a later option if host loss becomes a real problem.
+- **No Steam** (Android forks, BSD): the bridge's Steam transport could get a plain UDP sibling later.
 - **uscl-rpcs3** (decided 2026-10-22): our own RPCS3 build, patches in `uscl-rpcs3/`. Only for what the server
   can't do: per-game sceNp fixes, an NP call trace for working out each game, and turning Steam invites into
   in-game invites. New RPCS3↔RPCN messages go at the end of the RPCN protocol's command/notification lists,
@@ -47,13 +52,18 @@ Boot a game to its menu, then run `./np-profile.py`. It reads the PSN imports fr
 | Verdict | Meaning | Example (profiled) |
 |---|---|---|
 | FULL | rooms + P2P through Sony: Steam can carry all of it | Minecraft PS3 Edition (BLUS31426): 27 Matching2 functions, plus Score and Basic |
-| PARTIAL | PSN only for sign-in/invites; matchmaking on the publisher's servers | Skate 3 (BLUS30464): Basic, Manager, Lookup, no Matching2 |
+| PARTIAL | PSN only for sign-in/invites; matchmaking on the publisher's servers | Skate 3 (BLUS30464), Black Ops II (BLUS31011): Basic, Manager, Lookup, no Matching2 |
 | NONE | no PSN multiplayer | Spider-Man: Shattered Dimensions / Edge of Time |
 
 PARTIAL games still need a community server for that publisher (EA's Blaze for Skate 3, Battlefield, FIFA;
 Activision's Demonware for Call of Duty; Rockstar's own for GTA/RDR). Steam can only add friends/invites on top.
+Where one exists, the host can run it and the session tunnel can carry its ports, so nobody port-forwards
+(`games/BLUS30464.md`).
+
+First three games: Minecraft (FULL), Skate 3 and Black Ops II (PARTIAL). Notes per game in `games/<serial>.md`.
 
 ### The "top 10" list
+The live list of games, their status and what's next is in `GAMES.md`.
 Candidates (best-selling PS3 multiplayer titles in the US, from memory; nothing profiled yet): Call of Duty MW2,
 MW3, Black Ops, Black Ops II; GTA IV / V; Battlefield 3; Red Dead Redemption; Uncharted 2 / 3; LittleBigPlanet
 1 / 2; Gran Turismo 5; Killzone 2 / 3; FIFA. Most big third-party ones are expected to be PARTIAL
@@ -72,6 +82,11 @@ Best candidate: **Minecraft** (4J Studios made both editions from one codebase, 
 updates around the same time). The test is to capture each edition's session traffic and compare.
 Treat it as research, not a feature.
 
+### One app for more consoles (later)
+The USCL program will later run Xbox 360 and PS4/PS5 games too (player, 2026-10-24). Until then, keep
+uscl-bridge, the servers and the USCL panel free of RPCS3-only assumptions (per-game presets, no RPCS3 config
+inside the bridge), so other emulator cores can sit next to RPCS3 in the same install.
+
 ## Phases
 1. **Survey**: profile every game you own. Pick the first FULL one (Minecraft). Done for the 4 owned games.
 2. **Bridge proof of concept**: uscl-bridge with lobby create/join/list and Rich Presence, driven from a small
@@ -80,14 +95,22 @@ Treat it as research, not a feature.
    search, so room searches need a retry or a short delay.
    *Done:* `uscl-bridge serve` (local JSON socket: create/search/join/leave rooms, room data, presence, pushed
    member/room-data/join-request events). `uscl-bridge client-test` PASSes through the socket on real Steam.
+   *Windows (2026-10-22):* same three commands PASS on Windows 11 with real Steam. There the socket is TCP
+   `127.0.0.1:47321` (`USCL_BRIDGE_ADDR` overrides it), since Rust's std has no Unix sockets on Windows. Build
+   with the rustup GNU toolchain (`x86_64-pc-windows-gnu`, no Visual Studio needed) and copy
+   `target/<profile>/build/steamworks-sys-*/out/steam_api64.dll` next to `uscl-bridge.exe`.
 3. **uscl-rpcn**: local RPCN server fork with Steam-backed distributed rooms + the UDP
    relay, tested with Minecraft (a dump the player made). Steps: (a) stock RPCN running locally with an
    RPCS3 test config pointed at 127.0.0.1, so the player's real config is untouched; (b) auto-login; (c) room
    create/search/join through uscl-bridge; (d) signaling through the Steam relay. Done when two PCs join the
    same world through Steam.
    *(a) + (b) done 2026-10-22:* official RPCS3 + Minecraft PS3 logs in to the local uscl-rpcn with no
-   registration (see `uscl-rpcn/README.md`). Next: (c).
+   registration (see `uscl-rpcn/README.md`).
+   *(c) + (d) replaced by the session tunnel (2026-10-22):* `uscl-bridge host` / `join`. On one PC: Minecraft logs
+   in through the bridge and the UDP signaling round trip works (host path). Next: two PCs in one world.
 4. Basic (invites/presence) + Score for FULL games. Then friends/invites only for PARTIAL games like Skate 3.
+4b. **Server over the tunnel** for PARTIAL games with a community server: the host runs the server, and the
+   bridge forwards its TCP/UDP ports from every member's loopback. First: Skate 3 (`games/BLUS30464.md`).
 5. Cross-play research (Minecraft PS3 ↔ 360). Player is dumping their own 360 copy (JTAG) for Xenia Canary.
 6. **Blaze-over-Steam**: a local stand-in for EA's Blaze server on each player's PC. The game talks Blaze to
    localhost; the stand-in answers using Steam: login = Steam account, game manager = Steam lobbies (lobby owner
@@ -97,3 +120,6 @@ Treat it as research, not a feature.
    many games, with per-game components on top. Test game: Skate 3. Protocol reference: the Skate3BlazeServer
    community server, which has no license, so it's used as reference only unless its author agrees.
    Activision's Demonware (Call of Duty) would be a second engine of the same shape.
+   **Goal (player, 2026-10-23):** online services that work like Steam's for every such game, bypassing the
+   publisher's servers completely: our own stand-ins for Blaze (EA) and Demonware (Activision), backed by Steam.
+   Black Ops II confirmed the need: Demonware is up but refuses RPCN tickets (`games/BLUS31011.md`).

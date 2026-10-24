@@ -1,0 +1,90 @@
+From 8ee3605395c565d0d2bce47c92382f788dedbab6 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 13:51:52 -0700
+Subject: [PATCH 3/4] USCL: with USCL_LOCAL, no LAN-address swap and UDP on
+ 3757 (uscl-bridge fronts 3657)
+
+Every player reaches the host's RPCN through uscl-bridge as 127.0.0.1 with their own port, so equal IPs
+no longer mean same LAN, and the bridge needs 3657 because RPCS3 always sends there.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/server/client.rs          | 6 ++++++
+ src/server/client/cmd_misc.rs | 2 +-
+ src/server/room_manager.rs    | 4 ++--
+ src/server/udp_server.rs      | 6 ++++--
+ 4 files changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/src/server/client.rs b/src/server/client.rs
+index ce2240a..9f20e43 100644
+--- a/src/server/client.rs
++++ b/src/server/client.rs
+@@ -81,6 +81,12 @@ impl ClientSharedSignalingInfo {
+ 			local_addr_p2p: [0; 4],
+ 		}
+ 	}
++
++	/// Same public IPv4: the two should use their LAN addresses. Off with USCL_LOCAL, where every player
++	/// arrives through uscl-bridge as 127.0.0.1 with their own port.
++	pub fn same_lan(&self, other: &ClientSharedSignalingInfo) -> bool {
++		self.addr_p2p_ipv4.0 == other.addr_p2p_ipv4.0 && std::env::var_os("USCL_LOCAL").is_none()
++	}
+ }
+ 
+ #[derive(Clone)]
+diff --git a/src/server/client/cmd_misc.rs b/src/server/client/cmd_misc.rs
+index 45ca8bb..e716c3f 100644
+--- a/src/server/client/cmd_misc.rs
++++ b/src/server/client/cmd_misc.rs
+@@ -46,7 +46,7 @@ impl Client {
+ 
+ 			op_sig_infos = client_info.signaling_info.read().clone();
+ 
+-			if caller_sig_infos.addr_p2p_ipv4.0 == op_sig_infos.addr_p2p_ipv4.0 {
++			if caller_sig_infos.same_lan(&op_sig_infos) {
+ 				Client::add_data_packet(reply, &Client::build_signaling_addr(&op_sig_infos.local_addr_p2p, 3658));
+ 				info!("Requesting signaling infos for {} => (local) {:?}:{}", &npid, &op_sig_infos.local_addr_p2p, 3658);
+ 				// Don't send notification for local addresses as connectivity shouldn't be an issue
+diff --git a/src/server/room_manager.rs b/src/server/room_manager.rs
+index 4ec69d7..2490444 100644
+--- a/src/server/room_manager.rs
++++ b/src/server/room_manager.rs
+@@ -1237,7 +1237,7 @@ impl RoomManager {
+ 						if user.member_id == member_id {
+ 							continue;
+ 						}
+-						if user.signaling_info.addr_p2p_ipv4.0 == signaling_info.addr_p2p_ipv4.0 {
++						if user.signaling_info.same_lan(&signaling_info) {
+ 							add_to_notif_list(&mut notif_local_signaling, room, (&signaling_info.local_addr_p2p, 3658), user.user_id);
+ 							signaling_list_reply.push((user.member_id, user.signaling_info.local_addr_p2p.to_vec(), 3658));
+ 						} else {
+@@ -1260,7 +1260,7 @@ impl RoomManager {
+ 					let hub = if sig_param.get_hub() == 0 { room.owner } else { sig_param.get_hub() };
+ 					let hub_user = room.users.get(&hub).unwrap();
+ 
+-					if hub_user.signaling_info.addr_p2p_ipv4.0 == signaling_info.addr_p2p_ipv4.0 {
++					if hub_user.signaling_info.same_lan(&signaling_info) {
+ 						add_to_notif_list(&mut notif_local_signaling, room, (&signaling_info.local_addr_p2p, 3658), hub_user.user_id);
+ 						signaling_list_reply.push((hub_user.member_id, hub_user.signaling_info.local_addr_p2p.to_vec(), 3658));
+ 					} else {
+diff --git a/src/server/udp_server.rs b/src/server/udp_server.rs
+index 68c21c9..2cb4d18 100644
+--- a/src/server/udp_server.rs
++++ b/src/server/udp_server.rs
+@@ -64,9 +64,11 @@ impl UdpServer {
+ 	}
+ 
+ 	pub async fn start(&mut self) -> io::Result<()> {
++		// USCL_LOCAL: uscl-bridge owns 3657 on every player's PC (RPCS3 always sends there) and forwards here
++		let port = if std::env::var_os("USCL_LOCAL").is_some() { 3757 } else { 3657 };
+ 		// We try to bind to IPv6 and if it fails to IPv4
+-		let bind_addr_ipv6 = format!("[{}]:3657", self.host_ipv6.clone());
+-		let bind_addr_ipv4 = format!("{}:3657", self.host_ipv4.clone());
++		let bind_addr_ipv6 = format!("[{}]:{port}", self.host_ipv6.clone());
++		let bind_addr_ipv4 = format!("{}:{port}", self.host_ipv4.clone());
+ 		self.socket = Some({
+ 			let sock_res = UdpServer::try_to_bind_ipv6(&bind_addr_ipv6);
+ 			if let Err(e) = sock_res {
+-- 
+2.56.0
+

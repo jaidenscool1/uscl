@@ -4,9 +4,10 @@
 
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use steamworks::{Client, LobbyId, LobbyKey, LobbyType, StringFilter, StringFilterKind};
+use steamworks::{Client, FriendFlags, FriendState, LobbyId, LobbyKey, LobbyType, StringFilter, StringFilterKind};
 
 mod serve;
+mod tunnel;
 
 const APP_ID: u32 = 480;
 
@@ -77,6 +78,28 @@ fn selftest() -> Result<(), String> {
     }
 }
 
+/// `friends`: Steam friends who are online, as a JSON array for the USCL home screen.
+/// "session" is the USCL session (lobby) a friend is in, as a string because it doesn't fit a JS number.
+fn friends() -> Result<(), String> {
+    let client = Client::init_app(APP_ID).map_err(|e| format!("Steam init failed (is Steam running?): {e:?}"))?;
+    let app = client.utils().app_id();
+    let list: Vec<serde_json::Value> = client
+        .friends()
+        .get_friends(FriendFlags::IMMEDIATE)
+        .into_iter()
+        .filter_map(|f| {
+            let state = f.state();
+            if matches!(state, FriendState::Offline | FriendState::Invisible) {
+                return None;
+            }
+            let session = f.game_played().filter(|g| g.game.app_id() == app && g.lobby.raw() != 0).map(|g| g.lobby.raw().to_string());
+            Some(serde_json::json!({"name": f.name(), "state": format!("{state:?}"), "session": session}))
+        })
+        .collect();
+    println!("{}", serde_json::Value::Array(list));
+    Ok(())
+}
+
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("selftest") => match selftest() {
@@ -86,12 +109,43 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        Some(cmd @ ("host" | "join")) => {
+            let arg = std::env::args().nth(2);
+            let (join, spec) = if cmd == "host" {
+                let spec = arg.unwrap_or_default();
+                if let Err(e) = tunnel::parse_forwards(&spec) {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+                (None, spec)
+            } else {
+                let join = arg.map(|s| s.parse().map(steamworks::LobbyId::from_raw).unwrap_or_else(|_| {
+                    eprintln!("session id must be the number the host printed");
+                    std::process::exit(2);
+                }));
+                (join, String::new())
+            };
+            let client = Client::init_app(APP_ID).unwrap_or_else(|e| {
+                eprintln!("Steam init failed (is Steam running?): {e:?}");
+                std::process::exit(1);
+            });
+            if let Err(e) = tunnel::run(client, cmd == "host", join, &spec) {
+                eprintln!("FAIL: {e}");
+                std::process::exit(1);
+            }
+        }
         Some("serve") => {
             let client = Client::init_app(APP_ID).unwrap_or_else(|e| {
                 eprintln!("Steam init failed (is Steam running?): {e:?}");
                 std::process::exit(1);
             });
             if let Err(e) = serve::serve(client) {
+                eprintln!("FAIL: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some("friends") => {
+            if let Err(e) = friends() {
                 eprintln!("FAIL: {e}");
                 std::process::exit(1);
             }
@@ -104,7 +158,7 @@ fn main() {
             }
         },
         _ => {
-            eprintln!("usage: uscl-bridge selftest | serve | client-test");
+            eprintln!("usage: uscl-bridge host [skate3 | bo2 | tcp:PORT,udp:FIRST-LAST,sudp:PORT,...] | join [session id] | friends | selftest | serve | client-test");
             std::process::exit(2);
         }
     }
