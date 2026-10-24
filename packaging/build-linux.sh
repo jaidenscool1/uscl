@@ -66,5 +66,6 @@ rm -f "$APPDIR"/usr/lib/libwayland-client.so* "$APPDIR"/usr/lib/libvulkan.so* \
 # AppRun must start rpcs3 by its real path: through a symlink Qt looks for qt.conf/plugins in the AppImage root
 rm -f "$APPDIR/AppRun"; printf '#!/bin/sh\nexec "$(dirname "$(readlink -f "$0")")/usr/bin/rpcs3" "$@"\n' > "$APPDIR/AppRun"
 chmod +x "$APPDIR/AppRun"
-appimagetool "$APPDIR" "$OUTPUT"   # not linuxdeploy again: that would replace the AppRun launcher the Qt plugin made
+# not linuxdeploy again: that would replace the AppRun launcher the Qt plugin made
+appimagetool "$APPDIR" "$OUTPUT.new" && mv -f "$OUTPUT.new" "$OUTPUT"   # mv replaces it even while it is running
 ls -la "$OUTPUT"
