@@ -15,9 +15,9 @@ jobs:
     runs-on: windows-2025-vs2026
     env:
       # from RPCS3's .github/workflows/rpcs3.yml at the commit our patches are made against
-      RPCS3_COMMIT: e53ac18
-      RPCN_COMMIT: 7a3c3c4
-      DW_COMMIT: 39391e7
+      RPCS3_COMMIT: 'e53ac18'
+      RPCN_COMMIT: '7a3c3c4'
+      DW_COMMIT: '39391e7'  # quoted: unquoted YAML reads 39391e7 as a number
       COMPILER: msvc
       QT_VER_MAIN: '6'
       QT_VER: '6.12.0'
@@ -43,11 +43,11 @@ jobs:
         run: |
           git config --global user.name uscl-ci && git config --global user.email ci@uscl.invalid
           git clone -q https://github.com/RPCS3/rpcs3.git rpcs3
-          git -C rpcs3 checkout -q $RPCS3_COMMIT && git -C rpcs3 am -q ../uscl/uscl-rpcs3/patches/*.patch
+          git -C rpcs3 checkout -q $RPCS3_COMMIT && git -C rpcs3 am -q "$PWD"/uscl/uscl-rpcs3/patches/*.patch
           git clone -q https://github.com/RipleyTom/rpcn.git rpcn
-          git -C rpcn checkout -q $RPCN_COMMIT && git -C rpcn am -q ../uscl/uscl-rpcn/patches/*.patch
+          git -C rpcn checkout -q $RPCN_COMMIT && git -C rpcn am -q "$PWD"/uscl/uscl-rpcn/patches/*.patch
           git clone -q https://github.com/Laupetin/open-bitdemon-emulator obde
-          git -C obde checkout -q $DW_COMMIT && git -C obde am -q ../uscl/uscl-dw/patches/*.patch
+          git -C obde checkout -q $DW_COMMIT && git -C obde am -q "$PWD"/uscl/uscl-dw/patches/*.patch
 
       - uses: nuget/setup-nuget@v2
       - name: Restore NuGet packages
