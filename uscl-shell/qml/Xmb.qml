@@ -136,6 +136,7 @@ Item {
                     Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutSine } }
                 }
                 Text {
+                    id: titleText
                     x: row.sel ? (row.wide ? 220 + icon.width / 2 + 40 : 325) : (row.wide ? 220 + icon.width / 2 + 40 : 310)
                     y: row.sel ? 262 : 10
                     height: row.sel ? 56 : 100
@@ -146,6 +147,16 @@ Item {
                     font.pixelSize: row.sel ? 40 : 29
                     elide: Text.ElideRight
                     style: Text.Raised; styleColor: row.sel ? "#90000000" : "#70000000"
+                }
+                // a small tag after the title: "Update", or a count
+                Rectangle {
+                    visible: !!row.modelData.badge
+                    x: titleText.x + Math.min(titleText.implicitWidth, titleText.width) + 18
+                    y: row.sel ? 270 : 38
+                    width: badgeText.implicitWidth + 22; height: badgeText.implicitHeight + 6
+                    radius: height / 2
+                    color: "#d8f0a020"
+                    Text { id: badgeText; anchors.centerIn: parent; text: row.modelData.badge || ""; color: "black"; font.pixelSize: 21; font.bold: true }
                 }
                 Text {
                     visible: row.sel && !!row.modelData.desc

@@ -55,6 +55,10 @@ public:
 	Q_INVOKABLE void stop();
 	Q_INVOKABLE void refreshFriends();
 	Q_INVOKABLE void testConnection();
+	// Starts Steam in the tray (-silent: no window) when it isn't running, so sessions and friends work without
+	// the Steam window popping up over the home screen
+	Q_INVOKABLE static void startSteam();
+	static bool steamRunning();
 	// host: take a player out of this session (kick) or out of every session this PC hosts (ban); bans are
 	// keyed by Steam ID, so a new name doesn't get around them. The bridge applies both within 2 seconds.
 	Q_INVOKABLE void kick(const QString& id, const QString& name);

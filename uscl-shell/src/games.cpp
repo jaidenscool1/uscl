@@ -1,5 +1,7 @@
 #include "games.h"
 
+#include "gameupdates.h"
+
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
@@ -215,6 +217,9 @@ bool GameModel::describe(const QString& path, Game& game) const
 	game.serial = params.value("TITLE_ID");
 	game.path = path;
 	game.console = "PS3";
+	game.version = params.value("APP_VER");
+	if (const QString update = GameUpdates::installedVersion(game.serial); GameUpdates::newer(update, game.version))
+		game.version = update;
 
 	if (!icon.isEmpty())
 	{
@@ -282,13 +287,14 @@ QVariant GameModel::data(const QModelIndex& index, int role) const
 	case PathRole: return g.path;
 	case IconRole: return g.icon;
 	case ConsoleRole: return g.console;
+	case VersionRole: return g.version;
 	default: return {};
 	}
 }
 
 QHash<int, QByteArray> GameModel::roleNames() const
 {
-	return {{TitleRole, "title"}, {SerialRole, "serial"}, {PathRole, "path"}, {IconRole, "icon"}, {ConsoleRole, "console"}};
+	return {{TitleRole, "title"}, {SerialRole, "serial"}, {PathRole, "path"}, {IconRole, "icon"}, {ConsoleRole, "console"}, {VersionRole, "version"}};
 }
 
 QVariantMap GameModel::get(int row) const
@@ -296,12 +302,12 @@ QVariantMap GameModel::get(int row) const
 	if (row < 0 || row >= m_games.size())
 		return {};
 	const Game& g = m_games[row];
-	return {{"title", g.title}, {"serial", g.serial}, {"path", g.path}, {"icon", g.icon}, {"console", g.console}};
+	return {{"title", g.title}, {"serial", g.serial}, {"path", g.path}, {"icon", g.icon}, {"console", g.console}, {"version", g.version}};
 }
 
 namespace
 {
-	void walk(const QString& dir, int depth, QMap<QString, QString>& out)
+	void walk(const QString& dir, int depth, QMap<QString, QString>& out, int& encrypted)
 	{
 		const auto serialOf = [](const QString& sfo) {
 			QFile f(sfo);
@@ -320,22 +326,28 @@ namespace
 		const QDir d(dir);
 		for (const QFileInfo& f : d.entryInfoList({"*.iso", "*.ISO"}, QDir::Files))
 		{
-			const QString serial = GameModel::readSfo(GameModel::readIsoFile(f.absoluteFilePath(), {"PS3_GAME", "PARAM.SFO"})).value("TITLE_ID");
+			const QByteArray sfo = GameModel::readIsoFile(f.absoluteFilePath(), {"PS3_GAME", "PARAM.SFO"});
+			const QString serial = GameModel::readSfo(sfo).value("TITLE_ID");
 			if (!serial.isEmpty() && !out.contains(serial))
 				out[serial] = f.absoluteFilePath();
+			else if (serial.isEmpty() && !sfo.isEmpty())
+				encrypted++; // the file is listed but its contents are scrambled: a disc image that isn't decrypted
 		}
 		if (depth > 0)
 		{
 			for (const QFileInfo& sub : d.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks))
-				walk(sub.absoluteFilePath(), depth - 1, out);
+				walk(sub.absoluteFilePath(), depth - 1, out, encrypted);
 		}
 	}
 }
 
-QMap<QString, QString> GameModel::findGames(const QString& path)
+QMap<QString, QString> GameModel::findGames(const QString& path, int* encrypted)
 {
 	QMap<QString, QString> out;
-	walk(QDir::cleanPath(path), 6, out);
+	int scrambled = 0;
+	walk(QDir::cleanPath(path), 6, out, scrambled);
+	if (encrypted)
+		*encrypted = scrambled;
 	return out;
 }
 
@@ -352,8 +364,9 @@ void GameModel::scanFolder(const QString& path)
 	m_scanning = true;
 	emit scanningChanged();
 	auto* found = new QMap<QString, QString>;
-	QThread* t = QThread::create([found, path] { *found = findGames(path); });
-	connect(t, &QThread::finished, this, [this, t, found] {
+	auto* encrypted = new int(0);
+	QThread* t = QThread::create([found, encrypted, path] { *found = findGames(path, encrypted); });
+	connect(t, &QThread::finished, this, [this, t, found, encrypted] {
 		t->deleteLater();
 		QFile yml(gamesYmlPath());
 		QByteArray text;
@@ -361,17 +374,22 @@ void GameModel::scanFolder(const QString& path)
 			text = yml.readAll();
 		yml.close();
 		const QMap<QString, QString> known = readGamesYml(text);
-		int added = 0;
+		int added = 0, listed = 0;
 		for (auto it = found->cbegin(); it != found->cend(); ++it)
 		{
 			if (known.contains(it.key()))
+			{
+				listed++;
 				continue;
+			}
 			if (!text.isEmpty() && !text.endsWith('\n'))
 				text += '\n';
 			text += ymlLine(it.key(), it.value()).toUtf8() + '\n';
 			added++;
 		}
 		delete found;
+		const int scrambled = *encrypted;
+		delete encrypted;
 		if (added)
 		{
 			QDir().mkpath(QFileInfo(gamesYmlPath()).absolutePath());
@@ -382,7 +400,7 @@ void GameModel::scanFolder(const QString& path)
 		}
 		m_scanning = false;
 		emit scanningChanged();
-		emit scanFinished(added);
+		emit scanFinished(added, listed, scrambled);
 	});
 	t->start();
 }

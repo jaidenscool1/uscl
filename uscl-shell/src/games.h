@@ -13,11 +13,12 @@ class GameModel : public QAbstractListModel
 	Q_PROPERTY(bool scanning READ scanning NOTIFY scanningChanged)
 
 public:
-	enum Role { TitleRole = Qt::UserRole + 1, SerialRole, PathRole, IconRole, ConsoleRole };
+	enum Role { TitleRole = Qt::UserRole + 1, SerialRole, PathRole, IconRole, ConsoleRole, VersionRole };
 
 	struct Game
 	{
 		QString title, serial, path, icon, console;
+		QString version; // the disc's, or the installed update's when newer: "01.19"
 	};
 
 	explicit GameModel(QObject* parent = nullptr);
@@ -30,7 +31,7 @@ public:
 	Q_INVOKABLE QVariantMap get(int row) const;
 
 	// Add Games: finds every PS3 game under a folder (disc folders, installed games, ISOs) and adds the new ones
-	// to RPCS3's games.yml; scanFinished reports how many were new
+	// to RPCS3's games.yml; scanFinished reports how many were new, already listed, and encrypted ISOs it can't read
 	Q_INVOKABLE void scanFolder(const QString& path);
 	// takes a game off the list (games.yml); its files stay where they are
 	Q_INVOKABLE void remove(const QString& serial);
@@ -39,7 +40,7 @@ public:
 	Q_INVOKABLE static QVariantList roots();
 	Q_INVOKABLE static QVariantList folders(const QString& path);
 	// serial -> path of every game under a folder
-	static QMap<QString, QString> findGames(const QString& path);
+	static QMap<QString, QString> findGames(const QString& path, int* encrypted = nullptr);
 	static QString ymlLine(const QString& serial, const QString& path);
 
 	// The executable the game boots (an installed update's, else the disc's), as a short SHA-256: online sessions
@@ -57,7 +58,7 @@ public:
 signals:
 	void countChanged();
 	void scanningChanged();
-	void scanFinished(int added);
+	void scanFinished(int added, int known, int encrypted);
 
 private:
 	bool describe(const QString& path, Game& game) const;

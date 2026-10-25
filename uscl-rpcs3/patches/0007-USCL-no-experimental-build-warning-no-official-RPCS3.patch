@@ -1,0 +1,49 @@
+From 2f3d353a8285739b98f8a8b5c5087b721f435faa Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 10:44:05 -0700
+Subject: [PATCH] USCL: no 'experimental build' warning, no official RPCS3
+ update offers
+
+USCL's builds aren't RPCS3's release builds, so every start asked players whether to run it anyway. And RPCS3's
+updater would replace USCL's patched RPCS3 with the official one (no online play); the USCL app updates itself.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rpcs3/rpcs3qt/gui_application.cpp | 3 ++-
+ rpcs3/rpcs3qt/update_manager.cpp  | 6 ++++++
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/rpcs3/rpcs3qt/gui_application.cpp b/rpcs3/rpcs3qt/gui_application.cpp
+index 0093c53..997ab15 100644
+--- a/rpcs3/rpcs3qt/gui_application.cpp
++++ b/rpcs3/rpcs3qt/gui_application.cpp
+@@ -112,7 +112,8 @@ int gui_application::exec()
+ 		func();
+ 	};
+ 
+-	if (!rpcs3::is_release_build() && !rpcs3::is_local_build())
++	// USCL: our own builds aren't RPCS3's release builds; don't warn players about it on every start
++	if (false)
+ 	{
+ 		steps->push_back([this]()
+ 		{
+diff --git a/rpcs3/rpcs3qt/update_manager.cpp b/rpcs3/rpcs3qt/update_manager.cpp
+index 925fe94..f04903b 100644
+--- a/rpcs3/rpcs3qt/update_manager.cpp
++++ b/rpcs3/rpcs3qt/update_manager.cpp
+@@ -62,6 +62,12 @@ void update_manager::check_for_updates(bool automatic, bool check_only, bool aut
+ {
+ 	update_log.notice("Checking for updates: automatic=%d, check_only=%d, auto_accept=%d", automatic, check_only, auto_accept);
+ 
++	// USCL: the USCL app updates itself (and this patched RPCS3 with it); an official RPCS3 update would replace it
++	update_log.notice("Skipped update check: USCL updates itself");
++	if (!automatic && parent)
++		QMessageBox::information(parent, tr("Updates"), tr("USCL updates itself: use Settings → System Update in the USCL home screen."));
++	return;
++
+ 	m_update_info = {};
+ 
+ 	if (automatic)
+-- 
+2.56.0
+

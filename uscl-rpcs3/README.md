@@ -34,6 +34,8 @@ Then build as in RPCS3's `BUILDING.md`.
 - 0006: `USCL_ONLINE=1` runs the game unmodified: no game patches (`patch.yml`), GDB server or logpoints. The home
   screen sets it for games started during an online session. Anyone can build without it, so it keeps honest
   players honest; bans are the real defence (see `uscl-bridge/src/tunnel.rs`).
+- 0007: no "experimental build" warning on start, and RPCS3's own updater is off: it would replace USCL's
+  patched RPCS3 with the official one. The USCL app updates itself.
 
 ## Building (Arch, 2026-10)
 The bundled LLVM doesn't compile with GCC 16's libstdc++ and `llvm-ar` isn't installed, so the debugging build is

@@ -1,5 +1,6 @@
 #include "gamepad.h"
 #include "games.h"
+#include "gameupdates.h"
 #include "launcher.h"
 #include "online.h"
 #include "system.h"
@@ -10,6 +11,7 @@
 #include <QScreen>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QBuffer>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QTemporaryDir>
@@ -141,6 +143,23 @@ namespace
 			check(GameModel::gameHash(empty.path(), "BLUS99999").isEmpty(), "game hash without EBOOT.BIN");
 		}
 
+		{
+			// Sony's update list, newest first on the wire; we install oldest first
+			const QByteArray xml = "<?xml version='1.0'?><titlepatch titleid=\"BLUS1\"><tag name=\"T\">"
+			                       "<package version=\"01.19\" size=\"9\" sha1sum=\"0AAD7F0A4777F6CE82A3687D8EBC0F8D37BFF6A9\" url=\"http://x/b.pkg\"><paramsfo><TITLE>x</TITLE></paramsfo></package>"
+			                       "<package version=\"01.09\" size=\"8\" sha1sum=\"a3557b87227c2c65193ecb2e9d637ed8da6e731e\" url=\"http://x/a.pkg\"/></tag></titlepatch>";
+			const auto list = GameUpdates::parseList(xml);
+			check(list.size() == 2 && list[0].version == "01.09" && list[1].version == "01.19" && list[1].sha1.startsWith("0aad") && list[1].size == 9,
+			      "game update list");
+			check(GameUpdates::newer("01.19", "01.09") && GameUpdates::newer("01.00", "") && !GameUpdates::newer("01.09", "01.19"), "game update versions");
+			// SHA-1 of all but the last 32 bytes
+			QByteArray pkg = "package body";
+			pkg += QByteArray(32, 'x');
+			QBuffer b(&pkg);
+			b.open(QIODevice::ReadOnly);
+			check(GameUpdates::packageSha1(b, pkg.size()) == QCryptographicHash::hash("package body", QCryptographicHash::Sha1).toHex(), "game update hash");
+		}
+
 		std::fprintf(stderr, failed ? "self-test: %d failed\n" : "self-test: ok\n", failed);
 		return failed ? 1 : 0;
 	}
@@ -185,6 +204,8 @@ int main(int argc, char* argv[])
 	engine.rootContext()->setContextProperty("system", &system);
 	engine.rootContext()->setContextProperty("online", &online);
 	engine.rootContext()->setContextProperty("updater", &updater);
+	GameUpdates gameUpdates;
+	engine.rootContext()->setContextProperty("gameUpdates", &gameUpdates);
 	engine.rootContext()->setContextProperty("windowed", app.arguments().contains("--windowed"));
 	QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
 	engine.loadFromModule("Uscl", "Main");

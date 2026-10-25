@@ -96,6 +96,46 @@ Window {
             if (games.get(i).serial === serial) return games.get(i).title
         return serial
     }
+
+    // ---------------------------------------------------------------- game updates (Sony's patches)
+    property var updatePick: ({})     // serial -> true: games picked on the Game Updates page
+    function checkGameUpdates() {
+        var list = []
+        for (var i = 0; i < games.count; i++) { var g = games.get(i); list.push({ serial: g.serial, version: g.version }) }
+        gameUpdates.check(list)
+    }
+    function updateInfo(serial) {
+        var u = gameUpdates.available[serial]
+        if (!u) return ""
+        var mb = 0
+        u.forEach(function(p) { mb += p.size / 1048576 })
+        return qsTr("Update to %1 (%n update(s), %2 MB)", "", u.length).arg(u[u.length - 1].version).arg(Math.ceil(mb))
+    }
+    function installUpdates(serials) {
+        if (launcher.running) { dialog.show(qsTr("Game Updates"), qsTr("Quit the game first.")); return }
+        gameUpdates.install(serials)
+        dialog.show(qsTr("Game Updates"), "", {
+            live: function() { return gameUpdates.status },
+            progress: function() { return gameUpdates.busy ? gameUpdates.progress : -1 }
+        })
+    }
+    function updatesPage() {
+        var avail = gameUpdates.available
+        var serials = Object.keys(avail)
+        if (!serials.length)
+            return [{ title: gameUpdates.checking ? qsTr("Checking for updates...") : qsTr("All your games are up to date"), disabled: true }]
+        var picked = serials.filter(function(s) { return updatePick[s] })
+        var rows = [{ title: qsTr("Update All"), value: qsTr("%n game(s)", "", serials.length), icon: ic("it_update"),
+                      help: qsTr("Downloads every update from Sony and installs it"), action: function() { installUpdates(serials) } }]
+        if (picked.length)
+            rows.push({ title: qsTr("Update Selected"), value: qsTr("%n game(s)", "", picked.length), icon: ic("it_update"),
+                        help: qsTr("Only the games marked Selected"), action: function() { installUpdates(picked) } })
+        serials.forEach(function(s) {
+            rows.push({ title: gameTitle(s), value: updatePick[s] ? qsTr("Selected") : "", help: updateInfo(s) + qsTr("  ·  ✕ to select"),
+                        action: function() { var p = Object.assign({}, updatePick); if (p[s]) delete p[s]; else p[s] = true; updatePick = p } })
+        })
+        return rows
+    }
     readonly property int autoScaleValue: system.recommendedScale(Screen.height * Screen.devicePixelRatio)
     function gameInfo(g) {
         return qsTr("%1\n\nSerial: %2      Console: %3\n%4").arg(g.title).arg(g.serial).arg(g.console).arg(g.path)
@@ -394,7 +434,9 @@ Window {
     function browseBack() {
         if (!browsePath) { popPage(); return }
         var isRoot = browseRoots.some(function(r) { return r.path === browsePath })
-        browsePath = isRoot ? "" : (browsePath.substring(0, browsePath.lastIndexOf("/")) || "/")
+        var up = browsePath.substring(0, browsePath.lastIndexOf("/")) || "/"
+        if (/^[A-Za-z]:$/.test(up)) up += "/" // Windows drive root: "D:" alone means D's current folder
+        browsePath = isRoot ? "" : up
         page.current = 0
     }
     function addGames() {
@@ -423,6 +465,7 @@ Window {
         games.count; games.scanning; system.onlineName; system.firmwareInstalled; system.firmwareVersion; gamepad.count; prefs.avatar
         online.state; online.session; online.message; online.friends; online.friendsLoading; online.friendsError; online.players; online.bans; cfgTick
         updater.state; updater.progress
+        gameUpdates.available; gameUpdates.checking; gameUpdates.busy
         return buildCats()
     }
 
@@ -436,10 +479,17 @@ Window {
         for (var i = 0; i < games.count; i++) {
             let g = games.get(i)
             gameItems.push({
-                title: g.title, desc: g.serial, icon: g.icon || ic("it_games"), wide: !!g.icon,
+                title: g.title, desc: gameUpdates.available[g.serial] ? updateInfo(g.serial) : g.serial, icon: g.icon || ic("it_games"), wide: !!g.icon,
+                badge: gameUpdates.available[g.serial] ? qsTr("Update") : "",
                 action: function() { play(g) },
                 options: function() {
                     return [{ title: qsTr("Start"), action: function() { play(g) } },
+                            gameUpdates.available[g.serial]
+                                ? { title: qsTr("Update Game"), action: function() { installUpdates([g.serial]) } }
+                                : { title: qsTr("Check for Update"), action: function() {
+                                      gameUpdates.check([{ serial: g.serial, version: g.version }])
+                                      notice.show(qsTr("Checking for updates..."), ic("it_update"))
+                                  } },
                             { title: qsTr("Host Online Session"), action: function() { needsName(function() { online.host(g.serial, g.title, g.path) }) } },
                             { title: qsTr("Information"), action: function() { dialog.show(qsTr("Information"), gameInfo(g)) } },
                             { title: qsTr("Remove from List"), action: function() {
@@ -450,6 +500,12 @@ Window {
         }
         gameItems.push({ title: qsTr("Add Games"), icon: ic("it_addgames"), action: addGames,
                          desc: games.scanning ? qsTr("Looking for games...") : qsTr("Find the games in a folder, and every folder inside it") })
+        var pending = Object.keys(gameUpdates.available).length
+        gameItems.push({ title: qsTr("Game Updates"), icon: ic("it_update"), badge: pending ? String(pending) : "",
+                         action: function() { updatePick = ({}); openPage(updatesPage, ic("it_update"), 2) },
+                         desc: gameUpdates.busy ? gameUpdates.status
+                             : pending ? qsTr("%n game(s) have updates: choose which to install", "", pending)
+                             : gameUpdates.checking ? qsTr("Checking for updates...") : qsTr("All your games are up to date") })
         gameItems.push({ title: qsTr("How to Play"), icon: ic("it_help"), action: guide, desc: qsTr("Controls, quitting a game, and playing online") })
 
         var active = online.state !== "off"
@@ -563,10 +619,27 @@ Window {
         }
     }
     Connections {
+        target: gameUpdates
+        function onFinished(installed, problem) {
+            games.reload()
+            sound(problem ? "error" : "notify")
+            if (problem) dialog.show(qsTr("Game Updates"), (installed ? qsTr("%n update(s) installed. ", "", installed) : "") + problem)
+            else { dialog.close(); notice.show(qsTr("%n update(s) installed", "", installed), ic("it_update")) }
+        }
+    }
+    Connections {
         target: games
-        function onScanFinished(added) {
+        function onCountChanged() { checkGameUpdates() }
+        function onScanFinished(added, known, encrypted) {
             sound("notify")
-            notice.show(added ? qsTr("%n game(s) added", "", added) : qsTr("No new games found there"), ic("it_addgames"))
+            if (added)
+                notice.show(qsTr("%n game(s) added", "", added), ic("it_addgames"))
+            else if (known)
+                notice.show(qsTr("Those games are already in your library"), ic("it_addgames"))
+            if (encrypted)
+                dialog.show(qsTr("Add Games"), qsTr("%n disc image(s) there are still encrypted, so no emulator can read them. Decrypt them first (a .dec.iso, or the extracted disc folder), then add them again.", "", encrypted))
+            else if (!added && !known)
+                dialog.show(qsTr("Add Games"), qsTr("No PS3 games were found in that folder. USCL looks for disc folders (with PS3_GAME inside), installed games and decrypted .iso images."))
         }
     }
     Connections {
@@ -709,6 +782,8 @@ Window {
     }
 
     Component.onCompleted: {
+        online.startSteam()
+        checkGameUpdates()
         if (prefs.bootScreen) boot.start()
         else { boot.quick(); sound("startup") }
     }

@@ -7,6 +7,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHostAddress>
+#include <QProcess>
+#include <QStandardPaths>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -227,6 +229,41 @@ QString Online::personaFromVdf(const QByteArray& vdf)
 		}
 	}
 	return best;
+}
+
+bool Online::steamRunning()
+{
+#ifdef _WIN32
+	// Steam keeps its process id here while it runs, 0 once it has quit
+	return QSettings("HKEY_CURRENT_USER\\Software\\Valve\\Steam\\ActiveProcess", QSettings::NativeFormat).value("pid").toUInt() != 0;
+#else
+	for (const QString& pid_file : {QDir::homePath() + "/.steam/steam.pid", QDir::homePath() + "/.var/app/com.valvesoftware.Steam/.steam/steam.pid"})
+	{
+		QFile f(pid_file);
+		if (f.open(QIODevice::ReadOnly))
+		{
+			const QByteArray pid = f.readAll().trimmed();
+			if (!pid.isEmpty() && QFileInfo::exists("/proc/" + pid))
+				return true;
+		}
+	}
+	return false;
+#endif
+}
+
+void Online::startSteam()
+{
+	if (steamRunning())
+		return;
+#ifdef _WIN32
+	const QString dir = QSettings("HKEY_CURRENT_USER\\Software\\Valve\\Steam", QSettings::NativeFormat).value("SteamPath").toString();
+	QProcess::startDetached((dir.isEmpty() ? QString("C:/Program Files (x86)/Steam") : dir) + "/steam.exe", {"-silent"});
+#else
+	if (!QStandardPaths::findExecutable("steam").isEmpty())
+		QProcess::startDetached("steam", {"-silent"});
+	else if (!QStandardPaths::findExecutable("flatpak").isEmpty())
+		QProcess::startDetached("flatpak", {"run", "com.valvesoftware.Steam", "-silent"});
+#endif
 }
 
 QString Online::steamName() const

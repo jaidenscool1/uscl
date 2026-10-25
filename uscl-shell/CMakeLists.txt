@@ -15,6 +15,7 @@ endif()
 qt_add_executable(uscl
     src/main.cpp
     src/games.cpp src/games.h
+    src/gameupdates.cpp src/gameupdates.h
     src/gamepad.cpp src/gamepad.h
     src/launcher.cpp src/launcher.h
     src/system.cpp src/system.h
