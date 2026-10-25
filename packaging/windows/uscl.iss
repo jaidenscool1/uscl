@@ -36,15 +36,63 @@ Name: "{autodesktop}\USCL"; Filename: "{app}\uscl.exe"; IconFilename: "{app}\rpc
 
 [Tasks]
 Name: desktopicon; Description: "Create a desktop shortcut"
+; only offered when missing: online play runs over Steam, party chat over Discord
+Name: steam; Description: "Install Steam (needed to play online with friends)"; Check: not SteamInstalled and not WizardSilent
+Name: discord; Description: "Install Discord (party and voice chat)"; Check: not DiscordInstalled and not WizardSilent
 
 [Run]
 ; the Visual C++ runtime RPCS3 needs; asks for admin only when it isn't installed yet
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing the Visual C++ runtime..."; Flags: waituntilterminated skipifdoesntexist shellexec; Check: NeedsVCRedist
+; Valve's and Discord's own installers, downloaded on the Ready page (see NextButtonClick)
+Filename: "{tmp}\SteamSetup.exe"; StatusMsg: "Installing Steam..."; Flags: waituntilterminated skipifdoesntexist; Tasks: steam
+Filename: "{tmp}\DiscordSetup.exe"; StatusMsg: "Installing Discord..."; Flags: waituntilterminated skipifdoesntexist; Tasks: discord
 Filename: "{app}\uscl.exe"; Description: "Start USCL"; Flags: nowait postinstall skipifsilent
 ; an update from inside USCL installs silently: start the new USCL when it's done
 Filename: "{app}\uscl.exe"; Flags: nowait; Check: WizardSilent
 
 [Code]
+var
+  Downloads: TDownloadWizardPage;
+
+function SteamInstalled: Boolean;
+var Exe: String;
+begin
+  Result := RegQueryStringValue(HKCU, 'Software\Valve\Steam', 'SteamExe', Exe) and FileExists(Exe);
+end;
+
+function DiscordInstalled: Boolean;
+begin
+  Result := FileExists(ExpandConstant('{localappdata}\Discord\Update.exe'));
+end;
+
+procedure InitializeWizard;
+begin
+  Downloads := CreateDownloadPage(SetupMessage(msgWizardPreparing), SetupMessage(msgPreparingDesc), nil);
+end;
+
+// Fetch the Steam / Discord installers the player asked for; if that fails, USCL still installs without them
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (CurPageID <> wpReady) or not (WizardIsTaskSelected('steam') or WizardIsTaskSelected('discord')) then
+    Exit;
+  Downloads.Clear;
+  if WizardIsTaskSelected('steam') then
+    Downloads.Add('https://cdn.cloudflare.steamstatic.com/client/installer/SteamSetup.exe', 'SteamSetup.exe', '');
+  if WizardIsTaskSelected('discord') then
+    Downloads.Add('https://discord.com/api/downloads/distributions/app/installers/latest?channel=stable&platform=win&arch=x64', 'DiscordSetup.exe', '');
+  Downloads.Show;
+  try
+    try
+      Downloads.Download;
+    except
+      SuppressibleMsgBox('Couldn''t download: ' + GetExceptionMessage + #13#10 + 'USCL installs anyway; get Steam / Discord from their websites.', mbError, MB_OK, IDOK);
+    end;
+  finally
+    Downloads.Hide;
+  end;
+end;
+
 function NeedsVCRedist: Boolean;
 var Installed: Cardinal;
 begin

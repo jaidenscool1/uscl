@@ -119,7 +119,7 @@ Item {
                 width: xmb.width - xmb.colX
                 height: sel ? xmb.focH : xmb.rowH
                 visible: y > -xmb.rowH && y < xmb.height
-                opacity: modelData.disabled ? 0.45 : 1
+                opacity: modelData.disabled ? 0.45 : modelData.dim ? 0.6 : 1
                 Behavior on y { NumberAnimation { duration: 200; easing.type: Easing.OutSine } }
 
                 // icon: 100 px in the list, 150 px focused (wide game icons keep their shape)
@@ -147,6 +147,14 @@ Item {
                     font.pixelSize: row.sel ? 40 : 29
                     elide: Text.ElideRight
                     style: Text.Raised; styleColor: row.sel ? "#90000000" : "#70000000"
+                }
+                // presence light at the picture's corner (friends)
+                Rectangle {
+                    visible: !!row.modelData.presence
+                    width: row.sel ? 26 : 18; height: width; radius: width / 2
+                    x: icon.x + icon.width - width * 0.7; y: icon.y + icon.height - height * 0.7
+                    color: row.modelData.presence || "transparent"
+                    border.color: "#c0ffffff"; border.width: 2
                 }
                 // a small tag after the title: "Update", or a count
                 Rectangle {

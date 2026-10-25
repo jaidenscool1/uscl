@@ -543,11 +543,17 @@ Window {
         else if (!online.friends.length)
             friends.push({ title: qsTr("No Friends Online"), icon: ic("cat_friends"), desc: qsTr("✕ to check again"), action: online.refreshFriends })
         online.friends.forEach(function(f) {
+            var away = ["Away", "Snooze", "Busy"].indexOf(f.state) >= 0
             friends.push({
-                title: f.name, icon: ic(f.session ? "cat_game" : "it_person"),
-                desc: f.session ? qsTr("In a USCL session: ✕ to join") : f.state,
-                disabled: !f.session,
-                action: function() { needsName(function() { online.join(f.session) }) }
+                title: f.name, icon: f.avatar || ic("it_person"),
+                // the PS3's presence light: green online, orange away, none offline
+                presence: !f.online ? "" : away ? "#f0a020" : "#40d040",
+                desc: f.session ? qsTr("Online · In a USCL session: ✕ to join")
+                    : !f.online ? qsTr("Offline")
+                    : f.state === "Busy" ? qsTr("Busy") : away ? qsTr("Away") : qsTr("Online"),
+                dim: !f.online,
+                action: f.session ? function() { needsName(function() { online.join(f.session) }) }
+                                  : function() { notice.show(f.online ? qsTr("%1 isn't in a USCL session").arg(f.name) : qsTr("%1 is offline").arg(f.name), ic("it_person")) }
             })
         })
 

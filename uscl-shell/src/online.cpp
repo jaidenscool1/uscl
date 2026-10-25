@@ -17,6 +17,7 @@
 #include <QSettings>
 #include <QTcpServer>
 #include <QUdpSocket>
+#include <QUrl>
 
 #include <algorithm>
 
@@ -106,16 +107,21 @@ Online::Online(QObject* parent)
 		}
 		else
 		{
-			// friends in a USCL session first, then by name
-			QVariantList in_session, others;
+			// friends in a USCL session first, then online, then offline; by name within each
+			QVariantList in_session, online, offline;
 			for (const QJsonValue& v : doc.array())
-				(v["session"].isString() ? in_session : others).push_back(v.toObject().toVariantMap());
+			{
+				QVariantMap f = v.toObject().toVariantMap();
+				if (v["avatar"].isString())
+					f["avatar"] = QUrl::fromLocalFile(v["avatar"].toString()).toString();
+				(v["session"].isString() ? in_session : v["online"].toBool(true) ? online : offline).push_back(f);
+			}
 			const auto by_name = [](const QVariant& a, const QVariant& b) {
 				return QString::localeAwareCompare(a.toMap()["name"].toString(), b.toMap()["name"].toString()) < 0;
 			};
-			std::sort(in_session.begin(), in_session.end(), by_name);
-			std::sort(others.begin(), others.end(), by_name);
-			m_friends = in_session + others;
+			for (QVariantList* group : {&in_session, &online, &offline})
+				std::sort(group->begin(), group->end(), by_name);
+			m_friends = in_session + online + offline;
 		}
 		emit friendsChanged();
 	});
@@ -620,7 +626,10 @@ void Online::refreshFriends()
 {
 	if (friendsLoading())
 		return;
-	m_friends_proc.start(toolPath("uscl-bridge"), {"friends"});
+	// Steam profile pictures, refreshed each time
+	const QString avatars = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/avatars";
+	QDir().mkpath(avatars);
+	m_friends_proc.start(toolPath("uscl-bridge"), {"friends", avatars});
 	emit friendsChanged();
 }
 
