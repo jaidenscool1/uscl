@@ -16,7 +16,8 @@ Everything on 127.0.0.1 (works behind the session tunnel on every OS):
 ```
 DW_ADDR=127.0.0.1:3074 DW_STUN_ADDR=127.0.0.1:3074 DW_STUN_ALT_ADDR=127.0.0.1:3077 RUST_LOG=info target/release/dw-server
 ```
-RPCS3 (Black Ops II): `Network → IP swap list` (auth, lobby and the NAT discovery names):
+RPCS3 (Black Ops II; MW2's names are in `games/BLUS30377.md`): `Network → IP swap list` (auth, lobby and the NAT
+discovery names):
 `ops2-ps3-auth.prod.demonware.net=127.0.0.1&&ops2-ps3-lobby.prod.demonware.net=127.0.0.1&&cod7-stun.us.demonware.net=127.0.0.1&&cod7-stun.eu.demonware.net=127.0.0.1&&cod7-stun.jp.demonware.net=127.0.0.1&&cod7-stun.au.demonware.net=127.0.0.1&&stun.us.demonware.net=127.0.0.1`
 Without the stun names BO2 still asks Activision for its NAT type. RPCN must be the one the player logs in to (the
 login uses its ticket). The older two-address setup (`DW_AUTH_ADDR` / `DW_LOBBY_ADDR`) still works.
@@ -41,8 +42,14 @@ login uses its ticket). The older two-address setup (`DW_AUTH_ADDR` / `DW_LOBBY_
   servers can send push messages after a reply (`PushSource`).
 - 0012: Stats check: an `mpstatsCompressed` upload with prestige/rank/XP past the maximum, a prestige jump or more XP
   than one match gives is refused (layout: `ddl_mp/stats.ddl` v244, see `games/BLUS31011.md`).
+- 0013: Modern Warfare 2 (title 5280, `lobby/mw2.rs`): its older Demonware (batched frames, bit-packed tasks and
+  replies), publisher files by id, matchmaking and the bandwidth test (see `games/BLUS30377.md`).
 
 ## Status
+Modern Warfare 2 1.14: login, playlists and matchmaking work; two copies played the same match (2026-10-25).
+Publisher files `playlists.patch3`, `motd-english.txt` and `messageoftheday.info` from `mw2-files/` go in
+`storage/publisher/5280/`. RPCS3's swap list also needs MW2's names (the USCL panel sets them).
+
 Black Ops II 1.19: login, lobby, stats and **Play Online** work (2026-10-23). Publisher files go in
 `storage/publisher/<title id>/`. BO2 needs `online_tu19_mp_english.wad` holding `leagues.info` and
 `playlists_mp.info`, or Play Online times out (see `games/BLUS31011.md`, part 4). Build it from `bo2-wad/`:

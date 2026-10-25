@@ -1,0 +1,640 @@
+From f4878a820d9a649506fe60e677917addfc7e9915 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 04:24:12 -0700
+Subject: [PATCH] Serve Modern Warfare 2 (PS3)
+
+MW2's older Demonware: batched lobby frames, bit-packed tasks and replies answered in order, publisher files
+(playlists, MOTD) by id, matchmaking (replies echo the task id with one count; searches only get games of the same
+playlist, playlist version and netcode) and the bandwidth test (service 18, message type 5), whose result decides
+whether a host's lobby has public slots. Layouts from elliot1377/mw2-ps3-server (MIT) and Tustin/mw2-rpcs3's notes
+on the game's parsers. Two copies matchmade and played Hardcore Free-for-all.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dw-server/src/lobby/mod.rs              |   4 +-
+ dw-server/src/lobby/storage/mod.rs      |   6 +-
+ libbitdemon/src/domain/title.rs         |   1 +
+ libbitdemon/src/lobby/anti_cheat/mod.rs |   5 +
+ libbitdemon/src/lobby/mod.rs            |  13 +
+ libbitdemon/src/lobby/mw2.rs            | 314 ++++++++++++++++++++++++
+ libbitdemon/src/messaging/bd_reader.rs  |  42 ++--
+ libbitdemon/src/messaging/bd_writer.rs  |  22 +-
+ libbitdemon/src/networking/bd_socket.rs |  20 ++
+ 9 files changed, 382 insertions(+), 45 deletions(-)
+ create mode 100644 libbitdemon/src/lobby/mw2.rs
+
+diff --git a/dw-server/src/lobby/mod.rs b/dw-server/src/lobby/mod.rs
+index a2f64b1..1d6b7f4 100644
+--- a/dw-server/src/lobby/mod.rs
++++ b/dw-server/src/lobby/mod.rs
+@@ -11,7 +11,7 @@ use crate::lobby::counter::create_counter_handler;
+ use crate::lobby::group::create_group_handler;
+ use crate::lobby::profile::create_profile_handler;
+ use crate::lobby::rich_presence::create_rich_presence_handler;
+-use crate::lobby::storage::create_storage_handler;
++use crate::lobby::storage::{create_publisher_storage, create_storage_handler};
+ use axum::Router;
+ use bitdemon::lobby::LobbyServiceId::{Matchmaking, PooledStorage, 
+     Anticheat, BandwidthTest, Counter, Dml, EventLog, Facebook, Group, KeyArchive, League, Profile,
+@@ -26,6 +26,7 @@ use bitdemon::lobby::league::LeagueHandler;
+ use bitdemon::lobby::stats::StatsHandler;
+ use bitdemon::lobby::stub::StubHandler;
+ use bitdemon::lobby::matchmaking::MatchmakingHandler;
++use bitdemon::lobby::mw2::Mw2Lobby;
+ use bitdemon::lobby::title_utilities::TitleUtilitiesHandler;
+ use bitdemon::lobby::twitch::TwitchHandler;
+ use bitdemon::lobby::vote_rank::VoteRankHandler;
+@@ -72,6 +73,7 @@ pub fn configure_lobby_server(
+     configurer.direct_config(PooledStorage, Arc::new(StubHandler::new("PooledStorage")));
+     configurer.direct_config(Matchmaking, MatchmakingHandler::new(session_manager.clone()));
+     configurer.direct_config(Storage, create_storage_handler());
++    lobby_server.set_mw2(Mw2Lobby::new(create_publisher_storage(), session_manager.clone()));
+     configurer.direct_config(TitleUtilities, Arc::new(TitleUtilitiesHandler::new()));
+     configurer.direct_config(Twitch, Arc::new(TwitchHandler::new()));
+     configurer.direct_config(VoteRank, Arc::new(VoteRankHandler::new()));
+diff --git a/dw-server/src/lobby/storage/mod.rs b/dw-server/src/lobby/storage/mod.rs
+index 4055067..ba61757 100644
+--- a/dw-server/src/lobby/storage/mod.rs
++++ b/dw-server/src/lobby/storage/mod.rs
+@@ -1,7 +1,7 @@
+ use crate::lobby::storage::publisher_file::DwPublisherStorageService;
+ use crate::lobby::storage::user_file::DwUserStorageService;
+ use bitdemon::lobby::ThreadSafeLobbyHandler;
+-use bitdemon::lobby::storage::StorageHandler;
++use bitdemon::lobby::storage::{StorageHandler, ThreadSafePublisherStorageService};
+ use std::sync::Arc;
+ 
+ mod db;
+@@ -15,3 +15,7 @@ pub fn create_storage_handler() -> Arc<ThreadSafeLobbyHandler> {
+         Arc::new(DwPublisherStorageService::new()),
+     ))
+ }
++
++pub fn create_publisher_storage() -> Arc<ThreadSafePublisherStorageService> {
++    Arc::new(DwPublisherStorageService::new())
++}
+diff --git a/libbitdemon/src/domain/title.rs b/libbitdemon/src/domain/title.rs
+index bddf89e..4ebf410 100644
+--- a/libbitdemon/src/domain/title.rs
++++ b/libbitdemon/src/domain/title.rs
+@@ -1,6 +1,7 @@
+ ﻿#[derive(Debug, Eq, PartialEq, Hash, Copy, Clone, FromPrimitive, ToPrimitive)]
+ #[repr(u32)]
+ pub enum Title {
++    Iw4Ps3 = 5280, // Modern Warfare 2 (PS3)
+     Iw5 = 18409,
+     T5 = 18301,
+     T6Xenon = 18395,
+diff --git a/libbitdemon/src/lobby/anti_cheat/mod.rs b/libbitdemon/src/lobby/anti_cheat/mod.rs
+index 5f5f060..efbdc20 100644
+--- a/libbitdemon/src/lobby/anti_cheat/mod.rs
++++ b/libbitdemon/src/lobby/anti_cheat/mod.rs
+@@ -14,6 +14,7 @@
+ //! host's own game: everyone gets the same challenges and whoever answers differently runs changed game code.
+ //! That player's sessions are refused from then on (the game drops off online).
+ 
++use crate::domain::title::Title;
+ use crate::lobby::response::task_reply::TaskReply;
+ use crate::lobby::response::BdMessageType;
+ use crate::lobby::{LobbyHandler, PushSource};
+@@ -268,6 +269,10 @@ impl PushSource for AntiCheatHandler {
+         let (Some(_), Some(auth)) = (&self.trusted_user, session.authentication()) else {
+             return Vec::new();
+         };
++        // push type 19 and its layout are Black Ops II's; other titles may read it differently
++        if auth.title != Title::T6Ps3 {
++            return Vec::new();
++        }
+         let mut state = self.state.lock().unwrap();
+         let since = *state.first_seen.entry(session.id).or_insert_with(Instant::now);
+         if since.elapsed() < SETTLE {
+diff --git a/libbitdemon/src/lobby/mod.rs b/libbitdemon/src/lobby/mod.rs
+index 6813184..96595c4 100644
+--- a/libbitdemon/src/lobby/mod.rs
++++ b/libbitdemon/src/lobby/mod.rs
+@@ -8,6 +8,7 @@ pub mod group;
+ pub mod key_archive;
+ pub mod league;
+ pub mod matchmaking;
++pub mod mw2;
+ mod lsg;
+ pub mod profile;
+ mod response;
+@@ -223,6 +224,7 @@ pub trait PushSource: Send + Sync {
+ pub struct LobbyServer {
+     lobby_handlers: RwLock<HashMap<LobbyServiceId, Arc<ThreadSafeLobbyHandler>>>,
+     push_sources: RwLock<Vec<Arc<dyn PushSource>>>,
++    mw2: RwLock<Option<Arc<mw2::Mw2Lobby>>>,
+ }
+ 
+ impl LobbyServer {
+@@ -230,6 +232,7 @@ impl LobbyServer {
+         let lobby_server = LobbyServer {
+             lobby_handlers: RwLock::new(HashMap::new()),
+             push_sources: RwLock::new(Vec::new()),
++            mw2: RwLock::new(None),
+         };
+ 
+         lobby_server.add_service(LobbyService, Arc::new(LsgHandler::new(key_store)));
+@@ -241,6 +244,11 @@ impl LobbyServer {
+         self.push_sources.write().unwrap().push(source);
+     }
+ 
++    /// Serve Modern Warfare 2 (PS3), whose lobby works differently from the later titles'
++    pub fn set_mw2(&self, lobby: Arc<mw2::Mw2Lobby>) {
++        *self.mw2.write().unwrap() = Some(lobby);
++    }
++
+     pub fn add_service(&self, service_id: LobbyServiceId, handler: Arc<ThreadSafeLobbyHandler>) {
+         info!("Adding {service_id:?} lobby handler");
+         self.lobby_handlers
+@@ -269,6 +277,11 @@ impl BdMessageHandler for LobbyServer {
+ 
+         message.reader.set_type_checked(false);
+         let service_id_input = message.reader.read_u8()?;
++        if mw2::is_mw2(session) {
++            if let Some(mw2) = self.mw2.read().unwrap().clone() {
++                return mw2.handle(session, service_id_input, message.reader);
++            }
++        }
+ 
+         let Some(service_id) = LobbyServiceId::from_u8(service_id_input) else {
+             // An unknown service shouldn't end the whole session (Black Ops II calls 32)
+diff --git a/libbitdemon/src/lobby/mw2.rs b/libbitdemon/src/lobby/mw2.rs
+new file mode 100644
+index 0000000..46ec775
+--- /dev/null
++++ b/libbitdemon/src/lobby/mw2.rs
+@@ -0,0 +1,314 @@
++//! Modern Warfare 2 (PS3)'s lobby. Its older Demonware writes tasks and expects replies as bit buffers (a type-checked
++//! bit, then 5-bit type tags, values LSB first), numbers tasks its own way, and matches replies to tasks first in,
++//! first out, so every task gets an answer. Layouts from github.com/elliot1377/mw2-ps3-server (MIT), checked against
++//! the 1.14 BLUS30377 executable. Matchmaking replies (echoed task id, one count) follow github.com/Tustin/mw2-rpcs3's
++//! notes on the game's parser.
++
++use crate::domain::title::Title;
++use crate::lobby::response::BdMessageType;
++use crate::lobby::storage::{StorageFileInfo, ThreadSafePublisherStorageService};
++use crate::messaging::bd_reader::BdReader;
++use crate::messaging::bd_response::BdResponse;
++use crate::messaging::bd_writer::BdWriter;
++use crate::messaging::StreamMode;
++use crate::networking::bd_session::{BdSession, SessionId};
++use crate::networking::session_manager::SessionManager;
++use log::{debug, info, warn};
++use num_traits::ToPrimitive;
++use std::error::Error;
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::sync::{Arc, Mutex};
++
++const STORAGE: u8 = 10;
++const MATCHMAKING: u8 = 5;
++const BANDWIDTH_TEST: u8 = 18;
++
++// task reply result types
++const RESULT_NONE: u8 = 0;
++const RESULT_SINGLE: u8 = 1;
++const RESULT_LIST: u8 = 4;
++const RESULT_FILE_LIST: u8 = 7;
++
++type Body<'a> = &'a dyn Fn(&mut BdWriter) -> Result<(), Box<dyn Error>>;
++
++struct GameSession {
++    connection: SessionId,
++    id: Vec<u8>,
++    key: Vec<u8>,
++    host_addr: Vec<u8>,
++    info: Vec<i32>,
++}
++
++pub struct Mw2Lobby {
++    publisher_files: Arc<ThreadSafePublisherStorageService>,
++    sessions: Mutex<Vec<GameSession>>,
++    transaction: AtomicU64,
++}
++
++pub fn is_mw2(session: &BdSession) -> bool {
++    session.authentication().is_some_and(|a| a.title == Title::Iw4Ps3)
++}
++
++impl Mw2Lobby {
++    pub fn new(
++        publisher_files: Arc<ThreadSafePublisherStorageService>,
++        session_manager: Arc<SessionManager>,
++    ) -> Arc<Mw2Lobby> {
++        let lobby = Arc::new(Mw2Lobby {
++            publisher_files,
++            sessions: Mutex::new(Vec::new()),
++            transaction: AtomicU64::new(1),
++        });
++        let weak = Arc::downgrade(&lobby);
++        session_manager.on_session_unregistered(move |connection| {
++            if let Some(lobby) = weak.upgrade() {
++                lobby.sessions.lock().unwrap().retain(|s| s.connection != connection.id);
++            }
++        });
++        lobby
++    }
++
++    /// Answers one task; `reader` is positioned after the service id.
++    pub fn handle(&self, session: &mut BdSession, service: u8, mut reader: BdReader) -> Result<(), Box<dyn Error>> {
++        let mut response = match service {
++            BANDWIDTH_TEST => self.bandwidth_test(reader.remaining_data().len()),
++            _ => {
++                reader.set_mode(StreamMode::BitMode);
++                reader.read_type_checked_bit()?;
++                let task = reader.read_u8()?;
++                let data = reader.remaining_data().to_vec();
++                self.task(session, service, task, &mut reader).unwrap_or_else(|e| {
++                    warn!("MW2 service {service} task {task} not understood ({e}): {:02x?}", &data[..data.len().min(64)]);
++                    self.reply(RESULT_LIST, &empty)
++                })
++            }
++        }?;
++        response.send(session)
++    }
++
++    fn task(
++        &self,
++        session: &BdSession,
++        service: u8,
++        task: u8,
++        r: &mut BdReader,
++    ) -> Result<Result<BdResponse, Box<dyn Error>>, Box<dyn Error>> {
++        Ok(match (service, task) {
++            (STORAGE, 8) => {
++                let files = self.files(session);
++                self.reply(RESULT_FILE_LIST, &|w| {
++                    w.write_u32(files.len() as u32)?;
++                    for (id, file) in &files {
++                        w.write_u32(file.file_size as u32)?;
++                        file_header(w, *id, file)?;
++                    }
++                    Ok(())
++                })
++            }
++            (STORAGE, 5) => {
++                r.read_u8()?;
++                let id = r.read_u64()?;
++                let Some((_, file)) = self.files(session).into_iter().find(|(i, _)| *i == id) else {
++                    return Ok(self.reply(RESULT_NONE, &empty));
++                };
++                let data = self
++                    .publisher_files
++                    .get_publisher_file_data(session, file.filename.clone())
++                    .map_err(|e| format!("{e:?}"))?;
++                info!("MW2: sent {} ({} bytes)", file.filename, data.len());
++                self.reply(RESULT_SINGLE, &|w| {
++                    w.write_u32(1)?;
++                    file_header(w, id, &file)?;
++                    w.write_blob(&data)
++                })
++            }
++            (MATCHMAKING, 1) => {
++                let (host_addr, _, _, info) = read_session_info(r)?;
++                let (id, key) = (rand::random::<[u8; 8]>().to_vec(), rand::random::<[u8; 16]>().to_vec());
++                let reply = self.reply(task, &|w| {
++                    w.write_u32(1)?;
++                    w.write_blob(&id)?;
++                    w.write_blob(&key)
++                });
++                info!("MW2: {} hosts a game at {:02x?} {info:?}", username(session), host_addr);
++                let connection = session.id;
++                self.sessions.lock().unwrap().push(GameSession { connection, id, key, host_addr, info });
++                reply
++            }
++            (MATCHMAKING, 2) => {
++                let (host_addr, id, _, info) = read_session_info(r)?;
++                if let Some(s) = self.sessions.lock().unwrap().iter_mut().find(|s| s.id == id && s.connection == session.id) {
++                    (s.host_addr, s.info) = (host_addr, info);
++                }
++                self.reply(task, &|_| Ok(()))
++            }
++            (MATCHMAKING, 3) => {
++                if r.next_is_u8()? {
++                    r.read_u8()?;
++                }
++                let id = r.read_blob()?;
++                self.sessions.lock().unwrap().retain(|s| !(s.id == id && s.connection == session.id));
++                self.reply(task, &|_| Ok(()))
++            }
++            (MATCHMAKING, 5) => {
++                r.read_u8()?;
++                let mut wanted = Vec::new();
++                while wanted.len() < 32 && r.next_is_i32().unwrap_or(false) {
++                    wanted.push(r.read_i32()?);
++                }
++                let sessions = self.sessions.lock().unwrap();
++                let found: Vec<&GameSession> =
++                    sessions.iter().filter(|s| s.connection != session.id && compatible(&s.info, &wanted)).collect();
++                debug!("MW2: {} looks for {wanted:?}: {} game(s)", username(session), found.len());
++                self.reply(task, &|w| {
++                    w.write_u32(found.len() as u32)?;
++                    for s in &found {
++                        w.write_blob(&s.host_addr)?;
++                        w.write_blob(&s.id)?;
++                        w.write_blob(&s.key)?;
++                        for v in &s.info {
++                            w.write_i32(*v)?;
++                        }
++                    }
++                    Ok(())
++                })
++            }
++            // user files, stats and the rest: OK with no results, which the game takes as "nothing yet"
++            _ => self.reply(RESULT_LIST, &empty),
++        })
++    }
++
++    /// Service 18, plain little-endian bytes answered with message type 5. Phase 1 (19 bytes) gets the test
++    /// setup: the client then sends 5 x 512 bytes to our UDP 3074 (the NAT discovery socket ignores them). Finalize
++    /// (5 x u32 of its own, so longer) gets the measurement. The host computes its upload from it, and below
++    /// 256000 bit/s (or with zeros: NaN) it opens its lobby with no public slots, so nobody can join it. So we
++    /// report what a 50 ms send gives (Tustin/mw2-rpcs3 found 50 ms is what lets players join).
++    fn bandwidth_test(&self, len: usize) -> Result<BdResponse, Box<dyn Error>> {
++        const SEND_MS: u32 = 50;
++        let mut data = vec![5]; // BD_LSG_SERVICE_TASK_REPLY
++        data.extend_from_slice(&self.transaction.fetch_add(1, Ordering::Relaxed).to_le_bytes());
++        data.push(0); // accepted
++        if len >= 21 {
++            for v in [512 * 5, SEND_MS, 2, 0, 4] {
++                data.extend_from_slice(&u32::to_le_bytes(v)); // bytes, ms, average / first / last sequence
++            }
++        } else {
++            // packet size, count, sender wait, send time, receiver wait, receive time, linger
++            for v in [512, 5, 500, SEND_MS, 10000, 5000, 500] {
++                data.extend_from_slice(&u32::to_le_bytes(v));
++            }
++            let udp: std::net::SocketAddrV4 = std::env::var("DW_STUN_ADDR")
++                .ok()
++                .and_then(|a| a.parse().ok())
++                .unwrap_or_else(|| "127.0.0.1:3074".parse().unwrap());
++            data.extend_from_slice(&udp.port().to_le_bytes());
++            data.extend_from_slice(&udp.ip().octets());
++            data.extend_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7]); // token
++        }
++        Ok(BdResponse::encrypted_if_available(data))
++    }
++
++    /// The publisher files with stable ids (1-based, by name): the game asks for them by id.
++    fn files(&self, session: &BdSession) -> Vec<(u64, StorageFileInfo)> {
++        let mut files = self.publisher_files.list_publisher_files(session, 0, 0, 100).map(|s| s.into_data()).unwrap_or_default();
++        files.sort_by(|a, b| a.filename.cmp(&b.filename));
++        files.into_iter().enumerate().map(|(i, f)| (i as u64 + 1, f)).collect()
++    }
++
++    /// Task reply: [typed u64 transaction id][typed u32 error][typed u8 result type, or the task id for
++    /// matchmaking][body]
++    fn reply(&self, result_type: u8, body: Body) -> Result<BdResponse, Box<dyn Error>> {
++        let mut data = Vec::new();
++        {
++            let mut w = BdWriter::new(&mut data);
++            w.write_u8(BdMessageType::LobbyServiceTaskReply.to_u8().unwrap())?;
++            w.set_mode(StreamMode::BitMode);
++            w.set_type_checked(true);
++            w.write_type_checked_bit()?;
++            w.write_u64(self.transaction.fetch_add(1, Ordering::Relaxed))?;
++            w.write_u32(0)?;
++            w.write_u8(result_type)?;
++            body(&mut w)?;
++        }
++        Ok(BdResponse::encrypted_if_available(data))
++    }
++}
++
++/// No results: [u32 count 0][u32 total 0]
++fn empty(w: &mut BdWriter) -> Result<(), Box<dyn Error>> {
++    w.write_u32(0)?;
++    w.write_u32(0)
++}
++
++/// bdLobbyFileHeader: [u64 id][u32 time][u32 size][bool][bool][u64 owner][string name]
++fn file_header(w: &mut BdWriter, id: u64, file: &StorageFileInfo) -> Result<(), Box<dyn Error>> {
++    w.write_u64(id)?;
++    w.write_u32(file.modified as u32)?;
++    w.write_u32(file.file_size as u32)?;
++    w.write_bool(true)?;
++    w.write_bool(false)?;
++    w.write_u64(0)?;
++    w.write_str(&file.filename)
++}
++
++/// Whether a hosted game fits a search. The host sends 4 slot counts then the title's fields, the search 2 of its
++/// own (type, max results) then its fields; matched by value in TDM / HC FFA sessions (playlist 1 / 4):
++/// host [.., playlist 5, version 6, netcode 8], search [.., playlist 3, netcode 4, version 6]. A game of another
++/// playlist or game version would send the searcher into a join that fails.
++fn compatible(host: &[i32], search: &[i32]) -> bool {
++    host.len() >= 9 && search.len() >= 7 && host[5] == search[3] && host[6] == search[6] && host[8] == search[4]
++}
++
++/// Create / update: [u8][blob host address][blob session id][blob key][int32 game info...]
++fn read_session_info(r: &mut BdReader) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<i32>), Box<dyn Error>> {
++    r.read_u8()?;
++    let (addr, id, key) = (r.read_blob()?, r.read_blob()?, r.read_blob()?);
++    let mut info = Vec::new();
++    while info.len() < 32 && r.next_is_i32().unwrap_or(false) {
++        info.push(r.read_i32()?);
++    }
++    Ok((addr, id, key, info))
++}
++
++fn username(session: &BdSession) -> &str {
++    session.authentication().map_or("?", |a| a.username.as_str())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn finds_games_of_the_same_playlist() {
++        let tdm_host = [12, 0, 0, 0, 1, 1, 504, 0, 139, 2, 1, 17, 0];
++        let hc_ffa_host = [8, 0, 0, 0, 1, 4, 504, 0, 139, 2, 4, 17, 0];
++        let tdm_search = [2, 50, 1, 1, 139, 2, 504, 1, 0];
++        assert!(compatible(&tdm_host, &tdm_search));
++        assert!(!compatible(&hc_ffa_host, &tdm_search));
++        assert!(!compatible(&tdm_host, &[2, 50, 1, 1, 139, 2, 505, 1, 0])); // other playlist version
++        assert!(!compatible(&[], &tdm_search));
++    }
++
++    #[test]
++    fn reply_reads_back() {
++        let mut data = Vec::new();
++        {
++            let mut w = BdWriter::new(&mut data);
++            w.set_mode(StreamMode::BitMode);
++            w.set_type_checked(true);
++            w.write_type_checked_bit().unwrap();
++            w.write_u8(3).unwrap();
++            w.write_str("playlists.patch3").unwrap();
++            w.write_blob(b"version 1\n").unwrap();
++            w.write_i32(-5).unwrap();
++        }
++        let mut r = BdReader::new(data);
++        r.set_mode(StreamMode::BitMode);
++        r.read_type_checked_bit().unwrap();
++        assert_eq!(r.read_u8().unwrap(), 3);
++        assert_eq!(r.read_str().unwrap(), "playlists.patch3");
++        assert_eq!(r.read_blob().unwrap(), b"version 1\n");
++        assert!(r.next_is_i32().unwrap());
++        assert_eq!(r.read_i32().unwrap(), -5);
++    }
++}
+diff --git a/libbitdemon/src/messaging/bd_reader.rs b/libbitdemon/src/messaging/bd_reader.rs
+index b96d13e..1f35787 100644
+--- a/libbitdemon/src/messaging/bd_reader.rs
++++ b/libbitdemon/src/messaging/bd_reader.rs
+@@ -534,14 +534,6 @@ impl BdReader {
+     }
+ 
+     pub fn read_str(&mut self) -> Result<String, Box<dyn Error>> {
+-        ensure!(
+-            self.mode == StreamMode::ByteMode,
+-            ModeSnafu {
+-                actual_mode: self.mode,
+-                expected_mode: StreamMode::ByteMode
+-            }
+-        );
+-
+         if self.type_checked {
+             let actual_type = self.read_data_type()?;
+             ensure!(
+@@ -554,10 +546,22 @@ impl BdReader {
+         }
+ 
+         let mut buf = Vec::new();
+-        self.cursor.read_until(0u8, &mut buf)?;
+-        if !buf.is_empty() {
+-            // Remove the 0 byte
+-            buf.remove(buf.len() - 1);
++        if self.mode == StreamMode::BitMode {
++            // bit buffers (Modern Warfare 2) carry the characters unaligned
++            loop {
++                let mut c = [0u8];
++                self.read_bits(&mut c, 8)?;
++                if c[0] == 0 {
++                    break;
++                }
++                buf.push(c[0]);
++            }
++        } else {
++            self.cursor.read_until(0u8, &mut buf)?;
++            if !buf.is_empty() {
++                // Remove the 0 byte
++                buf.remove(buf.len() - 1);
++            }
+         }
+ 
+         Ok(String::from_utf8(buf)?)
+@@ -890,14 +894,6 @@ impl BdReader {
+     }
+ 
+     pub fn read_blob(&mut self) -> Result<Vec<u8>, Box<dyn Error>> {
+-        ensure!(
+-            self.mode == StreamMode::ByteMode,
+-            ModeSnafu {
+-                actual_mode: self.mode,
+-                expected_mode: StreamMode::ByteMode
+-            }
+-        );
+-
+         if self.type_checked {
+             let actual_type = self.read_data_type()?;
+             ensure!(
+@@ -910,11 +906,9 @@ impl BdReader {
+         }
+ 
+         let blob_size = self.read_u32()? as usize;
++        ensure!(blob_size <= self.cursor.get_ref().len(), UnexpectedEndOfMessageSnafu {});
+         let mut blob = vec![0; blob_size];
+-        ensure!(
+-            self.cursor.read(&mut blob[0..blob_size])? == blob_size,
+-            UnexpectedEndOfMessageSnafu {}
+-        );
++        self.read_bytes(&mut blob)?;
+ 
+         Ok(blob)
+     }
+diff --git a/libbitdemon/src/messaging/bd_writer.rs b/libbitdemon/src/messaging/bd_writer.rs
+index cc4e154..e790f40 100644
+--- a/libbitdemon/src/messaging/bd_writer.rs
++++ b/libbitdemon/src/messaging/bd_writer.rs
+@@ -310,20 +310,12 @@ impl<'a> BdWriter<'a> {
+     }
+ 
+     pub fn write_str(&mut self, value: &str) -> Result<(), Box<dyn Error>> {
+-        ensure!(
+-            self.mode == StreamMode::ByteMode,
+-            ModeSnafu {
+-                actual_mode: self.mode,
+-                expected_mode: StreamMode::ByteMode
+-            }
+-        );
+-
+         if self.type_checked {
+             self.write_data_type(BufferDataType::no_array(BdDataType::SignedChar8StringType))?;
+         }
+ 
+-        self.cursor.write_all(value.as_bytes())?;
+-        self.cursor.write_u8(0)?;
++        self.write_bytes(value.as_bytes())?;
++        self.write_bytes(&[0])?;
+ 
+         Ok(())
+     }
+@@ -519,20 +511,12 @@ impl<'a> BdWriter<'a> {
+     }
+ 
+     pub fn write_blob(&mut self, value: &[u8]) -> Result<(), Box<dyn Error>> {
+-        ensure!(
+-            self.mode == StreamMode::ByteMode,
+-            ModeSnafu {
+-                actual_mode: self.mode,
+-                expected_mode: StreamMode::ByteMode
+-            }
+-        );
+-
+         if self.type_checked {
+             self.write_data_type(BufferDataType::no_array(BdDataType::BlobType))?;
+         }
+ 
+         self.write_u32(value.len() as u32)?;
+-        self.cursor.write_all(value)?;
++        self.write_bytes(value)?;
+ 
+         Ok(())
+     }
+diff --git a/libbitdemon/src/networking/bd_socket.rs b/libbitdemon/src/networking/bd_socket.rs
+index 05e134e..9d4186c 100644
+--- a/libbitdemon/src/networking/bd_socket.rs
++++ b/libbitdemon/src/networking/bd_socket.rs
+@@ -142,6 +142,26 @@ impl BdSocket {
+                         debug!("Message with size {header}");
+                         let mut msg = vec![0; header as usize];
+                         session.read_exact(msg.as_mut_slice())?;
++                        // Modern Warfare 2 (PS3) batches messages: ff ff 00 00, then [u32 length][message]...;
++                        // the frame's length comes out one byte short of its last message, so read the rest
++                        if msg.len() >= 8 && msg[..4] == [0xff, 0xff, 0, 0] {
++                            let mut at = 4;
++                            while at + 4 <= msg.len() {
++                                let n = u32::from_le_bytes(msg[at..at + 4].try_into().unwrap()) as usize;
++                                at += 4;
++                                ensure!(n <= MAX_MESSAGE_SIZE as usize, MessageTooLargeSnafu { msg_size: n as u32 });
++                                if at + n > msg.len() {
++                                    let mut rest = vec![0; at + n - msg.len()];
++                                    session.read_exact(&mut rest)?;
++                                    msg.extend_from_slice(&rest);
++                                }
++                                let part = msg[at..at + n].to_vec();
++                                at += n;
++                                let message = BdMessage::new(session, part)?;
++                                message_handler.handle_message(session, message)?;
++                            }
++                            continue;
++                        }
+                         let message = BdMessage::new(session, msg)?;
+                         message_handler.handle_message(session, message)?;
+                     }
+-- 
+2.56.0
+

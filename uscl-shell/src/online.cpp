@@ -24,7 +24,14 @@ namespace
 	const QString swap_list =
 		"ops2-ps3-auth.prod.demonware.net=127.0.0.1&&ops2-ps3-lobby.prod.demonware.net=127.0.0.1"
 		"&&cod7-stun.us.demonware.net=127.0.0.1&&cod7-stun.eu.demonware.net=127.0.0.1"
-		"&&cod7-stun.jp.demonware.net=127.0.0.1&&cod7-stun.au.demonware.net=127.0.0.1&&stun.us.demonware.net=127.0.0.1";
+		"&&cod7-stun.jp.demonware.net=127.0.0.1&&cod7-stun.au.demonware.net=127.0.0.1&&stun.us.demonware.net=127.0.0.1"
+		// Modern Warfare 2
+		"&&mw2-ps3-auth.mmp3.demonware.net=127.0.0.1&&mw2-ps3-lsg.live.mmp3.demonware.net=127.0.0.1"
+		"&&mw2-stun.us.demonware.net=127.0.0.1&&mw2-stun.eu.demonware.net=127.0.0.1"
+		"&&auth1.ps3.iw4.iwnet.infinityward.com=127.0.0.1&&blob1.ps3.iw4.iwnet.infinityward.com=127.0.0.1"
+		"&&match1.ps3.iw4.iwnet.infinityward.com=127.0.0.1&&ip1.ps3.iw4.iwnet.infinityward.com=127.0.0.1"
+		"&&log1.ps3.iw4.iwnet.infinityward.com=127.0.0.1&&team1.ps3.iw4.iwnet.infinityward.com=127.0.0.1"
+		"&&web1.ps3.iw4.iwnet.infinityward.com=127.0.0.1";
 
 	struct preset
 	{
@@ -36,8 +43,9 @@ namespace
 	preset presetFor(const QString& serial)
 	{
 		static const QStringList bo2 = {"BLUS31011", "BLES01717", "BLES01718", "BLES01719", "BLES01720"};
+		static const QStringList mw2 = {"BLUS30377", "BLES00683", "BLES00684", "BLES00685", "BLES00686", "BLES00687"};
 		static const QStringList skate3 = {"BLUS30464", "BLES00760"};
-		if (bo2.contains(serial))
+		if (bo2.contains(serial) || mw2.contains(serial)) // the same uscl-dw ports
 			return {"bo2", true};
 		if (skate3.contains(serial))
 			return {"skate3", false};

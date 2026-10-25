@@ -120,11 +120,12 @@ jobs:
           "$QTDIR/bin/windeployqt.exe" --release --no-translations --qmldir uscl/uscl-shell/qml $S/uscl.exe
           cp "$(find uscl/uscl-bridge/target/release/build -name steam_api64.dll | head -1)" $S/
           # same data templates as packaging/build-linux.sh; the USCL panel looks for them in uscl-data
-          D=$S/uscl-data; mkdir -p $D/rpcn $D/dw/storage/publisher/18396
+          D=$S/uscl-data; mkdir -p $D/rpcn $D/dw/storage/publisher/18396 $D/dw/storage/publisher/5280
           cp rpcn/{servers,server_redirs,scoreboards}.cfg $D/rpcn/
           sed -e 's/^Port=.*/Port=31413/' -e 's/^Host=.*/Host=127.0.0.1/' -e 's/^HostIPv6=.*/HostIPv6=::1/' -e 's/^StatServerHost=.*/StatServerHost=127.0.0.1/' rpcn/rpcn.cfg > $D/rpcn/rpcn.cfg
           python uscl/uscl-dw/bo2-wad/mkwad.py $D/dw/storage/publisher/18396/online_tu19_mp_english.wad \
             uscl/uscl-dw/bo2-wad/leagues.info uscl/uscl-dw/bo2-wad/playlists_mp.info
+          cp uscl/uscl-dw/mw2-files/{playlists.patch3,motd-english.txt,messageoftheday.info} $D/dw/storage/publisher/5280/
           ls $S
 
       - name: Build installer

@@ -15,6 +15,7 @@ own = the publisher's own servers · ? = not profiled yet
 |---|---|---|---|---|---|
 | Minecraft: PlayStation 3 Edition | [BLUS31426](games/BLUS31426.md) | 1.84 | PSN (Matching2) | 🧪 two copies on one PC join the same world and see each other (2026-10-23) | the same join from a second PC over Steam |
 | Skate 3 | [BLUS30464](games/BLUS30464.md) | 1.05 + online EBOOT | Blaze (community server) + PSN invites | 🚧 bridge carries the server's ports (`host skate3`), untested | fix the joiner's black screen, then a two-PC test |
+| Call of Duty: Modern Warfare 2 | [BLUS30377](games/BLUS30377.md) | 1.14 | Demonware (older, its own lobby protocol) | 🧪 our Demonware (`uscl-dw` patch 0013): two copies on one PC matchmade and played the same Hardcore Free-for-all (2026-10-25); invites don't work in RPCS3 | two PCs over the Steam tunnel |
 | Call of Duty: Black Ops II | [BLUS31011](games/BLUS31011.md) | 1.19 | Demonware + PSN friends/invites | 🧪 our own Demonware (`uscl-dw`): two copies on one PC matchmade and played the same Team Deathmatch (NAT Open, no Activision servers); one PC can't sustain two copies for long | two PCs over the Steam tunnel |
 
 ## Next up
@@ -23,7 +24,6 @@ with `np-profile.py` on your own dump before starting.
 
 | Game | Serial | Online service | Reuses | Status |
 |---|---|---|---|---|
-| Call of Duty: Modern Warfare 2 | ? | Demonware ? | BO2's Demonware | 📋 |
 | Call of Duty: Black Ops | ? | Demonware ? | BO2's Demonware | 📋 |
 | Call of Duty: Modern Warfare 3 | ? | Demonware ? | BO2's Demonware | 📋 |
 | Call of Duty: Ghosts | ? | Demonware ? | BO2's Demonware | ⬜ |
