@@ -362,6 +362,10 @@ bool Online::start(service s, const QString& tool, const QStringList& args, cons
 				static const QRegularExpression failed(R"(anticheat: (\S+) failed the game code check)");
 				if (const auto m = failed.match(line); s == demonware && m.hasMatch())
 					emit notice(tr("%1 was removed: their game code doesn't match yours.").arg(m.captured(1)));
+				// "anticheat: <name> sent impossible stats (...)": the upload was refused, their saved stats stay
+				static const QRegularExpression stats(R"(anticheat: (\S+) sent impossible stats)");
+				if (const auto m = stats.match(line); s == demonware && m.hasMatch())
+					emit notice(tr("%1 tried to save impossible stats. They were refused.").arg(m.captured(1)));
 				if (s != bridge)
 					continue;
 				static const QRegularExpression re(R"(session (\d+) \((hosting|joined)\))");

@@ -39,6 +39,8 @@ login uses its ticket). The older two-address setup (`DW_AUTH_ADDR` / `DW_LOBBY_
 - 0011: Anticheat: BO2's code checks (push type 19) every `DW_AC_INTERVAL` s (300), judged against the answers of
   `DW_TRUSTED_USER` (the host); a player whose game code differs is refused (see `games/BLUS31011.md`). Lobby
   servers can send push messages after a reply (`PushSource`).
+- 0012: Stats check: an `mpstatsCompressed` upload with prestige/rank/XP past the maximum, a prestige jump or more XP
+  than one match gives is refused (layout: `ddl_mp/stats.ddl` v244, see `games/BLUS31011.md`).
 
 ## Status
 Black Ops II 1.19: login, lobby, stats and **Play Online** work (2026-10-23). Publisher files go in
