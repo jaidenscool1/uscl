@@ -9,6 +9,8 @@ tag=${1:?usage: sign-release.sh <tag> [file ...]}; shift
 key=${USCL_SIGNING_KEY:-$HOME/.config/uscl-signing/update-key.pem}
 [ -f "$key" ] || { echo "no signing key at $key"; exit 1; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+# gh finds the repo from the current folder; pin it, since the signing below runs in $tmp
+export GH_REPO=${GH_REPO:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}
 
 gh release view "$tag" >/dev/null 2>&1 || {
   pre=""; case "$tag" in *-*) pre="--prerelease";; esac
