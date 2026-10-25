@@ -43,10 +43,10 @@ login uses its ticket). The older two-address setup (`DW_AUTH_ADDR` / `DW_LOBBY_
 - 0012: Stats check: an `mpstatsCompressed` upload with prestige/rank/XP past the maximum, a prestige jump or more XP
   than one match gives is refused (layout: `ddl_mp/stats.ddl` v244, see `games/BLUS31011.md`).
 - 0013: Modern Warfare 2 (title 5280, `lobby/mw2.rs`): its older Demonware (batched frames, bit-packed tasks and
-  replies), publisher files by id, matchmaking and the bandwidth test (see `games/BLUS30377.md`).
+  replies), publisher files by id, the player's stats file, matchmaking and the bandwidth test (see `games/BLUS30377.md`).
 
 ## Status
-Modern Warfare 2 1.14: login, playlists and matchmaking work; two copies played the same match (2026-10-25).
+Modern Warfare 2 1.14: login, playlists, stats and matchmaking work; two copies played the same match (2026-10-25).
 Publisher files `playlists.patch3`, `motd-english.txt` and `messageoftheday.info` from `mw2-files/` go in
 `storage/publisher/5280/`. RPCS3's swap list also needs MW2's names (the USCL panel sets them).
 
