@@ -358,6 +358,10 @@ bool Online::start(service s, const QString& tool, const QStringList& args, cons
 			while (p->canReadLine())
 			{
 				const QString line = QString::fromUtf8(p->readLine()).trimmed();
+				// our Demonware's code check (BO2's own anticheat): "anticheat: <name> failed the game code check ..."
+				static const QRegularExpression failed(R"(anticheat: (\S+) failed the game code check)");
+				if (const auto m = failed.match(line); s == demonware && m.hasMatch())
+					emit notice(tr("%1 was removed: their game code doesn't match yours.").arg(m.captured(1)));
 				if (s != bridge)
 					continue;
 				static const QRegularExpression re(R"(session (\d+) \((hosting|joined)\))");
@@ -453,6 +457,8 @@ void Online::host(const QString& serial, const QString& title, const QString& pa
 		dw_env.insert("DW_STUN_ALT_ADDR", "127.0.0.1:3077");
 		dw_env.insert("DW_STUN_SELF_ADDR", "127.0.0.1:39001"); // the host is slot 1
 		dw_env.insert("RUST_LOG", "info");
+		// BO2's built-in anticheat: everyone's game gets the same code checks; this PC's answers are the reference
+		dw_env.insert("DW_TRUSTED_USER", yamlValue(readFile(rpcs3File("rpcn.yml")), {}, "NPID"));
 		if (!start(demonware, toolPath("dw-server"), {}, data + "/dw", dw_env))
 			return;
 	}

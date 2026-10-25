@@ -575,6 +575,7 @@ Window {
             if (online.state === "hosting" || online.state === "joined") { sound("notify"); notice.show(sessionText(), ic("it_stream")) }
             else if (online.state === "off" && online.message) { sound("error"); notice.show(online.message, ic("it_nettest")) }
         }
+        function onNotice(text) { sound("error"); notice.show(text, ic("it_person")) }
     }
     Connections {
         target: system

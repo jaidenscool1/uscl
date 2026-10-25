@@ -72,6 +72,8 @@ signals:
 	void friendsChanged();
 	void testsChanged();
 	void bansChanged();
+	// something the host should see now, e.g. a player removed by the anticheat
+	void notice(const QString& text);
 
 private:
 	enum service { rpcn, demonware, bridge };
