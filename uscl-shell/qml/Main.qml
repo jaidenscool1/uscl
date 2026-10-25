@@ -575,13 +575,13 @@ Window {
         online.friends.forEach(function(f) {
             var away = ["Away", "Snooze", "Busy"].indexOf(f.state) >= 0
             friends.push({
-                title: f.name, icon: f.avatar || ic("it_person"),
-                // the PS3's presence light: green online, orange away, none offline
-                presence: !f.online ? "" : away ? "#f0a020" : "#40d040",
-                desc: f.session ? qsTr("Online · In a USCL session: ✕ to join")
+                title: f.name, icon: f.avatar || ic("it_person"), friend: true,
+                status: !f.online ? "offline" : away ? "away" : "online",
+                cardColor: f.color || "", level: f.level || 0,
+                desc: f.session ? qsTr("In a USCL session: ✕ to join")
                     : !f.online ? qsTr("Offline")
+                    : f.playing ? qsTr("Playing a game")
                     : f.state === "Busy" ? qsTr("Busy") : away ? qsTr("Away") : qsTr("Online"),
-                dim: !f.online,
                 action: f.session ? function() { needsName(function() { online.join(f.session) }) }
                                   : function() { notice.show(f.online ? qsTr("%1 isn't in a USCL session").arg(f.name) : qsTr("%1 is offline").arg(f.name), ic("it_person")) }
             })

@@ -89,6 +89,10 @@ fn friends() -> Result<(), String> {
     // Steam loads big pictures on request: ask, give it a moment, then take what's there (medium otherwise)
     let mut pictures = std::collections::HashMap::new();
     if avatar_dir.is_some() {
+        // levels (and big pictures) arrive with the friend's full profile
+        for f in &all {
+            client.friends().request_user_information(f.id(), false);
+        }
         let start = std::time::Instant::now();
         loop {
             for f in &all {
@@ -124,12 +128,36 @@ fn friends() -> Result<(), String> {
                 }
                 _ => None,
             };
+            // Steam level: the ★ number on the PS3's friend card
+            let level = unsafe {
+                steamworks_sys::SteamAPI_ISteamFriends_GetFriendSteamLevel(steamworks_sys::SteamAPI_SteamFriends_v018(), f.id().raw())
+            };
+            let color = pictures.get(&f.id().raw()).map(|(_, rgba)| card_color(rgba));
+            let playing = f.game_played().is_some_and(|g| g.game.app_id() != app);
             serde_json::json!({"id": f.id().raw().to_string(), "name": f.name(), "state": format!("{state:?}"),
-                "online": !matches!(state, FriendState::Offline | FriendState::Invisible), "session": session, "avatar": avatar})
+                "online": !matches!(state, FriendState::Offline | FriendState::Invisible), "session": session, "avatar": avatar,
+                "level": level, "color": color, "playing": playing})
         })
         .collect();
     println!("{}", serde_json::Value::Array(list));
     Ok(())
+}
+
+/// The PS3 colours each friend's card with their profile colour; Steam has none, so take the picture's average,
+/// brightened so the card reads as a colour rather than grey, as "#rrggbb"
+fn card_color(rgba: &[u8]) -> String {
+    let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
+    for px in rgba.chunks_exact(4) {
+        r += px[0] as u64;
+        g += px[1] as u64;
+        b += px[2] as u64;
+        n += 1;
+    }
+    let n = n.max(1);
+    let (r, g, b) = ((r / n) as f64, (g / n) as f64, (b / n) as f64);
+    let max = r.max(g).max(b).max(1.0);
+    let scale = 200.0 / max;
+    format!("#{:02x}{:02x}{:02x}", (r * scale).min(255.0) as u8, (g * scale).min(255.0) as u8, (b * scale).min(255.0) as u8)
 }
 
 /// A square RGBA picture as a binary PPM (RGB), which Qt reads without extra image plugins
@@ -143,6 +171,11 @@ fn ppm(size: usize, rgba: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod picture_tests {
+    #[test]
+    fn card_color_brightens_the_average() {
+        assert_eq!(super::card_color(&[100, 50, 0, 255, 100, 50, 0, 255]), "#c86400");
+    }
+
     #[test]
     fn ppm_drops_alpha() {
         let out = super::ppm(1, &[1, 2, 3, 255]);

@@ -112,6 +112,10 @@ Item {
                 required property int index
                 readonly property bool sel: index === xmb.item
                 readonly property bool wide: !!modelData.wide      // game icons (ICON0.PNG, 320x176)
+                // a friend, drawn like the PS3's friends list: status icon, name, a line under it, and when focused
+                // a card in the friend's colour with their level
+                readonly property bool fr: !!modelData.friend
+                readonly property color cardColor: modelData.cardColor || "#8090a0"
                 x: xmb.colX
                 y: sel ? xmb.focTop
                    : index < xmb.item ? xmb.focTop - (xmb.item - index) * xmb.rowH
@@ -122,39 +126,67 @@ Item {
                 opacity: modelData.disabled ? 0.45 : modelData.dim ? 0.6 : 1
                 Behavior on y { NumberAnimation { duration: 200; easing.type: Easing.OutSine } }
 
+                Rectangle {
+                    visible: row.fr && row.sel
+                    x: icon.x - 4; y: icon.y + 8
+                    width: 1320; height: icon.height - 16
+                    radius: 14
+                    gradient: Gradient {
+                        orientation: Gradient.Vertical
+                        GradientStop { position: 0; color: Qt.rgba(Qt.lighter(row.cardColor, 1.25).r, Qt.lighter(row.cardColor, 1.25).g, Qt.lighter(row.cardColor, 1.25).b, 0.78) }
+                        GradientStop { position: 1; color: Qt.rgba(row.cardColor.r, row.cardColor.g, row.cardColor.b, 0.62) }
+                    }
+                    border.color: "#50ffffff"; border.width: 1
+                    Text {
+                        visible: row.modelData.level > 0
+                        anchors.right: parent.right; anchors.rightMargin: 22; y: 8
+                        text: "★" + row.modelData.level
+                        color: "white"; font.pixelSize: 30
+                        style: Text.Raised; styleColor: "#80000000"
+                    }
+                }
+                // focused friend: the picture gets a glowing frame
+                Rectangle {
+                    visible: row.fr && row.sel
+                    x: icon.x - 5; y: icon.y - 5; width: icon.width + 10; height: icon.height + 10
+                    radius: 8; color: "transparent"
+                    border.color: "#38b4ff"; border.width: 4
+                }
                 // icon: 100 px in the list, 150 px focused (wide game icons keep their shape)
                 Image {
                     id: icon
-                    readonly property real h: row.sel ? 150 : 100
+                    readonly property real h: row.fr ? (row.sel ? 140 : 80) : row.sel ? 150 : 100
                     width: row.wide ? h * 1.82 : h; height: h
                     x: 220 - width / 2
                     y: row.sel ? 235 : 10
                     source: row.modelData.icon || ""
                     fillMode: Image.PreserveAspectFit
-                    opacity: row.sel ? 1 : 0.71
+                    opacity: row.sel || row.fr ? 1 : 0.71
                     asynchronous: true; mipmap: true
                     Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutSine } }
                 }
                 Text {
                     id: titleText
-                    x: row.sel ? (row.wide ? 220 + icon.width / 2 + 40 : 325) : (row.wide ? 220 + icon.width / 2 + 40 : 310)
-                    y: row.sel ? 262 : 10
-                    height: row.sel ? 56 : 100
+                    x: row.fr ? icon.x + icon.width + 62
+                       : row.sel ? (row.wide ? 220 + icon.width / 2 + 40 : 325) : (row.wide ? 220 + icon.width / 2 + 40 : 310)
+                    y: row.fr ? icon.y + icon.height / 2 - (row.sel ? 44 : 38) : row.sel ? 262 : 10
+                    height: row.fr ? 50 : row.sel ? 56 : 100
                     width: 1200
                     verticalAlignment: Text.AlignVCenter
                     text: row.modelData.title
-                    color: row.sel ? "white" : "#b4ffffff"
-                    font.pixelSize: row.sel ? 40 : 29
+                    color: row.sel || row.fr ? "white" : "#b4ffffff"
+                    font.pixelSize: row.fr ? (row.sel ? 38 : 32) : row.sel ? 40 : 29
                     elide: Text.ElideRight
                     style: Text.Raised; styleColor: row.sel ? "#90000000" : "#70000000"
                 }
-                // presence light at the picture's corner (friends)
+                // the PS3's status icon before the name: red circle with a cross offline, blue online, amber away
                 Rectangle {
-                    visible: !!row.modelData.presence
-                    width: row.sel ? 26 : 18; height: width; radius: width / 2
-                    x: icon.x + icon.width - width * 0.7; y: icon.y + icon.height - height * 0.7
-                    color: row.modelData.presence || "transparent"
-                    border.color: "#c0ffffff"; border.width: 2
+                    visible: row.fr
+                    width: 26; height: 26; radius: 13
+                    x: titleText.x - 40; y: titleText.y + (titleText.height - height) / 2
+                    color: row.modelData.status === "offline" ? "#e02020" : row.modelData.status === "away" ? "#f0a020" : "#2088f0"
+                    border.color: "#e0ffffff"; border.width: 2
+                    Text { visible: row.modelData.status === "offline"; anchors.centerIn: parent; text: "✕"; color: "white"; font.pixelSize: 15; font.bold: true }
                 }
                 // a small tag after the title: "Update", or a count
                 Rectangle {
@@ -167,12 +199,14 @@ Item {
                     Text { id: badgeText; anchors.centerIn: parent; text: row.modelData.badge || ""; color: "black"; font.pixelSize: 21; font.bold: true }
                 }
                 Text {
-                    visible: row.sel && !!row.modelData.desc
-                    x: row.wide ? 220 + icon.width / 2 + 42 : 327
-                    y: 322; height: 40; width: 1200
+                    visible: (row.sel || row.fr) && !!row.modelData.desc
+                    x: row.fr ? titleText.x + 2 : row.wide ? 220 + icon.width / 2 + 42 : 327
+                    y: row.fr ? titleText.y + titleText.height - 6 : 322
+                    height: row.fr ? 34 : 40; width: row.fr ? 880 : 1200
+                    font.pixelSize: row.fr ? (row.sel ? 25 : 22) : 25
                     verticalAlignment: Text.AlignVCenter
                     text: row.modelData.desc || ""
-                    color: "#a8ffffff"; font.pixelSize: 25
+                    color: "#d8ffffff"
                     elide: Text.ElideRight
                     style: Text.Raised; styleColor: "#70000000"
                 }
