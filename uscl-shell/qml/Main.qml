@@ -97,6 +97,34 @@ Window {
         return serial
     }
 
+    // ---------------------------------------------------------------- party chat (Discord), like the PS5's party
+    function partyItem() {
+        var talking = party.members.filter(function(m) { return m.speaking }).map(function(m) { return m.name })
+        return {
+            title: party.inParty ? qsTr("Party (%n)", "", party.members.length) : qsTr("Party"),
+            icon: ic("cat_friends"), badge: party.inParty ? (party.muted ? qsTr("Muted") : qsTr("Voice")) : "",
+            desc: party.message ? party.message
+                : !party.linked ? qsTr("Voice chat with your session over Discord: ✕ to link your Discord account")
+                : party.inParty ? (talking.length ? qsTr("Talking: %1").arg(talking.join(", ")) : qsTr("Voice chat is on"))
+                : party.state === "ready" ? qsTr("Host or join a session and your party starts by itself")
+                : qsTr("Connecting to Discord..."),
+            action: function() { if (!party.linked && party.state !== "linking") party.link(); else openPage(partyPage, ic("cat_friends"), friendsCat) }
+        }
+    }
+    function partyPage() {
+        var rows = []
+        party.members.forEach(function(m) {
+            rows.push({ title: m.name + (m.me ? qsTr(" (you)") : ""), icon: m.avatar || ic("it_person"),
+                        value: m.speaking ? qsTr("Talking") : "", disabled: true })
+        })
+        if (!rows.length)
+            rows.push({ title: party.state === "ready" ? qsTr("Nobody here yet: host or join a session") : party.message || qsTr("Connecting to Discord..."), disabled: true })
+        rows.push({ title: party.muted ? qsTr("Unmute Microphone") : qsTr("Mute Microphone"), icon: ic("it_sound"), action: function() { party.setMuted(!party.muted) } })
+        rows.push({ title: qsTr("Unlink Discord"), icon: ic("it_logout"), help: party.myName ? qsTr("Signed in as %1").arg(party.myName) : "",
+                    action: function() { dialog.confirm(qsTr("Party"), qsTr("Unlink your Discord account from USCL?"), function() { party.unlink(); popPage() }) } })
+        return rows
+    }
+
     // ---------------------------------------------------------------- game updates (Sony's patches)
     property var updatePick: ({})     // serial -> true: games picked on the Game Updates page
     function checkGameUpdates() {
@@ -466,6 +494,7 @@ Window {
         online.state; online.session; online.message; online.friends; online.friendsLoading; online.friendsError; online.players; online.bans; cfgTick
         updater.state; updater.progress
         gameUpdates.available; gameUpdates.checking; gameUpdates.busy
+        party.state; party.message; party.linked; party.inParty; party.muted; party.members
         return buildCats()
     }
 
@@ -536,6 +565,7 @@ Window {
                      { title: qsTr("User's Guide"), icon: ic("it_help"), desc: qsTr("How to use this system"), action: guide })
 
         var friends = []
+        if (party.available) friends.push(partyItem())
         if (online.friendsError)
             friends.push({ title: qsTr("Steam Isn't Available"), icon: ic("it_nettest"), desc: online.friendsError, action: online.refreshFriends })
         else if (online.friendsLoading && !online.friends.length)
@@ -651,6 +681,7 @@ Window {
     Connections {
         target: online
         function onStateChanged() {
+            party.setSession(online.state === "hosting" || online.state === "joined" ? online.session : "")
             if (online.state === "hosting" || online.state === "joined") { sound("notify"); notice.show(sessionText(), ic("it_stream")) }
             else if (online.state === "off" && online.message) { sound("error"); notice.show(online.message, ic("it_nettest")) }
         }

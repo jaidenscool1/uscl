@@ -121,6 +121,16 @@ jobs:
           cp rpcn/target/release/rpcn.exe servers/uscl-rpcn.exe
           cp "$(find uscl/uscl-bridge/target/release/build -name steam_api64.dll | head -1)" servers/
 
+      # Party chat: Discord's Social SDK can't be downloaded without a Discord login, so a copy is kept on the
+      # ci-cache draft release (not public). Without it the home screen builds without party chat.
+      - name: Get the Discord Social SDK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release download ci-cache -R $GITHUB_REPOSITORY -p "discord-social-sdk-*.zip" -D dsdk 2>/dev/null; then
+            7z x -y -odsdk dsdk/*.zip >/dev/null && echo "DISCORD_SDK=$(cygpath -w "$PWD/dsdk/discord_social_sdk")" >> $GITHUB_ENV
+          fi
+
       - name: Compile home screen (uscl-shell)
         shell: pwsh
         run: |
@@ -130,7 +140,7 @@ jobs:
           $sdl = (Get-ChildItem sdl3 -Directory | Select-Object -First 1).FullName
           $version = "${{ github.ref_name }}" -replace '^v', ''
           if ("${{ github.ref_type }}" -ne "tag") { $version = "0.0.0-dev" }
-          cmake -S uscl/uscl-shell -B shell-build -A x64 "-DCMAKE_PREFIX_PATH=$env:QTDIR" "-DSDL3_DIR=$sdl/cmake" "-DUSCL_VERSION=$version"
+          cmake -S uscl/uscl-shell -B shell-build -A x64 "-DCMAKE_PREFIX_PATH=$env:QTDIR" "-DSDL3_DIR=$sdl/cmake" "-DUSCL_VERSION=$version" "-DUSCL_DISCORD_SDK=$env:DISCORD_SDK"
           cmake --build shell-build --config Release
           Copy-Item "$sdl/lib/x64/SDL3.dll" shell-build/Release/
           # a GUI-subsystem exe: wait for it explicitly; Qt's DLLs aren't deployed next to it yet
@@ -148,6 +158,7 @@ jobs:
           curl -fsSL 'https://rpcs3.net/compatibility?api=v1&export' | iconv -t UTF-8 > $S/GuiConfigs/compat_database.dat || true
           cp servers/* $S/
           cp shell-build/Release/uscl.exe shell-build/Release/SDL3.dll $S/
+          [ -f shell-build/Release/discord_partner_sdk.dll ] && cp shell-build/Release/discord_partner_sdk.dll $S/
           "$QTDIR/bin/windeployqt.exe" --release --no-translations --qmldir uscl/uscl-shell/qml $S/uscl.exe
           # same data templates as packaging/build-linux.sh; the USCL panel looks for them in uscl-data
           D=$S/uscl-data; mkdir -p $D/rpcn $D/dw/storage/publisher/18396 $D/dw/storage/publisher/5280
@@ -182,6 +193,7 @@ jobs:
           if [ "$SERVERS_CACHED" != 1 ]; then (cd servers && 7z a -tzip "../$SERVERS_KEY.zip" . >/dev/null); gh release upload ci-cache -R $GITHUB_REPOSITORY "$SERVERS_KEY.zip" --clobber; fi
           # only the current pair is worth keeping
           for old in $(gh release view ci-cache -R $GITHUB_REPOSITORY --json assets -q '.assets[].name'); do
+            case "$old" in discord-social-sdk-*) continue;; esac  # the Discord SDK lives here too
             [ "$old" = "$RPCS3_KEY.zip" ] || [ "$old" = "$SERVERS_KEY.zip" ] || gh release delete-asset ci-cache "$old" -R $GITHUB_REPOSITORY -y
           done
 

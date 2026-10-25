@@ -1,3 +1,4 @@
+#include "discordparty.h"
 #include "gamepad.h"
 #include "games.h"
 #include "gameupdates.h"
@@ -206,6 +207,8 @@ int main(int argc, char* argv[])
 	engine.rootContext()->setContextProperty("updater", &updater);
 	GameUpdates gameUpdates;
 	engine.rootContext()->setContextProperty("gameUpdates", &gameUpdates);
+	DiscordParty party;
+	engine.rootContext()->setContextProperty("party", &party);
 	engine.rootContext()->setContextProperty("windowed", app.arguments().contains("--windowed"));
 	QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
 	engine.loadFromModule("Uscl", "Main");

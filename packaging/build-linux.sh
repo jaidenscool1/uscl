@@ -2,6 +2,7 @@
 # Build the USCL AppImage: our RPCS3 build (uscl-rpcs3 patches) + uscl-rpcn + our Demonware + uscl-bridge.
 # usage: packaging/build-linux.sh
 #   USCL_RPCS3_BUILD  RPCS3 build dir (cmake -G Ninja, Release)   default ~/src/rpcs3-uscl/build-release
+#   USCL_DISCORD_SDK  Discord Social SDK (discord_social_sdk folder) for party chat; default ~/src/discord-social-sdk/sdk/discord_social_sdk
 #   USCL_RPCN_SRC     uscl-rpcn checkout                           default ~/src/rpcn-uscl
 #   USCL_DW_SRC       uscl-dw checkout                             default ~/src/obde-uscl
 # Output: build/USCL-x86_64.AppImage. Tools (linuxdeploy) are cached in ~/.cache/uscl-build.
@@ -19,7 +20,8 @@ echo "== servers"
 (cd "$DW_SRC" && cargo build --release -q -p dw-server)
 
 echo "== home screen (uscl-shell)"
-cmake -S "$REPO/uscl-shell" -B "$REPO/uscl-shell/build-release" -G Ninja -DCMAKE_BUILD_TYPE=Release >/dev/null
+DSDK=${USCL_DISCORD_SDK:-$HOME/src/discord-social-sdk/sdk/discord_social_sdk}; [ -d "$DSDK" ] || DSDK=""
+cmake -S "$REPO/uscl-shell" -B "$REPO/uscl-shell/build-release" -G Ninja -DCMAKE_BUILD_TYPE=Release -DUSCL_DISCORD_SDK="$DSDK" >/dev/null
 ninja -C "$REPO/uscl-shell/build-release"
 "$REPO/uscl-shell/build-release/uscl" --self-test
 
@@ -28,6 +30,7 @@ ninja -C "$RPCS3_BUILD"
 DESTDIR="$APPDIR" ninja -C "$RPCS3_BUILD" install >/dev/null
 
 BIN=$APPDIR/usr/bin
+[ -f "$REPO/uscl-shell/build-release/libdiscord_partner_sdk.so" ] && install -m755 "$REPO/uscl-shell/build-release/libdiscord_partner_sdk.so" "$APPDIR/usr/bin/"
 install -m755 "$REPO/uscl-bridge/target/release/uscl-bridge" "$RPCN_SRC/target/release/rpcn" "$DW_SRC/target/release/dw-server" "$REPO/uscl-shell/build-release/uscl" "$BIN/"
 mv "$BIN/rpcn" "$BIN/uscl-rpcn"
 cp "$(find "$REPO/uscl-bridge/target/release/build" -name libsteam_api.so | head -1)" "$BIN/"   # the bridge loads it from its own folder

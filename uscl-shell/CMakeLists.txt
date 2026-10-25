@@ -16,6 +16,7 @@ qt_add_executable(uscl
     src/main.cpp
     src/games.cpp src/games.h
     src/gameupdates.cpp src/gameupdates.h
+    src/discordparty.cpp src/discordparty.h
     src/gamepad.cpp src/gamepad.h
     src/launcher.cpp src/launcher.h
     src/system.cpp src/system.h
@@ -73,6 +74,25 @@ if(Vulkan_FOUND)
     target_include_directories(uscl PRIVATE ${Vulkan_INCLUDE_DIRS})
 endif()
 target_link_libraries(uscl PRIVATE Qt6::Quick Qt6::Multimedia Qt6::Network SDL3::SDL3)
+
+# Party chat: the Discord Social SDK (from Discord's developer portal; not in this repo). Without it the home
+# screen builds without party chat.
+set(USCL_DISCORD_SDK "" CACHE PATH "the discord_social_sdk folder from Discord's Social SDK download")
+if(USCL_DISCORD_SDK)
+    target_compile_definitions(uscl PRIVATE USCL_DISCORD)
+    target_include_directories(uscl PRIVATE ${USCL_DISCORD_SDK}/include)
+    if(WIN32)
+        target_link_libraries(uscl PRIVATE ${USCL_DISCORD_SDK}/lib/release/discord_partner_sdk.lib)
+        add_custom_command(TARGET uscl POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${USCL_DISCORD_SDK}/bin/release/discord_partner_sdk.dll $<TARGET_FILE_DIR:uscl>)
+    else()
+        target_link_libraries(uscl PRIVATE ${USCL_DISCORD_SDK}/lib/release/libdiscord_partner_sdk.so)
+        # found next to uscl at runtime
+        set_target_properties(uscl PROPERTIES BUILD_RPATH "$ORIGIN" INSTALL_RPATH "$ORIGIN")
+        add_custom_command(TARGET uscl POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${USCL_DISCORD_SDK}/lib/release/libdiscord_partner_sdk.so $<TARGET_FILE_DIR:uscl>)
+    endif()
+endif()
 
 set_target_properties(uscl PROPERTIES WIN32_EXECUTABLE ON)
 install(TARGETS uscl RUNTIME DESTINATION bin)
