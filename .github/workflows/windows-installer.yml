@@ -52,8 +52,28 @@ jobs:
           git clone -q https://github.com/Laupetin/open-bitdemon-emulator obde
           git -C obde checkout -q $DW_COMMIT && git -C obde am -q "$PWD"/uscl/uscl-dw/patches/*.patch
 
+      # Built RPCS3 and servers are kept as assets of a draft release (ci-cache), named by a hash of what they're
+      # built from: a release that only changes the home screen skips the hour of compiling. (Actions caches
+      # don't carry over from one tag's run to the next.)
+      - name: Reuse RPCS3 and the servers if their sources haven't changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          R=$GITHUB_REPOSITORY
+          rk=rpcs3-$RPCS3_COMMIT-$(cat uscl/uscl-rpcs3/patches/*.patch | sha256sum | cut -c1-16)
+          sk=servers-$RPCN_COMMIT-$DW_COMMIT-$( { cat uscl/uscl-rpcn/patches/*.patch uscl/uscl-dw/patches/*.patch; git -C uscl ls-tree -r HEAD uscl-bridge; } | sha256sum | cut -c1-16)
+          echo "RPCS3_KEY=$rk" >> $GITHUB_ENV; echo "SERVERS_KEY=$sk" >> $GITHUB_ENV
+          if gh release download ci-cache -R $R -p "$rk.zip" -D cache 2>/dev/null; then
+            7z x -y -orpcs3/bin "cache/$rk.zip" >/dev/null && echo "RPCS3_CACHED=1" >> $GITHUB_ENV && echo "reusing $rk"
+          fi
+          if gh release download ci-cache -R $R -p "$sk.zip" -D cache 2>/dev/null; then
+            7z x -y -oservers "cache/$sk.zip" >/dev/null && echo "SERVERS_CACHED=1" >> $GITHUB_ENV && echo "reusing $sk"
+          fi
+
       - uses: nuget/setup-nuget@v2
+        if: env.RPCS3_CACHED != '1'
       - name: Restore NuGet packages
+        if: env.RPCS3_CACHED != '1'
         working-directory: rpcs3
         run: nuget restore rpcs3.sln
 
@@ -72,22 +92,34 @@ jobs:
           grep -v '^#' .ci/ci-vars.env | grep = >> "$GITHUB_ENV"
 
       - uses: microsoft/setup-msbuild@v2
+        if: env.RPCS3_CACHED != '1'
 
       - name: Compile USCL (RPCS3)
+        if: env.RPCS3_CACHED != '1'
         working-directory: rpcs3
         shell: pwsh
         run: msbuild rpcs3.sln /p:Configuration=Release /v:minimal /p:Platform=x64 /p:PreferredToolArchitecture=x64 /p:UseMultiToolTask=true /p:CustomAfterMicrosoftCommonTargets="${{ github.workspace }}\rpcs3\buildfiles\msvc\ci_only.targets"
 
       - name: Install protoc
+        if: env.SERVERS_CACHED != '1'
         run: choco install -y --no-progress protoc
 
       - name: Compile servers
+        if: env.SERVERS_CACHED != '1'
         # pwsh, so the vendored OpenSSL build finds Strawberry Perl and not Git's
         shell: pwsh
         run: |
           cd uscl/uscl-bridge; cargo build --release; cd ../..
           cd rpcn; cargo build --release; cd ..
           cd obde; cargo build --release -p dw-server; cd ..
+
+      - name: Collect the servers
+        if: env.SERVERS_CACHED != '1'
+        run: |
+          mkdir -p servers
+          cp uscl/uscl-bridge/target/release/uscl-bridge.exe obde/target/release/dw-server.exe servers/
+          cp rpcn/target/release/rpcn.exe servers/uscl-rpcn.exe
+          cp "$(find uscl/uscl-bridge/target/release/build -name steam_api64.dll | head -1)" servers/
 
       - name: Compile home screen (uscl-shell)
         shell: pwsh
@@ -114,11 +146,9 @@ jobs:
           mkdir -p $S/config/input_configs
           curl -fsSL https://raw.githubusercontent.com/gabomdq/SDL_GameControllerDB/master/gamecontrollerdb.txt > $S/config/input_configs/gamecontrollerdb.txt
           curl -fsSL 'https://rpcs3.net/compatibility?api=v1&export' | iconv -t UTF-8 > $S/GuiConfigs/compat_database.dat || true
-          cp uscl/uscl-bridge/target/release/uscl-bridge.exe obde/target/release/dw-server.exe $S/
-          cp rpcn/target/release/rpcn.exe $S/uscl-rpcn.exe
+          cp servers/* $S/
           cp shell-build/Release/uscl.exe shell-build/Release/SDL3.dll $S/
           "$QTDIR/bin/windeployqt.exe" --release --no-translations --qmldir uscl/uscl-shell/qml $S/uscl.exe
-          cp "$(find uscl/uscl-bridge/target/release/build -name steam_api64.dll | head -1)" $S/
           # same data templates as packaging/build-linux.sh; the USCL panel looks for them in uscl-data
           D=$S/uscl-data; mkdir -p $D/rpcn $D/dw/storage/publisher/18396 $D/dw/storage/publisher/5280
           cp rpcn/{servers,server_redirs,scoreboards}.cfg $D/rpcn/
@@ -138,6 +168,22 @@ jobs:
           & $iscc /DStage="${{ github.workspace }}\stage" /DVersion="$version" /O"${{ github.workspace }}\artifacts" uscl\packaging\windows\uscl.iss
           # the updater checks this
           (Get-FileHash artifacts\USCL-Setup.exe -Algorithm SHA256).Hash.ToLower() + "  USCL-Setup.exe" | Out-File -Encoding ascii -NoNewline artifacts\USCL-Setup.exe.sha256
+
+      # Keep what was compiled for the next release (see "Reuse RPCS3 ...")
+      - name: Save RPCS3 and the servers for later releases
+        if: env.RPCS3_CACHED != '1' || env.SERVERS_CACHED != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd uscl
+          gh release view ci-cache >/dev/null 2>&1 || gh release create ci-cache --draft --title "CI cache" --notes "Build cache for the Windows installer (not a release)"
+          cd ..
+          if [ "$RPCS3_CACHED" != 1 ]; then (cd rpcs3/bin && 7z a -tzip "../../$RPCS3_KEY.zip" . >/dev/null); gh release upload ci-cache -R $GITHUB_REPOSITORY "$RPCS3_KEY.zip" --clobber; fi
+          if [ "$SERVERS_CACHED" != 1 ]; then (cd servers && 7z a -tzip "../$SERVERS_KEY.zip" . >/dev/null); gh release upload ci-cache -R $GITHUB_REPOSITORY "$SERVERS_KEY.zip" --clobber; fi
+          # only the current pair is worth keeping
+          for old in $(gh release view ci-cache -R $GITHUB_REPOSITORY --json assets -q '.assets[].name'); do
+            [ "$old" = "$RPCS3_KEY.zip" ] || [ "$old" = "$SERVERS_KEY.zip" ] || gh release delete-asset ci-cache "$old" -R $GITHUB_REPOSITORY -y
+          done
 
       - uses: actions/upload-artifact@v4
         with:
