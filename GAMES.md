@@ -17,7 +17,7 @@ own = the publisher's own servers · GameSpy (revived by OpenSpy) · ? = not pro
 | Skate 3 | [BLUS30464](games/BLUS30464.md) | 1.05 + online EBOOT | Blaze (community server) + PSN invites | 🚧 bridge carries the server's ports (`host skate3`), untested | fix the joiner's black screen, then a two-PC test |
 | Call of Duty: Modern Warfare 2 | [BLUS30377](games/BLUS30377.md) | 1.14 | Demonware (older, its own lobby protocol) | 🧪 our Demonware (`uscl-dw` patch 0013): two copies on one PC matchmade and played the same Hardcore Free-for-all (2026-10-25); invites don't work in RPCS3 | two PCs over the Steam tunnel |
 | Call of Duty: Black Ops II | [BLUS31011](games/BLUS31011.md) | 1.19 | Demonware + PSN friends/invites | 🧪 our own Demonware (`uscl-dw`): two copies on one PC matchmade and played the same Team Deathmatch (NAT Open, no Activision servers); one PC can't sustain two copies for long | two PCs over the Steam tunnel |
-| Gotham City Impostors (PSN) | [NPUB30252](games/NPUB30252.md) | 1.00 trial + full-game unlock | GameSpy (`sirenps3`, shut down 2014) + PSN tickets | 🚧 profiled: boots to the title screen with the unlock (2026-10-26) | point GameSpy at OpenSpy / a stand-in |
+| Gotham City Impostors (PSN) | [NPUB30252](games/NPUB30252.md) | 1.00 trial + full-game unlock | GameSpy (`sirenps3`, shut down 2014) + PSN tickets | 🚧 full-game licence accepted; stuck at the title without GameSpy (2026-10-26) | answer the SSLv3 GameSpy login (`sirenps3.api.gamespy.net`) |
 
 ## Next up
 Ordered by how much existing work each one reuses. Serials and services marked `?` are from memory: confirm them

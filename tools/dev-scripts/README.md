@@ -14,6 +14,7 @@ scratch folder: adjust before use. See `tools/autotest/README.md` for the virtua
 | `iso.py` | list / extract files from an ISO 9660 disc image (PS3 `.iso`) |
 | `ffdec.py` | inflate an IW4 (MW2) PS3 fastfile |
 | `bitdec.py` | decode Demonware bit-packed (MW2) task payloads |
+| `gs.py` | GameSpy probe: answers the "available" check (UDP 27900), logs TCP 29900/443/80/... (Gotham City Impostors) |
 | `relay.py` | logging UDP relay (watching peer traffic between two local copies) |
 
 `tools/ghidra/toc_str.py` / `abs_str.py`: find code that uses a string in a PS3 ELF (TOC slot or lis/addi loads),
