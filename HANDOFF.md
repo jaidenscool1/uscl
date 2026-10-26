@@ -1,8 +1,29 @@
-# Handoff (2026-10-23)
+# Handoff (updated 2026-10-26)
 
 Start here if you're picking USCL up. Background: `PLAN.md` (design), `GAMES.md` (per-game status),
 `AGENTS.md` (workflow), `games/<serial>.md` (details). Everything below is pushed on
 `agent/jaiden-pc/steam-tunnel` (PR #4).
+
+## Picking this up on another machine / account
+```
+git clone https://github.com/jaidenscool1/uscl.git && cd uscl
+git checkout agent/jaiden-pc/steam-tunnel
+```
+Everything is in this branch except what can't be public:
+- **Update signing key** (`~/.config/uscl-signing/update-key.pem`): stays on jaiden-pc. Releases must be signed
+  there (`tools/dev-scripts/release.sh`); without it, build and test only.
+- **Discord Social SDK** (licence forbids redistribution): download 1.10.x from the Discord developer portal
+  (app "USCL", ID `1563994423862231191`, Public Client on, redirect `http://127.0.0.1/callback`) and extract to
+  `~/src/discord-social-sdk/sdk/discord_social_sdk`, or set `USCL_DISCORD_SDK`. Without it party chat is just
+  hidden. CI gets it from the `ci-cache` draft release (`discord-social-sdk-*.zip`).
+- **Game files, licences, decrypted ELFs, PS3 sound rips**: never in git. Bring your own dumps.
+- **The forks' working trees** (RPCS3, RPCN, Demonware): rebuild them from upstream + the repo's patch folders
+  (`uscl-rpcs3/patches`, `uscl-rpcn/patches`, `uscl-dw/patches`).
+
+**GitHub budget:** batch commits, push once per chunk, and ask the owner before tagging a `v*-test` release
+(each tag runs the Windows installer build). `build.yml` only runs for `uscl-bridge/**` changes. The installer
+build caches RPCS3 and the servers in the `ci-cache` draft release (keyed by source hashes, old ones pruned), so
+an unchanged RPCS3 isn't rebuilt. Latest release: `v0.3.3-test`.
 
 ## Merge order
 PRs #3 → #1 → #4 → #5 (all approved by the other agent). Then retarget #5 and later work to `main`.
@@ -16,6 +37,10 @@ PRs #3 → #1 → #4 → #5 (all approved by the other agent). Then retarget #5 
 | Minecraft (BLUS31426) | two RPCS3 copies on one PC join the same world (normal RPCN) | the same join from a second PC over Steam |
 | Skate 3 (BLUS30464) | community server via the bridge, untested; joiner's black screen unsolved | black screen first |
 | Black Ops II (BLUS31011) | our Demonware (`uscl-dw`, patches 0001–0004): PS3 login, lobby, stats, playlists, matchmaking, NAT discovery; two copies played one match on one PC (`tools/autotest/`); tunnel support written (`host bo2`, uscl-dw 0008/0009) | two-PC test: steps in `games/BLUS31011.md` "Over the session tunnel" |
+| Modern Warfare 2 (BLUS30377) | our Demonware (uscl-dw 0013, bit-packed MW2 lobby); two copies on one PC played one match | two-PC test |
+| Gotham City Impostors (NPUB30252) | boots with the full-game unlock; online is GameSpy (`sirenps3`) | `games/NPUB30252.md` |
+| USCL home screen (`uscl-shell`) | XMB, Add Games (finds decrypted folders, says when a game is still encrypted), per-game update check + install from Sony's update server (Game Updates), Friends tab drawn like the PS3's with Steam avatars/levels, Discord party + voice (`discordparty.cpp`), starts Steam minimized | PS button still opens Steam Big Picture (Steam setting "Guide Button Focuses Steam"); two-PC test |
+| Windows installer | Inno Setup, per user; offers Steam / Discord when missing; self-update signed with the offline key; RPCS3 patch 0007 removes the "unofficial build" warning and RPCS3's own updater | – |
 
 ### Black Ops II: read this before continuing
 Solved 2026-10-23 (part 4 of the notes): the missing checks were the wad's `playlists_mp.info` and `leagues.info`.
@@ -53,3 +78,7 @@ Alternatives if it stays stuck: the open-bitdemon-emulator community, or BO2's L
   every Demonware name at 127.0.0.1; add `DW_STUN_SELF_ADDR=127.0.0.1:39001` only behind the tunnel).
 - Updates: `~/Downloads/GAME_DUMPS/updates/<serial>/` (Sony PKGs, SHA-1 verified; Sony's hash skips the last 32
   bytes).
+- Test profiles for the USCL AppImage build: `~/.config/uscl/` (dev_hdd0, licences in `home/00000001/exdata`),
+  log `~/.cache/uscl/RPCS3.log`. Its pad config is empty until set in the GUI.
+- `tools/dev-scripts/`: the helper scripts used for the tests above (paths assume this PC).
+- A second Windows PC is on the LAN for the two-PC BO2/MW2 test: it needs OpenSSH Server enabled first.
