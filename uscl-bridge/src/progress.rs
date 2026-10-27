@@ -29,34 +29,53 @@ impl Carry {
 
     /// Our player's progress as kept on this PC.
     pub fn export(&self) -> Result<String, String> {
-        std::fs::create_dir_all(&self.data_dir).map_err(|e| e.to_string())?;
-        let out = Command::new(&self.dw)
-            .args(["--export", &self.player])
-            .current_dir(&self.data_dir)
-            .stderr(Stdio::null())
-            .output()
-            .map_err(|e| format!("{}: {e}", self.dw.display()))?;
-        if !out.status.success() {
-            return Err(format!("dw-server --export failed ({})", out.status));
-        }
-        String::from_utf8(out.stdout).map(|s| s.trim().to_string()).map_err(|e| e.to_string())
+        let (stdout, _) = self.run(&["--export", &self.player], None)?;
+        Ok(stdout.trim().to_string())
     }
 
     /// Keeps the host's copy of our player's progress on this PC.
     pub fn import(&self, bundle: &str) -> Result<String, String> {
+        let (_, stderr) = self.run(&["--import"], Some(bundle))?;
+        Ok(stderr.trim().to_string())
+    }
+
+    /// Runs our uscl-dw on this PC's folder: (stdout, stderr). A uscl-dw from before carried progress doesn't know
+    /// these options and would start serving instead, so it gets 30 s and is then stopped.
+    fn run(&self, args: &[&str], input: Option<&str>) -> Result<(String, String), String> {
         std::fs::create_dir_all(&self.data_dir).map_err(|e| e.to_string())?;
         let mut child = Command::new(&self.dw)
-            .arg("--import")
+            .args(args)
             .current_dir(&self.data_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("{}: {e}", self.dw.display()))?;
-        child.stdin.take().expect("stdin piped").write_all(bundle.as_bytes()).map_err(|e| e.to_string())?;
-        let out = child.wait_with_output().map_err(|e| e.to_string())?;
-        let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        if out.status.success() { Ok(said) } else { Err(said) }
+        if let Some(input) = input {
+            child.stdin.take().expect("stdin piped").write_all(input.as_bytes()).map_err(|e| e.to_string())?;
+        }
+        // read both pipes off this thread: a bundle is bigger than a pipe's buffer
+        let read = |mut pipe: Box<dyn Read + Send>| std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = pipe.read_to_string(&mut text);
+            text
+        });
+        let stdout = read(Box::new(child.stdout.take().expect("stdout piped")));
+        let stderr = read(Box::new(child.stderr.take().expect("stderr piped")));
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            match child.try_wait().map_err(|e| e.to_string())? {
+                Some(status) => break status,
+                None if std::time::Instant::now() > deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("{} didn't answer (too old for carried progress?)", self.dw.display()));
+                }
+                None => std::thread::sleep(Duration::from_millis(50)),
+            }
+        };
+        let (stdout, stderr) = (stdout.join().unwrap_or_default(), stderr.join().unwrap_or_default());
+        if status.success() { Ok((stdout, stderr)) } else { Err(format!("dw-server {} failed: {}", args[0], stderr.trim())) }
     }
 }
 
@@ -142,6 +161,15 @@ mod tests {
         let seen = server.join().unwrap();
         assert!(seen[0].starts_with("POST /progress ") && seen[0].contains("x-uscl-steam-id: 765\r\n") && seen[0].ends_with(r#"{"online_id":"Pete_Hegseth"}"#));
         assert!(seen[1].starts_with("GET /progress/Pete_Hegseth "));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runs_uscl_dw() {
+        let carry = |dw: &str| super::Carry { player: "Pete_Hegseth".into(), data_dir: std::env::temp_dir().join("uscl-progress-test"), dw: dw.into() };
+        assert_eq!(carry("true").export().unwrap(), "");
+        assert!(carry("false").export().unwrap_err().contains("--export failed"));
+        assert!(carry("/nonexistent/dw-server").import("{}").is_err());
     }
 
     #[test]
