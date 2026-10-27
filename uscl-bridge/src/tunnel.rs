@@ -150,6 +150,13 @@ fn local(port: u16) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], port))
 }
 
+/// Our game's socket at `port`. Windows lets a game bind 0.0.0.0 on a port we hold on 127.0.0.1 (BO2 takes 3074
+/// there), and then 127.0.0.1:port is us; 127.0.0.2 reaches only the game. Linux refuses that bind, so it never
+/// happens there.
+fn game_addr(port: u16, ours: &HashMap<u16, UdpSocket>) -> SocketAddr {
+    if ours.contains_key(&port) { SocketAddr::from(([127, 0, 0, 2], port)) } else { local(port) }
+}
+
 /// Steam channel 1 frame: connection id, op, payload.
 fn tcp_frame(id: u32, op: u8, data: &[u8]) -> Vec<u8> {
     let mut f = Vec::with_capacity(5 + data.len());
@@ -607,7 +614,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                 if let Some(port) = src.port().checked_sub(SLOT_SERVER_OFFSET).filter(|p| host && sudp.contains(p)) {
                     if Some(slot) == my_slot {
                         if let (Some(sock), Some(game)) = (slot_udp.get(&port), slot_game) {
-                            let _ = sock.send_to(&buf[..n], game);
+                            let _ = sock.send_to(&buf[..n], game_addr(game.port(), &slot_udp));
                         }
                     } else if let Some(&peer) = member_at.get(&slot) {
                         send(peer, CH_UDP, &slot_frame(port, &buf[..n]), false);
@@ -687,7 +694,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                 } else if peer == host_id.raw() {
                     // the server's answer, from the same port it came from on the host
                     if let (Some(sock), Some(game)) = (slot_udp.get(&port), slot_game) {
-                        let _ = sock.send_to(d, game);
+                        let _ = sock.send_to(d, game_addr(game.port(), &slot_udp));
                     }
                 }
                 continue;
@@ -699,7 +706,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                 Some((&UDP_P2P, d)) => { let _ = sock.send_to(d, local(RPCS3_P2P)); }
                 Some((&UDP_P2P_PORT, [a, b, d @ ..])) => {
                     if let Some(port) = delivery_port(u16::from_be_bytes([*a, *b]), slot_game) {
-                        let _ = sock.send_to(d, local(port));
+                        let _ = sock.send_to(d, game_addr(port, &slot_udp));
                     }
                 }
                 _ => {}
@@ -782,6 +789,13 @@ mod tests {
         assert_eq!(delivery_port(RPCS3_P2P, ours), Some(RPCS3_P2P));
         assert_eq!(delivery_port(22, ours), None);
         assert_eq!(delivery_port(SLOT_BASE + 1, ours), None);
+    }
+
+    #[test]
+    fn a_game_sharing_our_port_is_reached_on_127_0_0_2() {
+        let ours = HashMap::from([(3074, bind_udp(0).unwrap())]);
+        assert_eq!(game_addr(3074, &ours), SocketAddr::from(([127, 0, 0, 2], 3074)));
+        assert_eq!(game_addr(3075, &ours), local(3075));
     }
 
     #[test]
