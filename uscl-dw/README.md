@@ -47,6 +47,9 @@ login uses its ticket). The older two-address setup (`DW_AUTH_ADDR` / `DW_LOBBY_
 - 0014: `DW_STUN_ALT_SHOWN`: the second server's address put in answers, when a relay sits in front of the stun
   (behind the session tunnel: `DW_STUN_ADDR=127.0.0.1:3174 DW_STUN_ALT_ADDR=127.0.0.1:3177
   DW_STUN_ALT_SHOWN=127.0.0.1:3077`, the bridge owns 3074/3077/3078 on every PC).
+- 0015: Player ids: BO2 names players by a 64-bit game id of its own, the login by the ticket's (RPCN) user id;
+  `lobby/player_id.rs` learns each player's game id from their first own file listing (`db/player_id.db`), so
+  profiles and files asked for by game id reach them (and ids above i64 no longer break file listings).
 
 ## Status
 Modern Warfare 2 1.14: login, playlists, stats and matchmaking work; two copies played the same match (2026-10-25).
