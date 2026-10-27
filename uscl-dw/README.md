@@ -50,6 +50,8 @@ login uses its ticket). The older two-address setup (`DW_AUTH_ADDR` / `DW_LOBBY_
 - 0015: Player ids: BO2 names players by a 64-bit game id of its own, the login by the ticket's (RPCN) user id;
   `lobby/player_id.rs` learns each player's game id from their first own file listing (`db/player_id.db`), so
   profiles and files asked for by game id reach them (and ids above i64 no longer break file listings).
+- 0016: File share (content streaming): URLs name 127.0.0.1 instead of `localhost` (RPCS3 resolves names through
+  real DNS), and streams asked for by game id reach their owner. Members reach TCP 3076 through the bridge (`bo2`).
 
 ## Status
 Modern Warfare 2 1.14: login, playlists, stats and matchmaking work; two copies played the same match (2026-10-25).

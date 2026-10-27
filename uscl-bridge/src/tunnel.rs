@@ -55,9 +55,10 @@ fn preset(name: &str) -> Option<&'static str> {
     match name {
         // Skate3BlazeServer: Blaze, HTTP, one UDP relay per lobby at 17000 + game id
         "skate3" => Some("tcp:42100,tcp:80,udp:17001-17064"),
-        // uscl-dw on DW_ADDR 127.0.0.1:3074 (login + lobby over TCP) and DW_STUN_ADDR 127.0.0.1:3174 (+ alt 3177,
-        // 3178): NAT discovery through each player's slot port, so it reports the address other players reach them at
-        "bo2" => Some("tcp:3074,sudp:3074,sudp:3077-3078"),
+        // uscl-dw on DW_ADDR 127.0.0.1:3074 (login + lobby over TCP), its content server on TCP 3076 (file share:
+        // emblems, served as http://127.0.0.1:3076/...) and DW_STUN_ADDR 127.0.0.1:3174 (+ alt 3177, 3178): NAT
+        // discovery through each player's slot port, so it reports the address other players reach them at
+        "bo2" => Some("tcp:3074,tcp:3076,sudp:3074,sudp:3077-3078"),
         _ => None,
     }
 }
@@ -801,7 +802,7 @@ mod tests {
     #[test]
     fn slot_udp_forwards() {
         assert_eq!(parse_slot_udp("bo2"), vec![3074, 3077, 3078]);
-        assert_eq!(parse_forwards("bo2").unwrap(), vec![(false, 3074)]);
+        assert_eq!(parse_forwards("bo2").unwrap(), vec![(false, 3074), (false, 3076)]);
         assert_eq!(parse_slot_udp("skate3"), Vec::<u16>::new());
         assert_eq!(slot_frame(3074, b"x"), [UDP_SLOT, 0x0c, 0x02, b'x']);
     }

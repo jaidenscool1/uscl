@@ -1,7 +1,7 @@
 From 93af826751db620bf276c439f9c1dbe5ef62be13 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 17:49:46 -0700
-Subject: [PATCH 11/15] Anticheat: BO2's code checks (push type 19), judged
+Subject: [PATCH 11/16] Anticheat: BO2's code checks (push type 19), judged
  against the host's own answers
 
 The server pushes code-checksum challenges (CRC-32 of game code ranges) to every player and compares the answers
