@@ -24,6 +24,9 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::mpsc::{channel, Sender};
+use std::sync::Arc;
+
+use crate::progress;
 use std::time::{Duration, Instant};
 use steamworks::networking_messages::SessionRequest;
 use steamworks::networking_types::{NetworkingIdentity, SendFlags};
@@ -41,6 +44,9 @@ const SLOT_SERVER_OFFSET: u16 = 100;
 
 const CH_TCP: u32 = 1;
 const CH_UDP: u32 = 2;
+const CH_PROGRESS: u32 = 3; // a player's saved progress (progress.rs): member -> host on join, host -> member after
+// shortcut: copies go back to members every minute (and on change only); a stats upload just before someone leaves can miss the last one
+const PROGRESS_EVERY: Duration = Duration::from_secs(60);
 const UDP_RPCN: u8 = 0;
 const UDP_P2P: u8 = 1;
 const UDP_FWD: u8 = 2; // [port u16 BE][data]
@@ -177,6 +183,7 @@ enum Ev {
     Changed,
     Invite(LobbyId),
     Session(SessionRequest),
+    Progress { to: u64, bundle: String }, // a bundle to send (member: ours to the host; host: a member's copy back)
 }
 
 fn spawn_reader(mut s: TcpStream, peer: u64, id: u32, tx: Sender<Ev>) {
@@ -370,6 +377,21 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
     println!("uscl-bridge: session {} ({}); give friends this number or invite them from Steam", lobby.raw(), if host { "hosting" } else { "joined" });
     client.friends().set_rich_presence("status", Some("USCL session"));
 
+    // progress travels with the player: a member hands the host its own copy (exported off the loop, it runs uscl-dw)
+    let carry = progress::Carry::from_env().map(Arc::new);
+    if let (Some(c), false) = (carry.clone(), host) {
+        let (t, to) = (tx.clone(), host_id.raw());
+        std::thread::spawn(move || match c.export() {
+            Ok(bundle) => {
+                let _ = t.send(Ev::Progress { to, bundle });
+            }
+            Err(e) => eprintln!("uscl-bridge: progress: couldn't read {}'s progress: {e}", c.player),
+        });
+    }
+    let mut carried: HashMap<u64, String> = HashMap::new(); // host: member -> their online id
+    let mut sent_back: HashMap<u64, String> = HashMap::new(); // host: the last copy each member got
+    let mut last_progress = Instant::now();
+
     let accept = |listener: TcpListener, port: u16| {
         let t = tx.clone();
         std::thread::spawn(move || {
@@ -457,6 +479,16 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                 Ev::Changed => changed = true,
                 Ev::Invite(_) => {} // already in a session
                 Ev::Session(req) => pending.push((req, Instant::now())),
+                Ev::Progress { to, bundle } => {
+                    if bundle.len() > progress::MAX_BUNDLE {
+                        eprintln!("uscl-bridge: progress: {} KB is too big to carry", bundle.len() / 1024);
+                    } else if !host || sent_back.get(&to) != Some(&bundle) {
+                        send(to, CH_PROGRESS, bundle.as_bytes(), true);
+                        if host {
+                            sent_back.insert(to, bundle);
+                        }
+                    }
+                }
                 Ev::Accepted(s, port) => {
                     next_conn += 1;
                     if host {
@@ -711,6 +743,42 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // progress: host hands members' bundles to its uscl-dw (with the Steam id Steam vouched for); member keeps
+        // the host's copies at home. uscl-dw work runs off the loop.
+        for m in net.receive_messages_on_channel(CH_PROGRESS, 16) {
+            let Some(peer) = m.identity_peer().steam_id().map(|s| s.raw()) else { continue };
+            let (Some(c), Ok(bundle)) = (carry.clone(), String::from_utf8(m.data().to_vec())) else { continue };
+            if removed.borrow().contains(&peer) || bundle.len() > progress::MAX_BUNDLE {
+                continue;
+            }
+            if host && members.contains(&peer) {
+                let Some(name) = progress::owner(&bundle).filter(|n| progress::valid_name(n)) else { continue };
+                carried.insert(peer, name.clone());
+                std::thread::spawn(move || match progress::hand_in(&bundle, peer) {
+                    Ok(state) => println!("uscl-bridge: progress: {name}'s progress {state}"),
+                    Err(e) => eprintln!("uscl-bridge: progress: {name}'s progress refused: {e}"),
+                });
+            } else if !host && peer == host_id.raw() && progress::owner(&bundle).as_deref() == Some(c.player.as_str()) {
+                std::thread::spawn(move || match c.import(&bundle) {
+                    Ok(said) => println!("uscl-bridge: progress: kept at home ({said})"),
+                    Err(e) => eprintln!("uscl-bridge: progress: couldn't keep it at home: {e}"),
+                });
+            }
+        }
+        if host && last_progress.elapsed() > PROGRESS_EVERY {
+            last_progress = Instant::now();
+            for (&peer, name) in carried.iter().filter(|(p, _)| members.contains(p)) {
+                let (t, name) = (tx.clone(), name.clone());
+                std::thread::spawn(move || match progress::fetch(&name) {
+                    Ok(Some(bundle)) => {
+                        let _ = t.send(Ev::Progress { to: peer, bundle });
+                    }
+                    Ok(None) => {} // not logged in here yet
+                    Err(e) => eprintln!("uscl-bridge: progress: couldn't read {name}'s progress here: {e}"),
+                });
             }
         }
 

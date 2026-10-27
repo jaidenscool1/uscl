@@ -1,7 +1,7 @@
 From 511f0755c01b2ca381bf48319a40f2976d3b570d Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sun, 25 Oct 2026 03:15:57 -0700
-Subject: [PATCH 12/16] Stats check: refuse Black Ops II stat files a real game
+Subject: [PATCH 12/17] Stats check: refuse Black Ops II stat files a real game
  can't write
 
 mpstatsCompressed (raw deflate, 48-byte header, then the ddl_mp/stats.ddl v244 buffer read from game memory) is

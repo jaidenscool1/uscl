@@ -1,7 +1,7 @@
 From 805b8812e05e9c08aea4a68295b90591fab2cf87 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sun, 25 Oct 2026 04:24:12 -0700
-Subject: [PATCH 13/16] Serve Modern Warfare 2 (PS3)
+Subject: [PATCH 13/17] Serve Modern Warfare 2 (PS3)
 
 MW2's older Demonware: batched lobby frames, bit-packed tasks and replies answered in order, publisher files
 (playlists, MOTD) by id, the player's stats file (iw4-mpdata: listed, downloaded, created and updated, always the

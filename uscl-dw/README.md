@@ -52,6 +52,11 @@ login uses its ticket). The older two-address setup (`DW_AUTH_ADDR` / `DW_LOBBY_
   profiles and files asked for by game id reach them (and ids above i64 no longer break file listings).
 - 0016: File share (content streaming): URLs name 127.0.0.1 instead of `localhost` (RPCS3 resolves names through
   real DNS), and streams asked for by game id reach their owner. Members reach TCP 3076 through the bridge (`bo2`).
+- 0017: Progress travels with the player (`lobby/progress.rs`, PLAN.md): a player's files, profiles and file-share
+  streams as one JSON bundle; `dw-server --export <online id>` / `--import` (stdin) for the player's own PC; a
+  local-only admin port (`DW_ADMIN_ADDR`, 127.0.0.1:3180; `POST /progress` with `x-uscl-steam-id`,
+  `GET /progress/<online id>`) for the host's bridge. A Steam account is bound to one online id; newer copies win;
+  carried stats pass the stats check's bounds. A bundle for a player not yet logged in waits for their login.
 
 ## Status
 Modern Warfare 2 1.14: login, playlists, stats and matchmaking work; two copies played the same match (2026-10-25).

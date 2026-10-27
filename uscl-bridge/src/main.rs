@@ -6,6 +6,7 @@ use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use steamworks::{Client, FriendFlags, FriendState, LobbyId, LobbyKey, LobbyType, StringFilter, StringFilterKind};
 
+mod progress;
 mod serve;
 mod tunnel;
 

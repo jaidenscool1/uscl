@@ -87,7 +87,7 @@ The USCL program will later run Xbox 360 and PS4/PS5 games too (player, 2026-10-
 uscl-bridge, the servers and the USCL panel free of RPCS3-only assumptions (per-game presets, no RPCS3 config
 inside the bridge), so other emulator cores can sit next to RPCS3 in the same install.
 
-## Progress travels with the player (design, 2026-10-27)
+## Progress travels with the player (built 2026-10-27: uscl-dw 0017, uscl-bridge progress.rs; untested across PCs)
 The player decided: a player's Call of Duty progress (stats, class sets, backups, public/private profile, file-share
 streams such as emblems) lives on **their own PC** and goes with them to whoever hosts. Today it all sits in the
 host's uscl-dw (`<uscl data>/dw/db/*.db`), so it's lost to anyone who later hosts themselves.

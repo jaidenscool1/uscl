@@ -521,7 +521,7 @@ void Online::host(const QString& serial, const QString& title, const QString& pa
 	QStringList args{"host"};
 	if (*p.bridge)
 		args << p.bridge;
-	QProcessEnvironment bridge_env = env;
+	QProcessEnvironment bridge_env = carryEnv(env);
 	QFile::remove(data + "/kicks.txt"); // kicks last one session
 	bridge_env.insert("USCL_BANS", data + "/bans.txt");
 	bridge_env.insert("USCL_KICKS", data + "/kicks.txt");
@@ -539,7 +539,16 @@ void Online::join(const QString& session)
 	QStringList args{"join"};
 	if (!session.isEmpty())
 		args << session;
-	start(bridge, toolPath("uscl-bridge"), args, QCoreApplication::applicationDirPath(), QProcessEnvironment::systemEnvironment());
+	start(bridge, toolPath("uscl-bridge"), args, QCoreApplication::applicationDirPath(), carryEnv(QProcessEnvironment::systemEnvironment()));
+}
+
+// Progress travels with the player (uscl-bridge progress.rs): who we are online and where this PC keeps its
+// Call of Duty progress (our uscl-dw's folder, home even for a player who never hosts)
+QProcessEnvironment Online::carryEnv(QProcessEnvironment env)
+{
+	env.insert("USCL_PLAYER", yamlValue(readFile(rpcs3File("rpcn.yml")), {}, "NPID"));
+	env.insert("USCL_DW_DATA", dataDir() + "/dw");
+	return env;
 }
 
 namespace

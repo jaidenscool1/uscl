@@ -88,6 +88,7 @@ private:
 	static QString dataDir();
 	static QString templateDir();
 	static QString rpcs3File(const QString& name);
+	static QProcessEnvironment carryEnv(QProcessEnvironment env);
 
 	std::array<QProcess*, 3> m_services{};
 	QString m_state = "off", m_session, m_game, m_message, m_host_game;
