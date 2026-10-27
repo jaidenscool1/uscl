@@ -750,7 +750,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
         // the host's copies at home. uscl-dw work runs off the loop.
         for m in net.receive_messages_on_channel(CH_PROGRESS, 16) {
             let Some(peer) = m.identity_peer().steam_id().map(|s| s.raw()) else { continue };
-            let (Some(c), Ok(bundle)) = (carry.clone(), String::from_utf8(m.data().to_vec())) else { continue };
+            let Ok(bundle) = String::from_utf8(m.data().to_vec()) else { continue };
             if removed.borrow().contains(&peer) || bundle.len() > progress::MAX_BUNDLE {
                 continue;
             }
@@ -761,7 +761,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                     Ok(state) => println!("uscl-bridge: progress: {name}'s progress {state}"),
                     Err(e) => eprintln!("uscl-bridge: progress: {name}'s progress refused: {e}"),
                 });
-            } else if !host && peer == host_id.raw() && progress::owner(&bundle).as_deref() == Some(c.player.as_str()) {
+            } else if let Some(c) = carry.clone().filter(|c| !host && peer == host_id.raw() && progress::owner(&bundle).as_deref() == Some(c.player.as_str())) {
                 std::thread::spawn(move || match c.import(&bundle) {
                     Ok(said) => println!("uscl-bridge: progress: kept at home ({said})"),
                     Err(e) => eprintln!("uscl-bridge: progress: couldn't keep it at home: {e}"),
