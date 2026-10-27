@@ -508,9 +508,9 @@ void Online::host(const QString& serial, const QString& title, const QString& pa
 	{
 		QProcessEnvironment dw_env = env;
 		dw_env.insert("DW_ADDR", "127.0.0.1:3074");
-		dw_env.insert("DW_STUN_ADDR", "127.0.0.1:3074");
-		dw_env.insert("DW_STUN_ALT_ADDR", "127.0.0.1:3077");
-		dw_env.insert("DW_STUN_SELF_ADDR", "127.0.0.1:39001"); // the host is slot 1
+		// NAT discovery 100 up: every bridge, ours too, owns UDP 3074/3077/3078 and asks from the player's slot port
+		dw_env.insert("DW_STUN_ADDR", "127.0.0.1:3174");
+		dw_env.insert("DW_STUN_ALT_ADDR", "127.0.0.1:3177");
 		dw_env.insert("RUST_LOG", "info");
 		// BO2's built-in anticheat: everyone's game gets the same code checks; this PC's answers are the reference
 		dw_env.insert("DW_TRUSTED_USER", yamlValue(readFile(rpcs3File("rpcn.yml")), {}, "NPID"));
@@ -685,7 +685,7 @@ void Online::testConnection()
 			if (!t.listen(QHostAddress::LocalHost, port))
 				busy << QString("TCP %1").arg(port);
 		}
-		for (const quint16 port : {quint16(3657), quint16(3757), quint16(3074), quint16(3077), quint16(3078)})
+		for (const quint16 port : {quint16(3657), quint16(3757), quint16(3074), quint16(3077), quint16(3078), quint16(3174), quint16(3177), quint16(3178)})
 		{
 			QUdpSocket u;
 			if (!u.bind(QHostAddress::LocalHost, port))

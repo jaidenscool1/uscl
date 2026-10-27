@@ -75,7 +75,7 @@ Alternatives if it stays stuck: the open-bitdemon-emulator community, or BO2's L
   our Demonware, a debug-only patch that disables BO2's hang watchdog), `rpcs3-probe` (network off).
 - Run our Demonware: `cd ~/.local/share/uscl/dw && DW_ADDR=127.0.0.1:3074 DW_STUN_ADDR=127.0.0.1:3074
   DW_STUN_ALT_ADDR=127.0.0.1:3077 RUST_LOG=info ~/src/obde-uscl/target/release/dw-server` (configs rpcs3-bo2/a/b point
-  every Demonware name at 127.0.0.1; add `DW_STUN_SELF_ADDR=127.0.0.1:39001` only behind the tunnel).
+  every Demonware name at 127.0.0.1; behind the tunnel the stun goes 100 up, `DW_STUN_ADDR=127.0.0.1:3174 DW_STUN_ALT_ADDR=127.0.0.1:3177`, because the bridge owns 3074/3077/3078).
 - Updates: `~/Downloads/GAME_DUMPS/updates/<serial>/` (Sony PKGs, SHA-1 verified; Sony's hash skips the last 32
   bytes).
 - Test profiles for the USCL AppImage build: `~/.config/uscl/` (dev_hdd0, licences in `home/00000001/exdata`),

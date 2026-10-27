@@ -36,6 +36,8 @@ const HOST_RPCN_TCP: u16 = 31413;
 const HOST_RPCN_UDP: u16 = 3757;
 // shortcut: fixed port range 39001+, make it configurable if something on a player's PC already uses it
 const SLOT_BASE: u16 = 39000;
+// sudp: the host's server listens this much higher than the port the game sends to (bridges own the game's ports)
+const SLOT_SERVER_OFFSET: u16 = 100;
 
 const CH_TCP: u32 = 1;
 const CH_UDP: u32 = 2;
@@ -53,8 +55,8 @@ fn preset(name: &str) -> Option<&'static str> {
     match name {
         // Skate3BlazeServer: Blaze, HTTP, one UDP relay per lobby at 17000 + game id
         "skate3" => Some("tcp:42100,tcp:80,udp:17001-17064"),
-        // uscl-dw on DW_ADDR / DW_STUN_ADDR 127.0.0.1:3074 (+ alt 3077, 3078): login + lobby over TCP, and NAT
-        // discovery through each member's slot port, so it reports the address other players reach them at
+        // uscl-dw on DW_ADDR 127.0.0.1:3074 (login + lobby over TCP) and DW_STUN_ADDR 127.0.0.1:3174 (+ alt 3177,
+        // 3178): NAT discovery through each player's slot port, so it reports the address other players reach them at
         "bo2" => Some("tcp:3074,sudp:3074,sudp:3077-3078"),
         _ => None,
     }
@@ -82,7 +84,9 @@ pub fn parse_forwards(spec: &str) -> Result<Vec<(bool, u16)>, String> {
 }
 
 /// "sudp:3074,sudp:3077-3078" items of a forward spec: UDP to the host's server that leaves the host from the
-/// member's slot port (so the server sees the member's tunnel address). Members bind them; the host's server owns them.
+/// player's slot port (so the server sees the player's tunnel address). Every bridge, the host's too, binds them for
+/// its own game; the host's server listens SLOT_SERVER_OFFSET higher. The game's socket that sends there is the one
+/// its tunnel address stands for, so peers' game traffic is delivered to it (`slot_game`).
 pub fn parse_slot_udp(spec: &str) -> Vec<u16> {
     let spec = preset(spec).unwrap_or(spec);
     let mut out = Vec::new();
@@ -116,11 +120,23 @@ fn fwd_frame(port: u16, data: &[u8]) -> Vec<u8> {
     f
 }
 
-/// Game traffic is delivered to the port it was sent from (a game uses the same ports on every PC): RPCS3's P2P
-/// port for RPCN games, the game's own UDP socket for others (Demonware titles: 3074-3079). Nothing else, so a
-/// peer can't reach other local services through us.
+/// Game traffic is delivered to the port it was sent from: RPCS3's P2P port for RPCN games, the game's own UDP
+/// socket for others (Demonware titles: 3074-3079). Nothing else, so a peer can't reach other local services
+/// through us. With sudp the receiver's own game socket is known and wins (`delivery_port`): games fall back to
+/// different free ports on each PC (BO2: 3075 on one, 3076 on the other), so "the same port" isn't theirs.
 fn p2p_port_ok(port: u16) -> bool {
     port == RPCS3_P2P || (3074..=3079).contains(&port)
+}
+
+/// Where a peer's game packet sent from `port` goes on this PC, if anywhere.
+// shortcut: all of a peer's game sockets reach our one slot-address socket (a NAT would give each its own port);
+// enough for BO2/MW2, which play from the socket they ran NAT discovery on
+fn delivery_port(port: u16, slot_game: Option<SocketAddr>) -> Option<u16> {
+    match slot_game {
+        _ if !p2p_port_ok(port) => None,
+        Some(g) if port != RPCS3_P2P => Some(g.port()),
+        _ => Some(port),
+    }
 }
 
 fn p2p_frame(port: u16, data: &[u8]) -> Vec<u8> {
@@ -361,15 +377,13 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
     // Forwards: the host connects to its own list only; a member listens on the host's list.
     let fwd = if host { fwd } else { parse_forwards(&mm.lobby_data(lobby, "fwd").unwrap_or_default())? };
     let sudp = if host { sudp } else { parse_slot_udp(&mm.lobby_data(lobby, "sudp").unwrap_or_default()) };
-    // member: our sockets on the server's ports, and the game socket that last used them
+    // our sockets on the server's ports, and the game socket that last used them
     let mut slot_udp: HashMap<u16, UdpSocket> = HashMap::new();
     let mut slot_game: Option<SocketAddr> = None;
-    if !host {
-        for &port in &sudp {
-            match bind_udp(port) {
-                Ok(sock) => { slot_udp.insert(port, sock); }
-                Err(e) => eprintln!("uscl-bridge: {e}"),
-            }
+    for &port in &sudp {
+        match bind_udp(port) {
+            Ok(sock) => { slot_udp.insert(port, sock); }
+            Err(e) => eprintln!("uscl-bridge: {e}"),
         }
     }
     let mut fwd_udp: HashMap<u16, (UdpSocket, Option<SocketAddr>)> = HashMap::new(); // member: port -> socket, game's address
@@ -589,9 +603,14 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
         for (&slot, sock) in &socks {
             while let Ok((n, src)) = sock.recv_from(&mut buf) {
                 let from_rpcn = host && src.port() == HOST_RPCN_UDP;
-                if host && sudp.contains(&src.port()) && Some(slot) != my_slot {
-                    if let Some(&peer) = member_at.get(&slot) {
-                        send(peer, CH_UDP, &slot_frame(src.port(), &buf[..n]), false);
+                // the server's answer to this slot's player, from the port they asked on (the game sees no offset)
+                if let Some(port) = src.port().checked_sub(SLOT_SERVER_OFFSET).filter(|p| host && sudp.contains(p)) {
+                    if Some(slot) == my_slot {
+                        if let (Some(sock), Some(game)) = (slot_udp.get(&port), slot_game) {
+                            let _ = sock.send_to(&buf[..n], game);
+                        }
+                    } else if let Some(&peer) = member_at.get(&slot) {
+                        send(peer, CH_UDP, &slot_frame(port, &buf[..n]), false);
                     }
                     continue;
                 }
@@ -610,11 +629,15 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
             }
         }
 
-        // Slot UDP, member side: the game's request to the server, carried to the host
+        // Slot UDP: our game's request to the host's server, from our slot port (the host's own game included)
         for (&port, sock) in &slot_udp {
             while let Ok((n, src)) = sock.recv_from(&mut buf) {
                 slot_game = Some(src);
-                send(host_id.raw(), CH_UDP, &slot_frame(port, &buf[..n]), false);
+                if !host {
+                    send(host_id.raw(), CH_UDP, &slot_frame(port, &buf[..n]), false);
+                } else if let Some(s) = my_slot.and_then(|s| socks.get(&s)) {
+                    let _ = s.send_to(&buf[..n], local(port + SLOT_SERVER_OFFSET));
+                }
             }
         }
 
@@ -659,7 +682,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                 if host && sudp.contains(&port) {
                     // to the server from the member's slot port
                     if let Some(sock) = slot_of.get(&peer).and_then(|s| socks.get(s)) {
-                        let _ = sock.send_to(d, local(port));
+                        let _ = sock.send_to(d, local(port + SLOT_SERVER_OFFSET));
                     }
                 } else if peer == host_id.raw() {
                     // the server's answer, from the same port it came from on the host
@@ -675,8 +698,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                 Some((&UDP_RPCN, d)) if peer == host_id.raw() => { let _ = rpcn_sock.send_to(d, local(RPCS3_P2P)); }
                 Some((&UDP_P2P, d)) => { let _ = sock.send_to(d, local(RPCS3_P2P)); }
                 Some((&UDP_P2P_PORT, [a, b, d @ ..])) => {
-                    let port = u16::from_be_bytes([*a, *b]);
-                    if p2p_port_ok(port) {
+                    if let Some(port) = delivery_port(u16::from_be_bytes([*a, *b]), slot_game) {
                         let _ = sock.send_to(d, local(port));
                     }
                 }
@@ -749,6 +771,17 @@ mod tests {
         for port in [RPCN_TCP, RPCN_UDP, HOST_RPCN_UDP, SLOT_BASE + 1, 80, 22] {
             assert!(!p2p_port_ok(port), "{port}");
         }
+    }
+
+    #[test]
+    fn game_traffic_reaches_our_game_socket() {
+        // two-PC BO2: the member plays from 3076, the host's game from 3075
+        let ours = Some(local(3075));
+        assert_eq!(delivery_port(3076, ours), Some(3075));
+        assert_eq!(delivery_port(3076, None), Some(3076));
+        assert_eq!(delivery_port(RPCS3_P2P, ours), Some(RPCS3_P2P));
+        assert_eq!(delivery_port(22, ours), None);
+        assert_eq!(delivery_port(SLOT_BASE + 1, ours), None);
     }
 
     #[test]
