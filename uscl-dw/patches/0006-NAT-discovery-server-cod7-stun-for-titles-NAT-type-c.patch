@@ -1,7 +1,7 @@
 From 6a7a616316e003968235c6dca3db327e242777ba Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 19:21:22 -0700
-Subject: [PATCH 06/10] NAT discovery server (cod7-stun) for titles' NAT type
+Subject: [PATCH 06/14] NAT discovery server (cod7-stun) for titles' NAT type
  checks
 
 DW_STUN_ADDR / DW_STUN_ALT_ADDR start a UDP responder with the live servers'

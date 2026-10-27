@@ -44,6 +44,9 @@ login uses its ticket). The older two-address setup (`DW_AUTH_ADDR` / `DW_LOBBY_
   than one match gives is refused (layout: `ddl_mp/stats.ddl` v244, see `games/BLUS31011.md`).
 - 0013: Modern Warfare 2 (title 5280, `lobby/mw2.rs`): its older Demonware (batched frames, bit-packed tasks and
   replies), publisher files by id, the player's stats file, matchmaking and the bandwidth test (see `games/BLUS30377.md`).
+- 0014: `DW_STUN_ALT_SHOWN`: the second server's address put in answers, when a relay sits in front of the stun
+  (behind the session tunnel: `DW_STUN_ADDR=127.0.0.1:3174 DW_STUN_ALT_ADDR=127.0.0.1:3177
+  DW_STUN_ALT_SHOWN=127.0.0.1:3077`, the bridge owns 3074/3077/3078 on every PC).
 
 ## Status
 Modern Warfare 2 1.14: login, playlists, stats and matchmaking work; two copies played the same match (2026-10-25).

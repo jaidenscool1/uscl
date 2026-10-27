@@ -511,6 +511,7 @@ void Online::host(const QString& serial, const QString& title, const QString& pa
 		// NAT discovery 100 up: every bridge, ours too, owns UDP 3074/3077/3078 and asks from the player's slot port
 		dw_env.insert("DW_STUN_ADDR", "127.0.0.1:3174");
 		dw_env.insert("DW_STUN_ALT_ADDR", "127.0.0.1:3177");
+		dw_env.insert("DW_STUN_ALT_SHOWN", "127.0.0.1:3077"); // answers name the bridge's port, not ours (uscl-dw 0014)
 		dw_env.insert("RUST_LOG", "info");
 		// BO2's built-in anticheat: everyone's game gets the same code checks; this PC's answers are the reference
 		dw_env.insert("DW_TRUSTED_USER", yamlValue(readFile(rpcs3File("rpcn.yml")), {}, "NPID"));
