@@ -87,6 +87,28 @@ The USCL program will later run Xbox 360 and PS4/PS5 games too (player, 2026-10-
 uscl-bridge, the servers and the USCL panel free of RPCS3-only assumptions (per-game presets, no RPCS3 config
 inside the bridge), so other emulator cores can sit next to RPCS3 in the same install.
 
+## Progress travels with the player (design, 2026-10-27)
+The player decided: a player's Call of Duty progress (stats, class sets, backups, public/private profile, file-share
+streams such as emblems) lives on **their own PC** and goes with them to whoever hosts. Today it all sits in the
+host's uscl-dw (`<uscl data>/dw/db/*.db`), so it's lost to anyone who later hosts themselves.
+
+- **Home copy:** each PC's own uscl-dw database is that player's home. Keyed by online id (stable across hosts;
+  the RPCN user id isn't, every host's RPCN numbers accounts its own way) and the game's 64-bit player id
+  (uscl-dw 0015).
+- **Carried by the bridge, not the content port:** TCP 3076 is reachable by every member, so an upload endpoint
+  there would let any player overwrite anyone's progress. Instead the member's bridge sends its player's bundle to
+  the host's bridge over the Steam session (which authenticates the sender's Steam id); the host's bridge hands it
+  to uscl-dw on a local-only admin port that isn't forwarded (e.g. 127.0.0.1:3175), together with the sender's
+  Steam id. uscl-dw binds a Steam id to an online id on first use and refuses a bundle for an online id bound to
+  another Steam id.
+- **When:** on join (member -> host, applied when that player first logs in to the host's uscl-dw, since its
+  RPCN user id only exists then), and back (host -> member) after each stats upload and when the session ends;
+  the member's USCL writes it into its own uscl-dw database.
+- **Checks:** imported stats go through the same `stats_check` as uploads (prestige/rank/XP bounds, no jumps);
+  newest copy wins by modification time; the host keeps its previous copy until the import passed the check.
+- **Bundle:** user_file rows (filename, visibility, data, modified), user_profile rows (public/private), content
+  streams (metadata, data), per title. JSON with base64 data; size bounded by the existing per-file limits.
+
 ## Phases
 1. **Survey**: profile every game you own. Pick the first FULL one (Minecraft). Done for the 4 owned games.
 2. **Bridge proof of concept**: uscl-bridge with lobby create/join/list and Rich Presence, driven from a small
