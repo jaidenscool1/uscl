@@ -66,6 +66,10 @@ Window {
     property var runningGame: null
     // a game to start once the running one has closed (Yes in the "still running" question)
     property var nextGame: null
+    // like a PS3, a supported game goes online by itself, in a session of the player's own (PLAN.md phase 7):
+    // the game waiting for that session, and whether the session ends with the game
+    property var onlineGame: null
+    property bool ownSession: false
     function resumeGame() { launcher.resume() }
     function closeGame() {
         dialog.confirm(qsTr("Close Game"), qsTr("Close %1? Anything not saved in the game is lost.").arg(launcher.title), function() { launcher.stop() })
@@ -102,6 +106,15 @@ Window {
         startGame(g)
     }
     function startGame(g) {
+        if (online.state === "off" && online.supports(g.serial) && system.onlineName && online.steamRunning()) {
+            onlineGame = g
+            ownSession = true
+            online.host(g.serial, g.title, g.path) // the game starts once the session is up (onStateChanged)
+            return
+        }
+        launchGame(g)
+    }
+    function launchGame(g) {
         if (prefs.autoControllers) launcher.prepareInput(gamepad.names)
         if (prefs.autoScale) system.setRpcs3Value("Video", "Resolution Scale", String(autoScaleValue))
         // shortcut: a game started before the session runs as it started (patches on); restart it to play online
@@ -679,6 +692,7 @@ Window {
         }
         function onFinished(crashed, details) {
             runningGame = null
+            if (ownSession) { ownSession = false; online.stop() } // the game's own session ends with it
             // the window manager may have taken us out of full screen when the game's window appeared
             if (!windowed) { root.showFullScreen(); root.requestActivate() }
             games.reload()
@@ -723,6 +737,15 @@ Window {
         target: online
         function onStateChanged() {
             party.setSession(online.state === "hosting" || online.state === "joined" ? online.session : "")
+            // joined someone else: our own session is gone, and leaving the game no longer ends anything
+            if (online.state === "joined" || online.state === "waiting") ownSession = false
+            // a game waiting for its own session: start it once up, or offline (like a PS3 without PSN) if not
+            if (onlineGame && (online.state === "hosting" || online.state === "off")) {
+                var g = onlineGame
+                onlineGame = null
+                if (online.state === "off") ownSession = false
+                launchGame(g)
+            }
             if (online.state === "hosting" || online.state === "joined") { sound("notify"); notice.show(sessionText(), ic("it_stream")) }
             else if (online.state === "off" && online.message) { sound("error"); notice.show(online.message, ic("it_nettest")) }
         }

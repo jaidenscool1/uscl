@@ -38,7 +38,8 @@ Then build as in RPCS3's `BUILDING.md`.
   patched RPCS3 with the official one. The USCL app updates itself.
 - 0008: with `USCL_SHELL=1` (set by the USCL home screen) the PS button doesn't open RPCS3's home menu: the game
   gets the usual system-menu events, RPCS3 prints `USCL:home`, and the home screen takes over. The game keeps
-  running. `hide` / `show` on stdin hide and show the game window (fullscreen comes back as it was).
+  running. `hide` / `show` on stdin hide and show the game window (fullscreen comes back as it was). RPCS3's
+  first-start welcome window is skipped (the home screen has its own; RPCS3's needs a mouse and Exit quits the game).
 
 ## Building (Arch, 2026-10)
 The bundled LLVM doesn't compile with GCC 16's libstdc++ and `llvm-ar` isn't installed, so the debugging build is

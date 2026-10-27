@@ -1,7 +1,7 @@
 From eb8247b519bf2ee62e621cb203d867c03f72ab8b Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 03:49:51 -0700
-Subject: [PATCH 09/17] NAT discovery: DW_STUN_SELF_ADDR reports the tunnel
+Subject: [PATCH 09/18] NAT discovery: DW_STUN_SELF_ADDR reports the tunnel
  host's own game at its slot address
 
 Behind uscl-bridge, members' requests arrive from their slot port and are

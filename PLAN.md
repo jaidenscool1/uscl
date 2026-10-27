@@ -109,6 +109,31 @@ host's uscl-dw (`<uscl data>/dw/db/*.db`), so it's lost to anyone who later host
 - **Bundle:** user_file rows (filename, visibility, data, modified), user_profile rows (public/private), content
   streams (metadata, data), per title. JSON with base64 data; size bounded by the existing per-file limits.
 
+## Online like a PS3: no Host / Join (player, 2026-10-27; (a) + (b) built, untested)
+On a PS3 you start a game and you're online. Host/Join exists only because one player's PC stands in for PSN and
+the publisher's servers. The player decided:
+
+- **Starting a game makes your own session.** With Steam and RPCN set up, starting a supported game (title and
+  version in `GAMES.md`) creates that player's own session (Steam lobby, their PC runs the servers). No menu.
+  USCL **never** moves you into a friend's session by itself.
+- **Whoever joins moves; the one joined stays host.** Accepting an invite, Steam's "Join Game", or picking a
+  match the game found takes you out of your own session into theirs, and they keep hosting. Your progress goes
+  with you (above).
+- **Public matchmaking:** every session is a public lobby tagged with title ID, game version and USCL protocol
+  version. The game's own search (RPCN rooms, Demonware matchmaking) lists matches from other sessions with the
+  same tags; picking one is a join as above. Different versions never see each other.
+- **Host leaves:** a remaining member's PC takes over the session (possible since progress travels with each
+  player). Until then the session ends with its host, as today.
+- **Host / Join** stay as an advanced option for testing.
+- **Built (uscl-shell):** `Online::supports` (games with a server preset, plus Minecraft) decides which games go
+  online by themselves; `startGame` hosts the player's own session first and starts the game once it's up (offline
+  if Steam or the session fails); the session ends with the game; `Online::join` leaves the own session first.
+- **Open question:** moving sessions changes the servers under a running game (its RPCN and Demonware login).
+  How each game takes that (reconnect, sign-in prompt, back to the menu) needs testing per game, BO2 first.
+- **Strangers:** public play beyond friends needs USCL's own Steam App ID (above); Spacewar (480) until then.
+- **Safety:** Valve's relay hides IP addresses, players block each other through Steam, and the servers check
+  uploaded stats (`stats_check`).
+
 ## Phases
 1. **Survey**: profile every game you own. Pick the first FULL one (Minecraft). Done for the 4 owned games.
 2. **Bridge proof of concept**: uscl-bridge with lobby create/join/list and Rich Presence, driven from a small
@@ -145,3 +170,7 @@ host's uscl-dw (`<uscl data>/dw/db/*.db`), so it's lost to anyone who later host
    **Goal (player, 2026-10-23):** online services that work like Steam's for every such game, bypassing the
    publisher's servers completely: our own stand-ins for Blaze (EA) and Demonware (Activision), backed by Steam.
    Black Ops II confirmed the need: Demonware is up but refuses RPCN tickets (`games/BLUS31011.md`).
+7. **Online like a PS3** (above), after the two-PC progress test: (a) starting a supported game creates the
+   player's own session, Host/Join move to an advanced option; (b) joining moves you into the other session;
+   (c) public sessions tagged by title/version, listed in the game's own search; (d) a member takes over when
+   the host leaves.

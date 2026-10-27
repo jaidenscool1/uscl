@@ -58,7 +58,9 @@ public:
 	// Starts Steam in the tray (-silent: no window) when it isn't running, so sessions and friends work without
 	// the Steam window popping up over the home screen
 	Q_INVOKABLE static void startSteam();
-	static bool steamRunning();
+	Q_INVOKABLE static bool steamRunning();
+	// games that go online by themselves when started, like on a PS3 (each in the player's own session)
+	Q_INVOKABLE static bool supports(const QString& serial);
 	// host: take a player out of this session (kick) or out of every session this PC hosts (ban); bans are
 	// keyed by Steam ID, so a new name doesn't get around them. The bridge applies both within 2 seconds.
 	Q_INVOKABLE void kick(const QString& id, const QString& name);

@@ -40,7 +40,7 @@ DATA=$APPDIR/usr/share/uscl
 mkdir -p "$DATA/rpcn" "$DATA/dw/storage/publisher/18396" "$DATA/dw/storage/publisher/5280"
 cp "$RPCN_SRC"/{servers,server_redirs,scoreboards}.cfg "$DATA/rpcn/"
 # the session tunnel's port; loopback only, players reach it through uscl-bridge
-sed -e 's/^Port=.*/Port=31413/' -e 's/^Host=.*/Host=127.0.0.1/' -e 's/^HostIPv6=.*/HostIPv6=::1/' -e 's/^StatServerHost=.*/StatServerHost=127.0.0.1/' \
+sed -e 's/^Port=.*/Port=31413/' -e 's/^Host=.*/Host=127.0.0.1/' -e 's/^HostIPv6=.*/HostIPv6=::ffff:127.0.0.1/' -e 's/^StatServerHost=.*/StatServerHost=127.0.0.1/' \
   "$RPCN_SRC/rpcn.cfg" > "$DATA/rpcn/rpcn.cfg"
 python3 "$REPO/uscl-dw/bo2-wad/mkwad.py" "$DATA/dw/storage/publisher/18396/online_tu19_mp_english.wad" \
   "$REPO/uscl-dw/bo2-wad/leagues.info" "$REPO/uscl-dw/bo2-wad/playlists_mp.info"

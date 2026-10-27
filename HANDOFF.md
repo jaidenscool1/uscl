@@ -82,3 +82,15 @@ Alternatives if it stays stuck: the open-bitdemon-emulator community, or BO2's L
   log `~/.cache/uscl/RPCS3.log`. Its pad config is empty until set in the GUI.
 - `tools/dev-scripts/`: the helper scripts used for the tests above (paths assume this PC).
 - A second Windows PC is on the LAN for the two-PC BO2/MW2 test: it needs OpenSSH Server enabled first.
+
+## State at end of 2026-10-27 (PR #7, not yet tested together)
+- Online like a PS3 (PLAN.md phase 7 a+b): starting a supported game opens the player's own session; joining a friend
+  leaves it. Built and self-tested; the two-PC test is still to do.
+- Bridge: a member's new RPCN login replaces their old connection on the host (fixes "user already connected").
+- RPCN `HostIPv6` is now `::ffff:127.0.0.1` (packaging). `::1` meant the signaling ping to 127.0.0.1 never reached
+  RPCN, so whoever hosted from an installed USCL got an RPCN error at Multiplayer. The shell now refreshes
+  `rpcn.cfg` on every host so old copies get fixed.
+- Hosting needs the shell, bridge and dw-server from the same version: a v0.3.3 shell starts dw-server on the ports the
+  new bridge owns (3074/3077/3078), so BO2's NAT check fails. The Windows test PC needs this branch's installer.
+- Emblem editor still says "error accessing the file manager" (parked; see games/BLUS31011.md). Still open:
+  "Matched Player" names, CPU load for all games.

@@ -1,0 +1,47 @@
+From 0cb98dfe4540073fe22f70575706eff9cc77ce48 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 16:50:19 -0700
+Subject: [PATCH 18/18] Service 32 answered by the logging stub (Black Ops II
+ calls it at login; name unknown)
+
+---
+ dw-server/src/lobby/mod.rs   | 3 ++-
+ libbitdemon/src/lobby/mod.rs | 1 +
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/dw-server/src/lobby/mod.rs b/dw-server/src/lobby/mod.rs
+index f0e6262..dac025f 100644
+--- a/dw-server/src/lobby/mod.rs
++++ b/dw-server/src/lobby/mod.rs
+@@ -17,7 +17,7 @@ use crate::lobby::storage::{create_publisher_storage, create_storage_handler, cr
+ use axum::Router;
+ use bitdemon::lobby::LobbyServiceId::{Matchmaking, PooledStorage, 
+     Anticheat, BandwidthTest, Counter, Dml, EventLog, Facebook, Group, KeyArchive, League, Profile,
+-    RichPresence, Stats, Storage, Teams, TitleUtilities, Twitch, Twitter, VoteRank, Youtube,
++    RichPresence, Service32, Stats, Storage, Teams, TitleUtilities, Twitch, Twitter, VoteRank, Youtube,
+ };
+ use bitdemon::lobby::anti_cheat::AntiCheatHandler;
+ use bitdemon::lobby::bandwidth::BandwidthHandler;
+@@ -72,6 +72,7 @@ pub fn configure_lobby_server(
+     configurer.direct_config(Teams, Arc::new(StubHandler::new("Teams")));
+     configurer.direct_config(Twitter, Arc::new(StubHandler::new("Twitter")));
+     configurer.direct_config(Facebook, Arc::new(StubHandler::new("Facebook")));
++    configurer.direct_config(Service32, Arc::new(StubHandler::new("Service32")));
+     configurer.direct_config(PooledStorage, Arc::new(StubHandler::new("PooledStorage")));
+     configurer.direct_config(Matchmaking, MatchmakingHandler::new(session_manager.clone()));
+     configurer.direct_config(Storage, create_storage_handler());
+diff --git a/libbitdemon/src/lobby/mod.rs b/libbitdemon/src/lobby/mod.rs
+index 96595c4..0c1904e 100644
+--- a/libbitdemon/src/lobby/mod.rs
++++ b/libbitdemon/src/lobby/mod.rs
+@@ -61,6 +61,7 @@ pub enum LobbyServiceId {
+     Group = 28,
+     Mail = 29,
+     Twitch = 31,
++    Service32 = 32, // name unknown; Black Ops II calls it at login
+     Youtube = 33,
+     Twitter = 35,
+     Facebook = 36,
+-- 
+2.56.0
+

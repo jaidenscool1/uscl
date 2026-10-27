@@ -459,6 +459,9 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
     let mut member_at: HashMap<u16, u64> = HashMap::new();
     let mut socks: HashMap<u16, UdpSocket> = HashMap::new();
     let mut tcp: HashMap<(u64, u32), TcpStream> = HashMap::new();
+    // host: each member's RPCN connection. RPCS3 keeps one, so a new one means the old is dead; left open, RPCN
+    // refuses the new login as "already logged in"
+    let mut rpcn_conn: HashMap<u64, u32> = HashMap::new();
     let mut next_conn: u32 = 0;
     let mut next_slot: u16 = 1;
     let mut changed = true;
@@ -525,6 +528,17 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
             changed = false;
             let list = mm.lobby_members(lobby);
             members = list.iter().map(|m| m.raw()).collect();
+            if host {
+                // a member who left: their connections here (RPCN login included) end with them
+                tcp.retain(|(p, _), s| {
+                    let stays = members.contains(p);
+                    if !stays {
+                        let _ = s.shutdown(Shutdown::Both);
+                    }
+                    stays
+                });
+                rpcn_conn.retain(|p, _| members.contains(p));
+            }
             let now: Vec<_> = list.iter().map(|m| serde_json::json!({"id": m.raw().to_string(), "name": client.friends().get_friend(*m).name(), "me": *m == me})).collect();
             let now = serde_json::Value::from(now).to_string();
             if now != players {
@@ -788,6 +802,11 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                 continue;
             }
             let Some((id, op, d)) = parse_tcp_frame(m.data()) else { continue };
+            if host && op == TCP_OPEN && d.is_empty() {
+                if let Some(s) = rpcn_conn.insert(peer, id).and_then(|old| tcp.remove(&(peer, old))) {
+                    let _ = s.shutdown(Shutdown::Both);
+                }
+            }
             match op {
                 TCP_OPEN if host => match match d {
                     [] => connect_rpcn(),

@@ -1,7 +1,7 @@
 From 764656d0b0c383f263253252e423f6a56acd13a0 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 14:39:06 -0700
-Subject: [PATCH 17/17] Progress travels with the player: bundles of files,
+Subject: [PATCH 17/18] Progress travels with the player: bundles of files,
  profiles and file-share streams; --export/--import; local admin port for the
  host's bridge (Steam-bound)
 

@@ -237,6 +237,13 @@ QString Online::personaFromVdf(const QByteArray& vdf)
 	return best;
 }
 
+bool Online::supports(const QString& serial)
+{
+	// RPCN alone is enough for these (GAMES.md); the rest need a preset's servers
+	static const QStringList rpcn_only = {"BLUS31426"}; // Minecraft
+	return *presetFor(serial).bridge || rpcn_only.contains(serial);
+}
+
 bool Online::steamRunning()
 {
 #ifdef _WIN32
@@ -480,6 +487,8 @@ void Online::host(const QString& serial, const QString& title, const QString& pa
 	const QString data = dataDir();
 	if (const QString templates = templateDir(); !templates.isEmpty())
 	{
+		// rpcn.cfg is ours, not the player's: refresh it so fixes reach old copies (one bound UDP to ::1 only)
+		QFile::remove(data + "/rpcn/rpcn.cfg");
 		copyMissing(templates + "/rpcn", data + "/rpcn");
 		copyMissing(templates + "/dw", data + "/dw");
 	}
@@ -532,8 +541,9 @@ void Online::host(const QString& serial, const QString& title, const QString& pa
 
 void Online::join(const QString& session)
 {
+	// whoever joins moves: out of their own session, into the other one (PLAN.md "Online like a PS3")
 	if (m_state != "off")
-		return;
+		stop();
 	m_game.clear();
 	setState(session.isEmpty() ? "waiting" : "starting");
 	QStringList args{"join"};
