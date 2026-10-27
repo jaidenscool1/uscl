@@ -62,8 +62,24 @@ Window {
         sound("error")
         dialog.show(qsTr("Error"), qsTr("The PS3 emulator (rpcs3) wasn't found next to USCL. Reinstalling USCL puts it back."))
     }
+    // the game started last, while it runs (behind the home screen after the PS button)
+    property var runningGame: null
+    // a game to start once the running one has closed (Yes in the "still running" question)
+    property var nextGame: null
+    function resumeGame() { launcher.resume() }
+    function closeGame() {
+        dialog.confirm(qsTr("Close Game"), qsTr("Close %1? Anything not saved in the game is lost.").arg(launcher.title), function() { launcher.stop() })
+    }
     function play(g) {
         if (!launcher.coreFound()) { coreMissing(); return }
+        if (launcher.running) {
+            if (runningGame && runningGame.serial === g.serial) { resumeGame(); return }
+            dialog.show(qsTr("Start %1").arg(g.title), qsTr("%1 is still running. Close it and start %2?").arg(launcher.title).arg(g.title),
+                        { buttons: [{ title: qsTr("Yes"), action: function() { nextGame = g; launcher.stop() } },
+                                    { title: qsTr("No") },
+                                    { title: qsTr("Keep Running"), action: resumeGame }] })
+            return
+        }
         if (!system.firmwareInstalled) {
             sound("error")
             dialog.show(qsTr("System Update"), qsTr("Games need the PS3 system software. Install it now?"),
@@ -89,7 +105,7 @@ Window {
         if (prefs.autoControllers) launcher.prepareInput(gamepad.names)
         if (prefs.autoScale) system.setRpcs3Value("Video", "Resolution Scale", String(autoScaleValue))
         // shortcut: a game started before the session runs as it started (patches on); restart it to play online
-        launcher.startGame(g.path, g.title, online.state !== "off")
+        if (launcher.startGame(g.path, g.title, online.state !== "off")) runningGame = g
     }
     function gameTitle(serial) {
         for (var i = 0; i < games.count; i++)
@@ -247,8 +263,8 @@ Window {
     }
     function guide() {
         dialog.show(qsTr("User's Guide"), xboxPad
-            ? qsTr("D-pad or left stick: move     A: select     B: back     Y: options\nLB / RB: jump through long lists\nHold the Guide button during a game to quit back here.\nOnline: Network → Host a Session, or accept a Steam invite.")
-            : qsTr("D-pad or left stick: move     ✕: select     ○: back     △: options\nL1 / R1: jump through long lists\nHold the PS button during a game to quit back here.\nOnline: Network → Host a Session, or accept a Steam invite."))
+            ? qsTr("D-pad or left stick: move     A: select     B: back     Y: options\nLB / RB: jump through long lists\nGuide button in a game: back here while the game keeps running. To close it: Y on the game → Close Game.\nOnline: Network → Host a Session, or accept a Steam invite.")
+            : qsTr("D-pad or left stick: move     ✕: select     ○: back     △: options\nL1 / R1: jump through long lists\nPS button in a game: back here while the game keeps running. To close it: △ on the game → Close Game.\nOnline: Network → Host a Session, or accept a Steam invite."))
     }
 
     // ---------------------------------------------------------------- USCL updates (like RPCS3's updater: ask, download, restart)
@@ -495,6 +511,7 @@ Window {
         updater.state; updater.progress
         gameUpdates.available; gameUpdates.checking; gameUpdates.busy
         party.state; party.message; party.linked; party.inParty; party.muted; party.members
+        launcher.running
         return buildCats()
     }
 
@@ -505,6 +522,14 @@ Window {
 
     function buildCats() {
         var gameItems = []
+        // the game that keeps running behind the home screen, first, like the PS3's
+        if (launcher.running && runningGame) {
+            let g = runningGame
+            gameItems.push({ title: g.title, desc: qsTr("Running"), icon: g.icon || ic("it_games"), wide: !!g.icon, badge: qsTr("Running"),
+                             action: resumeGame,
+                             options: function() { return [{ title: qsTr("Resume Game"), action: resumeGame },
+                                                           { title: qsTr("Close Game"), action: closeGame }] } })
+        }
         for (var i = 0; i < games.count; i++) {
             let g = games.get(i)
             gameItems.push({
@@ -625,7 +650,10 @@ Window {
     // ---------------------------------------------------------------- input: whatever is on top gets it
 
     function input(b) {
-        if (launcher.running) return
+        // the game on screen has the controller; its PS button reaches us from RPCS3 (onHomeRequested)
+        if (launcher.gameShown) return
+        // PS on the home screen over a running game: back to the game, like the PS3's
+        if (b === "home" && launcher.running) { resumeGame(); return }
         if (boot.running) { if (b === "accept") boot.skip(); return }
         if (prompt.open) prompt.pad(b)
         else if (dialog.open) dialog.input(b)
@@ -638,11 +666,19 @@ Window {
     Connections {
         target: gamepad
         function onPressed(b) { if (root.active) root.input(b) }
-        function onHomeHeld() { if (launcher.running) launcher.stop() }
     }
     Connections {
         target: launcher
+        // PS in a game: the game keeps running behind us
+        function onHomeRequested() {
+            launcher.showHome()
+            if (!windowed) root.showFullScreen()
+            root.raise()
+            root.requestActivate()
+            sound("category")
+        }
         function onFinished(crashed, details) {
+            runningGame = null
             // the window manager may have taken us out of full screen when the game's window appeared
             if (!windowed) { root.showFullScreen(); root.requestActivate() }
             games.reload()
@@ -651,7 +687,12 @@ Window {
             if (crashed) {
                 sound("error")
                 dialog.show(qsTr("Error"), qsTr("The game stopped unexpectedly.\n\n") + details.split("\n").slice(-4).join("\n"))
+            } else if (nextGame) {
+                var g = nextGame
+                nextGame = null
+                play(g)
             }
+            nextGame = null
         }
     }
     Connections {
@@ -787,11 +828,11 @@ Window {
                 onSound: function(name) { root.sound(name) }
             }
 
-            // while a game (or the classic window) runs
+            // while a game (or the classic window) is on screen
             Rectangle {
                 anchors.fill: parent
                 color: "black"
-                opacity: launcher.running ? 0.92 : 0
+                opacity: launcher.gameShown ? 0.92 : 0
                 visible: opacity > 0
                 Behavior on opacity { NumberAnimation { duration: 300 } }
                 Column {
@@ -800,7 +841,7 @@ Window {
                     Text { anchors.horizontalCenter: parent.horizontalCenter; text: launcher.title; color: "white"; font.pixelSize: 44 }
                     Text {
                         anchors.horizontalCenter: parent.horizontalCenter
-                        text: root.xboxPad ? qsTr("Hold the Guide button to quit and come back here") : qsTr("Hold the PS button to quit and come back here")
+                        text: root.xboxPad ? qsTr("Press the Guide button to come back here; the game keeps running") : qsTr("Press the PS button to come back here; the game keeps running")
                         color: "#b0ffffff"; font.pixelSize: 25
                     }
                 }

@@ -5,7 +5,7 @@
 #include <QTimer>
 
 // Every connected controller, through SDL3. Buttons by position, so ✕/A is "accept" and ○/B is "back" on any pad.
-// Keeps listening while a game has the screen, so holding the PS / Guide button can bring the player home.
+// A game's PS / Guide button reaches the home screen through RPCS3 (Launcher::homeRequested), not from here.
 class Gamepad : public QObject
 {
 	Q_OBJECT
@@ -24,7 +24,6 @@ public:
 signals:
 	// up, down, left, right, accept, back, options, info, l1, r1, home
 	void pressed(const QString& button);
-	void homeHeld();
 	void countChanged();
 
 private:
@@ -36,8 +35,6 @@ private:
 	QString m_held_dir;
 	QElapsedTimer m_held_since;
 	qint64 m_next_repeat = 0;
-	QElapsedTimer m_home_since;
-	bool m_home_fired = false;
 	int m_stick_x = 0, m_stick_y = 0; // -1, 0, 1
 	int m_count = 0;
 	QString m_name;

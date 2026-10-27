@@ -15,7 +15,9 @@ Launcher::Launcher(QObject* parent)
 	connect(&m_process, &QProcess::readyRead, this, [this] {
 		for (const QByteArray& line : m_process.readAll().split('\n'))
 		{
-			if (!line.trimmed().isEmpty())
+			if (line.trimmed() == "USCL:home")
+				emit homeRequested();
+			else if (!line.trimmed().isEmpty())
 				m_tail << QString::fromUtf8(line.trimmed());
 		}
 		while (m_tail.size() > 30)
@@ -25,6 +27,7 @@ Launcher::Launcher(QObject* parent)
 		const bool crashed = !m_stopping && (status == QProcess::CrashExit || code != 0);
 		m_stopping = false;
 		emit runningChanged();
+		emit gameShownChanged();
 		emit finished(crashed, m_tail.join('\n'));
 	});
 	connect(&m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
@@ -52,7 +55,7 @@ bool Launcher::coreFound()
 	return QFileInfo(corePath()).isExecutable();
 }
 
-bool Launcher::start(const QStringList& args, const QString& title, bool online)
+bool Launcher::start(const QStringList& args, const QString& title, bool online, bool game)
 {
 	if (running())
 		return false;
@@ -62,23 +65,49 @@ bool Launcher::start(const QStringList& args, const QString& title, bool online)
 		env.insert("USCL_ONLINE", "1");
 	else
 		env.remove("USCL_ONLINE");
+	// a game's PS button comes to us (uscl-rpcs3 0008); the classic window keeps RPCS3's own home menu
+	if (game)
+		env.insert("USCL_SHELL", "1");
+	else
+		env.remove("USCL_SHELL");
 	m_process.setProcessEnvironment(env);
 	m_tail.clear();
 	m_title = title;
 	m_stopping = false;
+	m_shown = true;
 	m_process.start(corePath(), args);
 	emit runningChanged();
+	emit gameShownChanged();
 	return true;
 }
 
 bool Launcher::startGame(const QString& path, const QString& title, bool online)
 {
-	return start({"--no-gui", "--fullscreen", path}, title, online);
+	return start({"--no-gui", "--fullscreen", path}, title, online, true);
 }
 
 bool Launcher::openClassic()
 {
-	return start({}, tr("All Settings"), false);
+	return start({}, tr("All Settings"), false, false);
+}
+
+void Launcher::command(const char* line, bool shown)
+{
+	if (!running() || m_shown == shown)
+		return;
+	m_process.write(line);
+	m_shown = shown;
+	emit gameShownChanged();
+}
+
+void Launcher::showHome()
+{
+	command("hide\n", false);
+}
+
+void Launcher::resume()
+{
+	command("show\n", true);
 }
 
 void Launcher::stop()

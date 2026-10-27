@@ -36,6 +36,9 @@ Then build as in RPCS3's `BUILDING.md`.
   players honest; bans are the real defence (see `uscl-bridge/src/tunnel.rs`).
 - 0007: no "experimental build" warning on start, and RPCS3's own updater is off: it would replace USCL's
   patched RPCS3 with the official one. The USCL app updates itself.
+- 0008: with `USCL_SHELL=1` (set by the USCL home screen) the PS button doesn't open RPCS3's home menu: the game
+  gets the usual system-menu events, RPCS3 prints `USCL:home`, and the home screen takes over. The game keeps
+  running. `hide` / `show` on stdin hide and show the game window (fullscreen comes back as it was).
 
 ## Building (Arch, 2026-10)
 The bundled LLVM doesn't compile with GCC 16's libstdc++ and `llvm-ar` isn't installed, so the debugging build is
