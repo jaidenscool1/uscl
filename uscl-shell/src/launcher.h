@@ -32,7 +32,9 @@ public:
 	Q_INVOKABLE static bool prepareInput(const QStringList& pads);
 	static QString inputYml(const QString& current, const QStringList& pads);
 	Q_INVOKABLE static bool coreFound();
+	Q_INVOKABLE static bool ps4CoreFound();
 	static QString corePath();
+	static QString ps4CorePath(); // our shadPS4, for PS4 games
 
 signals:
 	void runningChanged();
@@ -43,7 +45,7 @@ signals:
 	void finished(bool crashed, const QString& details);
 
 private:
-	bool start(const QStringList& args, const QString& title, bool online, bool game);
+	bool start(const QStringList& args, const QString& title, bool online, bool game, bool ps4 = false);
 	void command(const char* line, bool shown);
 
 	QProcess m_process;

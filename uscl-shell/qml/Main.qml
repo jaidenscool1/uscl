@@ -29,7 +29,7 @@ Window {
         property bool nightShade: true
         property bool sounds: true
         property bool setupDone: false
-        property int xmbCategory: 2
+        property int xmbColumn: 3 // Games
         property bool clock24: false
         property string dateFormat: "MM/dd/yy"
         property string avatar: "uscl"
@@ -75,7 +75,8 @@ Window {
         dialog.confirm(qsTr("Close Game"), qsTr("Close %1? Anything not saved in the game is lost.").arg(launcher.title), function() { launcher.stop() })
     }
     function play(g) {
-        if (!launcher.coreFound()) { coreMissing(); return }
+        var ps4 = games.isPs4Serial(g.serial) // runs in our shadPS4: no RPCS3 or PS3 system software needed
+        if (ps4 ? !launcher.ps4CoreFound() : !launcher.coreFound()) { coreMissing(); return }
         if (launcher.running) {
             if (runningGame && runningGame.serial === g.serial) { resumeGame(); return }
             dialog.show(qsTr("Start %1").arg(g.title), qsTr("%1 is still running. Close it and start %2?").arg(launcher.title).arg(g.title),
@@ -84,7 +85,7 @@ Window {
                                     { title: qsTr("Keep Running"), action: resumeGame }] })
             return
         }
-        if (!system.firmwareInstalled) {
+        if (!ps4 && !system.firmwareInstalled) {
             sound("error")
             dialog.show(qsTr("System Update"), qsTr("Games need the PS3 system software. Install it now?"),
                         { buttons: [{ title: qsTr("Yes"), action: function() { openPage(systemUpdatePage, ic("it_update"), 1) } }, { title: qsTr("No") }] })
@@ -115,8 +116,10 @@ Window {
         launchGame(g)
     }
     function launchGame(g) {
-        if (prefs.autoControllers) launcher.prepareInput(gamepad.names)
-        if (prefs.autoScale) system.setRpcs3Value("Video", "Resolution Scale", String(autoScaleValue))
+        if (!games.isPs4Serial(g.serial)) {
+            if (prefs.autoControllers) launcher.prepareInput(gamepad.names)
+            if (prefs.autoScale) system.setRpcs3Value("Video", "Resolution Scale", String(autoScaleValue))
+        }
         // shortcut: a game started before the session runs as it started (patches on); restart it to play online
         if (launcher.startGame(g.path, g.title, online.state !== "off")) runningGame = g
     }
@@ -126,32 +129,100 @@ Window {
         return serial
     }
 
-    // ---------------------------------------------------------------- party chat (Discord), like the PS5's party
-    function partyItem() {
-        var talking = party.members.filter(function(m) { return m.speaking }).map(function(m) { return m.name })
-        return {
-            title: party.inParty ? qsTr("Party (%n)", "", party.members.length) : qsTr("Party"),
-            icon: ic("cat_friends"), badge: party.inParty ? (party.muted ? qsTr("Muted") : qsTr("Voice")) : "",
-            desc: party.message ? party.message
-                : !party.linked ? qsTr("Voice chat with your session over Discord: ✕ to link your Discord account")
-                : party.inParty ? (talking.length ? qsTr("Talking: %1").arg(talking.join(", ")) : qsTr("Voice chat is on"))
-                : party.state === "ready" ? qsTr("Host or join a session and your party starts by itself")
-                : qsTr("Connecting to Discord..."),
-            action: function() { if (!party.linked && party.state !== "linking") party.link(); else openPage(partyPage, ic("cat_friends"), friendsCat) }
+    // ---------------------------------------------------------------- Party: the Discord app on this PC, from the menu
+    function partyItems() {
+        if (!party.available)
+            return [{ title: qsTr("Discord Isn't Available"), icon: ic("it_voice"), desc: qsTr("This USCL was built without Discord"), disabled: true }]
+        if (!party.linked || party.state === "linking")
+            return [{ title: qsTr("Link Discord"), icon: ic("it_join"), desc: party.message || qsTr("See and join your Discord voice chats from here: ✕ to sign in to Discord"),
+                      action: function() { if (party.state !== "linking") party.link() } }]
+        if (party.state === "noapp")
+            return [{ title: qsTr("Discord Isn't Open"), icon: ic("cat_party"), desc: qsTr("✕ to start Discord; the Party menu connects to it by itself"),
+                      action: function() { party.startDiscord(); notice.show(qsTr("Starting Discord..."), ic("cat_party")) } },
+                    unlinkItem()]
+        if (party.state !== "ready")
+            return [{ title: party.message || qsTr("Connecting to Discord..."), icon: ic("cat_party"), disabled: party.state !== "error",
+                      desc: party.state === "error" ? qsTr("✕ to link your Discord account again") : "", action: party.link },
+                    unlinkItem()]
+        var items = []
+        var v = party.voice
+        if (v.id) {
+            var talking = v.members.filter(function(m) { return m.speaking }).map(function(m) { return m.name })
+            items.push({ title: v.name, icon: ic("it_voice"), badge: String(v.members.length),
+                         desc: (v.server ? v.server + "  ·  " : "") + (talking.length ? qsTr("Talking: %1").arg(talking.join(", ")) : qsTr("✕ for who's here")),
+                         action: function() { openPage(voicePage, ic("it_voice"), partyCat) } },
+                       { title: party.muted ? qsTr("Unmute Microphone") : qsTr("Mute Microphone"), icon: ic("it_sound"), badge: party.muted ? qsTr("Muted") : "",
+                         action: function() { party.setMuted(!party.muted) } },
+                       { title: party.deafened ? qsTr("Undeafen") : qsTr("Deafen"), icon: ic("it_sound"), badge: party.deafened ? qsTr("Deafened") : "",
+                         action: function() { party.setDeafened(!party.deafened) } },
+                       { title: qsTr("Disconnect"), icon: ic("it_logout"), desc: qsTr("Leave %1").arg(v.name), action: party.leaveVoice })
+        } else {
+            items.push({ title: qsTr("Not in a Voice Chat"), icon: ic("it_voice"), desc: party.message || qsTr("Pick a server below to see its voice chats"), disabled: true })
         }
-    }
-    function partyPage() {
-        var rows = []
-        party.members.forEach(function(m) {
-            rows.push({ title: m.name + (m.me ? qsTr(" (you)") : ""), icon: m.avatar || ic("it_person"),
-                        value: m.speaking ? qsTr("Talking") : "", disabled: true })
+        if (!party.servers.length)
+            items.push({ title: qsTr("No Discord Servers"), icon: ic("it_server"), desc: qsTr("✕ to check again"), action: party.refreshServers })
+        party.servers.forEach(function(sv) {
+            items.push({ title: sv.name, icon: sv.icon || ic("it_server"), desc: qsTr("✕ for its voice chats and who's in them"),
+                         action: function() { party.loadChannels(sv.id); openPage(function() { return channelsPage(sv) }, sv.icon || ic("it_server"), partyCat) } })
         })
-        if (!rows.length)
-            rows.push({ title: party.state === "ready" ? qsTr("Nobody here yet: host or join a session") : party.message || qsTr("Connecting to Discord..."), disabled: true })
-        rows.push({ title: party.muted ? qsTr("Unmute Microphone") : qsTr("Mute Microphone"), icon: ic("it_sound"), action: function() { party.setMuted(!party.muted) } })
-        rows.push({ title: qsTr("Unlink Discord"), icon: ic("it_logout"), help: party.myName ? qsTr("Signed in as %1").arg(party.myName) : "",
-                    action: function() { dialog.confirm(qsTr("Party"), qsTr("Unlink your Discord account from USCL?"), function() { party.unlink(); popPage() }) } })
+        items.push(unlinkItem())
+        return items
+    }
+    function unlinkItem() {
+        return { title: qsTr("Unlink Discord"), icon: ic("it_logout"), desc: party.myName ? qsTr("Signed in as %1").arg(party.myName) : "",
+                 action: function() { dialog.confirm(qsTr("Party"), qsTr("Unlink your Discord account from USCL?"), party.unlink) } }
+    }
+    function channelsPage(sv) {
+        if (party.channelsServer !== sv.id)
+            return [{ title: qsTr("Loading..."), disabled: true }]
+        if (!party.channels.length)
+            return [{ title: qsTr("No voice chats here"), disabled: true }]
+        if (party.channels[0].error)
+            return [{ title: qsTr("Couldn't load the voice chats"), help: party.channels[0].error, disabled: true }]
+        // like Discord's channel list: each voice chat, then who's in it
+        var rows = []
+        party.channels.forEach(function(c) {
+            var here = party.voice.id === c.id
+            rows.push({ title: c.name, icon: ic("it_voice"),
+                        value: here ? qsTr("Joined") : c.members.length ? qsTr("%n in it", "", c.members.length) : "",
+                        help: here ? qsTr("You're in this voice chat") : qsTr("✕ to join"),
+                        action: here ? function() { openPage(voicePage, ic("it_voice"), partyCat) } : function() { party.joinVoice(c.id) } })
+            c.members.forEach(function(m) { rows.push(memberRow(m)) })
+        })
         return rows
+    }
+    function voicePage() {
+        var v = party.voice
+        var rows = (v.members || []).map(memberRow)
+        if (!rows.length) rows.push({ title: v.id ? qsTr("Loading...") : qsTr("Not in a voice chat"), disabled: true })
+        return rows
+    }
+    function memberRow(m) {
+        return { title: "    " + m.name + (m.me ? qsTr(" (you)") : ""), icon: m.avatar || ic("it_person"),
+                 value: m.speaking ? qsTr("Talking") : m.localMuted ? qsTr("Muted for You") : m.deafened ? qsTr("Deafened") : m.muted ? qsTr("Muted") : "",
+                 help: m.me ? qsTr("✕ for your microphone and sound") : qsTr("✕ for volume, mute and profile"),
+                 action: function() { memberOptions(m) } }
+    }
+    // what Discord's right-click on someone in a voice chat offers, as far as Discord lets other apps do it
+    function memberOptions(m) {
+        if (m.me) {
+            options.show([{ title: party.muted ? qsTr("Unmute Microphone") : qsTr("Mute Microphone"), action: function() { party.setMuted(!party.muted) } },
+                          { title: party.deafened ? qsTr("Undeafen") : qsTr("Deafen"), action: function() { party.setDeafened(!party.deafened) } },
+                          { title: qsTr("View Profile in Discord"), action: function() { party.openProfile(m.id) } }], 0)
+            return
+        }
+        options.show([
+            { title: qsTr("User Volume: %1%").arg(m.volume), action: function() {
+                var steps = [0, 25, 50, 75, 100, 125, 150, 175, 200]
+                options.show(steps.map(function(v) {
+                    return { title: v + "%", checked: Math.abs(m.volume - v) < 13, action: function() { party.setUserVolume(m.id, v) } }
+                }), steps.indexOf(Math.round(m.volume / 25) * 25))
+            } },
+            { title: m.localMuted ? qsTr("Unmute (for You)") : qsTr("Mute (for You)"),
+              action: function() { party.setUserMuted(m.id, !m.localMuted) } },
+            { title: qsTr("View Profile in Discord"),
+              action: function() { party.openProfile(m.id) } }
+        ], 0)
     }
 
     // ---------------------------------------------------------------- game updates (Sony's patches)
@@ -176,6 +247,44 @@ Window {
             progress: function() { return gameUpdates.busy ? gameUpdates.progress : -1 }
         })
     }
+    // ---------------------------------------------------------------- downloadable content (PS3), from the player's own files
+    property var dlcGame: null
+    property string dlcPath: ""
+    function openDlc(g) { dlcGame = g; dlcPath = ""; openPage(dlcPage, ic("it_games"), gamesCat) }
+    function dlcPage() {
+        var rows = [{ title: qsTr("Install from File"), icon: ic("it_addgames"), help: qsTr("A .pkg or .rap (license) you have, from a folder on this PC"),
+                      disabled: dlc.busy, action: function() { browseRoots = games.roots(); dlcPath = ""; openPage(dlcBrowsePage, ic("it_addgames"), gamesCat, dlcBrowseBack) } }]
+        var items = dlc.list(dlcGame.serial)
+        if (!items.length)
+            rows.push({ title: qsTr("No downloadable content installed"), disabled: true })
+        items.forEach(function(d) {
+            rows.push({ title: d.name, help: d.id,
+                        value: !d.content ? qsTr("License only: install its content")
+                             : !d.licensed ? qsTr("Needs its license (.rap)") : qsTr("Installed") })
+        })
+        return rows
+    }
+    function dlcBrowsePage() {
+        if (!dlcPath)
+            return browseRoots.map(function(r) { return { title: r.name, help: r.path, icon: ic("it_storage"), action: function() { dlcBrowseTo(r.path) } } })
+        return dlc.files(dlcPath).map(function(f) {
+            return { title: f.name, icon: ic("it_update"), action: function() {
+                closePages()
+                notice.show(qsTr("Installing %1...").arg(f.name), ic("it_update"))
+                dlc.install(f.path)
+            } }
+        }).concat(games.folders(dlcPath).map(function(f) { return { title: f.name, icon: ic("it_files"), action: function() { dlcBrowseTo(f.path) } } }))
+    }
+    function dlcBrowseTo(path) { dlcPath = path; page.current = 0; page.open() }
+    function dlcBrowseBack() { // like browseBack
+        if (!dlcPath) { popPage(); return }
+        var isRoot = browseRoots.some(function(r) { return r.path === dlcPath })
+        var up = dlcPath.substring(0, dlcPath.lastIndexOf("/")) || "/"
+        if (/^[A-Za-z]:$/.test(up)) up += "/"
+        dlcPath = isRoot ? "" : up
+        page.current = 0
+    }
+
     function updatesPage() {
         var avail = gameUpdates.available
         var serials = Object.keys(avail)
@@ -237,16 +346,22 @@ Window {
         })
     }
 
-    function hostPicker() {
-        needsName(function() {
-            var o = []
-            for (var i = 0; i < games.count; i++) {
-                let g = games.get(i)
-                o.push({ title: g.title, action: function() { online.host(g.serial, g.title, g.path) } })
-            }
-            o.push({ title: qsTr("Another Game (PSN)"), action: function() { online.host("", "", "") } })
-            options.show(o, 0)
-        })
+    // [badge, line] for the Online column: RPCN runs inside the session (the host's PC), so it's online with one
+    function rpcnStatus() {
+        switch (online.state) {
+        case "hosting": return [qsTr("Online"), qsTr("Signed in: this PC runs the server for %1").arg(online.game || qsTr("the session"))]
+        case "joined": return [qsTr("Online"), qsTr("Signed in through the host's PC")]
+        case "starting": case "waiting": return [qsTr("Connecting"), qsTr("Connecting...")]
+        default: return system.onlineName ? [qsTr("Ready"), qsTr("Signs in when you start an online game")]
+                                          : [qsTr("Not Set Up"), qsTr("Choose an Online ID to play online")]
+        }
+    }
+    function usclStatus() {
+        var lines = [qsTr("USCL %1").arg(system.version), qsTr("Steam: %1").arg(online.steamName || qsTr("signed in")),
+                     qsTr("Session: %1").arg(online.state === "off" ? qsTr("none") : sessionText())]
+        if (online.players.length) lines.push(qsTr("Players: %1").arg(online.players.map(function(p) { return p.name }).join(", ")))
+        lines.push(qsTr("Update: %1").arg(updateStateText()))
+        return lines.join("\n")
     }
     function removePlayer(p) {
         options.show([
@@ -276,8 +391,8 @@ Window {
     }
     function guide() {
         dialog.show(qsTr("User's Guide"), xboxPad
-            ? qsTr("D-pad or left stick: move     A: select     B: back     Y: options\nLB / RB: jump through long lists\nGuide button in a game: back here while the game keeps running. To close it: Y on the game → Close Game.\nOnline: Network → Host a Session, or accept a Steam invite.")
-            : qsTr("D-pad or left stick: move     ✕: select     ○: back     △: options\nL1 / R1: jump through long lists\nPS button in a game: back here while the game keeps running. To close it: △ on the game → Close Game.\nOnline: Network → Host a Session, or accept a Steam invite."))
+            ? qsTr("D-pad or left stick: move     A: select     B: back     Y: options\nLB / RB: jump through long lists\nGuide button in a game: back here while the game keeps running. To close it: Y on the game → Close Game.\nOnline: start a game and it goes online by itself; friends join you from Friends.")
+            : qsTr("D-pad or left stick: move     ✕: select     ○: back     △: options\nL1 / R1: jump through long lists\nPS button in a game: back here while the game keeps running. To close it: △ on the game → Close Game.\nOnline: start a game and it goes online by itself; friends join you from Friends."))
     }
 
     // ---------------------------------------------------------------- USCL updates (like RPCS3's updater: ask, download, restart)
@@ -498,7 +613,7 @@ Window {
     }
     function addGames() {
         browseRoots = games.roots(); browsePath = ""
-        openPage(browsePage, ic("it_addgames"), 2, browseBack)
+        openPage(browsePage, ic("it_addgames"), gamesCat, browseBack)
     }
 
     // ---------------------------------------------------------------- pages
@@ -517,13 +632,16 @@ Window {
 
     // ---------------------------------------------------------------- the crossbar
 
-    readonly property int friendsCat: 4
+    // column order: Users, Settings, Online, Games, Party, Friends
+    readonly property int gamesCat: 3
+    readonly property int partyCat: 4
+    readonly property int friendsCat: 5
     property var cats: {
         games.count; games.scanning; system.onlineName; system.firmwareInstalled; system.firmwareVersion; gamepad.count; prefs.avatar
         online.state; online.session; online.message; online.friends; online.friendsLoading; online.friendsError; online.players; online.bans; cfgTick
         updater.state; updater.progress
         gameUpdates.available; gameUpdates.checking; gameUpdates.busy
-        party.state; party.message; party.linked; party.inParty; party.muted; party.members
+        party.state; party.message; party.linked; party.muted; party.deafened; party.voice; party.servers
         launcher.running
         return buildCats()
     }
@@ -558,10 +676,11 @@ Window {
                                       notice.show(qsTr("Checking for updates..."), ic("it_update"))
                                   } },
                             { title: qsTr("Host Online Session"), action: function() { needsName(function() { online.host(g.serial, g.title, g.path) }) } },
+                            games.isPs4Serial(g.serial) ? null : { title: qsTr("Downloadable Content"), action: function() { openDlc(g) } },
                             { title: qsTr("Information"), action: function() { dialog.show(qsTr("Information"), gameInfo(g)) } },
                             { title: qsTr("Remove from List"), action: function() {
                                 dialog.confirm(qsTr("Remove"), qsTr("Take %1 off the list? The game's files stay where they are.").arg(g.title), function() { games.remove(g.serial) })
-                            } }]
+                            } }].filter(Boolean)
                 }
             })
         }
@@ -569,22 +688,23 @@ Window {
                          desc: games.scanning ? qsTr("Looking for games...") : qsTr("Find the games in a folder, and every folder inside it") })
         var pending = Object.keys(gameUpdates.available).length
         gameItems.push({ title: qsTr("Game Updates"), icon: ic("it_update"), badge: pending ? String(pending) : "",
-                         action: function() { updatePick = ({}); openPage(updatesPage, ic("it_update"), 2) },
+                         action: function() { updatePick = ({}); openPage(updatesPage, ic("it_update"), gamesCat) },
                          desc: gameUpdates.busy ? gameUpdates.status
                              : pending ? qsTr("%n game(s) have updates: choose which to install", "", pending)
                              : gameUpdates.checking ? qsTr("Checking for updates...") : qsTr("All your games are up to date") })
         gameItems.push({ title: qsTr("How to Play"), icon: ic("it_help"), action: guide, desc: qsTr("Controls, quitting a game, and playing online") })
 
         var active = online.state !== "off"
-        var network = [{ title: sessionText(), icon: ic(active ? "it_stream" : "it_host"),
-                         desc: online.message || (active ? (online.game || qsTr("Friends join from their Steam friends list")) : qsTr("Host a session, or join a friend's")),
-                         action: active ? function() { options.show([{ title: qsTr("Leave the Session"), action: online.stop }]) } : hostPicker }]
+        var steam = online.steamRunning()
+        var network = [{ title: qsTr("RPCN Status"), icon: ic("it_network"), badge: rpcnStatus()[0], desc: rpcnStatus()[1],
+                         action: function() { dialog.show(qsTr("RPCN Status"), rpcnStatus()[1] + "\n" + qsTr("Online ID: %1").arg(system.onlineName || qsTr("Not set"))) } },
+                       { title: qsTr("USCL Status"), icon: ic("it_system"), badge: steam ? qsTr("Online") : qsTr("Offline"),
+                         desc: (steam ? qsTr("Steam: %1").arg(online.steamName || qsTr("signed in")) : qsTr("Steam isn't running: ✕ to start it")) + "  ·  USCL " + system.version,
+                         action: steam ? function() { dialog.show(qsTr("USCL Status"), usclStatus()) } : online.startSteam }]
         if (active)
-            network.push({ title: qsTr("Leave the Session"), icon: ic("it_logout"), desc: qsTr("Stops the session on this PC"), action: online.stop })
-        else
-            network.push({ title: qsTr("Host a Session"), icon: ic("it_host"), desc: qsTr("Friends join you over Steam"), action: hostPicker },
-                         { title: qsTr("Join by Steam Invite"), icon: ic("it_join"), desc: qsTr("Accept an invite in Steam, or join the one session a friend is in"),
-                           action: function() { needsName(function() { online.join("") }) } })
+            network.push({ title: sessionText(), icon: ic("it_stream"), desc: online.message || online.game || qsTr("Friends join from their Friends list"),
+                           action: function() { options.show([{ title: qsTr("Leave the Session"), action: online.stop }], 0) } },
+                         { title: qsTr("Leave the Session"), icon: ic("it_logout"), desc: qsTr("Stops the session on this PC; the game goes offline"), action: online.stop })
         online.players.forEach(function(p) {
             if (p.me) return
             network.push({ title: p.name, icon: ic("it_person"), disabled: online.state !== "hosting",
@@ -599,11 +719,12 @@ Window {
                                        dialog.confirm(qsTr("Banned Players"), qsTr("Let %1 join your sessions again?").arg(b.name || b.id), function() { online.unban(b.id) }) } }
                                }), 0)
                            } })
-        network.push({ title: qsTr("Internet Connection Test"), icon: ic("it_nettest"), desc: qsTr("Check that this system can play online"), action: testConnection },
+        network.push({ title: qsTr("Online ID"), icon: ic("it_person"), desc: system.onlineName ? qsTr("Others see you as %1").arg(system.onlineName) : qsTr("Not set: ✕ to choose a name"),
+                       action: function() { nameChooser() } },
+                     { title: qsTr("Internet Connection Test"), icon: ic("it_nettest"), desc: qsTr("Check that this system can play online"), action: testConnection },
                      { title: qsTr("User's Guide"), icon: ic("it_help"), desc: qsTr("How to use this system"), action: guide })
 
         var friends = []
-        if (party.available) friends.push(partyItem())
         if (online.friendsError)
             friends.push({ title: qsTr("Steam Isn't Available"), icon: ic("it_nettest"), desc: online.friendsError, action: online.refreshFriends })
         else if (online.friendsLoading && !online.friends.length)
@@ -642,8 +763,9 @@ Window {
                 settingsItem(qsTr("Accessory Settings"), qsTr("Controllers and button assignments"), "it_gamepad", accessoryPage),
                 settingsItem(qsTr("Network Settings"), qsTr("Online ID and the connection test"), "it_network", networkSettingsPage),
                 settingsItem(qsTr("System Settings"), qsTr("Language, system information and setup"), "it_system", systemSettingsPage) ] },
-            { name: qsTr("Game"), icon: ic("cat_game"), items: gameItems },
-            { name: qsTr("Network"), icon: ic("cat_network"), items: network },
+            { name: qsTr("Online"), icon: ic("cat_network"), items: network },
+            { name: qsTr("Games"), icon: ic("cat_game"), items: gameItems },
+            { name: qsTr("Party"), icon: ic("cat_party"), items: partyItems() },
             { name: qsTr("Friends"), icon: ic("cat_friends"), items: friends }
         ]
     }
@@ -710,6 +832,14 @@ Window {
         }
     }
     Connections {
+        target: dlc
+        function onFinished(ok, message) {
+            sound(ok ? "notify" : "error")
+            if (ok) notice.show(message, ic("it_update"))
+            else dialog.show(qsTr("Downloadable Content"), message)
+        }
+    }
+    Connections {
         target: gameUpdates
         function onFinished(installed, problem) {
             games.reload()
@@ -736,7 +866,6 @@ Window {
     Connections {
         target: online
         function onStateChanged() {
-            party.setSession(online.state === "hosting" || online.state === "joined" ? online.session : "")
             // joined someone else: our own session is gone, and leaving the game no longer ends anything
             if (online.state === "joined" || online.state === "waiting") ownSession = false
             // a game waiting for its own session: start it once up, or offline (like a PS3 without PSN) if not
@@ -787,14 +916,15 @@ Window {
                 id: xmb
                 anchors.fill: parent
                 cats: root.cats
-                cat: prefs.xmbCategory
+                cat: prefs.xmbColumn
                 // the crossbar slides out to the left while an inner screen is open
                 opacity: root.topPage || setup.open || boot.running ? 0 : 1
                 transform: Translate { x: root.topPage ? -120 : 0; Behavior on x { NumberAnimation { duration: 200; easing.type: Easing.OutSine } } }
                 Behavior on opacity { NumberAnimation { duration: 200 } }
                 onCatChanged: {
-                    prefs.xmbCategory = cat
+                    prefs.xmbColumn = cat
                     if (cat === root.friendsCat) online.refreshFriends()
+                    if (cat === root.partyCat) party.refreshServers()
                 }
                 onSound: function(name) { root.sound(name) }
                 onShowOptions: function(e) { options.show(e.options(), 0) }

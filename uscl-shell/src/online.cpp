@@ -21,6 +21,11 @@
 
 #include <algorithm>
 
+#ifdef __linux__
+#include <csignal>
+#include <sys/prctl.h>
+#endif
+
 namespace
 {
 	// Our Demonware serves auth, lobby and NAT discovery on 127.0.0.1 (uscl-dw/README.md)
@@ -40,6 +45,7 @@ namespace
 	{
 		const char* bridge; // uscl-bridge host <preset>
 		bool demonware;
+		bool ps4 = false; // shadPS4 game: shadNet carries its PSN sign-in, Demonware also answers auth3 (443)
 	};
 
 	// Games that need more than RPCN: which ports the session carries and whether our Demonware runs
@@ -50,6 +56,8 @@ namespace
 		static const QStringList skate3 = {"BLUS30464", "BLES00760"};
 		if (bo2.contains(serial) || mw2.contains(serial)) // the same uscl-dw ports
 			return {"bo2", true};
+		if (serial == "CUSA57548") // Black Ops II, PS4
+			return {"bo2ps4", true, true};
 		if (skate3.contains(serial))
 			return {"skate3", false};
 		return {"", false};
@@ -151,6 +159,49 @@ QString Online::toolPath(const QString& name)
 QString Online::dataDir()
 {
 	return GameModel::rpcs3ConfigDir() + "uscl";
+}
+
+QString Online::preparePs4()
+{
+	const QString dir = dataDir() + "/shadps4", user = dir + "/user";
+	if (const QString templates = templateDir(); !templates.isEmpty())
+	{
+		QDir(user + "/patches/uscl").removeRecursively(); // our game patches: refresh so fixes reach old copies
+		copyMissing(templates + "/shadps4", dir);
+	}
+	const QString name = yamlValue(readFile(rpcs3File("rpcn.yml")), {}, "NPID");
+	QFile f(user + "/users.json");
+	QJsonObject root = f.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(f.readAll()).object() : QJsonObject{};
+	f.close();
+	QJsonObject users = root["Users"].toObject();
+	QJsonArray list = users["user"].toArray();
+	for (int i = list.size(); i < 4; i++)
+	{
+		list.append(QJsonObject{{"player_index", i + 1}, {"user_id", 1000 + i}, {"user_color", i + 1},
+			{"user_name", QString("Player %1").arg(i + 1)}, {"np_age", 30}, {"np_country", "us"},
+			{"np_date_of_birth", "1994-01-01"}, {"np_language", "en"}, {"shadnet_enabled", false}});
+	}
+	if (QJsonObject p1 = list[0].toObject(); !name.isEmpty())
+	{
+		if (p1["shadnet_npid"].toString() != name)
+		{
+			// a new name is a new shadNet account: the host's shadNet (USCL_LOCAL) makes it at first sign-in
+			auto* r = QRandomGenerator::system();
+			p1["shadnet_password"] = QString::number(r->generate64(), 16) + QString::number(r->generate64(), 16);
+			p1["shadnet_token"] = "";
+		}
+		p1["shadnet_enabled"] = true;
+		p1["shadnet_npid"] = name;
+		p1["shadnet_email"] = name + "@uscl.local";
+		p1["user_name"] = name;
+		list[0] = p1;
+	}
+	users["user"] = list;
+	root["Users"] = users;
+	QDir().mkpath(user);
+	if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+		f.write(QJsonDocument(root).toJson());
+	return dir;
 }
 
 QString Online::templateDir()
@@ -412,6 +463,12 @@ bool Online::start(service s, const QString& tool, const QStringList& args, cons
 	{
 		p = new QProcess(this);
 		p->setProcessChannelMode(QProcess::MergedChannels);
+#ifdef __linux__
+		// the servers go when we do, even after a crash: left running they hold the ports the next session needs
+		// (SIGKILL: uscl-rpcn ignores SIGTERM)
+		// shortcut: Linux only; Windows would need a job object
+		p->setChildProcessModifier([] { prctl(PR_SET_PDEATHSIG, SIGKILL); });
+#endif
 		connect(p, &QProcess::readyRead, this, [this, p, s] {
 			while (p->canReadLine())
 			{
@@ -513,6 +570,15 @@ void Online::host(const QString& serial, const QString& title, const QString& pa
 	rpcn_env.insert("USCL_LOCAL", "1");
 	if (!start(rpcn, toolPath("uscl-rpcn"), {}, data + "/rpcn", rpcn_env))
 		return;
+	if (p.ps4)
+	{
+		// the bo2ps4 preset carries 31513/31515 to members; shadNet's other defaults are fine
+		QDir().mkpath(data + "/shadnet");
+		if (QFile cfg(data + "/shadnet/shadnet.cfg"); !cfg.exists() && cfg.open(QIODevice::WriteOnly))
+			cfg.write("[General]\nHost=127.0.0.1\nUnsecuredPort=31513\nWebApiPort=31515\nAdminApiEnabled=false\n");
+		if (!start(shadnet, toolPath("shadnet"), {}, data + "/shadnet", rpcn_env))
+			return;
+	}
 	if (p.demonware)
 	{
 		QProcessEnvironment dw_env = env;
@@ -522,6 +588,8 @@ void Online::host(const QString& serial, const QString& title, const QString& pa
 		dw_env.insert("DW_STUN_ALT_ADDR", "127.0.0.1:3177");
 		dw_env.insert("DW_STUN_ALT_SHOWN", "127.0.0.1:3077"); // answers name the bridge's port, not ours (uscl-dw 0014)
 		dw_env.insert("RUST_LOG", "info");
+		if (p.ps4)
+			dw_env.insert("DW_AUTH3_ADDR", "127.0.0.1:443");
 		// BO2's built-in anticheat: everyone's game gets the same code checks; this PC's answers are the reference
 		dw_env.insert("DW_TRUSTED_USER", yamlValue(readFile(rpcs3File("rpcn.yml")), {}, "NPID"));
 		if (!start(demonware, toolPath("dw-server"), {}, data + "/dw", dw_env))

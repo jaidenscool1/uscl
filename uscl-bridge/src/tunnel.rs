@@ -65,6 +65,10 @@ fn preset(name: &str) -> Option<&'static str> {
         // emblems, served as http://127.0.0.1:3076/...) and DW_STUN_ADDR 127.0.0.1:3174 (+ alt 3177, 3178): NAT
         // discovery through each player's slot port, so it reports the address other players reach them at
         "bo2" => Some("tcp:3074,tcp:3076,sudp:3074,sudp:3077-3078"),
+        // Black Ops II on PS4 (shadPS4 fork, game bound to 127.0.0.2): the same, plus Demonware's HTTPS sign-in
+        // (auth3, TCP 443) and the host's shadNet (UnsecuredPort 31513, WebApiPort 31515; 31313 is ours for RPCN).
+        // One shadNet for everyone: its account ids are the players' Demonware user ids.
+        "bo2ps4" => Some("tcp:3074,tcp:3076,tcp:443,tcp:31513,tcp:31515,sudp:3074,sudp:3077-3078"),
         _ => None,
     }
 }
@@ -74,7 +78,7 @@ pub fn parse_forwards(spec: &str) -> Result<Vec<(bool, u16)>, String> {
     let spec = preset(spec).unwrap_or(spec);
     let mut out = Vec::new();
     for item in spec.split(',').filter(|i| !i.is_empty()) {
-        let bad = || format!("bad forward `{item}` (want tcp:PORT, udp:PORT or udp:FIRST-LAST, or a preset: skate3)");
+        let bad = || format!("bad forward `{item}` (want tcp:PORT, udp:PORT or udp:FIRST-LAST, or a preset: skate3, bo2, bo2ps4)");
         let (proto, ports) = item.split_once(':').ok_or_else(bad)?;
         let udp = match proto { "tcp" => false, "udp" => true, "sudp" => continue, _ => return Err(bad()) };
         let (a, b) = ports.split_once('-').unwrap_or((ports, ports));
@@ -151,6 +155,19 @@ fn p2p_frame(port: u16, data: &[u8]) -> Vec<u8> {
     f.extend_from_slice(&port.to_be_bytes());
     f.extend_from_slice(data);
     f
+}
+
+/// Developer capture of game <-> game packets (USCL_DUMP_UDP=<file>): [ms u32][out u8][slot u8][port u16][len u16]
+/// [data], big-endian, for working out game protocols (crossplay).
+fn dump_udp(f: &mut Option<std::fs::File>, t: Instant, out: bool, slot: u8, port: u16, d: &[u8]) {
+    if let Some(file) = f {
+        let mut r = (t.elapsed().as_millis() as u32).to_be_bytes().to_vec();
+        r.extend_from_slice(&[out as u8, slot]);
+        r.extend_from_slice(&port.to_be_bytes());
+        r.extend_from_slice(&(d.len() as u16).to_be_bytes());
+        r.extend_from_slice(d);
+        let _ = file.write_all(&r);
+    }
 }
 
 fn local(port: u16) -> SocketAddr {
@@ -473,6 +490,8 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
     // a request can beat the lobby update that makes its sender a member, so it waits here a little
     let mut pending: Vec<(SessionRequest, Instant)> = Vec::new();
     let mut buf = vec![0u8; 65536];
+    let mut dump = std::env::var_os("USCL_DUMP_UDP").and_then(|p| std::fs::File::create(p).ok());
+    let started = Instant::now();
 
     loop {
         client.run_callbacks();
@@ -675,6 +694,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                         let f = if from_rpcn {
                             [&[UDP_RPCN][..], &buf[..n]].concat()
                         } else {
+                            dump_udp(&mut dump, started, true, slot as u8, src.port(), &buf[..n]);
                             p2p_frame(src.port(), &buf[..n])
                         };
                         send(peer, CH_UDP, &f, false);
@@ -753,6 +773,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                 Some((&UDP_P2P, d)) => { let _ = sock.send_to(d, local(RPCS3_P2P)); }
                 Some((&UDP_P2P_PORT, [a, b, d @ ..])) => {
                     if let Some(port) = delivery_port(u16::from_be_bytes([*a, *b]), slot_game) {
+                        dump_udp(&mut dump, started, false, slot_of[&peer] as u8, port, d);
                         let _ = sock.send_to(d, game_addr(port, &slot_udp));
                     }
                 }
@@ -890,6 +911,8 @@ mod tests {
     fn slot_udp_forwards() {
         assert_eq!(parse_slot_udp("bo2"), vec![3074, 3077, 3078]);
         assert_eq!(parse_forwards("bo2").unwrap(), vec![(false, 3074), (false, 3076)]);
+        assert_eq!(parse_slot_udp("bo2ps4"), vec![3074, 3077, 3078]);
+        assert_eq!(parse_forwards("bo2ps4").unwrap().len(), 5);
         assert_eq!(parse_slot_udp("skate3"), Vec::<u16>::new());
         assert_eq!(slot_frame(3074, b"x"), [UDP_SLOT, 0x0c, 0x02, b'x']);
     }

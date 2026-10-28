@@ -72,6 +72,9 @@ public:
 	static QString personaFromVdf(const QByteArray& vdf);
 	static QString setYamlValue(const QString& yml, const QString& section, const QString& key, const QString& value);
 	static QString yamlValue(const QString& yml, const QString& section, const QString& key);
+	// Sets up shadPS4's portable folder (it uses ./user when that exists) for a PS4 game: settings and the USCL
+	// game patches from the templates, player 1 signed in to shadNet as this player. Returns the folder.
+	static QString preparePs4();
 
 signals:
 	void stateChanged();
@@ -82,7 +85,7 @@ signals:
 	void notice(const QString& text);
 
 private:
-	enum service { rpcn, demonware, bridge };
+	enum service { rpcn, demonware, bridge, shadnet };
 	bool start(service s, const QString& tool, const QStringList& args, const QString& dir, const QProcessEnvironment& env);
 	void setState(const QString& state, const QString& message = {});
 	void setTest(int i, const QString& result, const QString& detail);
@@ -92,7 +95,7 @@ private:
 	static QString rpcs3File(const QString& name);
 	static QProcessEnvironment carryEnv(QProcessEnvironment env);
 
-	std::array<QProcess*, 3> m_services{};
+	std::array<QProcess*, 4> m_services{};
 	QString m_state = "off", m_session, m_game, m_message, m_host_game;
 	QVariantList m_players;
 	QProcess m_friends_proc;

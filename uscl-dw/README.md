@@ -57,6 +57,11 @@ login uses its ticket). The older two-address setup (`DW_AUTH_ADDR` / `DW_LOBBY_
   local-only admin port (`DW_ADMIN_ADDR`, 127.0.0.1:3180; `POST /progress` with `x-uscl-steam-id`,
   `GET /progress/<online id>`) for the host's bridge. A Steam account is bound to one online id; newer copies win;
   carried stats pass the stats check's bounds. A bundle for a player not yet logged in waits for their login.
+- 0018: Service 32 answered by the logging stub (BO2 calls it at login).
+- 0019: Black Ops II PS4 (title 2430, `games/CUSA57548.md`): `DW_AUTH3_ADDR` serves the PS4's HTTPS sign-in
+  (`/auth/`); bandwidth test answered for T6 too (shared with MW2), so hosts open public slots; user files are
+  read per title (PS3 and PS4 player ids overlap); the stats check only runs for PS3. PS4 publisher file:
+  `storage/publisher/2430/online_tu17_mp_english.wad` (the PS3 wad works).
 
 ## Status
 Modern Warfare 2 1.14: login, playlists, stats and matchmaking work; two copies played the same match (2026-10-25).

@@ -1,7 +1,7 @@
 From 37aa0730740b3f0ea916b2e97ed0313cfe1d90f9 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 09:44:47 -0700
-Subject: [PATCH 14/18] NAT discovery: DW_STUN_ALT_SHOWN, the second server's
+Subject: [PATCH 14/19] NAT discovery: DW_STUN_ALT_SHOWN, the second server's
  address as the game reaches it (behind uscl-bridge)
 
 ---
