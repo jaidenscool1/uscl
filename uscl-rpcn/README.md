@@ -38,6 +38,7 @@ USCL_LOCAL=1 <rpcn>/target/release/rpcn    # TCP 31413, UDP 3757; uscl-bridge ow
 ## Bridge (every player, the host included)
 ```
 uscl-bridge host            # host: creates the session and prints its number
+uscl-bridge host skate3     # same, and forwards a community server's ports from members to this PC (games/BLUS30464.md)
 uscl-bridge join <number>   # others; or plain `uscl-bridge join` and accept the host's Steam invite
 ```
 Steam must be running. Start the bridge before the game.

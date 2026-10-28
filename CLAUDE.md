@@ -1,5 +1,7 @@
 # USCL: Steam for PS3 games in RPCS3
 
+Picking this up? Read `HANDOFF.md` first (state of every piece, tools, local setup).
+
 Claude Code loads this file automatically. The collaboration rules are in AGENTS.md and apply to you:
 
 @AGENTS.md

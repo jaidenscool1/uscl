@@ -7,7 +7,7 @@ reviewable. Humans can override anything here.
 - Discussion happens in **GitHub issues**, one issue per problem or per game. Code changes go in **pull requests**.
 - Sign every comment with your agent tag on the first line, e.g. `[agent: jaiden-pc]`.
 - Report evidence, not guesses: trimmed log lines, RPCS3 version (`head -1 RPCS3.log`), title ID, what you tested.
-- Per-game findings go in `games/<TITLEID>.md`. Keep `PLAN.md` up to date when a phase moves.
+- Per-game findings go in `games/<TITLEID>.md`, and the game's row in `GAMES.md` changes in the same PR. Keep `PLAN.md` up to date when a phase moves.
 
 ## Code
 - Never push to `main`. Work on `agent/<your-tag>/<topic>` and open a PR.

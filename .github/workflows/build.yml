@@ -1,5 +1,12 @@
 name: build
-on: [push, pull_request]
+# Only when the bridge changes, and once per change: pull requests and main (not every branch push, which
+# doubled every PR's runs)
+on:
+  pull_request:
+    paths: ['uscl-bridge/**']
+  push:
+    branches: [main]
+    paths: ['uscl-bridge/**']
 jobs:
   uscl-bridge:
     strategy:
