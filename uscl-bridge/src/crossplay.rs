@@ -32,6 +32,75 @@ impl Build {
     fn other(self) -> Build {
         if self == Build::Ps3 { Build::Ps4 } else { Build::Ps3 }
     }
+
+    /// The netcode checksum the build's joinParty carries and its host compares (PS4 `FUN_0038aca0`, a global set
+    /// at start). Captured from both games 2026-10-29.
+    fn netcode(self) -> u32 {
+        match self {
+            Build::Ps3 => 0xe377b8be,
+            Build::Ps4 => 0x5fcda453,
+        }
+    }
+}
+
+/// Copies a native-order message body field by field into the other build's byte order.
+struct Fields<'a> {
+    src: &'a [u8],
+    pos: usize,
+    out: Vec<u8>,
+}
+
+impl Fields<'_> {
+    /// The next `n`-byte number, reversed. None when the body is shorter than its layout.
+    fn num(&mut self, n: usize) -> Option<u64> {
+        let f = self.src.get(self.pos..self.pos + n)?;
+        self.pos += n;
+        self.out.extend(f.iter().rev());
+        Some(f.iter().fold(0u64, |v, &b| v << 8 | b as u64))
+    }
+
+    /// The next u32, replaced by `v` in the target's order (source order doesn't matter: it is overwritten).
+    fn set_u32(&mut self, v: u32, to: Build) -> Option<()> {
+        self.src.get(self.pos..self.pos + 4)?;
+        self.pos += 4;
+        self.out.extend(if to == Build::Ps3 { v.to_be_bytes() } else { v.to_le_bytes() });
+        Some(())
+    }
+}
+
+/// joinParty body (PS4 reader `FUN_00154c00`): u32 protocol, u32 netcode, u32 playlist version, u64, u8, u16, u32,
+/// u8 count, count x (u8, u32, u32), then (u8 flag, u64) pairs to the end.
+fn join_party(to: Build, body: &[u8]) -> Option<Vec<u8>> {
+    let mut f = Fields { src: body, pos: 0, out: Vec::with_capacity(body.len()) };
+    f.set_u32(to.protocol() as u32, to)?;
+    f.set_u32(to.netcode(), to)?;
+    for n in [4, 8, 1, 2, 4] {
+        f.num(n)?;
+    }
+    for _ in 0..f.num(1)? {
+        for n in [1, 4, 4] {
+            f.num(n)?;
+        }
+    }
+    while f.pos < body.len() {
+        f.num(1)?;
+        f.num(8)?;
+    }
+    Some(f.out)
+}
+
+/// An out-of-band message (`ff ff ff ff`, an optional digit, the command, its body) in the other build's form.
+/// Commands without a known binary layout pass as they are (text ones are the same on both builds).
+fn oob(to: Build, m: &[u8]) -> Option<Cow<'_, [u8]>> {
+    let rest = m.strip_prefix(&[0xff; 4])?;
+    let start = usize::from(rest.first().is_some_and(u8::is_ascii_digit));
+    let name_len = rest[start..].iter().position(|&b| b == 0 || b == b' ').unwrap_or(rest.len() - start);
+    let (head, body) = rest.split_at(start + name_len);
+    let body = match &head[start..] {
+        b"joinParty" if body.first() == Some(&0) => join_party(to, &body[1..]).map(|b| [&[0][..], &b].concat())?,
+        _ => return Some(Cow::Borrowed(m)),
+    };
+    Some(Cow::Owned([&[0xff; 4][..], head, &body].concat()))
 }
 
 /// The PS3 build's checksum (t6mp `0x334244`): BE u16 words summed, carries folded, complemented. An odd last byte
@@ -98,9 +167,10 @@ pub fn translate(from: Build, pkt: &[u8]) -> Option<Vec<u8>> {
     }
     let n = u16::from_le_bytes([*pkt.get(14)?, *pkt.get(15)?]) as usize;
     let (flags, m) = message(from, pkt.get(HEADER..HEADER + n)?)?;
-    // shortcut: the message itself is passed as is; text commands match, binary ones (ph, pseg, b, in-game
-    // snapshots) still need per-message translation
-    let p = payload(to, flags, m);
+    // shortcut: of the binary messages only joinParty is translated; text commands match on both builds, the
+    // others (ph, pseg, b, in-game snapshots) still pass as they are
+    let m = if m.starts_with(&[0xff; 4]) { oob(to, m)? } else { Cow::Borrowed(m) };
+    let p = payload(to, flags, &m);
     let mut out = pkt[..14].to_vec();
     out.extend_from_slice(&(p.len() as u16).to_le_bytes());
     out.extend_from_slice(&p);
@@ -215,6 +285,30 @@ mod tests {
         assert_eq!(&for_game(Build::Ps3, &ps4).unwrap()[16..18], &[0x04, 0x57]);
         let handshake = hex("010200000000a26f0554175aed837702");
         assert!(matches!(for_game(Build::Ps4, &handshake), Some(Cow::Borrowed(_))));
+    }
+
+    #[test]
+    fn join_party_reaches_the_host_in_its_build() {
+        // captured 2026-10-29 (bodies after "2joinParty\0"); same layout, native order, own protocol + netcode
+        let ps3 = hex("0000082de377b8be000000010000000000000000020010001beb9601016ae3483d0000000001165985743b61654c");
+        let ps4 = hex("3108000053a4cd5f010000000000000000000000020f000000000001012f49e36a00000000010400000000000000");
+        let to4 = join_party(Build::Ps4, &ps3).unwrap();
+        assert_eq!(to4.len(), ps4.len());
+        assert_eq!(&to4[..8], &ps4[..8]); // protocol 2097, PS4 netcode
+        assert_eq!(&to4[8..12], &ps4[8..12]); // playlist version 1, now little-endian
+        assert_eq!(&to4[21..23], &[0x10, 0x00]); // u16 16, little-endian
+        assert_eq!(&to4[29..33], &[0x3d, 0x48, 0xe3, 0x6a]); // member id
+        let to3 = join_party(Build::Ps3, &ps4).unwrap();
+        assert_eq!(&to3[..8], &ps3[..8]);
+        assert_eq!(join_party(Build::Ps3, &ps4[..20]), None); // truncated: dropped
+
+        // whole message: name and separator kept
+        let m = [&[0xff; 4][..], b"2joinParty\0", &ps3].concat();
+        let out = oob(Build::Ps4, &m).unwrap();
+        assert_eq!(&out[..15], &m[..15]);
+        assert_eq!(&out[15..], &to4[..]);
+        let text = [&[0xff; 4][..], b"0partyJoinFailed netcode"].concat();
+        assert!(matches!(oob(Build::Ps4, &text), Some(Cow::Borrowed(_))));
     }
 
     #[test]
