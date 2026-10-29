@@ -9,6 +9,8 @@
 use std::borrow::Cow;
 
 const DATA: u8 = 6;
+const QOS_REPLY: u8 = 0x29; // bdQoS reply: u32 id, u64 echo, u8 0, u8 1, u32 payload length, payload (u16 protocol first)
+const QOS_PROTOCOL: usize = 18;
 const HEADER: usize = 16; // header 6 + MAC 8 + length 2
 const MAGIC: u16 = 0x0457;
 
@@ -16,6 +18,20 @@ const MAGIC: u16 = 0x0457;
 pub enum Build {
     Ps3,
     Ps4,
+}
+
+impl Build {
+    /// The game's network protocol version (lobby, QoS payload).
+    fn protocol(self) -> u16 {
+        match self {
+            Build::Ps3 => 2093,
+            Build::Ps4 => 2097,
+        }
+    }
+
+    fn other(self) -> Build {
+        if self == Build::Ps3 { Build::Ps4 } else { Build::Ps3 }
+    }
 }
 
 /// The PS3 build's checksum (t6mp `0x334244`): BE u16 words summed, carries folded, complemented. An odd last byte
@@ -70,7 +86,13 @@ fn payload(build: Build, flags: u8, m: &[u8]) -> Vec<u8> {
 /// A packet sent by a `from` game, as the other build expects it. Non-DATA packets (handshake) are the same on both
 /// builds; a DATA packet whose payload isn't a well-formed `from` payload is dropped (None), as its receiver would.
 pub fn translate(from: Build, pkt: &[u8]) -> Option<Vec<u8>> {
-    let to = if from == Build::Ps3 { Build::Ps4 } else { Build::Ps3 };
+    let to = from.other();
+    if pkt.first() == Some(&QOS_REPLY) && pkt.len() >= QOS_PROTOCOL + 2 {
+        // the searcher drops a host whose QoS payload names another protocol
+        let mut out = pkt.to_vec();
+        out[QOS_PROTOCOL..QOS_PROTOCOL + 2].copy_from_slice(&to.protocol().to_le_bytes());
+        return Some(out);
+    }
     if pkt.first() != Some(&DATA) {
         return Some(pkt.to_vec());
     }
@@ -105,11 +127,16 @@ pub fn own_build(spec: &str, game: &str) -> Option<Build> {
     }
 }
 
-/// The build a DATA packet came from, by its payload frame's byte order.
+/// The build a packet came from: DATA by its payload frame's byte order, a QoS reply by its protocol.
 pub fn sender(pkt: &[u8]) -> Option<Build> {
     match (pkt.first(), pkt.get(HEADER..HEADER + 2)) {
         (Some(&DATA), Some([0x04, 0x57])) => Some(Build::Ps3),
         (Some(&DATA), Some([0x57, 0x04])) => Some(Build::Ps4),
+        (Some(&QOS_REPLY), _) => match pkt.get(QOS_PROTOCOL..QOS_PROTOCOL + 2) {
+            Some(&[a, b]) if u16::from_le_bytes([a, b]) == 2093 => Some(Build::Ps3),
+            Some(&[a, b]) if u16::from_le_bytes([a, b]) == 2097 => Some(Build::Ps4),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -188,6 +215,18 @@ mod tests {
         assert_eq!(&for_game(Build::Ps3, &ps4).unwrap()[16..18], &[0x04, 0x57]);
         let handshake = hex("010200000000a26f0554175aed837702");
         assert!(matches!(for_game(Build::Ps4, &handshake), Some(Cow::Borrowed(_))));
+    }
+
+    #[test]
+    fn qos_replies_name_the_receivers_protocol() {
+        // captured 2026-10-29: a PS4 host's reply to a PS3 probe
+        let ps4 = hex("29190000007c575f730000000001100000003108450a020000000000000000000000");
+        assert_eq!(sender(&ps4), Some(Build::Ps4));
+        let out = for_game(Build::Ps3, &ps4).unwrap();
+        assert_eq!(&out[18..20], &2093u16.to_le_bytes());
+        assert_eq!((&out[..18], &out[20..]), (&ps4[..18], &ps4[20..]));
+        assert!(matches!(for_game(Build::Ps4, &ps4), Some(Cow::Borrowed(_))));
+        assert_eq!(&for_peer(Build::Ps4, Build::Ps3, &ps4).unwrap()[18..20], &2093u16.to_le_bytes());
     }
 
     #[test]
