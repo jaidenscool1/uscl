@@ -19,6 +19,7 @@
 //! connections, so a removed player can't come back under a new name. USCL_GAME ("<serial> <hash>") goes in
 //! lobby data "game" so members can check they run the same game files as the host.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
@@ -26,7 +27,7 @@ use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 
-use crate::progress;
+use crate::{crossplay, progress};
 use std::time::{Duration, Instant};
 use steamworks::networking_messages::SessionRequest;
 use steamworks::networking_types::{NetworkingIdentity, SendFlags};
@@ -310,6 +311,7 @@ fn friend_sessions(client: &Client) -> Vec<(LobbyId, String)> {
 pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Result<(), String> {
     let fwd = parse_forwards(spec)?;
     let sudp = parse_slot_udp(spec);
+    let own_build = crossplay::build_for(spec);
     client.networking_utils().init_relay_network_access();
     let mm = client.matchmaking();
     let net = client.networking_messages();
@@ -774,7 +776,9 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                 Some((&UDP_P2P_PORT, [a, b, d @ ..])) => {
                     if let Some(port) = delivery_port(u16::from_be_bytes([*a, *b]), slot_game) {
                         dump_udp(&mut dump, started, false, slot_of[&peer] as u8, port, d);
-                        let _ = sock.send_to(d, game_addr(port, &slot_udp));
+                        // BO2 PS3 <-> PS4: the other build's packets in our game's format
+                        let Some(d) = own_build.map_or(Some(Cow::Borrowed(d)), |b| crossplay::for_game(b, d)) else { continue };
+                        let _ = sock.send_to(&d, game_addr(port, &slot_udp));
                     }
                 }
                 _ => {}

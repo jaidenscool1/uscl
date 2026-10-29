@@ -6,7 +6,7 @@
 //! length (LE on both), payload padded to 8 with 0x01. Payload frame: u16 0x0457 (native order: BE on PS3, LE on
 //! PS4), u8 flags, message; PS3 adds an RFC 1071 checksum (BE) after the message, PS4 has none.
 
-#![allow(dead_code)] // shortcut: not wired into the tunnel yet; needs the bridge to know which peer runs which build
+use std::borrow::Cow;
 
 const DATA: u8 = 6;
 const HEADER: usize = 16; // header 6 + MAC 8 + length 2
@@ -86,6 +86,33 @@ pub fn translate(from: Build, pkt: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Our own game's build, from the forward preset the bridge runs with.
+pub fn build_for(spec: &str) -> Option<Build> {
+    match spec {
+        "bo2" => Some(Build::Ps3),
+        "bo2ps4" => Some(Build::Ps4),
+        _ => None,
+    }
+}
+
+/// The build a DATA packet came from, by its payload frame's byte order.
+fn sender(pkt: &[u8]) -> Option<Build> {
+    match (pkt.first(), pkt.get(HEADER..HEADER + 2)) {
+        (Some(&DATA), Some([0x04, 0x57])) => Some(Build::Ps3),
+        (Some(&DATA), Some([0x57, 0x04])) => Some(Build::Ps4),
+        _ => None,
+    }
+}
+
+/// Another player's packet as our game (`own`) expects it: the other build's DATA is translated, everything else
+/// passes as is. None: drop it (a malformed packet from the other build).
+pub fn for_game(own: Build, pkt: &[u8]) -> Option<Cow<'_, [u8]>> {
+    match sender(pkt) {
+        Some(from) if from != own => translate(from, pkt).map(Cow::Owned),
+        _ => Some(Cow::Borrowed(pkt)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +161,17 @@ mod tests {
         assert_eq!(translate(Build::Ps3, &bad), None);
         assert_eq!(translate(Build::Ps3, &p[..20]), None); // truncated
         assert_eq!(translate(Build::Ps4, &hex(PS3)), None); // wrong build
+    }
+
+    #[test]
+    fn games_get_their_own_build() {
+        let (ps3, ps4) = (hex(PS3), hex(PS4));
+        assert_eq!(build_for("bo2"), Some(Build::Ps3));
+        assert_eq!(build_for("skate3"), None);
+        assert!(matches!(for_game(Build::Ps3, &ps3), Some(Cow::Borrowed(_)))); // same build: untouched
+        assert_eq!(&for_game(Build::Ps4, &ps3).unwrap()[16..18], &[0x57, 0x04]);
+        assert_eq!(&for_game(Build::Ps3, &ps4).unwrap()[16..18], &[0x04, 0x57]);
+        let handshake = hex("010200000000a26f0554175aed837702");
+        assert!(matches!(for_game(Build::Ps4, &handshake), Some(Cow::Borrowed(_))));
     }
 }
