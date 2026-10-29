@@ -127,3 +127,26 @@ QtHttpServer: `~/.local/qt6-extra`), Demonware fork `~/src/obde-uscl/.claude/wor
 `uscl-dw/patches` 0001-0019). Reverse-engineering folders `~/src/bo2-re` (PS3) and `~/src/bo2-ps4-re` (PS4: Ghidra
 projects, fastfile unpacker, 2-PC kit and TESTLOG.md). Windows test PC: `C:\USCL-PS4` with an agent mailbox in
 `C:\USCL-PS4\agents` (to-pete.md / from-pete.md, last message 12).
+
+## Update 2026-10-29: BO2 PS3 <-> PS4 crossplay groundwork (all pushed, `[skip ci]`)
+**Done and tested:**
+- "Plain peer data" game patches: the games' peer DTLS DATA is sent unencrypted (the Steam tunnel encrypts between
+  PCs) so the bridge can translate it. PS4: `uscl-shadps4/mk_mm_patch.py`. PS3: RPCS3 fork patch 0009 (USCL's own
+  patches are built in, keyed by PPU hash, and apply also with `USCL_ONLINE`).
+- Two PCs over Steam (Linux host + Windows member), patched on both sides: **PS4** public FFA on Raid (02:59) and
+  **PS3** Team Deathmatch on Yemen (05:39) both ran, full bars, traffic readable in the bridge's `USCL_DUMP_UDP`.
+  On one PC two PS3 copies can't start a match (host load stalls; the unpatched official build fails the same).
+- Protocol findings in `games/CUSA57548.md`: DTLS layer identical on both builds; payload frame `u16 0x0457`
+  (native order) + flags; PS3 adds an RFC 1071 checksum (verified on all 7064 PS3 packets of the two-PC capture,
+  lobby and in-game); same out-of-band command set; party command tables mapped; Huffman table identical.
+- Bridge (`uscl-bridge/src/crossplay.rs`, wired into delivery): the receiving bridge knows its game's build from the
+  preset (`bo2` = PS3, `bo2ps4` = PS4) and the sender's from the frame byte order, and translates the frame.
+  Same-build traffic is untouched.
+
+**Next for crossplay:** uscl-dw must let PS3 (T6Ps3) and PS4 (title 2430) sessions find each other; protocol
+2093 vs 2097 in the connect/lobby messages; per-message translation of binary messages (`ph`, `pseg`, `b`,
+`profiles`, ...; handler pairs in `games/CUSA57548.md`), then in-game snapshots (netfield order/encoder ids, asset
+ids). Captures for that: RE folder `crossplay/ps3-2pc-plain.udp`, `ps4-2pc-plain.udp` (bridge dump format).
+- Pete's PC: `%LOCALAPPDATA%\Programs\USCL\patches\imported_patch.yml` holds the PS3 patch (inactive; enabling it =
+  `config\patch_config.yml` entry, see message 14/17 in `C:\USCL-PS4\agents`). His RPCS3 needs
+  `Shader Mode: "Async Recompiler (multi-threaded)"` when started outside the app (interpreter precompile stalls).
