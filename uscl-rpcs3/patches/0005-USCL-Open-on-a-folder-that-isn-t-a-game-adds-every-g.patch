@@ -1,7 +1,7 @@
 From 6b86ed7722430bbd90d1600f5c821e593493f9fd Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 10:34:38 -0700
-Subject: [PATCH 5/5] USCL: Open on a folder that isn't a game adds every game
+Subject: [PATCH 5/8] USCL: Open on a folder that isn't a game adds every game
  inside it (all subfolders)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

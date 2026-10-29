@@ -5,6 +5,8 @@
 #   USCL_DISCORD_SDK  Discord Social SDK (discord_social_sdk folder) for party chat; default ~/src/discord-social-sdk/sdk/discord_social_sdk
 #   USCL_RPCN_SRC     uscl-rpcn checkout                           default ~/src/rpcn-uscl
 #   USCL_DW_SRC       uscl-dw checkout                             default ~/src/obde-uscl
+#   USCL_SHADPS4_BUILD / USCL_SHADNET_BUILD  PS4 games: shadPS4 (uscl-shadps4) and shadNet (uscl-shadnet) build dirs;
+#                     left out of the AppImage when missing     default ~/src/shadps4-uscl/build, ~/src/shadnet-uscl/build
 # Output: build/USCL-x86_64.AppImage. Tools (linuxdeploy) are cached in ~/.cache/uscl-build.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -33,18 +35,27 @@ BIN=$APPDIR/usr/bin
 [ -f "$REPO/uscl-shell/build-release/libdiscord_partner_sdk.so" ] && install -m755 "$REPO/uscl-shell/build-release/libdiscord_partner_sdk.so" "$APPDIR/usr/bin/"
 install -m755 "$REPO/uscl-bridge/target/release/uscl-bridge" "$RPCN_SRC/target/release/rpcn" "$DW_SRC/target/release/dw-server" "$REPO/uscl-shell/build-release/uscl" "$BIN/"
 mv "$BIN/rpcn" "$BIN/uscl-rpcn"
+install -m644 "$REPO/uscl-rpcs3/uscl_patches.yml" "$BIN/"   # RPCS3 loads its generated built-in patches from its own folder
 cp "$(find "$REPO/uscl-bridge/target/release/build" -name libsteam_api.so | head -1)" "$BIN/"   # the bridge loads it from its own folder
+SHADPS4_BUILD=${USCL_SHADPS4_BUILD:-$HOME/src/shadps4-uscl/build}; SHADNET_BUILD=${USCL_SHADNET_BUILD:-$HOME/src/shadnet-uscl/build}
+[ -x "$SHADPS4_BUILD/shadps4" ] && install -m755 "$SHADPS4_BUILD/shadps4" "$BIN/"
+[ -x "$SHADNET_BUILD/shadnet" ] && install -m755 "$SHADNET_BUILD/shadnet" "$BIN/"
 
 echo "== data templates (copied to the user's USCL folder when they first host)"
 DATA=$APPDIR/usr/share/uscl
 mkdir -p "$DATA/rpcn" "$DATA/dw/storage/publisher/18396" "$DATA/dw/storage/publisher/5280"
 cp "$RPCN_SRC"/{servers,server_redirs,scoreboards}.cfg "$DATA/rpcn/"
 # the session tunnel's port; loopback only, players reach it through uscl-bridge
-sed -e 's/^Port=.*/Port=31413/' -e 's/^Host=.*/Host=127.0.0.1/' -e 's/^HostIPv6=.*/HostIPv6=::1/' -e 's/^StatServerHost=.*/StatServerHost=127.0.0.1/' \
+sed -e 's/^Port=.*/Port=31413/' -e 's/^Host=.*/Host=127.0.0.1/' -e 's/^HostIPv6=.*/HostIPv6=::ffff:127.0.0.1/' -e 's/^StatServerHost=.*/StatServerHost=127.0.0.1/' \
   "$RPCN_SRC/rpcn.cfg" > "$DATA/rpcn/rpcn.cfg"
 python3 "$REPO/uscl-dw/bo2-wad/mkwad.py" "$DATA/dw/storage/publisher/18396/online_tu19_mp_english.wad" \
   "$REPO/uscl-dw/bo2-wad/leagues.info" "$REPO/uscl-dw/bo2-wad/playlists_mp.info"
 cp "$REPO"/uscl-dw/mw2-files/{playlists.patch3,motd-english.txt,messageoftheday.info} "$DATA/dw/storage/publisher/5280/"
+# Black Ops II PS4 (title 2430) reads the same playlists from its own file name
+mkdir -p "$DATA/dw/storage/publisher/2430" "$DATA/shadps4/user"
+cp "$DATA/dw/storage/publisher/18396/online_tu19_mp_english.wad" "$DATA/dw/storage/publisher/2430/online_tu17_mp_english.wad"
+cp "$REPO/uscl-shadps4/data/user/config.json" "$DATA/shadps4/user/"
+python3 "$REPO/uscl-shadps4/mk_mm_patch.py" "$DATA/shadps4/user/patches/uscl" >/dev/null
 
 echo "== desktop entry"
 DESKTOP=$(ls "$APPDIR"/usr/share/applications/*.desktop | head -1)
@@ -72,7 +83,10 @@ cd "$OUT"
 mkdir -p "$APPDIR/usr/plugins"
 cp -r "$QT_PLUGINS/wayland-graphics-integration-client" "$APPDIR/usr/plugins/"
 export QML_SOURCES_PATHS="$REPO/uscl-shell/qml"   # so the Qt plugin bundles the QML modules the home screen imports
-linuxdeploy --appdir "$APPDIR" --plugin qt --executable "$BIN/uscl" --executable "$BIN/uscl-rpcn" --executable "$BIN/dw-server" \
+PS4_EXES=(); for e in shadps4 shadnet; do [ -x "$BIN/$e" ] && PS4_EXES+=(--executable "$BIN/$e"); done
+# shadNet needs QtHttpServer, which a system Qt may lack (built to ~/.local/qt6-extra here)
+LD_LIBRARY_PATH=$HOME/.local/qt6-extra/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} \
+linuxdeploy --appdir "$APPDIR" --plugin qt --executable "$BIN/uscl" --executable "$BIN/uscl-rpcn" --executable "$BIN/dw-server" "${PS4_EXES[@]}" \
   --deploy-deps-only "$APPDIR/usr/plugins/wayland-graphics-integration-client"
 # same cleanup as RPCS3's .ci/deploy-linux.sh: these break other distros / gamescope
 rm -f "$APPDIR"/usr/lib/libwayland-client.so* "$APPDIR"/usr/lib/libvulkan.so* \

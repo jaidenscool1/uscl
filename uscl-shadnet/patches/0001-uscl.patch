@@ -1,0 +1,56 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3c21684..b419fbc 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -153,6 +153,12 @@ if(WIN32)
+     target_link_libraries(shadnet PRIVATE bcrypt)
+ endif()
+ 
++# Keep the static LibreSSL private: exported, its EVP_* would interpose on the system libcrypto a
++# distribution's Qt hashes with (QCryptographicHash then calls into LibreSSL and crashes at start).
++if(UNIX AND NOT APPLE)
++    target_link_options(shadnet PRIVATE "LINKER:--exclude-libs,ALL")
++endif()
++
+ install(TARGETS shadnet RUNTIME DESTINATION bin)
+ install(FILES externals/libressl/COPYING
+     DESTINATION share/licenses/shadnet RENAME LibreSSL.txt)
+diff --git a/src/cmd_account.cpp b/src/cmd_account.cpp
+index d247b77..647a3f2 100644
+--- a/src/cmd_account.cpp
++++ b/src/cmd_account.cpp
+@@ -79,6 +79,17 @@ ErrorType ClientSession::CmdLogin(StreamExtractor& data, QByteArray& reply) {
+ 
+     bool checkToken = m_shared->config->IsEmailValidated();
+     auto userOpt = m_db->CheckUser(npid, QString::fromStdString(req.password()), token, checkToken);
++    // USCL_LOCAL: a session server on the host's PC, reached through the Steam tunnel. A new name
++    // gets its account at first login (players are known by their Steam account, not here); an
++    // existing one still needs its password, so a name can't be taken over.
++    if (!userOpt && qEnvironmentVariableIsSet("USCL_LOCAL") && IsValidNpid(npid) &&
++        !req.password().empty() &&
++        !m_db->CreateAccount(npid, QString::fromStdString(req.password()),
++                             "https://shadps4.net/shad_net/assets/avatar/default_01.png",
++                             npid + "@uscl.local")) {
++        qInfo() << "USCL: account created at login:" << npid;
++        userOpt = m_db->CheckUser(npid, QString::fromStdString(req.password()), token, false);
++    }
+     if (!userOpt) {
+         qWarning() << "Login failed for" << npid;
+         return ErrorType::LoginInvalidPassword;
+diff --git a/src/main.cpp b/src/main.cpp
+index f656c1a..2751b71 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -27,8 +27,10 @@ int main(int argc, char* argv[]) {
+     QCoreApplication app(argc, argv);
+     app.setApplicationName("shadnet");
+ 
+-    // Set working directory to executable location
+-    QDir::setCurrent(QCoreApplication::applicationDirPath());
++    // Set working directory to executable location. USCL starts it in the player's data folder instead
++    // (the install folder may not be writable).
++    if (!qEnvironmentVariableIsSet("USCL_LOCAL"))
++        QDir::setCurrent(QCoreApplication::applicationDirPath());
+ 
+     qInfo().noquote() << "ShadNet Qt server version" << ShadNet::Version() << "(built "
+                       << ShadNet::BuildTimestamp() << ")";

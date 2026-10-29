@@ -36,6 +36,19 @@ Then build as in RPCS3's `BUILDING.md`.
   players honest; bans are the real defence (see `uscl-bridge/src/tunnel.rs`).
 - 0007: no "experimental build" warning on start, and RPCS3's own updater is off: it would replace USCL's
   patched RPCS3 with the official one. The USCL app updates itself.
+- 0008: with `USCL_SHELL=1` (set by the USCL home screen) the PS button doesn't open RPCS3's home menu: the game
+  gets the usual system-menu events, RPCS3 prints `USCL:home`, and the home screen takes over. The game keeps
+  running. `hide` / `show` on stdin hide and show the game window (fullscreen comes back as it was). RPCS3's
+  first-start welcome window is skipped (the home screen has its own; RPCS3's needs a mouse and Exit quits the game).
+- 0009: USCL's own game patches are built in (`Utilities/bin_patch.cpp`, keyed by PPU hash) and always apply, also
+  with `USCL_ONLINE` (players' `patch.yml` stays off there). BO2 multiplayer 1.19 (`PPU-d26243d3…`): "plain peer
+  data" sends game-to-game data unencrypted for PS4 crossplay (`games/CUSA57548.md`).
+- 0010: second built-in BO2 patch, "little-endian messages": the msg_t read/write primitives call the byte-swapping
+  helpers (13 `bl` rewrites in t6mp 0x32a600-0x32f500), so lobby and game messages are little-endian like the PS4
+  build's. PS3 <-> PS3 is unaffected (both sides change together); PS3 <-> PS4 binary messages become identical.
+- 0011: built-in patches are also read from `uscl_patches.yml` next to the RPCS3 executable (generated, too big for
+  the source; packaging ships it): BO2 "PS4 netfield order", the 22 network field tables in the PS4 build's order so
+  game state encodes alike (crossplay).
 
 ## Building (Arch, 2026-10)
 The bundled LLVM doesn't compile with GCC 16's libstdc++ and `llvm-ar` isn't installed, so the debugging build is

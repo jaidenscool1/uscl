@@ -5,7 +5,7 @@
 #include <QVector>
 
 // The games RPCS3 knows about: games.yml (discs, ISOs, folders added with Open / Add Games) and games
-// installed to dev_hdd0. Title, serial and icon come from each game's PARAM.SFO and ICON0.PNG.
+// installed to dev_hdd0, plus installed PS4 games (uscl/ps4_games.yml, run by our shadPS4). Title, serial and icon come from each game's PARAM.SFO and ICON0.PNG.
 class GameModel : public QAbstractListModel
 {
 	Q_OBJECT
@@ -49,6 +49,8 @@ public:
 
 	// RPCS3's settings folder: ~/.config/uscl on Linux, the folder of rpcs3.exe on Windows
 	static QString rpcs3ConfigDir();
+	// PS4 games run in our shadPS4, not RPCS3
+	Q_INVOKABLE static bool isPs4Serial(const QString& serial);
 
 	// Exposed for the self-test
 	static QMap<QString, QString> readSfo(const QByteArray& sfo);

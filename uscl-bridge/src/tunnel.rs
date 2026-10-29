@@ -19,11 +19,15 @@
 //! connections, so a removed player can't come back under a new name. USCL_GAME ("<serial> <hash>") goes in
 //! lobby data "game" so members can check they run the same game files as the host.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::mpsc::{channel, Sender};
+use std::sync::Arc;
+
+use crate::{crossplay, progress};
 use std::time::{Duration, Instant};
 use steamworks::networking_messages::SessionRequest;
 use steamworks::networking_types::{NetworkingIdentity, SendFlags};
@@ -36,9 +40,14 @@ const HOST_RPCN_TCP: u16 = 31413;
 const HOST_RPCN_UDP: u16 = 3757;
 // shortcut: fixed port range 39001+, make it configurable if something on a player's PC already uses it
 const SLOT_BASE: u16 = 39000;
+// sudp: the host's server listens this much higher than the port the game sends to (bridges own the game's ports)
+const SLOT_SERVER_OFFSET: u16 = 100;
 
 const CH_TCP: u32 = 1;
 const CH_UDP: u32 = 2;
+const CH_PROGRESS: u32 = 3; // a player's saved progress (progress.rs): member -> host on join, host -> member after
+// shortcut: copies go back to members every minute (and on change only); a stats upload just before someone leaves can miss the last one
+const PROGRESS_EVERY: Duration = Duration::from_secs(60);
 const UDP_RPCN: u8 = 0;
 const UDP_P2P: u8 = 1;
 const UDP_FWD: u8 = 2; // [port u16 BE][data]
@@ -53,9 +62,14 @@ fn preset(name: &str) -> Option<&'static str> {
     match name {
         // Skate3BlazeServer: Blaze, HTTP, one UDP relay per lobby at 17000 + game id
         "skate3" => Some("tcp:42100,tcp:80,udp:17001-17064"),
-        // uscl-dw on DW_ADDR / DW_STUN_ADDR 127.0.0.1:3074 (+ alt 3077, 3078): login + lobby over TCP, and NAT
-        // discovery through each member's slot port, so it reports the address other players reach them at
-        "bo2" => Some("tcp:3074,sudp:3074,sudp:3077-3078"),
+        // uscl-dw on DW_ADDR 127.0.0.1:3074 (login + lobby over TCP), its content server on TCP 3076 (file share:
+        // emblems, served as http://127.0.0.1:3076/...) and DW_STUN_ADDR 127.0.0.1:3174 (+ alt 3177, 3178): NAT
+        // discovery through each player's slot port, so it reports the address other players reach them at
+        "bo2" => Some("tcp:3074,tcp:3076,sudp:3074,sudp:3077-3078"),
+        // Black Ops II on PS4 (shadPS4 fork, game bound to 127.0.0.2): the same, plus Demonware's HTTPS sign-in
+        // (auth3, TCP 443) and the host's shadNet (UnsecuredPort 31513, WebApiPort 31515; 31313 is ours for RPCN).
+        // One shadNet for everyone: its account ids are the players' Demonware user ids.
+        "bo2ps4" => Some("tcp:3074,tcp:3076,tcp:443,tcp:31513,tcp:31515,sudp:3074,sudp:3077-3078"),
         _ => None,
     }
 }
@@ -65,7 +79,7 @@ pub fn parse_forwards(spec: &str) -> Result<Vec<(bool, u16)>, String> {
     let spec = preset(spec).unwrap_or(spec);
     let mut out = Vec::new();
     for item in spec.split(',').filter(|i| !i.is_empty()) {
-        let bad = || format!("bad forward `{item}` (want tcp:PORT, udp:PORT or udp:FIRST-LAST, or a preset: skate3)");
+        let bad = || format!("bad forward `{item}` (want tcp:PORT, udp:PORT or udp:FIRST-LAST, or a preset: skate3, bo2, bo2ps4)");
         let (proto, ports) = item.split_once(':').ok_or_else(bad)?;
         let udp = match proto { "tcp" => false, "udp" => true, "sudp" => continue, _ => return Err(bad()) };
         let (a, b) = ports.split_once('-').unwrap_or((ports, ports));
@@ -82,7 +96,9 @@ pub fn parse_forwards(spec: &str) -> Result<Vec<(bool, u16)>, String> {
 }
 
 /// "sudp:3074,sudp:3077-3078" items of a forward spec: UDP to the host's server that leaves the host from the
-/// member's slot port (so the server sees the member's tunnel address). Members bind them; the host's server owns them.
+/// player's slot port (so the server sees the player's tunnel address). Every bridge, the host's too, binds them for
+/// its own game; the host's server listens SLOT_SERVER_OFFSET higher. The game's socket that sends there is the one
+/// its tunnel address stands for, so peers' game traffic is delivered to it (`slot_game`).
 pub fn parse_slot_udp(spec: &str) -> Vec<u16> {
     let spec = preset(spec).unwrap_or(spec);
     let mut out = Vec::new();
@@ -116,11 +132,23 @@ fn fwd_frame(port: u16, data: &[u8]) -> Vec<u8> {
     f
 }
 
-/// Game traffic is delivered to the port it was sent from (a game uses the same ports on every PC): RPCS3's P2P
-/// port for RPCN games, the game's own UDP socket for others (Demonware titles: 3074-3079). Nothing else, so a
-/// peer can't reach other local services through us.
+/// Game traffic is delivered to the port it was sent from: RPCS3's P2P port for RPCN games, the game's own UDP
+/// socket for others (Demonware titles: 3074-3079). Nothing else, so a peer can't reach other local services
+/// through us. With sudp the receiver's own game socket is known and wins (`delivery_port`): games fall back to
+/// different free ports on each PC (BO2: 3075 on one, 3076 on the other), so "the same port" isn't theirs.
 fn p2p_port_ok(port: u16) -> bool {
     port == RPCS3_P2P || (3074..=3079).contains(&port)
+}
+
+/// Where a peer's game packet sent from `port` goes on this PC, if anywhere.
+// shortcut: all of a peer's game sockets reach our one slot-address socket (a NAT would give each its own port);
+// enough for BO2/MW2, which play from the socket they ran NAT discovery on
+fn delivery_port(port: u16, slot_game: Option<SocketAddr>) -> Option<u16> {
+    match slot_game {
+        _ if !p2p_port_ok(port) => None,
+        Some(g) if port != RPCS3_P2P => Some(g.port()),
+        _ => Some(port),
+    }
 }
 
 fn p2p_frame(port: u16, data: &[u8]) -> Vec<u8> {
@@ -130,8 +158,28 @@ fn p2p_frame(port: u16, data: &[u8]) -> Vec<u8> {
     f
 }
 
+/// Developer capture of game <-> game packets (USCL_DUMP_UDP=<file>): [ms u32][out u8][slot u8][port u16][len u16]
+/// [data], big-endian, for working out game protocols (crossplay).
+fn dump_udp(f: &mut Option<std::fs::File>, t: Instant, out: bool, slot: u8, port: u16, d: &[u8]) {
+    if let Some(file) = f {
+        let mut r = (t.elapsed().as_millis() as u32).to_be_bytes().to_vec();
+        r.extend_from_slice(&[out as u8, slot]);
+        r.extend_from_slice(&port.to_be_bytes());
+        r.extend_from_slice(&(d.len() as u16).to_be_bytes());
+        r.extend_from_slice(d);
+        let _ = file.write_all(&r);
+    }
+}
+
 fn local(port: u16) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], port))
+}
+
+/// Our game's socket at `port`. Windows lets a game bind 0.0.0.0 on a port we hold on 127.0.0.1 (BO2 takes 3074
+/// there), and then 127.0.0.1:port is us; 127.0.0.2 reaches only the game. Linux refuses that bind, so it never
+/// happens there.
+fn game_addr(port: u16, ours: &HashMap<u16, UdpSocket>) -> SocketAddr {
+    if ours.contains_key(&port) { SocketAddr::from(([127, 0, 0, 2], port)) } else { local(port) }
 }
 
 /// Steam channel 1 frame: connection id, op, payload.
@@ -153,6 +201,7 @@ enum Ev {
     Changed,
     Invite(LobbyId),
     Session(SessionRequest),
+    Progress { to: u64, bundle: String }, // a bundle to send (member: ours to the host; host: a member's copy back)
 }
 
 fn spawn_reader(mut s: TcpStream, peer: u64, id: u32, tx: Sender<Ev>) {
@@ -267,6 +316,12 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
     let net = client.networking_messages();
     let me = client.user().steam_id();
     let game = std::env::var("USCL_GAME").unwrap_or_default();
+    // BO2 PS3 <-> PS4: our game's build, and each peer's as seen in its packets
+    let own_build = crossplay::own_build(spec, &game);
+    // peers' builds: announced by their bridges (which translate what they receive), or seen in their packets
+    let mut peer_build: HashMap<u64, crossplay::Build> = HashMap::new();
+    let mut announced: HashSet<u64> = HashSet::new();
+    let mut announced_ours = false;
     let (tx, rx) = channel::<Ev>();
 
     // Bind before touching Steam so a port clash (RPCN or another bridge already running) fails fast.
@@ -346,6 +401,21 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
     println!("uscl-bridge: session {} ({}); give friends this number or invite them from Steam", lobby.raw(), if host { "hosting" } else { "joined" });
     client.friends().set_rich_presence("status", Some("USCL session"));
 
+    // progress travels with the player: a member hands the host its own copy (exported off the loop, it runs uscl-dw)
+    let carry = progress::Carry::from_env().map(Arc::new);
+    if let (Some(c), false) = (carry.clone(), host) {
+        let (t, to) = (tx.clone(), host_id.raw());
+        std::thread::spawn(move || match c.export() {
+            Ok(bundle) => {
+                let _ = t.send(Ev::Progress { to, bundle });
+            }
+            Err(e) => eprintln!("uscl-bridge: progress: couldn't read {}'s progress: {e}", c.player),
+        });
+    }
+    let mut carried: HashMap<u64, String> = HashMap::new(); // host: member -> their online id
+    let mut sent_back: HashMap<u64, String> = HashMap::new(); // host: the last copy each member got
+    let mut last_progress = Instant::now();
+
     let accept = |listener: TcpListener, port: u16| {
         let t = tx.clone();
         std::thread::spawn(move || {
@@ -361,15 +431,13 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
     // Forwards: the host connects to its own list only; a member listens on the host's list.
     let fwd = if host { fwd } else { parse_forwards(&mm.lobby_data(lobby, "fwd").unwrap_or_default())? };
     let sudp = if host { sudp } else { parse_slot_udp(&mm.lobby_data(lobby, "sudp").unwrap_or_default()) };
-    // member: our sockets on the server's ports, and the game socket that last used them
+    // our sockets on the server's ports, and the game socket that last used them
     let mut slot_udp: HashMap<u16, UdpSocket> = HashMap::new();
     let mut slot_game: Option<SocketAddr> = None;
-    if !host {
-        for &port in &sudp {
-            match bind_udp(port) {
-                Ok(sock) => { slot_udp.insert(port, sock); }
-                Err(e) => eprintln!("uscl-bridge: {e}"),
-            }
+    for &port in &sudp {
+        match bind_udp(port) {
+            Ok(sock) => { slot_udp.insert(port, sock); }
+            Err(e) => eprintln!("uscl-bridge: {e}"),
         }
     }
     let mut fwd_udp: HashMap<u16, (UdpSocket, Option<SocketAddr>)> = HashMap::new(); // member: port -> socket, game's address
@@ -415,6 +483,9 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
     let mut member_at: HashMap<u16, u64> = HashMap::new();
     let mut socks: HashMap<u16, UdpSocket> = HashMap::new();
     let mut tcp: HashMap<(u64, u32), TcpStream> = HashMap::new();
+    // host: each member's RPCN connection. RPCS3 keeps one, so a new one means the old is dead; left open, RPCN
+    // refuses the new login as "already logged in"
+    let mut rpcn_conn: HashMap<u64, u32> = HashMap::new();
     let mut next_conn: u32 = 0;
     let mut next_slot: u16 = 1;
     let mut changed = true;
@@ -426,6 +497,8 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
     // a request can beat the lobby update that makes its sender a member, so it waits here a little
     let mut pending: Vec<(SessionRequest, Instant)> = Vec::new();
     let mut buf = vec![0u8; 65536];
+    let mut dump = std::env::var_os("USCL_DUMP_UDP").and_then(|p| std::fs::File::create(p).ok());
+    let started = Instant::now();
 
     loop {
         client.run_callbacks();
@@ -435,6 +508,16 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                 Ev::Changed => changed = true,
                 Ev::Invite(_) => {} // already in a session
                 Ev::Session(req) => pending.push((req, Instant::now())),
+                Ev::Progress { to, bundle } => {
+                    if bundle.len() > progress::MAX_BUNDLE {
+                        eprintln!("uscl-bridge: progress: {} KB is too big to carry", bundle.len() / 1024);
+                    } else if !host || sent_back.get(&to) != Some(&bundle) {
+                        send(to, CH_PROGRESS, bundle.as_bytes(), true);
+                        if host {
+                            sent_back.insert(to, bundle);
+                        }
+                    }
+                }
                 Ev::Accepted(s, port) => {
                     next_conn += 1;
                     if host {
@@ -471,6 +554,17 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
             changed = false;
             let list = mm.lobby_members(lobby);
             members = list.iter().map(|m| m.raw()).collect();
+            if host {
+                // a member who left: their connections here (RPCN login included) end with them
+                tcp.retain(|(p, _), s| {
+                    let stays = members.contains(p);
+                    if !stays {
+                        let _ = s.shutdown(Shutdown::Both);
+                    }
+                    stays
+                });
+                rpcn_conn.retain(|p, _| members.contains(p));
+            }
             let now: Vec<_> = list.iter().map(|m| serde_json::json!({"id": m.raw().to_string(), "name": client.friends().get_friend(*m).name(), "me": *m == me})).collect();
             let now = serde_json::Value::from(now).to_string();
             if now != players {
@@ -484,7 +578,15 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                     host_game = g;
                 }
             }
+            if let (Some(b), false) = (own_build, announced_ours) {
+                mm.set_lobby_member_data(lobby, "build", b.name());
+                announced_ours = true;
+            }
             for m in &list {
+                if let Some(b) = mm.get_lobby_member_data(lobby, *m, "build").and_then(|v| crossplay::Build::from_name(&v)) {
+                    peer_build.insert(m.raw(), b);
+                    announced.insert(m.raw());
+                }
                 let key = format!("slot:{}", m.raw());
                 let mut slot = mm.lobby_data(lobby, &key).and_then(|v| v.parse::<u16>().ok());
                 if host && slot.is_none() {
@@ -589,9 +691,14 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
         for (&slot, sock) in &socks {
             while let Ok((n, src)) = sock.recv_from(&mut buf) {
                 let from_rpcn = host && src.port() == HOST_RPCN_UDP;
-                if host && sudp.contains(&src.port()) && Some(slot) != my_slot {
-                    if let Some(&peer) = member_at.get(&slot) {
-                        send(peer, CH_UDP, &slot_frame(src.port(), &buf[..n]), false);
+                // the server's answer to this slot's player, from the port they asked on (the game sees no offset)
+                if let Some(port) = src.port().checked_sub(SLOT_SERVER_OFFSET).filter(|p| host && sudp.contains(p)) {
+                    if Some(slot) == my_slot {
+                        if let (Some(sock), Some(game)) = (slot_udp.get(&port), slot_game) {
+                            let _ = sock.send_to(&buf[..n], game_addr(game.port(), &slot_udp));
+                        }
+                    } else if let Some(&peer) = member_at.get(&slot) {
+                        send(peer, CH_UDP, &slot_frame(port, &buf[..n]), false);
                     }
                     continue;
                 }
@@ -602,7 +709,15 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                         let f = if from_rpcn {
                             [&[UDP_RPCN][..], &buf[..n]].concat()
                         } else {
-                            p2p_frame(src.port(), &buf[..n])
+                            dump_udp(&mut dump, started, true, slot as u8, src.port(), &buf[..n]);
+                            // a peer on the other BO2 build gets our packets in its format (its bridge may be older)
+                            // a peer whose bridge doesn't translate what it receives gets our packets in its build's form
+                            let d = match (own_build, peer_build.get(&peer)) {
+                                (Some(o), Some(&to)) if !announced.contains(&peer) => crossplay::between(o, to, &buf[..n]),
+                                _ => Some(Cow::Borrowed(&buf[..n])),
+                            };
+                            let Some(d) = d else { continue };
+                            p2p_frame(src.port(), &d)
                         };
                         send(peer, CH_UDP, &f, false);
                     }
@@ -610,11 +725,15 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
             }
         }
 
-        // Slot UDP, member side: the game's request to the server, carried to the host
+        // Slot UDP: our game's request to the host's server, from our slot port (the host's own game included)
         for (&port, sock) in &slot_udp {
             while let Ok((n, src)) = sock.recv_from(&mut buf) {
                 slot_game = Some(src);
-                send(host_id.raw(), CH_UDP, &slot_frame(port, &buf[..n]), false);
+                if !host {
+                    send(host_id.raw(), CH_UDP, &slot_frame(port, &buf[..n]), false);
+                } else if let Some(s) = my_slot.and_then(|s| socks.get(&s)) {
+                    let _ = s.send_to(&buf[..n], local(port + SLOT_SERVER_OFFSET));
+                }
             }
         }
 
@@ -659,12 +778,12 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                 if host && sudp.contains(&port) {
                     // to the server from the member's slot port
                     if let Some(sock) = slot_of.get(&peer).and_then(|s| socks.get(s)) {
-                        let _ = sock.send_to(d, local(port));
+                        let _ = sock.send_to(d, local(port + SLOT_SERVER_OFFSET));
                     }
                 } else if peer == host_id.raw() {
                     // the server's answer, from the same port it came from on the host
                     if let (Some(sock), Some(game)) = (slot_udp.get(&port), slot_game) {
-                        let _ = sock.send_to(d, game);
+                        let _ = sock.send_to(d, game_addr(game.port(), &slot_udp));
                     }
                 }
                 continue;
@@ -675,12 +794,59 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                 Some((&UDP_RPCN, d)) if peer == host_id.raw() => { let _ = rpcn_sock.send_to(d, local(RPCS3_P2P)); }
                 Some((&UDP_P2P, d)) => { let _ = sock.send_to(d, local(RPCS3_P2P)); }
                 Some((&UDP_P2P_PORT, [a, b, d @ ..])) => {
-                    let port = u16::from_be_bytes([*a, *b]);
-                    if p2p_port_ok(port) {
-                        let _ = sock.send_to(d, local(port));
+                    if let Some(port) = delivery_port(u16::from_be_bytes([*a, *b]), slot_game) {
+                        dump_udp(&mut dump, started, false, slot_of[&peer] as u8, port, d);
+                        // BO2 PS3 <-> PS4: the other build's packets in our game's format
+                        if !announced.contains(&peer) {
+                            if let Some(b) = crossplay::sender(d) {
+                                peer_build.insert(peer, b);
+                            }
+                        }
+                        let d = match (own_build, peer_build.get(&peer)) {
+                            (Some(o), Some(&from)) => crossplay::between(from, o, d),
+                            _ => Some(Cow::Borrowed(d)),
+                        };
+                        let Some(d) = d else { continue };
+                        let _ = sock.send_to(&d, game_addr(port, &slot_udp));
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // progress: host hands members' bundles to its uscl-dw (with the Steam id Steam vouched for); member keeps
+        // the host's copies at home. uscl-dw work runs off the loop.
+        for m in net.receive_messages_on_channel(CH_PROGRESS, 16) {
+            let Some(peer) = m.identity_peer().steam_id().map(|s| s.raw()) else { continue };
+            let Ok(bundle) = String::from_utf8(m.data().to_vec()) else { continue };
+            if removed.borrow().contains(&peer) || bundle.len() > progress::MAX_BUNDLE {
+                continue;
+            }
+            if host && members.contains(&peer) {
+                let Some(name) = progress::owner(&bundle).filter(|n| progress::valid_name(n)) else { continue };
+                carried.insert(peer, name.clone());
+                std::thread::spawn(move || match progress::hand_in(&bundle, peer) {
+                    Ok(state) => println!("uscl-bridge: progress: {name}'s progress {state}"),
+                    Err(e) => eprintln!("uscl-bridge: progress: {name}'s progress refused: {e}"),
+                });
+            } else if let Some(c) = carry.clone().filter(|c| !host && peer == host_id.raw() && progress::owner(&bundle).as_deref() == Some(c.player.as_str())) {
+                std::thread::spawn(move || match c.import(&bundle) {
+                    Ok(said) => println!("uscl-bridge: progress: kept at home ({said})"),
+                    Err(e) => eprintln!("uscl-bridge: progress: couldn't keep it at home: {e}"),
+                });
+            }
+        }
+        if host && last_progress.elapsed() > PROGRESS_EVERY {
+            last_progress = Instant::now();
+            for (&peer, name) in carried.iter().filter(|(p, _)| members.contains(p)) {
+                let (t, name) = (tx.clone(), name.clone());
+                std::thread::spawn(move || match progress::fetch(&name) {
+                    Ok(Some(bundle)) => {
+                        let _ = t.send(Ev::Progress { to: peer, bundle });
+                    }
+                    Ok(None) => {} // not logged in here yet
+                    Err(e) => eprintln!("uscl-bridge: progress: couldn't read {name}'s progress here: {e}"),
+                });
             }
         }
 
@@ -690,6 +856,11 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                 continue;
             }
             let Some((id, op, d)) = parse_tcp_frame(m.data()) else { continue };
+            if host && op == TCP_OPEN && d.is_empty() {
+                if let Some(s) = rpcn_conn.insert(peer, id).and_then(|old| tcp.remove(&(peer, old))) {
+                    let _ = s.shutdown(Shutdown::Both);
+                }
+            }
             match op {
                 TCP_OPEN if host => match match d {
                     [] => connect_rpcn(),
@@ -752,9 +923,29 @@ mod tests {
     }
 
     #[test]
+    fn game_traffic_reaches_our_game_socket() {
+        // two-PC BO2: the member plays from 3076, the host's game from 3075
+        let ours = Some(local(3075));
+        assert_eq!(delivery_port(3076, ours), Some(3075));
+        assert_eq!(delivery_port(3076, None), Some(3076));
+        assert_eq!(delivery_port(RPCS3_P2P, ours), Some(RPCS3_P2P));
+        assert_eq!(delivery_port(22, ours), None);
+        assert_eq!(delivery_port(SLOT_BASE + 1, ours), None);
+    }
+
+    #[test]
+    fn a_game_sharing_our_port_is_reached_on_127_0_0_2() {
+        let ours = HashMap::from([(3074, bind_udp(0).unwrap())]);
+        assert_eq!(game_addr(3074, &ours), SocketAddr::from(([127, 0, 0, 2], 3074)));
+        assert_eq!(game_addr(3075, &ours), local(3075));
+    }
+
+    #[test]
     fn slot_udp_forwards() {
         assert_eq!(parse_slot_udp("bo2"), vec![3074, 3077, 3078]);
-        assert_eq!(parse_forwards("bo2").unwrap(), vec![(false, 3074)]);
+        assert_eq!(parse_forwards("bo2").unwrap(), vec![(false, 3074), (false, 3076)]);
+        assert_eq!(parse_slot_udp("bo2ps4"), vec![3074, 3077, 3078]);
+        assert_eq!(parse_forwards("bo2ps4").unwrap().len(), 5);
         assert_eq!(parse_slot_udp("skate3"), Vec::<u16>::new());
         assert_eq!(slot_frame(3074, b"x"), [UDP_SLOT, 0x0c, 0x02, b'x']);
     }

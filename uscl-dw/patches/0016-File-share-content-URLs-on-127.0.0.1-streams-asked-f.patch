@@ -1,0 +1,68 @@
+From e5363b852e910e43c3204c91c88eea2cd2988bae Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 11:43:44 -0700
+Subject: [PATCH 16/19] File share: content URLs on 127.0.0.1, streams asked
+ for by game id reach their owner
+
+---
+ dw-server/src/config.rs                            |  4 +++-
+ dw-server/src/lobby/content_streaming/user_file.rs | 14 ++++++++++++--
+ 2 files changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/dw-server/src/config.rs b/dw-server/src/config.rs
+index 4b8d11f..2acf0dc 100644
+--- a/dw-server/src/config.rs
++++ b/dw-server/src/config.rs
+@@ -1,7 +1,9 @@
+ ﻿use serde::{Deserialize, Serialize};
+ 
+ const DEFAULT_CONTENT_PORT: u16 = 3076;
+-const DEFAULT_HOSTNAME: &str = "localhost";
++// USCL: games resolve names through RPCS3's real DNS, which doesn't answer "localhost"; behind the session tunnel
++// every player reaches the content server at 127.0.0.1 (each bridge forwards TCP 3076 to the host)
++const DEFAULT_HOSTNAME: &str = "127.0.0.1";
+ 
+ #[derive(Serialize, Deserialize, Default)]
+ pub struct DwServerConfig {
+diff --git a/dw-server/src/lobby/content_streaming/user_file.rs b/dw-server/src/lobby/content_streaming/user_file.rs
+index 11a496f..0dc0f54 100644
+--- a/dw-server/src/lobby/content_streaming/user_file.rs
++++ b/dw-server/src/lobby/content_streaming/user_file.rs
+@@ -1,4 +1,5 @@
+ use crate::config::DwServerConfig;
++use crate::lobby::player_id;
+ use crate::lobby::content_streaming::db::{
+     PersistedStreamInfo, create_empty_stream, delete_db_stream, get_slot_count_for_upload,
+     get_stream_data, get_stream_id_for_slot, get_streams_by_ids, get_streams_by_owners,
+@@ -93,9 +94,12 @@ impl UserContentStreamingService for DwUserContentStreamingService {
+             .authentication()
+             .expect("session to be authentication checked");
+ 
++        // asked by game id (see player_id); answered under the id the game asked for
++        let asked: Vec<(u64, u64)> = owner_ids.iter().map(|&id| (player_id::resolve(id), id)).collect();
++        let user_ids: Vec<u64> = asked.iter().map(|&(user_id, _)| user_id).collect();
+         let (res, total): (Vec<PersistedStreamInfo>, usize) = get_streams_by_owners(
+             authentication.title,
+-            owner_ids,
++            &user_ids,
+             min_date_time,
+             category,
+             item_offset,
+@@ -104,7 +108,13 @@ impl UserContentStreamingService for DwUserContentStreamingService {
+ 
+         let res: Vec<StreamInfo> = res
+             .into_iter()
+-            .map(|persisted_stream| self.build_get_url(authentication.user_id, persisted_stream))
++            .map(|persisted_stream| {
++                let mut info = self.build_get_url(authentication.user_id, persisted_stream);
++                if let Some(&(_, game_id)) = asked.iter().find(|&&(user_id, _)| user_id == info.owner_id) {
++                    info.owner_id = game_id;
++                }
++                info
++            })
+             .collect();
+ 
+         Ok(ResultSlice::with_total_count(res, item_offset, total))
+-- 
+2.56.0
+

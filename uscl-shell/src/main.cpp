@@ -1,4 +1,5 @@
 #include "discordparty.h"
+#include "dlc.h"
 #include "gamepad.h"
 #include "games.h"
 #include "gameupdates.h"
@@ -85,6 +86,18 @@ namespace
 		check(GameModel::readIsoFile(tmp.fileName(), {"PS3_GAME", "ICON0.PNG"}).isEmpty(), "ISO 9660 missing file");
 
 		// online names from Steam persona names
+		QByteArray rpc = DiscordParty::frame(1, {{"cmd", "A"}}) + DiscordParty::frame(3, {{"n", 2}});
+		const QByteArray tail = rpc.right(3);
+		rpc.chop(3); // second frame cut short: comes out once the rest arrives
+		auto frames = DiscordParty::takeFrames(rpc);
+		const bool first_only = frames.size() == 1 && frames[0].first == 1 && frames[0].second.value("cmd") == "A";
+		rpc += tail;
+		frames = DiscordParty::takeFrames(rpc);
+		check(first_only && frames.size() == 1 && frames[0].first == 3 && frames[0].second.value("n") == 2 && rpc.isEmpty(), "Discord RPC frames");
+		auto ids = [](const QVariantList& l) { QStringList out; for (const QVariant& v : l) out << v.toMap().value("id").toString(); return out; };
+		const QVariantList servers{QVariantMap{{"id", "a"}}, QVariantMap{{"id", "b"}}, QVariantMap{{"id", "c"}}, QVariantMap{{"id", "d"}}};
+		check(ids(DiscordParty::sortedServers(servers, "c", {"d", "b"})) == QStringList{"c", "d", "b", "a"} &&
+		      ids(DiscordParty::sortedServers(servers, "", {})) == QStringList{"a", "b", "c", "d"}, "Discord server order");
 		check(Online::sanitizeName("Player One") == "Player_One", "name: spaces");
 		check(Online::sanitizeName("ab") == "abPlayer", "name: too short");
 		check(Online::sanitizeName("Zoë ★ the Great Destroyer") == "Zo_the_Great_Des", "name: symbols, length");
@@ -142,6 +155,31 @@ namespace
 			      "game hash (disc folder, EBOOT, PS3_GAME)");
 			QTemporaryDir empty;
 			check(GameModel::gameHash(empty.path(), "BLUS99999").isEmpty(), "game hash without EBOOT.BIN");
+		}
+
+		{
+			// installed PS4 game: sce_sys/param.sfo next to eboot.bin
+			QTemporaryDir dir;
+			QDir(dir.path()).mkpath("sce_sys");
+			QFile sfo4(dir.filePath("sce_sys/param.sfo")), eboot(dir.filePath("eboot.bin"));
+			sfo4.open(QIODevice::WriteOnly);
+			sfo4.write(QByteArray(sfo).replace("BLUS12345", "CUSA12345"));
+			sfo4.close();
+			eboot.open(QIODevice::WriteOnly);
+			eboot.write("ps4");
+			eboot.close();
+			const QString want = QString::fromLatin1(QCryptographicHash::hash("ps4", QCryptographicHash::Sha256).toHex().left(16));
+			check(GameModel::gameHash(dir.path(), "CUSA12345") == want, "game hash (PS4 eboot.bin)");
+			check(GameModel::isPs4Serial("CUSA12345") && !GameModel::isPs4Serial("BLUS12345"), "PS4 serials");
+		}
+
+		{
+			// DLC headers: NPD (.edat) with license type, PKG
+			QByteArray npd = QByteArray("NPD\0\0\0\0\4\0\0\0\2\0\0\0\0", 16) + "UP0002-BLUS31011_00-CODBLOPS2PATCH06" + QByteArray(12, '\0');
+			check(Dlc::contentId(npd) == "UP0002-BLUS31011_00-CODBLOPS2PATCH06" && Dlc::licenseType(npd) == 2, "DLC .edat header");
+			QByteArray pkg = QByteArray("\x7FPKG", 4) + QByteArray(0x2C, '\0') + "UP0002-BLUS31011_00-CODBLOPS2PATCH06" + QByteArray(12, '\0');
+			check(Dlc::contentId(pkg) == "UP0002-BLUS31011_00-CODBLOPS2PATCH06" && Dlc::licenseType(pkg) == 0, "DLC .pkg header");
+			check(Dlc::contentId(QByteArray("NPD\0", 4) + QByteArray(60, 'x')).isEmpty(), "DLC header without a content ID");
 		}
 
 		{
@@ -207,6 +245,8 @@ int main(int argc, char* argv[])
 	engine.rootContext()->setContextProperty("updater", &updater);
 	GameUpdates gameUpdates;
 	engine.rootContext()->setContextProperty("gameUpdates", &gameUpdates);
+	Dlc dlc;
+	engine.rootContext()->setContextProperty("dlc", &dlc);
 	DiscordParty party;
 	engine.rootContext()->setContextProperty("party", &party);
 	engine.rootContext()->setContextProperty("windowed", app.arguments().contains("--windowed"));

@@ -1,7 +1,7 @@
-From 2f3d353a8285739b98f8a8b5c5087b721f435faa Mon Sep 17 00:00:00 2001
+From 1b96935a51f567ee48e0f6978aec4edd410ed2f6 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sun, 25 Oct 2026 10:44:05 -0700
-Subject: [PATCH] USCL: no 'experimental build' warning, no official RPCS3
+Subject: [PATCH 7/8] USCL: no 'experimental build' warning, no official RPCS3
  update offers
 
 USCL's builds aren't RPCS3's release builds, so every start asked players whether to run it anyway. And RPCS3's

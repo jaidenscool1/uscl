@@ -1,0 +1,138 @@
+From 917cba211a4f5a82566d1eb505b0619f9651d77c Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 14:55:07 -0700
+Subject: [PATCH 8/8] USCL: the PS button opens USCL's home screen over a
+ running game (USCL_SHELL)
+
+The game gets the system menu open/close events like on a PS3 and keeps running; RPCS3 prints USCL:home, and USCL answers hide / show on stdin.
+---
+ rpcs3/Input/pad_thread.cpp        | 27 +++++++++++++++++++
+ rpcs3/Input/pad_thread.h          |  1 +
+ rpcs3/rpcs3qt/gui_application.cpp | 43 ++++++++++++++++++++++++++++++-
+ 3 files changed, 70 insertions(+), 1 deletion(-)
+
+diff --git a/rpcs3/Input/pad_thread.cpp b/rpcs3/Input/pad_thread.cpp
+index 6d9e4e9..aaf50e3 100644
+--- a/rpcs3/Input/pad_thread.cpp
++++ b/rpcs3/Input/pad_thread.cpp
+@@ -920,6 +920,25 @@ void pad_thread::open_home_menu()
+ 		return;
+ 	}
+ 
++	// USCL: its home screen stands in for the PS3's (USCL_SHELL, set by USCL). The game gets the system menu
++	// events like on a PS3 and keeps running; USCL hears "USCL:home" and answers "hide" / "show" on stdin.
++	if (std::getenv("USCL_SHELL"))
++	{
++		if (!m_home_menu_open.exchange(true))
++		{
++			if (send_open_home_menu_cmds())
++			{
++				std::fputs("USCL:home\n", stdout);
++				std::fflush(stdout);
++			}
++			else
++			{
++				m_home_menu_open = false;
++			}
++		}
++		return;
++	}
++
+ 	if (auto manager = g_fxo->try_get<rsx::overlays::display_manager>())
+ 	{
+ 		if (m_home_menu_open.exchange(true))
+@@ -947,3 +966,11 @@ void pad_thread::open_home_menu()
+ 		(result ? input_log.error : input_log.notice)("opened home menu with result %d", s32{result});
+ 	}
+ }
++
++void pad_thread::uscl_home_closed()
++{
++	if (m_home_menu_open.exchange(false))
++	{
++		send_close_home_menu_cmds();
++	}
++}
+diff --git a/rpcs3/Input/pad_thread.h b/rpcs3/Input/pad_thread.h
+index 20f53e9..ae48913 100644
+--- a/rpcs3/Input/pad_thread.h
++++ b/rpcs3/Input/pad_thread.h
+@@ -34,6 +34,7 @@ public:
+ 	void UnregisterLddPad(u32 handle);
+ 
+ 	void open_home_menu();
++	void uscl_home_closed(); // USCL: its home screen closed, the game gets the system menu close events
+ 
+ 	std::map<pad_handler, std::shared_ptr<PadHandlerBase>>& get_handlers() { return m_handlers; }
+ 
+diff --git a/rpcs3/rpcs3qt/gui_application.cpp b/rpcs3/rpcs3qt/gui_application.cpp
+index 997ab15..1019ba2 100644
+--- a/rpcs3/rpcs3qt/gui_application.cpp
++++ b/rpcs3/rpcs3qt/gui_application.cpp
+@@ -24,6 +24,10 @@
+ #include "Input/sdl_camera_handler.h"
+ #endif
+ 
++#include "Input/pad_thread.h"
++#include <iostream>
++#include <thread>
++
+ #include "Emu/Audio/audio_utils.h"
+ #include "Emu/Cell/Modules/cellSysutil.h"
+ #include "Emu/Io/Null/null_camera_handler.h"
+@@ -223,7 +227,8 @@ int gui_application::exec()
+ 			msg->open();
+ 		});
+ 	}
+-	if (m_gui_settings->GetValue(gui::ib_show_welcome).toBool())
++	// the USCL home screen has its own welcome; RPCS3's would sit over the game, mouse only, and Exit quits it
++	if (m_gui_settings->GetValue(gui::ib_show_welcome).toBool() && !std::getenv("USCL_SHELL"))
+ 	{
+ 		steps->push_back([this]()
+ 		{
+@@ -310,6 +315,42 @@ void gui_application::Init()
+ 	// Create connects to propagate events throughout Gui.
+ 	InitializeConnects();
+ 
++	// USCL: its home screen's commands on stdin (see pad_thread::open_home_menu): "hide" the game window while USCL
++	// is shown, "show" it again (the game keeps running throughout)
++	if (std::getenv("USCL_SHELL"))
++	{
++		std::thread([this]()
++		{
++			std::string line;
++			while (std::getline(std::cin, line))
++			{
++				QMetaObject::invokeMethod(this, [this, line]()
++				{
++					static bool was_fullscreen = true;
++					if (!m_game_window)
++					{
++						return;
++					}
++					QWindow* window = m_game_window; // gs_frame keeps QWindow's show()/hide() protected
++					if (line == "hide")
++					{
++						was_fullscreen = window->visibility() == QWindow::FullScreen;
++						window->hide();
++					}
++					else if (line == "show")
++					{
++						was_fullscreen ? window->showFullScreen() : window->show();
++						window->requestActivate();
++						if (pad_thread* pad = pad::get_pad_thread(true))
++						{
++							pad->uscl_home_closed();
++						}
++					}
++				}, Qt::QueuedConnection);
++			}
++		}).detach();
++	}
++
+ 	// Create the main window
+ 	if (m_show_gui)
+ 	{
+-- 
+2.56.0
+
