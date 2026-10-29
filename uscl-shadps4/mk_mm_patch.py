@@ -45,8 +45,26 @@ meta = '''    <Metadata Title="Call of Duty: Black Ops II"
             {lines}
         </PatchList>
     </Metadata>'''
+
+# Plain peer data (bdDTLSData, crossplay with PS3): the Steam tunnel encrypts between PCs, so DATA packets carry the
+# payload unencrypted and the bridge can translate it. Handshake and the sent MAC stay; the MAC is no longer checked.
+SEND_ENC = 0x8A62DF  # call [rax+0x10] (in-place encrypt) -> mov al, 1
+RECV_MAC_JNZ = 0x8A67EE  # jnz after memcmp of the MAC
+RECV_DEC = 0x8A683F  # 26 bytes up to the call [rax+0x18] (decrypt src r14 -> dst [rbp-0x3b8], length r15d)
+dec = (b"\x48\x8b\xbd\x48\xfc\xff\xff"  # mov rdi, [rbp-0x3b8]
+       b"\x4c\x89\xf6"  # mov rsi, r14
+       b"\x44\x89\xf9"  # mov ecx, r15d
+       b"\xf3\xa4"  # rep movsb
+       b"\xb0\x01")  # mov al, 1
+dec += b"\x90" * (26 - len(dec))
+plain = "\n            ".join(f'<Line Type="bytes" Address="{a + 0x400000:#x}" Value="{v}"/>' for a, v in (
+    (SEND_ENC, "B00190"), (RECV_MAC_JNZ, "90" * 6), (RECV_DEC, dec.hex().upper())))
+plain_meta = meta.replace("USCL: host when no public match is found", "USCL: plain peer data").replace(
+    "SetupMatchmakingStage never ends the search; give up after {stages} stages and host",
+    "No 3DES on game-to-game data (the Steam tunnel encrypts); needed for PS3 crossplay")
 xml = '<?xml version="1.0" encoding="utf-8"?>\n<Patch>\n' + "\n".join(
-    meta.format(stages=STAGES, ver=v, lines=lines) for v in ("01.11", "01.00")) + "\n</Patch>\n"
+    m.format(stages=STAGES, ver=v, lines=l) for m, l in ((meta, lines), (plain_meta, plain))
+    for v in ("01.11", "01.00")) + "\n</Patch>\n"
 out = sys.argv[1]
 os.makedirs(out, exist_ok=True)
 open(os.path.join(out, "CUSA57548.xml"), "w").write(xml)

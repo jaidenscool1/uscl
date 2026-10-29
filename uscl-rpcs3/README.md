@@ -40,6 +40,9 @@ Then build as in RPCS3's `BUILDING.md`.
   gets the usual system-menu events, RPCS3 prints `USCL:home`, and the home screen takes over. The game keeps
   running. `hide` / `show` on stdin hide and show the game window (fullscreen comes back as it was). RPCS3's
   first-start welcome window is skipped (the home screen has its own; RPCS3's needs a mouse and Exit quits the game).
+- 0009: USCL's own game patches are built in (`Utilities/bin_patch.cpp`, keyed by PPU hash) and always apply, also
+  with `USCL_ONLINE` (players' `patch.yml` stays off there). BO2 multiplayer 1.19 (`PPU-d26243d3…`): "plain peer
+  data" sends game-to-game data unencrypted for PS4 crossplay (`games/CUSA57548.md`).
 
 ## Building (Arch, 2026-10)
 The bundled LLVM doesn't compile with GCC 16's libstdc++ and `llvm-ar` isn't installed, so the debugging build is

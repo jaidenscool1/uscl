@@ -32,6 +32,7 @@ Templates the USCL app copies to `<USCL folder>/shadps4` (shadPS4 uses `./user` 
 - `user/config.json`: network on, shadNet at `127.0.0.1:31513` / web API `31515` (the bridge carries both to the
   host's shadNet).
 - `user/patches/uscl/`: made at build time by `mk_mm_patch.py` (BO2 PS4 `CUSA57548`: public-match search gives up
-  after 4 stages so a party hosts its own lobby, and the "online needs dedicated servers" check is skipped).
+  after 4 stages so a party hosts its own lobby, and the "online needs dedicated servers" check is skipped; game-to-game data is sent unencrypted, since the Steam
+  tunnel encrypts it, so the bridge can translate it for PS3 crossplay).
 
 The app writes `user/users.json` itself: player 1 is signed in to shadNet as the player's online name.
