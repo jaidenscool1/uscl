@@ -43,6 +43,9 @@ Then build as in RPCS3's `BUILDING.md`.
 - 0009: USCL's own game patches are built in (`Utilities/bin_patch.cpp`, keyed by PPU hash) and always apply, also
   with `USCL_ONLINE` (players' `patch.yml` stays off there). BO2 multiplayer 1.19 (`PPU-d26243d3…`): "plain peer
   data" sends game-to-game data unencrypted for PS4 crossplay (`games/CUSA57548.md`).
+- 0010: second built-in BO2 patch, "little-endian messages": the msg_t read/write primitives call the byte-swapping
+  helpers (13 `bl` rewrites in t6mp 0x32a600-0x32f500), so lobby and game messages are little-endian like the PS4
+  build's. PS3 <-> PS3 is unaffected (both sides change together); PS3 <-> PS4 binary messages become identical.
 
 ## Building (Arch, 2026-10)
 The bundled LLVM doesn't compile with GCC 16's libstdc++ and `llvm-ar` isn't installed, so the debugging build is

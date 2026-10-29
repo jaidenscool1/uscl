@@ -318,7 +318,10 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
     let game = std::env::var("USCL_GAME").unwrap_or_default();
     // BO2 PS3 <-> PS4: our game's build, and each peer's as seen in its packets
     let own_build = crossplay::own_build(spec, &game);
+    // peers' builds: announced by their bridges (which translate what they receive), or seen in their packets
     let mut peer_build: HashMap<u64, crossplay::Build> = HashMap::new();
+    let mut announced: HashSet<u64> = HashSet::new();
+    let mut announced_ours = false;
     let (tx, rx) = channel::<Ev>();
 
     // Bind before touching Steam so a port clash (RPCN or another bridge already running) fails fast.
@@ -575,7 +578,15 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                     host_game = g;
                 }
             }
+            if let (Some(b), false) = (own_build, announced_ours) {
+                mm.set_lobby_member_data(lobby, "build", b.name());
+                announced_ours = true;
+            }
             for m in &list {
+                if let Some(b) = mm.get_lobby_member_data(lobby, *m, "build").and_then(|v| crossplay::Build::from_name(&v)) {
+                    peer_build.insert(m.raw(), b);
+                    announced.insert(m.raw());
+                }
                 let key = format!("slot:{}", m.raw());
                 let mut slot = mm.lobby_data(lobby, &key).and_then(|v| v.parse::<u16>().ok());
                 if host && slot.is_none() {
@@ -700,8 +711,9 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                         } else {
                             dump_udp(&mut dump, started, true, slot as u8, src.port(), &buf[..n]);
                             // a peer on the other BO2 build gets our packets in its format (its bridge may be older)
+                            // a peer whose bridge doesn't translate what it receives gets our packets in its build's form
                             let d = match (own_build, peer_build.get(&peer)) {
-                                (Some(o), Some(&to)) => crossplay::for_peer(o, to, &buf[..n]),
+                                (Some(o), Some(&to)) if !announced.contains(&peer) => crossplay::between(o, to, &buf[..n]),
                                 _ => Some(Cow::Borrowed(&buf[..n])),
                             };
                             let Some(d) = d else { continue };
@@ -785,10 +797,16 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                     if let Some(port) = delivery_port(u16::from_be_bytes([*a, *b]), slot_game) {
                         dump_udp(&mut dump, started, false, slot_of[&peer] as u8, port, d);
                         // BO2 PS3 <-> PS4: the other build's packets in our game's format
-                        if let Some(b) = crossplay::sender(d) {
-                            peer_build.insert(peer, b);
+                        if !announced.contains(&peer) {
+                            if let Some(b) = crossplay::sender(d) {
+                                peer_build.insert(peer, b);
+                            }
                         }
-                        let Some(d) = own_build.map_or(Some(Cow::Borrowed(d)), |b| crossplay::for_game(b, d)) else { continue };
+                        let d = match (own_build, peer_build.get(&peer)) {
+                            (Some(o), Some(&from)) => crossplay::between(from, o, d),
+                            _ => Some(Cow::Borrowed(d)),
+                        };
+                        let Some(d) = d else { continue };
                         let _ = sock.send_to(&d, game_addr(port, &slot_udp));
                     }
                 }

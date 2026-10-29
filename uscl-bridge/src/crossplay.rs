@@ -1,10 +1,13 @@
 //! Black Ops II PS3 <-> PS4 crossplay: rewrites game-to-game packets between the two builds (games/CUSA57548.md).
-//! Both games run with USCL's "plain peer data" patch, so bdDTLS DATA carries the payload unencrypted. The DTLS
-//! handshake is the same on both builds and passes through; DATA payloads get their frame translated.
+//! Both games run with USCL's patches: "plain peer data" (bdDTLS DATA unencrypted, the Steam tunnel encrypts) and,
+//! on PS3, "little-endian messages" (msg_t numbers little-endian like PS4), so most messages are the same bytes on
+//! both builds. The DTLS handshake passes through; what differs and is rewritten here:
+//! - DATA payload: u16 0x0457 (LE), u8 flags, message; PS3 adds an RFC 1071 checksum (BE) after the message.
+//! - QoS reply: the host's protocol (2093 / 2097) in its payload.
+//! - joinParty: the joiner's protocol and netcode checksum, which the host compares with its own.
 //!
 //! DATA packet: u8 type 6, u8 version 2, u16 vtag, u16 seq, 8-byte MAC (not checked by patched games), u16 payload
-//! length (LE on both), payload padded to 8 with 0x01. Payload frame: u16 0x0457 (native order: BE on PS3, LE on
-//! PS4), u8 flags, message; PS3 adds an RFC 1071 checksum (BE) after the message, PS4 has none.
+//! length (LE), payload padded to 8 with 0x01.
 
 use std::borrow::Cow;
 
@@ -12,7 +15,7 @@ const DATA: u8 = 6;
 const QOS_REPLY: u8 = 0x29; // bdQoS reply: u32 id, u64 echo, u8 0, u8 1, u32 payload length, payload (u16 protocol first)
 const QOS_PROTOCOL: usize = 18;
 const HEADER: usize = 16; // header 6 + MAC 8 + length 2
-const MAGIC: u16 = 0x0457;
+const MAGIC: [u8; 2] = 0x0457u16.to_le_bytes();
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Build {
@@ -29,10 +32,6 @@ impl Build {
         }
     }
 
-    fn other(self) -> Build {
-        if self == Build::Ps3 { Build::Ps4 } else { Build::Ps3 }
-    }
-
     /// The netcode checksum the build's joinParty carries and its host compares (PS4 `FUN_0038aca0`, a global set
     /// at start). Captured from both games 2026-10-29.
     fn netcode(self) -> u32 {
@@ -41,66 +40,23 @@ impl Build {
             Build::Ps4 => 0x5fcda453,
         }
     }
-}
 
-/// Copies a native-order message body field by field into the other build's byte order.
-struct Fields<'a> {
-    src: &'a [u8],
-    pos: usize,
-    out: Vec<u8>,
-}
-
-impl Fields<'_> {
-    /// The next `n`-byte number, reversed. None when the body is shorter than its layout.
-    fn num(&mut self, n: usize) -> Option<u64> {
-        let f = self.src.get(self.pos..self.pos + n)?;
-        self.pos += n;
-        self.out.extend(f.iter().rev());
-        Some(f.iter().fold(0u64, |v, &b| v << 8 | b as u64))
+    fn other(self) -> Build {
+        if self == Build::Ps3 { Build::Ps4 } else { Build::Ps3 }
     }
 
-    /// The next u32, replaced by `v` in the target's order (source order doesn't matter: it is overwritten).
-    fn set_u32(&mut self, v: u32, to: Build) -> Option<()> {
-        self.src.get(self.pos..self.pos + 4)?;
-        self.pos += 4;
-        self.out.extend(if to == Build::Ps3 { v.to_be_bytes() } else { v.to_le_bytes() });
-        Some(())
+    /// Lobby member data value, so other bridges know which build this player runs.
+    pub fn name(self) -> &'static str {
+        if self == Build::Ps3 { "ps3" } else { "ps4" }
     }
-}
 
-/// joinParty body (PS4 reader `FUN_00154c00`): u32 protocol, u32 netcode, u32 playlist version, u64, u8, u16, u32,
-/// u8 count, count x (u8, u32, u32), then (u8 flag, u64) pairs to the end.
-fn join_party(to: Build, body: &[u8]) -> Option<Vec<u8>> {
-    let mut f = Fields { src: body, pos: 0, out: Vec::with_capacity(body.len()) };
-    f.set_u32(to.protocol() as u32, to)?;
-    f.set_u32(to.netcode(), to)?;
-    for n in [4, 8, 1, 2, 4] {
-        f.num(n)?;
-    }
-    for _ in 0..f.num(1)? {
-        for n in [1, 4, 4] {
-            f.num(n)?;
+    pub fn from_name(s: &str) -> Option<Build> {
+        match s {
+            "ps3" => Some(Build::Ps3),
+            "ps4" => Some(Build::Ps4),
+            _ => None,
         }
     }
-    while f.pos < body.len() {
-        f.num(1)?;
-        f.num(8)?;
-    }
-    Some(f.out)
-}
-
-/// An out-of-band message (`ff ff ff ff`, an optional digit, the command, its body) in the other build's form.
-/// Commands without a known binary layout pass as they are (text ones are the same on both builds).
-fn oob(to: Build, m: &[u8]) -> Option<Cow<'_, [u8]>> {
-    let rest = m.strip_prefix(&[0xff; 4])?;
-    let start = usize::from(rest.first().is_some_and(u8::is_ascii_digit));
-    let name_len = rest[start..].iter().position(|&b| b == 0 || b == b' ').unwrap_or(rest.len() - start);
-    let (head, body) = rest.split_at(start + name_len);
-    let body = match &head[start..] {
-        b"joinParty" if body.first() == Some(&0) => join_party(to, &body[1..]).map(|b| [&[0][..], &b].concat())?,
-        _ => return Some(Cow::Borrowed(m)),
-    };
-    Some(Cow::Owned([&[0xff; 4][..], head, &body].concat()))
 }
 
 /// The PS3 build's checksum (t6mp `0x334244`): BE u16 words summed, carries folded, complemented. An odd last byte
@@ -119,14 +75,7 @@ fn checksum(d: &[u8]) -> u16 {
 /// The message inside a DATA payload (after the 3-byte frame, without PS3's checksum), with the frame's flags.
 /// None if it isn't a well-formed payload of that build (PS3: checksum must match, as the game checks it).
 fn message(build: Build, p: &[u8]) -> Option<(u8, &[u8])> {
-    if p.len() < 3 {
-        return None;
-    }
-    let magic = match build {
-        Build::Ps3 => u16::from_be_bytes([p[0], p[1]]),
-        Build::Ps4 => u16::from_le_bytes([p[0], p[1]]),
-    };
-    if magic != MAGIC {
+    if p.len() < 3 || p[..2] != MAGIC {
         return None;
     }
     match build {
@@ -139,11 +88,7 @@ fn message(build: Build, p: &[u8]) -> Option<(u8, &[u8])> {
 }
 
 fn payload(build: Build, flags: u8, m: &[u8]) -> Vec<u8> {
-    let mut p = match build {
-        Build::Ps3 => MAGIC.to_be_bytes(),
-        Build::Ps4 => MAGIC.to_le_bytes(),
-    }
-    .to_vec();
+    let mut p = MAGIC.to_vec();
     p.push(flags);
     p.extend_from_slice(m);
     if build == Build::Ps3 {
@@ -152,8 +97,29 @@ fn payload(build: Build, flags: u8, m: &[u8]) -> Vec<u8> {
     p
 }
 
-/// A packet sent by a `from` game, as the other build expects it. Non-DATA packets (handshake) are the same on both
-/// builds; a DATA packet whose payload isn't a well-formed `from` payload is dropped (None), as its receiver would.
+/// joinParty body (PS4 reader `FUN_00154c00`): u32 protocol, u32 netcode, then the rest (playlist version, ...),
+/// the same on both builds. The host refuses another build's protocol or netcode ("partyJoinFailed netcode").
+fn join_party(to: Build, body: &[u8]) -> Option<Vec<u8>> {
+    let rest = body.get(8..)?;
+    Some([&(to.protocol() as u32).to_le_bytes()[..], &to.netcode().to_le_bytes(), rest].concat())
+}
+
+/// An out-of-band message (`ff ff ff ff`, an optional digit, the command, its body) in the other build's form.
+/// Other commands pass as they are.
+fn oob(to: Build, m: &[u8]) -> Option<Cow<'_, [u8]>> {
+    let rest = m.strip_prefix(&[0xff; 4])?;
+    let start = usize::from(rest.first().is_some_and(u8::is_ascii_digit));
+    let name_len = rest[start..].iter().position(|&b| b == 0 || b == b' ').unwrap_or(rest.len() - start);
+    let (head, body) = rest.split_at(start + name_len);
+    let body = match &head[start..] {
+        b"joinParty" if body.first() == Some(&0) => [&[0][..], &join_party(to, &body[1..])?].concat(),
+        _ => return Some(Cow::Borrowed(m)),
+    };
+    Some(Cow::Owned([&[0xff; 4][..], head, &body].concat()))
+}
+
+/// A packet sent by a `from` game, as the other build expects it. Handshake packets are the same on both builds;
+/// a DATA packet whose payload isn't a well-formed `from` payload is dropped (None), as its receiver would.
 pub fn translate(from: Build, pkt: &[u8]) -> Option<Vec<u8>> {
     let to = from.other();
     if pkt.first() == Some(&QOS_REPLY) && pkt.len() >= QOS_PROTOCOL + 2 {
@@ -167,8 +133,6 @@ pub fn translate(from: Build, pkt: &[u8]) -> Option<Vec<u8>> {
     }
     let n = u16::from_le_bytes([*pkt.get(14)?, *pkt.get(15)?]) as usize;
     let (flags, m) = message(from, pkt.get(HEADER..HEADER + n)?)?;
-    // shortcut: of the binary messages only joinParty is translated; text commands match on both builds, the
-    // others (ph, pseg, b, in-game snapshots) still pass as they are
     let m = if m.starts_with(&[0xff; 4]) { oob(to, m)? } else { Cow::Borrowed(m) };
     let p = payload(to, flags, &m);
     let mut out = pkt[..14].to_vec();
@@ -197,32 +161,31 @@ pub fn own_build(spec: &str, game: &str) -> Option<Build> {
     }
 }
 
-/// The build a packet came from: DATA by its payload frame's byte order, a QoS reply by its protocol.
+/// The build a packet came from, for peers whose bridge doesn't announce its build: a QoS reply by its protocol, a
+/// DATA payload by PS3's checksum (shortcut: a PS4 payload whose last 2 bytes happen to match it reads as PS3).
 pub fn sender(pkt: &[u8]) -> Option<Build> {
-    match (pkt.first(), pkt.get(HEADER..HEADER + 2)) {
-        (Some(&DATA), Some([0x04, 0x57])) => Some(Build::Ps3),
-        (Some(&DATA), Some([0x57, 0x04])) => Some(Build::Ps4),
-        (Some(&QOS_REPLY), _) => match pkt.get(QOS_PROTOCOL..QOS_PROTOCOL + 2) {
-            Some(&[a, b]) if u16::from_le_bytes([a, b]) == 2093 => Some(Build::Ps3),
-            Some(&[a, b]) if u16::from_le_bytes([a, b]) == 2097 => Some(Build::Ps4),
+    match pkt.first() {
+        Some(&QOS_REPLY) => match u16::from_le_bytes([*pkt.get(QOS_PROTOCOL)?, *pkt.get(QOS_PROTOCOL + 1)?]) {
+            2093 => Some(Build::Ps3),
+            2097 => Some(Build::Ps4),
             _ => None,
         },
+        Some(&DATA) => {
+            let n = u16::from_le_bytes([*pkt.get(14)?, *pkt.get(15)?]) as usize;
+            let p = pkt.get(HEADER..HEADER + n)?;
+            if message(Build::Ps3, p).is_some() {
+                Some(Build::Ps3)
+            } else {
+                message(Build::Ps4, p).map(|_| Build::Ps4)
+            }
+        }
         _ => None,
     }
 }
 
-/// Another player's packet as our game (`own`) expects it: the other build's DATA is translated, everything else
-/// passes as is. None: drop it (a malformed packet from the other build).
-pub fn for_game(own: Build, pkt: &[u8]) -> Option<Cow<'_, [u8]>> {
-    match sender(pkt) {
-        Some(from) if from != own => translate(from, pkt).map(Cow::Owned),
-        _ => Some(Cow::Borrowed(pkt)),
-    }
-}
-
-/// Our game's packet as a peer on build `to` expects it (None: drop, not a well-formed packet of ours).
-pub fn for_peer(own: Build, to: Build, pkt: &[u8]) -> Option<Cow<'_, [u8]>> {
-    if own == to { Some(Cow::Borrowed(pkt)) } else { translate(own, pkt).map(Cow::Owned) }
+/// A packet between games on builds `from` and `to`: translated when they differ. None: drop it.
+pub fn between(from: Build, to: Build, pkt: &[u8]) -> Option<Cow<'_, [u8]>> {
+    if from == to { Some(Cow::Borrowed(pkt)) } else { translate(from, pkt).map(Cow::Owned) }
 }
 
 #[cfg(test)]
@@ -233,8 +196,9 @@ mod tests {
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
     }
 
-    // captured from the patched games (2026-10-29): a joiner's "getchallenge" to the host
-    const PS3: &str = "06021725850097122875872718b61500045740ffffffff6765746368616c6c656e67658295010101";
+    // a joiner's "getchallenge" to the host, captured from the patched games 2026-10-29 (PS3: frame in the
+    // little-endian messages patch's order; the checksum covers only the message)
+    const PS3: &str = "06021725850097122875872718b61500570440ffffffff6765746368616c6c656e67658295010101";
     const PS4: &str = "06024cd7e20039d813a886a2dd681300570400ffffffff6765746368616c6c656e67650101010101";
 
     #[test]
@@ -248,15 +212,13 @@ mod tests {
     fn ps3_to_ps4_drops_the_checksum() {
         let out = translate(Build::Ps3, &hex(PS3)).unwrap();
         assert_eq!(&out[..14], &hex(PS3)[..14]);
-        // PS4 framing, flags kept
-        assert_eq!(&out[14..], &hex("1300570440ffffffff6765746368616c6c656e67650101010101")[..]);
+        assert_eq!(&out[14..], &hex("1300570440ffffffff6765746368616c6c656e67650101010101")[..]); // flags kept
     }
 
     #[test]
     fn ps4_to_ps3_adds_the_checksum() {
         let out = translate(Build::Ps4, &hex(PS4)).unwrap();
-        assert_eq!(&out[14..16], &[0x15, 0x00]);
-        assert_eq!(&out[16..19], &[0x04, 0x57, 0x00]);
+        assert_eq!(&out[14..19], &[0x15, 0x00, 0x57, 0x04, 0x00]);
         let (flags, m) = message(Build::Ps3, &out[16..16 + 0x15]).unwrap();
         assert_eq!((flags, m), (0, &b"\xff\xff\xff\xffgetchallenge"[..]));
         assert_eq!(out.len() % 8, 0);
@@ -272,43 +234,37 @@ mod tests {
         bad[30] ^= 1; // checksum no longer matches: the PS3 game would drop it too
         assert_eq!(translate(Build::Ps3, &bad), None);
         assert_eq!(translate(Build::Ps3, &p[..20]), None); // truncated
-        assert_eq!(translate(Build::Ps4, &hex(PS3)), None); // wrong build
+        assert_eq!(translate(Build::Ps3, &hex(PS4)), None); // no checksum: not a PS3 payload
     }
 
     #[test]
-    fn games_get_their_own_build() {
+    fn same_build_is_untouched() {
         let (ps3, ps4) = (hex(PS3), hex(PS4));
+        assert!(matches!(between(Build::Ps3, Build::Ps3, &ps3), Some(Cow::Borrowed(_))));
+        assert_eq!(&between(Build::Ps3, Build::Ps4, &ps3).unwrap()[..], &translate(Build::Ps3, &ps3).unwrap()[..]);
+        assert_eq!(&between(Build::Ps4, Build::Ps3, &ps4).unwrap()[14..16], &[0x15, 0x00]);
         assert_eq!(build_for("bo2"), Some(Build::Ps3));
         assert_eq!(build_for("skate3"), None);
-        assert!(matches!(for_game(Build::Ps3, &ps3), Some(Cow::Borrowed(_)))); // same build: untouched
-        assert_eq!(&for_game(Build::Ps4, &ps3).unwrap()[16..18], &[0x57, 0x04]);
-        assert_eq!(&for_game(Build::Ps3, &ps4).unwrap()[16..18], &[0x04, 0x57]);
-        let handshake = hex("010200000000a26f0554175aed837702");
-        assert!(matches!(for_game(Build::Ps4, &handshake), Some(Cow::Borrowed(_))));
+        assert_eq!(own_build("bo2ps4", "BLUS31011 abc"), Some(Build::Ps3)); // PS3 game in a mixed session
+        assert_eq!(own_build("bo2ps4", ""), Some(Build::Ps4));
+        assert_eq!(Build::from_name(Build::Ps3.name()), Some(Build::Ps3));
     }
 
     #[test]
-    fn join_party_reaches_the_host_in_its_build() {
-        // captured 2026-10-29 (bodies after "2joinParty\0"); same layout, native order, own protocol + netcode
-        let ps3 = hex("0000082de377b8be000000010000000000000000020010001beb9601016ae3483d0000000001165985743b61654c");
+    fn join_party_names_the_hosts_protocol_and_netcode() {
+        // captured 2026-10-29 from the PS4 (body after "2joinParty\0")
         let ps4 = hex("3108000053a4cd5f010000000000000000000000020f000000000001012f49e36a00000000010400000000000000");
-        let to4 = join_party(Build::Ps4, &ps3).unwrap();
-        assert_eq!(to4.len(), ps4.len());
-        assert_eq!(&to4[..8], &ps4[..8]); // protocol 2097, PS4 netcode
-        assert_eq!(&to4[8..12], &ps4[8..12]); // playlist version 1, now little-endian
-        assert_eq!(&to4[21..23], &[0x10, 0x00]); // u16 16, little-endian
-        assert_eq!(&to4[29..33], &[0x3d, 0x48, 0xe3, 0x6a]); // member id
         let to3 = join_party(Build::Ps3, &ps4).unwrap();
-        assert_eq!(&to3[..8], &ps3[..8]);
-        assert_eq!(join_party(Build::Ps3, &ps4[..20]), None); // truncated: dropped
+        assert_eq!(&to3[..8], &hex("2d080000beb877e3")[..]); // 2093, PS3 netcode (little-endian)
+        assert_eq!(&to3[8..], &ps4[8..]);
+        assert_eq!(join_party(Build::Ps4, &to3).unwrap(), ps4);
+        assert_eq!(join_party(Build::Ps3, &ps4[..6]), None);
 
-        // whole message: name and separator kept
-        let m = [&[0xff; 4][..], b"2joinParty\0", &ps3].concat();
-        let out = oob(Build::Ps4, &m).unwrap();
-        assert_eq!(&out[..15], &m[..15]);
-        assert_eq!(&out[15..], &to4[..]);
+        let m = [&[0xff; 4][..], b"2joinParty\0", &ps4].concat();
+        let out = oob(Build::Ps3, &m).unwrap();
+        assert_eq!((&out[..15], &out[15..]), (&m[..15], &to3[..]));
         let text = [&[0xff; 4][..], b"0partyJoinFailed netcode"].concat();
-        assert!(matches!(oob(Build::Ps4, &text), Some(Cow::Borrowed(_))));
+        assert!(matches!(oob(Build::Ps3, &text), Some(Cow::Borrowed(_))));
     }
 
     #[test]
@@ -316,21 +272,11 @@ mod tests {
         // captured 2026-10-29: a PS4 host's reply to a PS3 probe
         let ps4 = hex("29190000007c575f730000000001100000003108450a020000000000000000000000");
         assert_eq!(sender(&ps4), Some(Build::Ps4));
-        let out = for_game(Build::Ps3, &ps4).unwrap();
+        let out = between(Build::Ps4, Build::Ps3, &ps4).unwrap();
         assert_eq!(&out[18..20], &2093u16.to_le_bytes());
         assert_eq!((&out[..18], &out[20..]), (&ps4[..18], &ps4[20..]));
-        assert!(matches!(for_game(Build::Ps4, &ps4), Some(Cow::Borrowed(_))));
-        assert_eq!(&for_peer(Build::Ps4, Build::Ps3, &ps4).unwrap()[18..20], &2093u16.to_le_bytes());
-    }
-
-    #[test]
-    fn own_build_and_outgoing() {
-        assert_eq!(own_build("bo2ps4", "BLUS31011 abc"), Some(Build::Ps3)); // PS3 game in a mixed session
-        assert_eq!(own_build("bo2ps4", ""), Some(Build::Ps4));
-        assert_eq!(own_build("skate3", "BLUS30464 x"), None);
-        let ps3 = hex(PS3);
-        assert!(matches!(for_peer(Build::Ps3, Build::Ps3, &ps3), Some(Cow::Borrowed(_))));
-        assert_eq!(&for_peer(Build::Ps3, Build::Ps4, &ps3).unwrap()[16..18], &[0x57, 0x04]);
-        assert_eq!(sender(&ps3), Some(Build::Ps3));
+        assert_eq!(sender(&hex(PS4)), Some(Build::Ps4));
+        assert_eq!(sender(&hex(PS3)), Some(Build::Ps3));
+        assert_eq!(sender(&hex("010200000000a26f0554175aed837702")), None); // handshake
     }
 }
