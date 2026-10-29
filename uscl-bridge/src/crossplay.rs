@@ -32,12 +32,14 @@ impl Build {
         }
     }
 
-    /// The netcode checksum the build's joinParty carries and its host compares (PS4 `FUN_0038aca0`, a global set
-    /// at start). Captured from both games 2026-10-29.
+    /// The netcode checksum (= the connect string's netfieldchk) the build's joinParty and connect carry and its
+    /// host compares (PS4 `FUN_0038aca0`, computed at start over the network field tables, so it changes with
+    /// patches to them). Captured 2026-10-29: PS3 0xe377b8be; PS4 with "PS3 party layout" 0x9200bdfd (without:
+    /// 0x5fcda453).
     fn netcode(self) -> u32 {
         match self {
             Build::Ps3 => 0xe377b8be,
-            Build::Ps4 => 0x5fcda453,
+            Build::Ps4 => 0x9200bdfd,
         }
     }
 
@@ -104,6 +106,15 @@ fn join_party(to: Build, body: &[u8]) -> Option<Vec<u8>> {
     Some([&(to.protocol() as u32).to_le_bytes()[..], &to.netcode().to_le_bytes(), rest].concat())
 }
 
+/// The value of `\\key\\value` in an info string replaced by `value`.
+fn set_info(s: &[u8], key: &str, value: &str) -> Vec<u8> {
+    let k = format!("\\{key}\\");
+    let Some(at) = s.windows(k.len()).position(|w| w == k.as_bytes()) else { return s.to_vec() };
+    let start = at + k.len();
+    let end = s[start..].iter().position(|&b| b == b'\\' || b == b'"').map_or(s.len(), |e| start + e);
+    [&s[..start], value.as_bytes(), &s[end..]].concat()
+}
+
 /// An out-of-band message (`ff ff ff ff`, an optional digit, the command, its body) in the other build's form.
 /// Other commands pass as they are.
 fn oob(to: Build, m: &[u8]) -> Option<Cow<'_, [u8]>> {
@@ -113,6 +124,11 @@ fn oob(to: Build, m: &[u8]) -> Option<Cow<'_, [u8]>> {
     let (head, body) = rest.split_at(start + name_len);
     let body = match &head[start..] {
         b"joinParty" if body.first() == Some(&0) => [&[0][..], &join_party(to, &body[1..])?].concat(),
+        // the server refuses another protocol or netfieldchk (EXE_SERVER_IS_DIFFERENT_VER)
+        b"connect" => {
+            let b = set_info(body, "protocol", &to.protocol().to_string());
+            set_info(&b, "netfieldchk", &(to.netcode() as i32).to_string())
+        }
         _ => return Some(Cow::Borrowed(m)),
     };
     Some(Cow::Owned([&[0xff; 4][..], head, &body].concat()))
@@ -253,7 +269,7 @@ mod tests {
     #[test]
     fn join_party_names_the_hosts_protocol_and_netcode() {
         // captured 2026-10-29 from the PS4 (body after "2joinParty\0")
-        let ps4 = hex("3108000053a4cd5f010000000000000000000000020f000000000001012f49e36a00000000010400000000000000");
+        let ps4 = hex("31080000fdbd0092010000000000000000000000020f000000000001012f49e36a00000000010400000000000000");
         let to3 = join_party(Build::Ps3, &ps4).unwrap();
         assert_eq!(&to3[..8], &hex("2d080000beb877e3")[..]); // 2093, PS3 netcode (little-endian)
         assert_eq!(&to3[8..], &ps4[8..]);
@@ -265,6 +281,16 @@ mod tests {
         assert_eq!((&out[..15], &out[15..]), (&m[..15], &to3[..]));
         let text = [&[0xff; 4][..], b"0partyJoinFailed netcode"].concat();
         assert!(matches!(oob(Build::Ps3, &text), Some(Cow::Borrowed(_))));
+    }
+
+    #[test]
+    fn connect_names_the_servers_protocol_and_netfieldchk() {
+        // captured 2026-10-29 (shortened): the PS4 connecting to a PS3 host
+        let m = [&[0xff; 4][..], br#"connect "\rate\20000\protocol\2097\netfieldchk\-1845460995\challenge\1685989745""#].concat();
+        let out = oob(Build::Ps3, &m).unwrap();
+        assert_eq!(&out[4..], &br#"connect "\rate\20000\protocol\2093\netfieldchk\-478693186\challenge\1685989745""#[..]);
+        assert_eq!(set_info(b"\\a\\1", "a", "22"), b"\\a\\22"); // last value, no closing quote
+        assert_eq!(set_info(b"\\a\\1", "b", "2"), b"\\a\\1");
     }
 
     #[test]

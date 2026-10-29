@@ -62,8 +62,20 @@ plain = "\n            ".join(f'<Line Type="bytes" Address="{a + 0x400000:#x}" V
 plain_meta = meta.replace("USCL: host when no public match is found", "USCL: plain peer data").replace(
     "SetupMatchmakingStage never ends the search; give up after {stages} stages and host",
     "No 3DES on game-to-game data (the Steam tunnel encrypts); needed for PS3 crossplay")
+
+# PS3 party layout (crossplay): the PS4 port writes one more availableMapPackFlags bit (12, PS3 11) in each party
+# member (descriptor table 0xe07fe0, entry 21) and an extra string (+0xbe14) in the party state (pseg); make both
+# like PS3's, on both sides of a PS4 game, so PS3 and PS4 read each other's party state.
+MAP_PACK_BITS = 0xE081D8  # int32 12 -> 11
+PSEG_WRITE_STR = 0x14EC84  # call MSG_WriteString (+0xbe14) -> nop
+PSEG_READ_STR = 0x144DE8  # call MSG_ReadString (+0xbe14, 0x40) -> nop
+party = "\n            ".join(f'<Line Type="bytes" Address="{a + 0x400000:#x}" Value="{v}"/>' for a, v in (
+    (MAP_PACK_BITS, "0B000000"), (PSEG_WRITE_STR, "0F1F440000"), (PSEG_READ_STR, "0F1F440000")))
+party_meta = meta.replace("USCL: host when no public match is found", "USCL: PS3 party layout").replace(
+    "SetupMatchmakingStage never ends the search; give up after {stages} stages and host",
+    "Party member map pack flags in 11 bits and no extra party string, as on PS3 (crossplay)")
 xml = '<?xml version="1.0" encoding="utf-8"?>\n<Patch>\n' + "\n".join(
-    m.format(stages=STAGES, ver=v, lines=l) for m, l in ((meta, lines), (plain_meta, plain))
+    m.format(stages=STAGES, ver=v, lines=l) for m, l in ((meta, lines), (plain_meta, plain), (party_meta, party))
     for v in ("01.11", "01.00")) + "\n</Patch>\n"
 out = sys.argv[1]
 os.makedirs(out, exist_ok=True)
