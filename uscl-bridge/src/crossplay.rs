@@ -95,8 +95,18 @@ pub fn build_for(spec: &str) -> Option<Build> {
     }
 }
 
+/// Our game's build: the serial in USCL_GAME ("<serial> <hash>") if set, else the forward preset (a mixed session
+/// runs the bo2ps4 forwards with a PS3 game too).
+pub fn own_build(spec: &str, game: &str) -> Option<Build> {
+    match game.split(' ').next() {
+        Some("BLUS31011") => Some(Build::Ps3),
+        Some("CUSA57548") => Some(Build::Ps4),
+        _ => build_for(spec),
+    }
+}
+
 /// The build a DATA packet came from, by its payload frame's byte order.
-fn sender(pkt: &[u8]) -> Option<Build> {
+pub fn sender(pkt: &[u8]) -> Option<Build> {
     match (pkt.first(), pkt.get(HEADER..HEADER + 2)) {
         (Some(&DATA), Some([0x04, 0x57])) => Some(Build::Ps3),
         (Some(&DATA), Some([0x57, 0x04])) => Some(Build::Ps4),
@@ -111,6 +121,11 @@ pub fn for_game(own: Build, pkt: &[u8]) -> Option<Cow<'_, [u8]>> {
         Some(from) if from != own => translate(from, pkt).map(Cow::Owned),
         _ => Some(Cow::Borrowed(pkt)),
     }
+}
+
+/// Our game's packet as a peer on build `to` expects it (None: drop, not a well-formed packet of ours).
+pub fn for_peer(own: Build, to: Build, pkt: &[u8]) -> Option<Cow<'_, [u8]>> {
+    if own == to { Some(Cow::Borrowed(pkt)) } else { translate(own, pkt).map(Cow::Owned) }
 }
 
 #[cfg(test)]
@@ -173,5 +188,16 @@ mod tests {
         assert_eq!(&for_game(Build::Ps3, &ps4).unwrap()[16..18], &[0x04, 0x57]);
         let handshake = hex("010200000000a26f0554175aed837702");
         assert!(matches!(for_game(Build::Ps4, &handshake), Some(Cow::Borrowed(_))));
+    }
+
+    #[test]
+    fn own_build_and_outgoing() {
+        assert_eq!(own_build("bo2ps4", "BLUS31011 abc"), Some(Build::Ps3)); // PS3 game in a mixed session
+        assert_eq!(own_build("bo2ps4", ""), Some(Build::Ps4));
+        assert_eq!(own_build("skate3", "BLUS30464 x"), None);
+        let ps3 = hex(PS3);
+        assert!(matches!(for_peer(Build::Ps3, Build::Ps3, &ps3), Some(Cow::Borrowed(_))));
+        assert_eq!(&for_peer(Build::Ps3, Build::Ps4, &ps3).unwrap()[16..18], &[0x57, 0x04]);
+        assert_eq!(sender(&ps3), Some(Build::Ps3));
     }
 }
