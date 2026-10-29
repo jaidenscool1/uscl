@@ -35,6 +35,7 @@ BIN=$APPDIR/usr/bin
 [ -f "$REPO/uscl-shell/build-release/libdiscord_partner_sdk.so" ] && install -m755 "$REPO/uscl-shell/build-release/libdiscord_partner_sdk.so" "$APPDIR/usr/bin/"
 install -m755 "$REPO/uscl-bridge/target/release/uscl-bridge" "$RPCN_SRC/target/release/rpcn" "$DW_SRC/target/release/dw-server" "$REPO/uscl-shell/build-release/uscl" "$BIN/"
 mv "$BIN/rpcn" "$BIN/uscl-rpcn"
+install -m644 "$REPO/uscl-rpcs3/uscl_patches.yml" "$BIN/"   # RPCS3 loads its generated built-in patches from its own folder
 cp "$(find "$REPO/uscl-bridge/target/release/build" -name libsteam_api.so | head -1)" "$BIN/"   # the bridge loads it from its own folder
 SHADPS4_BUILD=${USCL_SHADPS4_BUILD:-$HOME/src/shadps4-uscl/build}; SHADNET_BUILD=${USCL_SHADNET_BUILD:-$HOME/src/shadnet-uscl/build}
 [ -x "$SHADPS4_BUILD/shadps4" ] && install -m755 "$SHADPS4_BUILD/shadps4" "$BIN/"

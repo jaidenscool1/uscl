@@ -46,6 +46,9 @@ Then build as in RPCS3's `BUILDING.md`.
 - 0010: second built-in BO2 patch, "little-endian messages": the msg_t read/write primitives call the byte-swapping
   helpers (13 `bl` rewrites in t6mp 0x32a600-0x32f500), so lobby and game messages are little-endian like the PS4
   build's. PS3 <-> PS3 is unaffected (both sides change together); PS3 <-> PS4 binary messages become identical.
+- 0011: built-in patches are also read from `uscl_patches.yml` next to the RPCS3 executable (generated, too big for
+  the source; packaging ships it): BO2 "PS4 netfield order", the 22 network field tables in the PS4 build's order so
+  game state encodes alike (crossplay).
 
 ## Building (Arch, 2026-10)
 The bundled LLVM doesn't compile with GCC 16's libstdc++ and `llvm-ar` isn't installed, so the debugging build is

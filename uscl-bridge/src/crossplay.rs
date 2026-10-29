@@ -33,13 +33,14 @@ impl Build {
     }
 
     /// The netcode checksum (= the connect string's netfieldchk) the build's joinParty and connect carry and its
-    /// host compares (PS4 `FUN_0038aca0`, computed at start over the network field tables, so it changes with
-    /// patches to them). Captured 2026-10-29: PS3 0xe377b8be; PS4 with "PS3 party layout" 0x9200bdfd (without:
-    /// 0x5fcda453).
+    /// host compares: CRC-32 over the network field tables and party member descriptors, computed at start (PS4
+    /// `FUN_0038a370` into 0x269e240, PS3 0x32dd70 into 0x1b03a58), so it changes with patches to them. With USCL's
+    /// crossplay patches (bo2-ps4-re/crossplay/netfieldchk.py; PS4 read live 2026-10-29). Shipped: PS3 0xe377b8be,
+    /// PS4 0x5fcda453.
     fn netcode(self) -> u32 {
         match self {
-            Build::Ps3 => 0xe377b8be,
-            Build::Ps4 => 0x9200bdfd,
+            Build::Ps3 => 0x58139cbe,
+            Build::Ps4 => 0x93b4778f,
         }
     }
 
@@ -269,9 +270,9 @@ mod tests {
     #[test]
     fn join_party_names_the_hosts_protocol_and_netcode() {
         // captured 2026-10-29 from the PS4 (body after "2joinParty\0")
-        let ps4 = hex("31080000fdbd0092010000000000000000000000020f000000000001012f49e36a00000000010400000000000000");
+        let ps4 = hex("310800008f77b493010000000000000000000000020f000000000001012f49e36a00000000010400000000000000");
         let to3 = join_party(Build::Ps3, &ps4).unwrap();
-        assert_eq!(&to3[..8], &hex("2d080000beb877e3")[..]); // 2093, PS3 netcode (little-endian)
+        assert_eq!(&to3[..8], &hex("2d080000be9c1358")[..]); // 2093, PS3 netcode (little-endian)
         assert_eq!(&to3[8..], &ps4[8..]);
         assert_eq!(join_party(Build::Ps4, &to3).unwrap(), ps4);
         assert_eq!(join_party(Build::Ps3, &ps4[..6]), None);
@@ -286,9 +287,9 @@ mod tests {
     #[test]
     fn connect_names_the_servers_protocol_and_netfieldchk() {
         // captured 2026-10-29 (shortened): the PS4 connecting to a PS3 host
-        let m = [&[0xff; 4][..], br#"connect "\rate\20000\protocol\2097\netfieldchk\-1845460995\challenge\1685989745""#].concat();
+        let m = [&[0xff; 4][..], br#"connect "\rate\20000\protocol\2097\netfieldchk\-1816889457\challenge\1685989745""#].concat();
         let out = oob(Build::Ps3, &m).unwrap();
-        assert_eq!(&out[4..], &br#"connect "\rate\20000\protocol\2093\netfieldchk\-478693186\challenge\1685989745""#[..]);
+        assert_eq!(&out[4..], &br#"connect "\rate\20000\protocol\2093\netfieldchk\1477680318\challenge\1685989745""#[..]);
         assert_eq!(set_info(b"\\a\\1", "a", "22"), b"\\a\\22"); // last value, no closing quote
         assert_eq!(set_info(b"\\a\\1", "b", "2"), b"\\a\\1");
     }

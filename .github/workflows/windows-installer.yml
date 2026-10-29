@@ -157,6 +157,7 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/gabomdq/SDL_GameControllerDB/master/gamecontrollerdb.txt > $S/config/input_configs/gamecontrollerdb.txt
           curl -fsSL 'https://rpcs3.net/compatibility?api=v1&export' | iconv -t UTF-8 > $S/GuiConfigs/compat_database.dat || true
           cp servers/* $S/
+          cp uscl/uscl-rpcs3/uscl_patches.yml $S/   # RPCS3 loads its generated built-in patches from its own folder
           cp shell-build/Release/uscl.exe shell-build/Release/SDL3.dll $S/
           [ -f shell-build/Release/discord_partner_sdk.dll ] && cp shell-build/Release/discord_partner_sdk.dll $S/
           "$QTDIR/bin/windeployqt.exe" --release --no-translations --qmldir uscl/uscl-shell/qml $S/uscl.exe
