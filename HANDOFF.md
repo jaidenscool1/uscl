@@ -143,7 +143,19 @@ projects, fastfile unpacker, 2-PC kit and TESTLOG.md). Windows test PC: `C:\USCL
   preset (`bo2` = PS3, `bo2ps4` = PS4) and the sender's from the frame byte order, and translates the frame.
   Same-build traffic is untouched.
 
-**Next for crossplay:** uscl-dw must let PS3 (T6Ps3) and PS4 (title 2430) sessions find each other; protocol
+**Crossplay status (2026-10-29 07:10, two PCs: PS3 host on Linux, PS4 member on Pete's PC):** the whole lobby
+works (join, party state, profiles, heartbeats, the host's `go`), the PS4 connects to the PS3 server
+(connectResponse, stats) and loads the map, then disconnects itself while parsing the gamestate (in-game layer).
+Pieces, all pushed: uscl-dw 0020 (security ID), RPCS3 0009/0010 (plain peer data, little-endian messages, built
+in), `uscl-shadps4/mk_mm_patch.py` (plain peer data, PS3 party layout), `uscl-bridge/src/crossplay.rs` (frame,
+QoS, joinParty, connect; bridges announce their build in lobby member data and translate what they receive).
+Details and addresses: `games/CUSA57548.md`. Test scripts (job tmp, not in git): host_x.sh (servers + bridge with
+`USCL_GAME=BLUS31011`), round.sh (one full round incl. Pete's PS4 via scheduled tasks + key helper).
+**Next for crossplay (in-game):** make the PS4's netfield tables PS3's (order, bits, encoder ids; offsets by field
+name) as a PS4 data patch, then update the PS4 netcode constant in crossplay.rs (it is the tables' checksum); then
+whatever the gamestate shows next (configstring / asset indexes).
+
+**Next for crossplay (older notes):** uscl-dw must let PS3 (T6Ps3) and PS4 (title 2430) sessions find each other; protocol
 2093 vs 2097 in the connect/lobby messages; per-message translation of binary messages (`ph`, `pseg`, `b`,
 `profiles`, ...; handler pairs in `games/CUSA57548.md`), then in-game snapshots (netfield order/encoder ids, asset
 ids). Captures for that: RE folder `crossplay/ps3-2pc-plain.udp`, `ps4-2pc-plain.udp` (bridge dump format).
