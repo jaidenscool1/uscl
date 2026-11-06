@@ -1,7 +1,7 @@
-From ee18812132f4fc830417cdcb8662e8def1ad93d2 Mon Sep 17 00:00:00 2001
+From 5d40305750cd8056656765cf589e51b2ef8a0863 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 16:10:28 -0700
-Subject: [PATCH 6/8] USCL: USCL_ONLINE runs the game unmodified (no game
+Subject: [PATCH 06/11] USCL: USCL_ONLINE runs the game unmodified (no game
  patches, GDB server or logpoints)
 
 USCL sets it for games started during an online session.
@@ -14,10 +14,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  3 files changed, 19 insertions(+)
 
 diff --git a/Utilities/bin_patch.cpp b/Utilities/bin_patch.cpp
-index 0d4eb2e..61f92dc 100644
+index 953d813..fab5c6a 100644
 --- a/Utilities/bin_patch.cpp
 +++ b/Utilities/bin_patch.cpp
-@@ -1467,6 +1467,13 @@ void patch_engine::apply(std::vector<u32>& applied_total, const std::string& nam
+@@ -1480,6 +1480,13 @@ void patch_engine::apply(std::vector<u32>& applied_total, const std::string& nam
  		return;
  	}
  
@@ -32,10 +32,10 @@ index 0d4eb2e..61f92dc 100644
  	const std::string& serial = Emu.GetTitleID();
  	const std::string& app_version = Emu.GetAppVersion();
 diff --git a/rpcs3/Emu/Cell/PPUThread.cpp b/rpcs3/Emu/Cell/PPUThread.cpp
-index 92e487b..bb4c2e8 100644
+index 4757d04..366e5e6 100644
 --- a/rpcs3/Emu/Cell/PPUThread.cpp
 +++ b/rpcs3/Emu/Cell/PPUThread.cpp
-@@ -1306,6 +1306,11 @@ static void ppu_logpoint(ppu_thread& ppu, ppu_opcode_t op, be_t<u32>* this_op, p
+@@ -1320,6 +1320,11 @@ static void ppu_logpoint(ppu_thread& ppu, ppu_opcode_t op, be_t<u32>* this_op, p
  static void ppu_install_logpoints()
  {
  	const char* path = std::getenv("USCL_LOGPOINTS");

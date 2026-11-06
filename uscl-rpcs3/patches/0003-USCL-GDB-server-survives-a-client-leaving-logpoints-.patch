@@ -1,8 +1,8 @@
-From ef2520dee8cee77f32e7c9a7481d9394bfa50b89 Mon Sep 17 00:00:00 2001
+From 96e6149a996434dfcedc9cd562a574715ca2b259 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 15:32:00 -0700
-Subject: [PATCH 3/8] USCL: GDB server survives a client leaving; '!' logpoints
- dump game memory
+Subject: [PATCH 03/11] USCL: GDB server survives a client leaving; '!'
+ logpoints dump game memory
 
 A closed connection or 'D' (detach) ended in a fatal error that froze
 emulation; now the session ends and emulation resumes. A logpoint named
@@ -15,10 +15,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 56 insertions(+)
 
 diff --git a/rpcs3/Emu/Cell/PPUThread.cpp b/rpcs3/Emu/Cell/PPUThread.cpp
-index 4d61f99..92e487b 100644
+index 30113e2..4757d04 100644
 --- a/rpcs3/Emu/Cell/PPUThread.cpp
 +++ b/rpcs3/Emu/Cell/PPUThread.cpp
-@@ -1232,6 +1232,7 @@ static void ppu_break(ppu_thread& ppu, ppu_opcode_t, be_t<u32>* this_op, ppu_int
+@@ -1246,6 +1246,7 @@ static void ppu_break(ppu_thread& ppu, ppu_opcode_t, be_t<u32>* this_op, ppu_int
  // first time the executable with that hash runs an address, log its name, LR and r3-r5, then carry on (a breakpoint
  // that doesn't pause, so games with a hang watchdog keep running). One-shot: the original is put back on the hit.
  // A name starting with '*' logs every call instead; ending in "@rN" (N = 3..10) also logs the string rN points to.
@@ -26,7 +26,7 @@ index 4d61f99..92e487b 100644
  std::string g_uscl_exec_hash;
  static shared_mutex s_logpoint_mutex;
  static std::unordered_map<u32, std::string> s_logpoints;
-@@ -1269,6 +1270,34 @@ static void ppu_logpoint(ppu_thread& ppu, ppu_opcode_t op, be_t<u32>* this_op, p
+@@ -1283,6 +1284,34 @@ static void ppu_logpoint(ppu_thread& ppu, ppu_opcode_t op, be_t<u32>* this_op, p
  		}
  
  		ppu_log.success("USCL logpoint 0x%08x %s lr=0x%08x r3=0x%x r4=0x%x r5=0x%x \"%s\" (%s)", addr, name, ppu.lr, ppu.gpr[3], ppu.gpr[4], ppu.gpr[5], text, ppu.get_name());

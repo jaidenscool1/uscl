@@ -19,6 +19,9 @@ own = the publisher's own servers · GameSpy (revived by OpenSpy) · ? = not pro
 | Call of Duty: Black Ops II | [BLUS31011](games/BLUS31011.md) | 1.19 | Demonware + PSN friends/invites | ✅ a full match between two PCs over Steam (Linux host, Windows member, 2026-10-27): Find Match, quality test, game traffic through the tunnel | lobby player names; Join Friend / invites; per-game RPCS3 settings (glitches, CPU) |
 | Call of Duty: Black Ops II (PS4, shadPS4) | [CUSA57548](games/CUSA57548.md) | update in `CUSA57548-UPDATE` | Demonware (title 2430, auth3 HTTPS) + shadNet | ✅ public Free-for-All matches between two PCs over Steam, also hosted from the USCL app (2026-10-28) | in-game friends / invites (PlayerSessions); Windows app build |
 | Gotham City Impostors (PSN) | [NPUB30252](games/NPUB30252.md) | 1.00 trial + full-game unlock | GameSpy (`sirenps3`, shut down 2014) + PSN tickets | 🚧 full-game licence accepted; stuck at the title without GameSpy (2026-10-26) | answer the SSLv3 GameSpy login (`sirenps3.api.gamespy.net`) |
+| NBA Jam | [BLUS30696](games/BLUS30696.md) | 1.00 | Blaze 2.11 (redirector plain TCP 42100) + RPCN ticket | 🚧 profiled 2026-11-06: boots, signs in to RPCN, sends its redirector request (`nbajam-2010-ps3`) | try Skate3BlazeServer's login, then our own Blaze stand-in |
+| Madden NFL 25 | [BLUS31178](games/BLUS31178.md) | 1.00 | Blaze 13.3 (redirector TLS 42127) + RPCN ticket | 🚧 profiled 2026-11-06: boots, signs in to RPCN, redirector handshake is ProtoSSL TLS | get past ProtoSSL (certificate check or PPU patch) |
+| Grand Theft Auto V | [BLUS31156](games/BLUS31156.md) | disc 1.01 (Online needs the last update) | own (Rockstar ROS, HTTPS 443) + PSN ticket | 🚧 profiled 2026-11-06: boots, signs in to RPCN, calls `prod.ros.rockstargames.com` | install the last title update, profile again; ROS stand-in after the EA games |
 
 ## Next up
 Ordered by how much existing work each one reuses. Serials and services marked `?` are from memory: confirm them
@@ -40,7 +43,7 @@ with `np-profile.py` on your own dump before starting.
 | Killzone 2 / 3 | ? | ? | profile first | ⬜ |
 | Gran Turismo 5 | ? | ? | profile first | ⬜ |
 | Midnight Club: Los Angeles | BLUS30442 | own (Rockstar) + PSN friends/invites, scores (profiled 2026-10-23: PARTIAL) | new service: find what its race lobbies talk to | ⬜ |
-| GTA IV / GTA V, Red Dead Redemption | ? | own (Rockstar) ? | new service | ⬜ |
+| GTA IV, Red Dead Redemption | ? | own (Rockstar) ? | GTA V's ROS work | ⬜ |
 
 ## No online multiplayer
 | Game | Serial |
