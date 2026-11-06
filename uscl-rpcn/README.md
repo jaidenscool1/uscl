@@ -11,6 +11,19 @@ git am ../patches/*.patch
 cargo build --release
 ```
 
+### Windows (tested 2026-10-22, Windows 11, patches 0001-0004)
+Rust's GNU toolchain plus a few build tools (all via winget): `rustup` with host `x86_64-pc-windows-gnu`,
+`BrechtSanders.WinLibs.POSIX.MSVCRT` (gcc, dlltool), `Google.Protobuf` (protoc) and
+`StrawberryPerl.StrawberryPerl`. The vendored OpenSSL won't build: its `mingw64` target needs a Unix-style Perl,
+and Git's lacks modules. So build against Strawberry's OpenSSL instead, from Git Bash with WinLibs first in PATH:
+```
+OPENSSL_NO_VENDOR=1 OPENSSL_DIR='C:\Strawberry\c' PROTOC=<path to protoc.exe> cargo build --release
+cp /c/Strawberry/c/bin/{libcrypto-3-x64__,libssl-3-x64__,zlib1__}.dll target/release/
+```
+`rpcn.exe` loads those three DLLs at start (without them it exits with 0xC0000135). The run steps below work
+the same from any folder (edit `rpcn.cfg` by hand if there's no `sed`). With `USCL_LOCAL=1` it listens on
+TCP 127.0.0.1:31413 and UDP 127.0.0.1:3757, and `uscl-bridge host` in front of it passes connections through.
+
 ## Run (host only)
 The Steam lobby owner runs this; everyone else only runs `uscl-bridge join`.
 ```
