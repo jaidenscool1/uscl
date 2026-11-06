@@ -1,0 +1,87 @@
+From eb8247b519bf2ee62e621cb203d867c03f72ab8b Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 03:49:51 -0700
+Subject: [PATCH 09/10] NAT discovery: DW_STUN_SELF_ADDR reports the tunnel
+ host's own game at its slot address
+
+Behind uscl-bridge, members' requests arrive from their slot port and are
+reported as is; the host's own game asks directly, so it is reported as the
+host's slot address (127.0.0.1:39001) and advertises an address other
+players can reach.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dw-server/src/stun.rs | 25 +++++++++++++++++++++----
+ 1 file changed, 21 insertions(+), 4 deletions(-)
+
+diff --git a/dw-server/src/stun.rs b/dw-server/src/stun.rs
+index 47eba87..9edec3e 100644
+--- a/dw-server/src/stun.rs
++++ b/dw-server/src/stun.rs
+@@ -16,6 +16,16 @@ fn addr_bytes(addr: SocketAddrV4) -> [u8; 6] {
+     [ip[0], ip[1], ip[2], ip[3], port[0], port[1]]
+ }
+ 
++/// Behind the session tunnel (uscl-bridge `host bo2`) members' requests arrive from their slot port
++/// (127.0.0.1:39001..=39255), which is the address other players reach them at. The host's own game asks directly;
++/// DW_STUN_SELF_ADDR (the host's slot address, 127.0.0.1:39001) is reported for it instead.
++pub fn reported(sender: SocketAddrV4, self_addr: Option<SocketAddrV4>) -> SocketAddrV4 {
++    match self_addr {
++        Some(me) if sender.ip().is_loopback() && !(39001..=39255).contains(&sender.port()) => me,
++        _ => sender,
++    }
++}
++
+ pub fn reply(request: &[u8], sender: SocketAddrV4, second_server: SocketAddrV4) -> Option<Vec<u8>> {
+     match request {
+         [0x1e, 0x02, 0x00, ..] => Some([&[0x1f, 0x02, 0x00][..], &addr_bytes(sender)].concat()),
+@@ -36,13 +46,13 @@ fn responder(received_on: usize, request: &[u8]) -> usize {
+     }
+ }
+ 
+-async fn serve(sockets: Arc<Vec<UdpSocket>>, index: usize, second_server: SocketAddrV4) {
++async fn serve(sockets: Arc<Vec<UdpSocket>>, index: usize, second_server: SocketAddrV4, self_addr: Option<SocketAddrV4>) {
+     let mut buf = [0u8; 1500];
+     loop {
+         let Ok((len, SocketAddr::V4(sender))) = sockets[index].recv_from(&mut buf).await else {
+             continue;
+         };
+-        if let Some(answer) = reply(&buf[..len], sender, second_server) {
++        if let Some(answer) = reply(&buf[..len], reported(sender, self_addr), second_server) {
+             let out = responder(index, &buf[..len]);
+             info!("stun {:02x?} from {sender}, answered from {:?}", &buf[..len.min(4)], sockets[out].local_addr());
+             let _ = sockets[out].send_to(&answer, sender).await;
+@@ -72,14 +82,15 @@ pub async fn start() {
+         info!("NAT discovery (stun) on udp {addr}");
+     }
+     let sockets = Arc::new(sockets);
++    let self_addr = std::env::var("DW_STUN_SELF_ADDR").ok().map(|a| a.parse::<SocketAddrV4>().expect("DW_STUN_SELF_ADDR must be IPv4 addr:port"));
+     for index in 0..3 {
+-        tokio::spawn(serve(sockets.clone(), index, alt_addr));
++        tokio::spawn(serve(sockets.clone(), index, alt_addr, self_addr));
+     }
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::{reply, responder};
++    use super::{reply, reported, responder};
+     use std::net::{Ipv4Addr, SocketAddrV4};
+ 
+     #[test]
+@@ -93,6 +104,12 @@ mod tests {
+             [0x15, 2, 0, 4, 0x2b, 0xf5, 0x66, 0x04, 0x0c, 0xb9, 0x22, 0x6b, 0x81, 0x02, 0x0c]
+         );
+         assert!(reply(&[0x0e, 0x02, 0x00], me, second).is_none());
++        let me: SocketAddrV4 = "127.0.0.1:39001".parse().unwrap();
++        let member: SocketAddrV4 = "127.0.0.1:39002".parse().unwrap();
++        let game: SocketAddrV4 = "127.0.0.1:3075".parse().unwrap();
++        assert_eq!(reported(member, Some(me)), member);
++        assert_eq!(reported(game, Some(me)), me);
++        assert_eq!(reported(game, None), game);
+         // sockets: 0 primary, 1 alt, 2 alt port+1
+         assert_eq!(responder(0, &[0x14, 2, 0, 0]), 0);
+         assert_eq!(responder(0, &[0x14, 2, 0, 3]), 2);
+-- 
+2.56.0
+

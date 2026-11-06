@@ -1,0 +1,41 @@
+From 6b86ed7722430bbd90d1600f5c821e593493f9fd Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 10:34:38 -0700
+Subject: [PATCH 5/5] USCL: Open on a folder that isn't a game adds every game
+ inside it (all subfolders)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rpcs3/rpcs3qt/main_window.cpp | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/rpcs3/rpcs3qt/main_window.cpp b/rpcs3/rpcs3qt/main_window.cpp
+index bd3dd90..c98b303 100644
+--- a/rpcs3/rpcs3qt/main_window.cpp
++++ b/rpcs3/rpcs3qt/main_window.cpp
+@@ -700,6 +700,22 @@ void main_window::BootGame()
+ 
+ 	m_gui_settings->SetValue(gui::fd_boot_game, QFileInfo(dir_path).path());
+ 
++	// USCL: a folder that isn't a game itself is searched (all subfolders) and its games are added to the list
++	if (std::string elf; Emulator::GetElfPathFromDir(elf, dir_path.toStdString()) != game_boot_result::no_errors)
++	{
++		if (stopped)
++		{
++			Emu.Resume();
++		}
++
++		gui_log.notice("BootGame: %s is not a game, adding the games inside it", dir_path);
++		const bool recursive = g_cfg.misc.use_recursive_scan.get();
++		g_cfg.misc.use_recursive_scan.set(true);
++		AddGamesFromDirs(QStringList{dir_path}); // reports what it found
++		g_cfg.misc.use_recursive_scan.set(recursive);
++		return;
++	}
++
+ 	gui_log.notice("Booting from BootGame...");
+ 	Boot(dir_path.toStdString(), "", false, true);
+ }
+-- 
+2.56.0
+

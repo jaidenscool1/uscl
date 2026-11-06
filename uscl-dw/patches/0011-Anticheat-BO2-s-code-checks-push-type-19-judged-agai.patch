@@ -1,0 +1,500 @@
+From 93af826751db620bf276c439f9c1dbe5ef62be13 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 17:49:46 -0700
+Subject: [PATCH] Anticheat: BO2's code checks (push type 19), judged against
+ the host's own answers
+
+The server pushes code-checksum challenges (CRC-32 of game code ranges) to every player and compares the answers
+with the session host's (DW_TRUSTED_USER) on the same build; a player whose answers differ runs changed game
+code and their sessions are refused. Verified on BO2 1.19 (PS3): the launcher and multiplayer answers match
+CRCs computed from the decrypted executables. The push goes to the player's PS3 user id (Tiger hash of the
+online ID); any other id hits a log line that crashes the game. Lobby servers can now send push messages after
+a reply (PushSource).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dw-server/src/lobby/mod.rs              |  12 +-
+ libbitdemon/src/lobby/anti_cheat/mod.rs | 350 +++++++++++++++++++++---
+ libbitdemon/src/lobby/mod.rs            |  23 ++
+ 3 files changed, 350 insertions(+), 35 deletions(-)
+
+diff --git a/dw-server/src/lobby/mod.rs b/dw-server/src/lobby/mod.rs
+index 9b0f8ee..a2f64b1 100644
+--- a/dw-server/src/lobby/mod.rs
++++ b/dw-server/src/lobby/mod.rs
+@@ -42,7 +42,17 @@ pub fn configure_lobby_server(
+ ) -> Router {
+     let mut configurer = DwServerConfigurer::new(lobby_server);
+ 
+-    configurer.direct_config(Anticheat, Arc::new(AntiCheatHandler::new()));
++    // DW_TRUSTED_USER (the host's online name): send code checks, judged against that player's answers
++    let anti_cheat = match std::env::var("DW_TRUSTED_USER") {
++        Ok(host) if !host.is_empty() => {
++            let every = std::env::var("DW_AC_INTERVAL").ok().and_then(|s| s.parse().ok()).unwrap_or(300);
++            let handler = Arc::new(AntiCheatHandler::with_challenges(host, std::time::Duration::from_secs(every)));
++            lobby_server.add_push_source(handler.clone());
++            handler
++        }
++        _ => Arc::new(AntiCheatHandler::new()),
++    };
++    configurer.direct_config(Anticheat, anti_cheat);
+     configurer.direct_config(BandwidthTest, Arc::new(BandwidthHandler::new()));
+ 
+     configurer.full_config(create_content_streaming_handler(config));
+diff --git a/libbitdemon/src/lobby/anti_cheat/mod.rs b/libbitdemon/src/lobby/anti_cheat/mod.rs
+index af9e30e..5f5f060 100644
+--- a/libbitdemon/src/lobby/anti_cheat/mod.rs
++++ b/libbitdemon/src/lobby/anti_cheat/mod.rs
+@@ -1,16 +1,36 @@
+-use crate::lobby::LobbyHandler;
++//! Anticheat (service 38), Black Ops II style: the server pushes challenges (push type 19) and the game answers
++//! them with AnswerChallenges. Reversed from BO2 1.19 (PS3, `live/live_anticheat_mipster.cpp`):
++//!
++//! - Push: `u32 19, u64 user id, string (<= 64), u16 count, count x { u16 type, u64 id, u16 n, n x blob }`.
++//! - Type 1 (what we send): CRC-32 of a range of the game's own code. Blob: `u64 key, i64 start, i64 end,
++//!   u8 len + module name, u8 len + section name` (big endian). An empty module is the main executable; start and
++//!   end are offsets from its start (clamped to it). The CRC uses the reflected 0xEDB88320 table, starts from the
++//!   key's low 32 bits and has no final xor.
++//! - AnswerChallenges (task 2): `u16 count, count x { u64 id, i64 answer }, blob (<= 64, game info)`. The
++//!   blob starts with the executable's build (`[1][u32 build][u8]`): the launcher and multiplayer are different
++//!   code, so answers are only compared between players on the same build.
++//!
++//! Players don't have a decrypted copy of the game to work answers out from, so the reference is the session
++//! host's own game: everyone gets the same challenges and whoever answers differently runs changed game code.
++//! That player's sessions are refused from then on (the game drops off online).
++
+ use crate::lobby::response::task_reply::TaskReply;
+-use crate::messaging::BdErrorCode::NoError;
++use crate::lobby::response::BdMessageType;
++use crate::lobby::{LobbyHandler, PushSource};
+ use crate::messaging::bd_message::BdMessage;
+ use crate::messaging::bd_reader::BdReader;
+ use crate::messaging::bd_response::{BdResponse, ResponseCreator};
+-use crate::networking::bd_session::BdSession;
+-use log::{debug, warn};
++use crate::messaging::bd_writer::BdWriter;
++use crate::messaging::BdErrorCode::NoError;
++use crate::messaging::StreamMode;
++use crate::networking::bd_session::{BdSession, SessionId};
++use log::{debug, info, warn};
+ use num_derive::{FromPrimitive, ToPrimitive};
+-use num_traits::FromPrimitive;
++use num_traits::{FromPrimitive, ToPrimitive};
++use std::collections::{HashMap, HashSet};
+ use std::error::Error;
+-
+-pub struct AntiCheatHandler {}
++use std::sync::Mutex;
++use std::time::{Duration, Instant};
+ 
+ #[derive(Debug, Eq, PartialEq, Hash, Copy, Clone, FromPrimitive, ToPrimitive)]
+ #[repr(u8)]
+@@ -20,30 +40,124 @@ enum AntiCheatTaskId {
+     ReportConsoleDetails = 4,
+ }
+ 
+-impl LobbyHandler for AntiCheatHandler {
+-    fn handle_message(
+-        &self,
+-        session: &mut BdSession,
+-        mut message: BdMessage,
+-    ) -> Result<BdResponse, Box<dyn Error>> {
+-        let task_id_value = message.reader.read_u8()?;
+-        let maybe_task_id = AntiCheatTaskId::from_u8(task_id_value);
+-        if maybe_task_id.is_none() {
+-            warn!("Client called unknown task {task_id_value}");
+-            return TaskReply::with_only_error_code(NoError, task_id_value).to_response();
++const PUSH_CHALLENGES: u32 = 19;
++const CHALLENGE_CODE_CRC: u16 = 1;
++// shortcut: BO2 1.19 multiplayer's code size (0x10200..0x8df5cc); other titles clamp to their own, which only
++// makes some ranges shorter
++const CODE_SIZE: u64 = 0x8cf3cc;
++const CHALLENGES_PER_ROUND: u64 = 3;
++// give the game time to set up its anticheat listener after logging in
++const SETTLE: Duration = Duration::from_secs(20);
++
++#[derive(Clone, Debug, PartialEq)]
++pub struct Challenge {
++    pub id: u64,
++    pub key: u64,
++    pub start: i64,
++    pub end: i64,
++}
++
++impl Challenge {
++    pub fn blob(&self) -> Vec<u8> {
++        let mut b = Vec::with_capacity(26);
++        b.extend_from_slice(&self.key.to_be_bytes());
++        b.extend_from_slice(&self.start.to_be_bytes());
++        b.extend_from_slice(&self.end.to_be_bytes());
++        b.extend_from_slice(&[0, 0]); // module and section: the main executable
++        b
++    }
++
++    fn random(id: u64) -> Challenge {
++        let len = 0x1000 + rand::random::<u64>() % 0xf000;
++        let start = rand::random::<u64>() % (CODE_SIZE - len);
++        Challenge {
++            id,
++            key: rand::random::<u32>() as u64,
++            start: start as i64,
++            end: (start + len) as i64,
+         }
+-        let task_id = maybe_task_id.unwrap();
++    }
++}
+ 
+-        match task_id {
+-            AntiCheatTaskId::ReportConsoleDetails => {
+-                Self::report_console_details(session, &mut message.reader)
+-            }
+-            AntiCheatTaskId::AnswerChallenges | AntiCheatTaskId::ReportConsoleId => {
+-                warn!("Client called unimplemented task {task_id:?}");
+-                Ok(TaskReply::with_only_error_code(NoError, task_id).to_response()?)
+-            }
++/// What the game computes for a type 1 challenge over `code` (the module's bytes from its start).
++pub fn code_crc(code: &[u8], c: &Challenge) -> i64 {
++    let start = (c.start.max(0) as usize).min(code.len());
++    let end = (c.end.max(0) as usize).min(code.len()).max(start);
++    let mut crc = c.key as u32;
++    for &b in &code[start..end] {
++        crc ^= b as u32;
++        for _ in 0..8 {
++            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xedb88320 } else { crc >> 1 };
+         }
+     }
++    crc as i64
++}
++
++/// The id a PS3 title knows its player by (`0081e378` in BO2 1.19): Tiger hash of the lowercased online ID, its
++/// first 8 bytes read little endian. A push for any other id hits a log line that crashes the game.
++pub fn ps3_user_id(online_id: &str) -> u64 {
++    use tiger::{Digest, Tiger};
++    let hash: [u8; 24] = Tiger::digest(online_id.to_ascii_lowercase().as_bytes()).into();
++    u64::from_le_bytes(hash[..8].try_into().unwrap())
++}
++
++pub fn challenge_push(user_id: u64, challenges: &[Challenge]) -> Result<BdResponse, Box<dyn Error>> {
++    let mut data = Vec::new();
++    {
++        let mut writer = BdWriter::new(&mut data);
++        writer.set_type_checked(false);
++        writer.set_mode(StreamMode::ByteMode);
++        writer.write_u8(BdMessageType::LobbyServicePushMessage.to_u8().unwrap())?;
++        writer.set_type_checked(true);
++        writer.write_u32(PUSH_CHALLENGES)?;
++        writer.write_u64(user_id)?;
++        writer.write_str("")?;
++        writer.write_u16(challenges.len() as u16)?;
++        for c in challenges {
++            writer.write_u16(CHALLENGE_CODE_CRC)?;
++            writer.write_u64(c.id)?;
++            writer.write_u16(1)?;
++            writer.write_blob(&c.blob())?;
++        }
++    }
++    Ok(BdResponse::encrypted_if_available(data))
++}
++
++/// The answers and the build they came from.
++pub fn read_answers(reader: &mut BdReader) -> Result<(Vec<(u64, i64)>, Vec<u8>), Box<dyn Error>> {
++    let count = reader.read_u16()?;
++    let mut answers = Vec::with_capacity(count as usize);
++    for _ in 0..count {
++        let id = reader.read_u64()?;
++        answers.push((id, reader.read_i64()?));
++    }
++    let info = reader.read_blob().unwrap_or_default();
++    Ok((answers, info.into_iter().take(6).collect()))
++}
++
++#[derive(Default)]
++struct Round {
++    number: u64,
++    challenges: Vec<Challenge>,
++    started: Option<Instant>,
++    // build -> the host's answers on it
++    reference: HashMap<Vec<u8>, HashMap<u64, i64>>,
++    // user id -> (name, build, answers) waiting for the host's answers on that build
++    pending: HashMap<u64, (String, Vec<u8>, HashMap<u64, i64>)>,
++}
++
++#[derive(Default)]
++struct State {
++    round: Round,
++    first_seen: HashMap<SessionId, Instant>,
++    sent: HashMap<SessionId, u64>, // session -> round it has
++    blocked: HashSet<u64>,         // user ids
++}
++
++pub struct AntiCheatHandler {
++    trusted_user: Option<String>,
++    interval: Duration,
++    state: Mutex<State>,
+ }
+ 
+ impl Default for AntiCheatHandler {
+@@ -53,14 +167,53 @@ impl Default for AntiCheatHandler {
+ }
+ 
+ impl AntiCheatHandler {
++    /// Answers requests only; never sends challenges.
+     pub fn new() -> AntiCheatHandler {
+-        AntiCheatHandler {}
++        AntiCheatHandler { trusted_user: None, interval: Duration::from_secs(300), state: Mutex::new(State::default()) }
++    }
++
++    /// Sends a new round of code checks every `interval`; `trusted_user` (the host's online name) is the reference.
++    pub fn with_challenges(trusted_user: String, interval: Duration) -> AntiCheatHandler {
++        AntiCheatHandler { trusted_user: Some(trusted_user), interval, state: Mutex::new(State::default()) }
+     }
+ 
+-    fn report_console_details(
+-        _session: &mut BdSession,
+-        reader: &mut BdReader,
+-    ) -> Result<BdResponse, Box<dyn Error>> {
++    fn report(&self, user_id: u64, name: &str, build: Vec<u8>, answers: Vec<(u64, i64)>) {
++        let mut state = self.state.lock().unwrap();
++        let round = &mut state.round;
++        let ids: HashSet<u64> = round.challenges.iter().map(|c| c.id).collect();
++        let answers: HashMap<u64, i64> = answers.into_iter().filter(|(id, _)| ids.contains(id)).collect();
++        if answers.is_empty() {
++            debug!("Anticheat answers from {name} for no current challenge");
++            return;
++        }
++        let mut to_judge = Vec::new();
++        if self.trusted_user.as_deref() == Some(name) {
++            info!("Anticheat reference answers from {name} (round {}, build {build:02x?})", round.number);
++            round.reference.insert(build.clone(), answers);
++            let waiting: Vec<u64> = round.pending.iter().filter(|(_, (_, b, _))| *b == build).map(|(u, _)| *u).collect();
++            for uid in waiting {
++                let (n, _, a) = round.pending.remove(&uid).unwrap();
++                to_judge.push((uid, n, a));
++            }
++        } else if round.reference.contains_key(&build) {
++            to_judge.push((user_id, name.to_string(), answers));
++        } else {
++            round.pending.insert(user_id, (name.to_string(), build.clone(), answers));
++        }
++        let reference = round.reference.get(&build).cloned().unwrap_or_default();
++        for (uid, n, a) in to_judge {
++            match verdict(&reference, &a) {
++                Some(true) => info!("anticheat: {n} passed the game code check"),
++                Some(false) => {
++                    warn!("anticheat: {n} failed the game code check and was removed");
++                    state.blocked.insert(uid);
++                }
++                None => {}
++            }
++        }
++    }
++
++    fn report_console_details(reader: &mut BdReader) -> Result<BdResponse, Box<dyn Error>> {
+         let _blob1 = reader.read_blob()?; // Always blob with length 16 on PC with first 4 byte being 0x756B5B3
+         let _uint1 = reader.read_u32()?; // Always 2 on PC
+         let changelist = reader.read_u32()?; // Changelist of the game executable
+@@ -71,7 +224,136 @@ impl AntiCheatHandler {
+ 
+         debug!("Client reported console details changelist={changelist}");
+ 
+-        TaskReply::with_only_error_code(NoError, AntiCheatTaskId::ReportConsoleDetails)
+-            .to_response()
++        TaskReply::with_only_error_code(NoError, AntiCheatTaskId::ReportConsoleDetails).to_response()
++    }
++}
++
++/// Some(true) when every answer the reference also has matches it; None when there's nothing to compare.
++fn verdict(reference: &HashMap<u64, i64>, answers: &HashMap<u64, i64>) -> Option<bool> {
++    let shared: Vec<_> = answers.iter().filter(|(id, _)| reference.contains_key(id)).collect();
++    if shared.is_empty() {
++        return None;
++    }
++    Some(shared.iter().all(|(id, a)| reference[id] == **a))
++}
++
++impl LobbyHandler for AntiCheatHandler {
++    fn handle_message(&self, session: &mut BdSession, mut message: BdMessage) -> Result<BdResponse, Box<dyn Error>> {
++        let task_id_value = message.reader.read_u8()?;
++        let Some(task_id) = AntiCheatTaskId::from_u8(task_id_value) else {
++            warn!("Client called unknown task {task_id_value}");
++            return TaskReply::with_only_error_code(NoError, task_id_value).to_response();
++        };
++
++        match task_id {
++            AntiCheatTaskId::ReportConsoleDetails => Self::report_console_details(&mut message.reader),
++            AntiCheatTaskId::AnswerChallenges => {
++                let (answers, build) = read_answers(&mut message.reader)?;
++                if let Some(auth) = session.authentication() {
++                    debug!("Anticheat answers from {} (build {build:02x?}): {answers:x?}", auth.username);
++                    self.report(auth.user_id, &auth.username, build, answers);
++                }
++                TaskReply::with_only_error_code(NoError, task_id).to_response()
++            }
++            AntiCheatTaskId::ReportConsoleId => {
++                warn!("Client called unimplemented task {task_id:?}");
++                TaskReply::with_only_error_code(NoError, task_id).to_response()
++            }
++        }
++    }
++}
++
++impl PushSource for AntiCheatHandler {
++    fn pushes(&self, session: &BdSession) -> Vec<BdResponse> {
++        let (Some(_), Some(auth)) = (&self.trusted_user, session.authentication()) else {
++            return Vec::new();
++        };
++        let mut state = self.state.lock().unwrap();
++        let since = *state.first_seen.entry(session.id).or_insert_with(Instant::now);
++        if since.elapsed() < SETTLE {
++            return Vec::new();
++        }
++        if state.round.started.is_none_or(|t| t.elapsed() > self.interval) {
++            let number = state.round.number + 1;
++            let challenges = (0..CHALLENGES_PER_ROUND).map(|i| Challenge::random(number << 8 | i)).collect();
++            state.round = Round { number, challenges, started: Some(Instant::now()), ..Round::default() };
++        }
++        if state.sent.get(&session.id) == Some(&state.round.number) {
++            return Vec::new();
++        }
++        let number = state.round.number;
++        state.sent.insert(session.id, number);
++        info!("Anticheat round {} sent to {}", state.round.number, auth.username);
++        debug!("Anticheat challenges: {:x?}", state.round.challenges);
++        match challenge_push(ps3_user_id(&auth.username), &state.round.challenges) {
++            Ok(push) => vec![push],
++            Err(e) => {
++                warn!("Couldn't build the anticheat push: {e}");
++                Vec::new()
++            }
++        }
++    }
++
++    fn blocked(&self, session: &BdSession) -> bool {
++        session.authentication().is_some_and(|a| self.state.lock().unwrap().blocked.contains(&a.user_id))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn challenge_blob_layout() {
++        let c = Challenge { id: 1, key: 0x1122334455667788, start: 0x10, end: -0x20 };
++        let b = c.blob();
++        assert_eq!(b.len(), 26);
++        assert_eq!(&b[..8], &0x1122334455667788u64.to_be_bytes());
++        assert_eq!(&b[8..16], &0x10i64.to_be_bytes());
++        assert_eq!(&b[16..24], &(-0x20i64).to_be_bytes());
++        assert_eq!(&b[24..], &[0, 0]);
++    }
++
++    #[test]
++    fn crc_is_reflected_without_final_xor() {
++        // with key 0xffffffff the game's CRC is the standard CRC-32 before its final xor
++        let c = Challenge { id: 0, key: 0xffffffff, start: 0, end: 9 };
++        assert_eq!(code_crc(b"123456789", &c) as u32, !0xcbf43926u32);
++        let shorter = Challenge { end: 4, ..c.clone() };
++        assert_ne!(code_crc(b"123456789", &shorter), code_crc(b"123456789", &c));
++    }
++
++    #[test]
++    fn ps3_user_ids() {
++        // Tiger("") = 3293ac630c13f024...; the id is its first 8 bytes, little endian
++        assert_eq!(ps3_user_id(""), u64::from_le_bytes([0x32, 0x93, 0xac, 0x63, 0x0c, 0x13, 0xf0, 0x24]));
++        assert_eq!(ps3_user_id("USCLtest"), ps3_user_id("uscltest"));
++    }
++
++    #[test]
++    fn verdicts() {
++        let reference = HashMap::from([(1, 10), (2, 20)]);
++        assert_eq!(verdict(&reference, &HashMap::from([(1, 10), (2, 20)])), Some(true));
++        assert_eq!(verdict(&reference, &HashMap::from([(1, 10), (2, 21)])), Some(false));
++        assert_eq!(verdict(&reference, &HashMap::from([(3, 30)])), None);
++    }
++
++    #[test]
++    fn host_answers_decide() {
++        let ac = AntiCheatHandler::with_challenges("host".into(), Duration::from_secs(300));
++        ac.state.lock().unwrap().round.challenges = vec![Challenge::random(1), Challenge::random(2)];
++        // players answering before the host wait for the host's answers
++        let (mp, launcher) = (vec![1, 0, 0, 0, 7, 1], vec![1, 0, 0, 0, 7, 0]);
++        ac.report(7, "cheater", mp.clone(), vec![(1, 5), (2, 6)]);
++        ac.report(8, "honest", mp.clone(), vec![(1, 1), (2, 2)]);
++        // still in the launcher: different code, so different answers, never compared with multiplayer
++        ac.report(10, "in menus", launcher.clone(), vec![(1, 40), (2, 41)]);
++        assert!(ac.state.lock().unwrap().blocked.is_empty());
++        ac.report(1, "host", mp.clone(), vec![(1, 1), (2, 2)]);
++        // and players answering after it are judged straight away
++        ac.report(9, "late cheater", mp, vec![(1, 1), (2, 3)]);
++        let s = ac.state.lock().unwrap();
++        assert!(s.blocked.contains(&7) && !s.blocked.contains(&8) && s.blocked.contains(&9));
++        assert!(!s.blocked.contains(&10) && s.round.pending.contains_key(&10));
+     }
+ }
+diff --git a/libbitdemon/src/lobby/mod.rs b/libbitdemon/src/lobby/mod.rs
+index be6fdc6..6813184 100644
+--- a/libbitdemon/src/lobby/mod.rs
++++ b/libbitdemon/src/lobby/mod.rs
+@@ -213,14 +213,23 @@ pub trait LobbyHandler {
+     }
+ }
+ 
++/// Messages the server sends on its own (push messages) and sessions it won't serve. The lobby server asks after
++/// answering each request, since a session is only written to from its own thread.
++pub trait PushSource: Send + Sync {
++    fn pushes(&self, session: &BdSession) -> Vec<BdResponse>;
++    fn blocked(&self, session: &BdSession) -> bool;
++}
++
+ pub struct LobbyServer {
+     lobby_handlers: RwLock<HashMap<LobbyServiceId, Arc<ThreadSafeLobbyHandler>>>,
++    push_sources: RwLock<Vec<Arc<dyn PushSource>>>,
+ }
+ 
+ impl LobbyServer {
+     pub fn new(key_store: Arc<ThreadSafeBackendPrivateKeyStorage>) -> Self {
+         let lobby_server = LobbyServer {
+             lobby_handlers: RwLock::new(HashMap::new()),
++            push_sources: RwLock::new(Vec::new()),
+         };
+ 
+         lobby_server.add_service(LobbyService, Arc::new(LsgHandler::new(key_store)));
+@@ -228,6 +237,10 @@ impl LobbyServer {
+         lobby_server
+     }
+ 
++    pub fn add_push_source(&self, source: Arc<dyn PushSource>) {
++        self.push_sources.write().unwrap().push(source);
++    }
++
+     pub fn add_service(&self, service_id: LobbyServiceId, handler: Arc<ThreadSafeLobbyHandler>) {
+         info!("Adding {service_id:?} lobby handler");
+         self.lobby_handlers
+@@ -249,6 +262,11 @@ impl BdMessageHandler for LobbyServer {
+         session: &mut BdSession,
+         mut message: BdMessage,
+     ) -> Result<(), Box<dyn Error>> {
++        let sources = self.push_sources.read().unwrap().clone();
++        if sources.iter().any(|s| s.blocked(session)) {
++            return Err("session blocked".into());
++        }
++
+         message.reader.set_type_checked(false);
+         let service_id_input = message.reader.read_u8()?;
+ 
+@@ -277,6 +295,11 @@ impl BdMessageHandler for LobbyServer {
+                     message.reader.set_type_checked(true);
+                     let mut response = handler.handle_message(session, message)?;
+                     response.send(session)?;
++                    for source in &sources {
++                        for mut push in source.pushes(session) {
++                            push.send(session)?;
++                        }
++                    }
+                 }
+ 
+                 Ok(())
+-- 
+2.56.0
+

@@ -1,0 +1,325 @@
+From 511f0755c01b2ca381bf48319a40f2976d3b570d Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 03:15:57 -0700
+Subject: [PATCH] Stats check: refuse Black Ops II stat files a real game can't
+ write
+
+mpstatsCompressed (raw deflate, 48-byte header, then the ddl_mp/stats.ddl v244 buffer read from game memory) is
+compared with the player's previous file: prestige, rank and XP past the maximum, a prestige jump of more than
+one, or more XP than one match can give are refused and logged as 'anticheat: <name> sent impossible stats'.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Cargo.lock                                 |  49 ++++++++++
+ dw-server/Cargo.toml                       |   1 +
+ dw-server/src/lobby/storage/mod.rs         |   1 +
+ dw-server/src/lobby/storage/stats_check.rs | 108 +++++++++++++++++++++
+ dw-server/src/lobby/storage/user_file.rs   |  35 +++++++
+ 5 files changed, 194 insertions(+)
+ create mode 100644 dw-server/src/lobby/storage/stats_check.rs
+
+diff --git a/Cargo.lock b/Cargo.lock
+index d77601b..20900ca 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2,6 +2,12 @@
+ # It is not intended for manual editing.
+ version = 4
+ 
++[[package]]
++name = "adler2"
++version = "2.0.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
++
+ [[package]]
+ name = "aes"
+ version = "0.9.3"
+@@ -356,6 +362,15 @@ dependencies = [
+  "libc",
+ ]
+ 
++[[package]]
++name = "crc32fast"
++version = "1.5.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0ba106e844045ddc02c20768ac4b0b7cb45f2cc2ecbd833ac9f5dacb183c2055"
++dependencies = [
++ "cfg-if",
++]
++
+ [[package]]
+ name = "crypto-bigint"
+ version = "0.5.5"
+@@ -475,6 +490,7 @@ dependencies = [
+  "axum-extra",
+  "chrono",
+  "env_logger",
++ "flate2",
+  "jsonwebtoken",
+  "libbitdemon",
+  "log",
+@@ -620,6 +636,17 @@ version = "0.1.9"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+ 
++[[package]]
++name = "flate2"
++version = "1.1.10"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
++dependencies = [
++ "crc32fast",
++ "miniz_oxide",
++ "zlib-rs",
++]
++
+ [[package]]
+ name = "foldhash"
+ version = "0.1.5"
+@@ -1095,6 +1122,16 @@ version = "0.3.17"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+ 
++[[package]]
++name = "miniz_oxide"
++version = "0.9.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
++dependencies = [
++ "adler2",
++ "simd-adler32",
++]
++
+ [[package]]
+ name = "mio"
+ version = "1.2.0"
+@@ -1638,6 +1675,12 @@ dependencies = [
+  "rand_core 0.6.4",
+ ]
+ 
++[[package]]
++name = "simd-adler32"
++version = "0.3.10"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
++
+ [[package]]
+ name = "slab"
+ version = "0.4.12"
+@@ -2196,6 +2239,12 @@ dependencies = [
+  "syn 2.0.117",
+ ]
+ 
++[[package]]
++name = "zlib-rs"
++version = "0.6.8"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
++
+ [[package]]
+ name = "zmij"
+ version = "1.0.21"
+diff --git a/dw-server/Cargo.toml b/dw-server/Cargo.toml
+index 64d5870..c50606c 100644
+--- a/dw-server/Cargo.toml
++++ b/dw-server/Cargo.toml
+@@ -21,3 +21,4 @@ log.workspace = true
+ num-derive.workspace = true
+ num-traits.workspace = true
+ rand.workspace = true
++flate2 = "1.1.10"
+diff --git a/dw-server/src/lobby/storage/mod.rs b/dw-server/src/lobby/storage/mod.rs
+index af3526e..4055067 100644
+--- a/dw-server/src/lobby/storage/mod.rs
++++ b/dw-server/src/lobby/storage/mod.rs
+@@ -6,6 +6,7 @@ use std::sync::Arc;
+ 
+ mod db;
+ mod publisher_file;
++mod stats_check;
+ mod user_file;
+ 
+ pub fn create_storage_handler() -> Arc<ThreadSafeLobbyHandler> {
+diff --git a/dw-server/src/lobby/storage/stats_check.rs b/dw-server/src/lobby/storage/stats_check.rs
+new file mode 100644
+index 0000000..29801d7
+--- /dev/null
++++ b/dw-server/src/lobby/storage/stats_check.rs
+@@ -0,0 +1,108 @@
++//! Refuses Black Ops II stat files a real game can't produce, so modded rank/prestige/XP never get saved.
++//!
++//! `mpstatsCompressed` is raw deflate of: 48 bytes of header (u32 checksum, u32 BE layout version, ...) then the
++//! buffer described by `ddl_mp/stats.ddl` (version 244 in 1.19, read from game memory). Values are little
++//! endian. `playerstatslist` starts at bit 64 and holds 383 `intstat_s { u32 statvalue; u16 challengevalue }`
++//! (48 bits each) indexed by `globalstats_e`.
++
++use flate2::read::DeflateDecoder;
++use std::io::Read;
++
++pub const MP_STATS_FILE: &str = "mpstatsCompressed";
++const HEADER: usize = 48;
++const SIZE: usize = 50972;
++const LAYOUT_VERSION: u32 = 244;
++
++// globalstats_e
++const PLEVEL: usize = 326;
++const RANK: usize = 329;
++const RANKXP: usize = 330;
++
++const MAX_PLEVEL: u32 = 16; // prestige master + the extra BO2 added in a title update
++const MAX_RANK: u32 = 54; // level 55
++const MAX_RANKXP: u32 = 1_262_500; // level 55's XP
++// shortcut: generous ceiling for one upload (a long match with double XP stays well under it); tighten with real
++// match data
++const MAX_XP_PER_UPLOAD: u32 = 150_000;
++
++#[derive(Debug, PartialEq)]
++struct Rank {
++    plevel: u32,
++    rank: u32,
++    rankxp: u32,
++}
++
++fn read(file: &[u8]) -> Result<Rank, String> {
++    let mut data = Vec::new();
++    DeflateDecoder::new(file).take(SIZE as u64 + 1).read_to_end(&mut data).map_err(|_| "not a stats file")?;
++    if data.len() != SIZE || u32::from_be_bytes(data[4..8].try_into().unwrap()) != LAYOUT_VERSION {
++        return Err(format!("unexpected stats layout ({} bytes)", data.len()));
++    }
++    let stat = |i: usize| {
++        let at = HEADER + (64 + 48 * i) / 8;
++        u32::from_le_bytes(data[at..at + 4].try_into().unwrap())
++    };
++    Ok(Rank { plevel: stat(PLEVEL), rank: stat(RANK), rankxp: stat(RANKXP) })
++}
++
++/// Err(reason) when `new` (replacing `old`, if there was one) isn't something the game could have written.
++pub fn check(old: Option<&[u8]>, new: &[u8]) -> Result<(), String> {
++    let n = read(new)?;
++    if n.plevel > MAX_PLEVEL || n.rank > MAX_RANK || n.rankxp > MAX_RANKXP {
++        return Err(format!("prestige {} rank {} xp {} is past the maximum", n.plevel, n.rank, n.rankxp));
++    }
++    // an unreadable old file (e.g. from before this check) can't vouch for anything: judge from zero
++    let o = old.and_then(|o| read(o).ok()).unwrap_or(Rank { plevel: 0, rank: 0, rankxp: 0 });
++    if n.plevel > o.plevel + 1 {
++        return Err(format!("prestige {} -> {} in one match", o.plevel, n.plevel));
++    }
++    // prestiging resets XP; otherwise XP only grows, by at most one match's worth
++    let gained = if n.plevel > o.plevel { n.rankxp } else { n.rankxp.saturating_sub(o.rankxp) };
++    if gained > MAX_XP_PER_UPLOAD {
++        return Err(format!("{gained} XP in one match"));
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use flate2::write::DeflateEncoder;
++    use flate2::Compression;
++    use std::io::Write;
++
++    fn file(plevel: u32, rank: u32, rankxp: u32) -> Vec<u8> {
++        let mut data = vec![0u8; SIZE];
++        data[4..8].copy_from_slice(&LAYOUT_VERSION.to_be_bytes());
++        for (i, v) in [(PLEVEL, plevel), (RANK, rank), (RANKXP, rankxp)] {
++            let at = HEADER + (64 + 48 * i) / 8;
++            data[at..at + 4].copy_from_slice(&v.to_le_bytes());
++        }
++        let mut enc = DeflateEncoder::new(Vec::new(), Compression::default());
++        enc.write_all(&data).unwrap();
++        enc.finish().unwrap()
++    }
++
++    #[test]
++    fn reads_rank() {
++        assert_eq!(read(&file(2, 30, 400_000)).unwrap(), Rank { plevel: 2, rank: 30, rankxp: 400_000 });
++        assert!(read(b"junk").is_err());
++    }
++
++    #[test]
++    fn normal_progress_passes() {
++        assert!(check(None, &file(0, 0, 100)).is_ok());
++        assert!(check(Some(&file(0, 3, 9_000)), &file(0, 4, 14_000)).is_ok());
++        // prestiging: rank and XP start over
++        assert!(check(Some(&file(0, 54, 1_262_500)), &file(1, 0, 2_000)).is_ok());
++    }
++
++    #[test]
++    fn impossible_stats_fail() {
++        assert!(check(None, &file(15, 54, 1_262_500)).is_err()); // a fresh account at max
++        assert!(check(Some(&file(0, 3, 9_000)), &file(0, 54, 1_262_500)).is_err()); // a level jump
++        assert!(check(Some(&file(1, 10, 50_000)), &file(5, 10, 50_000)).is_err()); // prestige jump
++        assert!(check(None, &file(0, 99, 0)).is_err()); // past the maximum
++        assert!(check(None, b"not deflate").is_err());
++    }
++}
+diff --git a/dw-server/src/lobby/storage/user_file.rs b/dw-server/src/lobby/storage/user_file.rs
+index e1ab2d6..6d47ab6 100644
+--- a/dw-server/src/lobby/storage/user_file.rs
++++ b/dw-server/src/lobby/storage/user_file.rs
+@@ -1,4 +1,5 @@
+ use crate::lobby::storage::db::{STORAGE_DB, from_file_visibility, from_title, to_file_visibility};
++use crate::lobby::storage::stats_check;
+ use bitdemon::domain::result_slice::ResultSlice;
+ use bitdemon::lobby::storage::{
+     FileVisibility, StorageFileInfo, StorageServiceError, UserStorageService,
+@@ -12,6 +13,18 @@ pub struct DwUserStorageService {}
+ const MAX_FILENAME_LENGTH: usize = 260;
+ const MAX_USER_FILE_SIZE: usize = 50_000; // 50KB
+ 
++/// Stat files are checked against the player's previous one; impossible ones are refused (and logged for the host).
++fn check_upload(session: &BdSession, filename: &str, old: Option<Vec<u8>>, new: &[u8]) -> Result<(), StorageServiceError> {
++    if filename != stats_check::MP_STATS_FILE {
++        return Ok(());
++    }
++    stats_check::check(old.as_deref(), new).map_err(|reason| {
++        let name = &session.authentication().unwrap().username;
++        warn!("anticheat: {name} sent impossible stats ({reason}); the upload was refused");
++        StorageServiceError::PermissionDeniedError
++    })
++}
++
+ impl UserStorageService for DwUserStorageService {
+     fn get_storage_file_data_by_id(
+         &self,
+@@ -144,6 +157,16 @@ impl UserStorageService for DwUserStorageService {
+         let now = Utc::now().timestamp();
+         let visibility_num = from_file_visibility(visibility);
+ 
++        let old: Option<Vec<u8>> = STORAGE_DB.with_borrow(|db| {
++            db.query_row(
++                "SELECT u.data FROM user_file u WHERE u.filename = ? AND title = ? AND owner_id = ?",
++                (filename.as_str(), title_num, owner_id),
++                |row| row.get(0),
++            )
++            .ok()
++        });
++        check_upload(session, &filename, old, &file_data)?;
++
+         let file_id: u64 = STORAGE_DB.with_borrow_mut(|db| {
+             let transaction = db.transaction().expect("transaction to be started");
+ 
+@@ -224,6 +247,18 @@ impl UserStorageService for DwUserStorageService {
+         let title = session.authentication().unwrap().title;
+         let title_num = from_title(title);
+ 
++        let old: Option<(String, Vec<u8>)> = STORAGE_DB.with_borrow(|db| {
++            db.query_row(
++                "SELECT u.filename, u.data FROM user_file u WHERE u.id = ? AND title = ?",
++                (file_id, title_num),
++                |row| Ok((row.get(0)?, row.get(1)?)),
++            )
++            .ok()
++        });
++        if let Some((filename, old)) = old {
++            check_upload(session, &filename, Some(old), &file_data)?;
++        }
++
+         STORAGE_DB.with_borrow_mut(|db| {
+             let transaction = db.transaction().expect("transaction to be open");
+ 
+-- 
+2.56.0
+

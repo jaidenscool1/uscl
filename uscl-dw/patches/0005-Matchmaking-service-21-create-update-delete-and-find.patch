@@ -1,0 +1,286 @@
+From eba71f06100c25827907b79678b64311c312dfe9 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 16:18:02 -0700
+Subject: [PATCH 05/10] Matchmaking service (21): create, update, delete and
+ find sessions
+
+Sessions are kept in memory; the title's own fields are stored as raw typed
+bytes and sent back unchanged. Black Ops II hosts and searches with it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dw-server/src/lobby/mod.rs               |   4 +-
+ libbitdemon/src/lobby/matchmaking/mod.rs | 219 +++++++++++++++++++++++
+ libbitdemon/src/lobby/mod.rs             |   1 +
+ 3 files changed, 223 insertions(+), 1 deletion(-)
+ create mode 100644 libbitdemon/src/lobby/matchmaking/mod.rs
+
+diff --git a/dw-server/src/lobby/mod.rs b/dw-server/src/lobby/mod.rs
+index d39e231..db33682 100644
+--- a/dw-server/src/lobby/mod.rs
++++ b/dw-server/src/lobby/mod.rs
+@@ -13,7 +13,7 @@ use crate::lobby::profile::create_profile_handler;
+ use crate::lobby::rich_presence::create_rich_presence_handler;
+ use crate::lobby::storage::create_storage_handler;
+ use axum::Router;
+-use bitdemon::lobby::LobbyServiceId::{
++use bitdemon::lobby::LobbyServiceId::{Matchmaking, 
+     Anticheat, BandwidthTest, Counter, Dml, EventLog, Facebook, Group, KeyArchive, League, Profile,
+     RichPresence, Stats, Storage, Teams, TitleUtilities, Twitch, Twitter, VoteRank, Youtube,
+ };
+@@ -25,6 +25,7 @@ use bitdemon::lobby::key_archive::KeyArchiveHandler;
+ use bitdemon::lobby::league::LeagueHandler;
+ use bitdemon::lobby::stats::StatsHandler;
+ use bitdemon::lobby::stub::StubHandler;
++use bitdemon::lobby::matchmaking::MatchmakingHandler;
+ use bitdemon::lobby::title_utilities::TitleUtilitiesHandler;
+ use bitdemon::lobby::twitch::TwitchHandler;
+ use bitdemon::lobby::vote_rank::VoteRankHandler;
+@@ -58,6 +59,7 @@ pub fn configure_lobby_server(
+     configurer.direct_config(Teams, Arc::new(StubHandler::new("Teams")));
+     configurer.direct_config(Twitter, Arc::new(StubHandler::new("Twitter")));
+     configurer.direct_config(Facebook, Arc::new(StubHandler::new("Facebook")));
++    configurer.direct_config(Matchmaking, Arc::new(MatchmakingHandler::new()));
+     configurer.direct_config(Storage, create_storage_handler());
+     configurer.direct_config(TitleUtilities, Arc::new(TitleUtilitiesHandler::new()));
+     configurer.direct_config(Twitch, Arc::new(TwitchHandler::new()));
+diff --git a/libbitdemon/src/lobby/matchmaking/mod.rs b/libbitdemon/src/lobby/matchmaking/mod.rs
+new file mode 100644
+index 0000000..17919f3
+--- /dev/null
++++ b/libbitdemon/src/lobby/matchmaking/mod.rs
+@@ -0,0 +1,219 @@
++//! bdMatchMaking (service 21): hosts publish sessions, others search for them.
++//! A session is the host's bdMatchMakingInfo: host address blob, game type, max players, then title fields
++//! (Black Ops II: security id, key, playlist data...), which are kept as raw typed bytes and sent back as-is.
++//! Search results use bdMatchMakingInfo::deserialize's order: host address, session id, game type, max players,
++//! player count, title fields.
++//! shortcut: sessions live in memory and only go away on delete or when their owner hosts again; expire them
++//! once a game is seen leaving sessions behind.
++use crate::lobby::LobbyHandler;
++use crate::lobby::response::task_reply::TaskReply;
++use crate::messaging::BdErrorCode;
++use crate::messaging::bd_message::BdMessage;
++use crate::messaging::bd_reader::BdReader;
++use crate::messaging::bd_response::{BdResponse, ResponseCreator};
++use crate::messaging::bd_serialization::BdSerialize;
++use crate::messaging::bd_writer::BdWriter;
++use crate::networking::bd_session::BdSession;
++use log::info;
++use std::error::Error;
++use std::sync::Mutex;
++
++const TASK_CREATE_SESSION: u8 = 1;
++const TASK_UPDATE_SESSION: u8 = 2;
++const TASK_DELETE_SESSION: u8 = 3;
++const TASK_FIND_SESSION_FROM_ID: u8 = 4;
++const TASK_FIND_SESSIONS: u8 = 5;
++const TASK_UPDATE_SESSION_PLAYERS: u8 = 12;
++const TASK_FIND_SESSIONS_PAGED: u8 = 13;
++const TASK_FIND_SESSIONS_TWO_PASS: u8 = 16;
++
++#[derive(Clone)]
++struct MatchSession {
++    id: u64,
++    owner: u64,
++    host_addr: Vec<u8>,
++    game_type: u32,
++    max_players: u32,
++    num_players: u32,
++    title_fields: Vec<u8>,
++}
++
++struct SessionId(u64);
++
++impl BdSerialize for SessionId {
++    fn serialize(&self, writer: &mut BdWriter) -> Result<(), Box<dyn Error>> {
++        writer.write_blob(&self.0.to_le_bytes())
++    }
++}
++
++impl BdSerialize for MatchSession {
++    fn serialize(&self, writer: &mut BdWriter) -> Result<(), Box<dyn Error>> {
++        writer.write_blob(&self.host_addr)?;
++        writer.write_blob(&self.id.to_le_bytes())?;
++        writer.write_u32(self.game_type)?;
++        writer.write_u32(self.max_players)?;
++        writer.write_u32(self.num_players)?;
++        writer.write_bytes(&self.title_fields)
++    }
++}
++
++#[derive(Default)]
++pub struct MatchmakingHandler {
++    sessions: Mutex<Vec<MatchSession>>,
++    next_id: Mutex<u64>,
++}
++
++impl MatchmakingHandler {
++    pub fn new() -> MatchmakingHandler {
++        MatchmakingHandler::default()
++    }
++}
++
++/// Length of the leading run of type-tagged values in `data` (the title fields); stops at the first byte that
++/// isn't a known tag, such as the 0 that ends a message.
++fn typed_prefix_len(data: &[u8]) -> usize {
++    let mut i = 0;
++    while i < data.len() {
++        let size = match data[i] {
++            1..=3 => 1,
++            5 | 6 => 2,
++            7 | 8 | 13 => 4,
++            9 | 10 | 14 => 8,
++            // blob: tag, then a typed u32 length, then the bytes
++            0x13 if data.get(i + 1) == Some(&8) && i + 6 <= data.len() => {
++                let len = u32::from_le_bytes(data[i + 2..i + 6].try_into().unwrap()) as usize;
++                5 + len
++            }
++            0x10 => match data[i + 1..].iter().position(|&b| b == 0) {
++                Some(end) => end + 1,
++                None => return i,
++            },
++            _ => return i,
++        };
++        if i + 1 + size > data.len() {
++            return i;
++        }
++        i += 1 + size;
++    }
++    i
++}
++
++fn read_info(reader: &mut BdReader) -> Result<(Vec<u8>, u32, u32, Vec<u8>), Box<dyn Error>> {
++    let host_addr = reader.read_blob()?;
++    let game_type = reader.read_u32()?;
++    let max_players = reader.read_u32()?;
++    let rest = reader.remaining_data();
++    Ok((host_addr, game_type, max_players, rest[..typed_prefix_len(rest)].to_vec()))
++}
++
++fn read_session_id(reader: &mut BdReader) -> Result<u64, Box<dyn Error>> {
++    let blob = reader.read_blob()?;
++    let mut id = [0u8; 8];
++    id[..blob.len().min(8)].copy_from_slice(&blob[..blob.len().min(8)]);
++    Ok(u64::from_le_bytes(id))
++}
++
++impl LobbyHandler for MatchmakingHandler {
++    fn handle_message(
++        &self,
++        session: &mut BdSession,
++        mut message: BdMessage,
++    ) -> Result<BdResponse, Box<dyn Error>> {
++        let owner = session.authentication().map(|a| a.user_id).unwrap_or(0);
++        let task_id = message.reader.read_u8()?;
++        let reader = &mut message.reader;
++        let mut sessions = self.sessions.lock().unwrap();
++        match task_id {
++            TASK_CREATE_SESSION => {
++                let (host_addr, game_type, max_players, title_fields) = read_info(reader)?;
++                let id = {
++                    let mut next = self.next_id.lock().unwrap();
++                    *next += 1;
++                    *next
++                };
++                sessions.retain(|s| s.owner != owner);
++                sessions.push(MatchSession {
++                    id,
++                    owner,
++                    host_addr,
++                    game_type,
++                    max_players,
++                    num_players: 1,
++                    title_fields,
++                });
++                info!("Matchmaking: user {owner} hosts session {id} ({} open)", sessions.len());
++                TaskReply::with_results(task_id, vec![Box::new(SessionId(id))]).to_response()
++            }
++            TASK_UPDATE_SESSION | TASK_UPDATE_SESSION_PLAYERS => {
++                let id = read_session_id(reader)?;
++                let num_players = if task_id == TASK_UPDATE_SESSION_PLAYERS {
++                    Some(reader.read_u32()?)
++                } else {
++                    None
++                };
++                let (host_addr, game_type, max_players, title_fields) = read_info(reader)?;
++                if let Some(s) = sessions.iter_mut().find(|s| s.id == id && s.owner == owner) {
++                    s.host_addr = host_addr;
++                    s.game_type = game_type;
++                    s.max_players = max_players;
++                    s.title_fields = title_fields;
++                    if let Some(n) = num_players {
++                        s.num_players = n;
++                    }
++                }
++                TaskReply::with_only_error_code(BdErrorCode::NoError, task_id).to_response()
++            }
++            TASK_DELETE_SESSION => {
++                let id = read_session_id(reader)?;
++                sessions.retain(|s| !(s.id == id && s.owner == owner));
++                info!("Matchmaking: user {owner} closed session {id}");
++                TaskReply::with_only_error_code(BdErrorCode::NoError, task_id).to_response()
++            }
++            TASK_FIND_SESSION_FROM_ID => {
++                let id = read_session_id(reader)?;
++                let found: Vec<Box<dyn BdSerialize>> = sessions
++                    .iter()
++                    .filter(|s| s.id == id)
++                    .map(|s| Box::new(s.clone()) as Box<dyn BdSerialize>)
++                    .collect();
++                TaskReply::with_results(task_id, found).to_response()
++            }
++            TASK_FIND_SESSIONS | TASK_FIND_SESSIONS_PAGED | TASK_FIND_SESSIONS_TWO_PASS => {
++                // query id, offset, max results, then the title's query parameters (not used for filtering yet)
++                let _query = reader.read_u32()?;
++                let offset = reader.read_u32()? as usize;
++                let max = reader.read_u32()? as usize;
++                let found: Vec<Box<dyn BdSerialize>> = sessions
++                    .iter()
++                    .filter(|s| s.owner != owner && s.num_players < s.max_players)
++                    .skip(offset)
++                    .take(max)
++                    .map(|s| Box::new(s.clone()) as Box<dyn BdSerialize>)
++                    .collect();
++                info!("Matchmaking: user {owner} searched, {} sessions found", found.len());
++                TaskReply::with_results(task_id, found).to_response()
++            }
++            _ => {
++                let data = reader.remaining_data();
++                let hex: String = data[..data.len().min(256)].iter().map(|b| format!("{b:02x}")).collect();
++                info!("Matchmaking task {task_id} ({} bytes): {hex}", data.len());
++                TaskReply::with_only_error_code(BdErrorCode::NoError, task_id).to_response()
++            }
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::typed_prefix_len;
++
++    #[test]
++    fn title_fields_stop_at_message_end() {
++        // u64, blob[2], i32, f32, then the 0 that ends the message and padding
++        let data = [
++            0x0a, 1, 2, 3, 4, 5, 6, 7, 8, 0x13, 0x08, 2, 0, 0, 0, 0xaa, 0xbb, 0x07, 1, 0, 0, 0, 0x0d, 0, 0, 0, 0,
++            0x00, 0x0e, 0x0e,
++        ];
++        assert_eq!(typed_prefix_len(&data), 27);
++    }
++}
+diff --git a/libbitdemon/src/lobby/mod.rs b/libbitdemon/src/lobby/mod.rs
+index e4927ff..be6fdc6 100644
+--- a/libbitdemon/src/lobby/mod.rs
++++ b/libbitdemon/src/lobby/mod.rs
+@@ -7,6 +7,7 @@ pub mod event_log;
+ pub mod group;
+ pub mod key_archive;
+ pub mod league;
++pub mod matchmaking;
+ mod lsg;
+ pub mod profile;
+ mod response;
+-- 
+2.56.0
+

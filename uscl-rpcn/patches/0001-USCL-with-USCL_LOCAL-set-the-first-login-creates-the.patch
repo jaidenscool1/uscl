@@ -1,7 +1,7 @@
 From 2f6a3d36af005893e9ddf058fba4629f39d6b15c Mon Sep 17 00:00:00 2001
 From: jaidenscool1 <jaidenscool1@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 09:04:02 -0700
-Subject: [PATCH 1/2] USCL: with USCL_LOCAL set, the first login creates the
+Subject: [PATCH 1/4] USCL: with USCL_LOCAL set, the first login creates the
  local account
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
