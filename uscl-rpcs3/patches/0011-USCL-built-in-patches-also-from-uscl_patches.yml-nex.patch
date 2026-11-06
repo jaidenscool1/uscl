@@ -1,0 +1,27 @@
+From 0c5a31fdd7a2faee467859f969c5787a5316671c Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 07:38:04 -0700
+Subject: [PATCH] USCL: built-in patches also from uscl_patches.yml next to
+ RPCS3 (generated BO2 crossplay netfield order)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Utilities/bin_patch.cpp | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/Utilities/bin_patch.cpp b/Utilities/bin_patch.cpp
+index 24ce9bd..1366710 100644
+--- a/Utilities/bin_patch.cpp
++++ b/Utilities/bin_patch.cpp
+@@ -1505,6 +1505,8 @@ PPU-d26243d3556a8d446a97da71df8c12da4b7867a1:
+       - [ be32, 0x0032b424, 0x480b9811 ] # in 0x32b3f4: long64 via the swapping function
+       - [ be32, 0x0032b938, 0x480b92fd ] # in 0x32b8a8: long64 via the swapping function
+ )", true);
++		// generated ones too big for the source (BO2 crossplay netfield tables): uscl_patches.yml next to RPCS3
++		load(map, fs::get_executable_dir() + "uscl_patches.yml", "", true);
+ 		return map;
+ 	}();
+ 
+-- 
+2.56.0
+

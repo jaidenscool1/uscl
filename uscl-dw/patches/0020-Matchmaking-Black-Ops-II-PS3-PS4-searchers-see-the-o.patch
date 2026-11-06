@@ -1,0 +1,117 @@
+From 7eeb2033f8387bfa4959c1c3c41b8b5a295fffbe Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 06:22:51 -0700
+Subject: [PATCH] Matchmaking: Black Ops II PS3/PS4 searchers see the other
+ build's security ID byte-swapped; log session blobs
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libbitdemon/src/lobby/matchmaking/mod.rs | 50 +++++++++++++++++++++++-
+ 1 file changed, 48 insertions(+), 2 deletions(-)
+
+diff --git a/libbitdemon/src/lobby/matchmaking/mod.rs b/libbitdemon/src/lobby/matchmaking/mod.rs
+index d5d19c8..12cea65 100644
+--- a/libbitdemon/src/lobby/matchmaking/mod.rs
++++ b/libbitdemon/src/lobby/matchmaking/mod.rs
+@@ -5,6 +5,7 @@
+ //! player count, title fields.
+ //! Sessions live in memory and go away on delete, when their owner hosts again, or when the connection that
+ //! created them closes.
++use crate::domain::title::Title;
+ use crate::lobby::LobbyHandler;
+ use crate::lobby::response::task_reply::TaskReply;
+ use crate::messaging::BdErrorCode;
+@@ -39,6 +40,24 @@ struct MatchSession {
+     max_players: u32,
+     num_players: u32,
+     title_fields: Vec<u8>,
++    /// The host's title (Black Ops II: PS3 18396 and PS4 2430 share sessions, USCL crossplay)
++    title: Option<Title>,
++}
++
++impl MatchSession {
++    /// This session as a searcher on `title` sees it. Black Ops II PS3 <-> PS4: the title fields start with the
++    /// session's security ID (typed u64, tag 0x0a); each build copies its first 4 in-memory bytes into QoS probes
++    /// and DTLS INITs, so for the other build it is byte-swapped (games/CUSA57548.md in the USCL repo).
++    fn for_searcher(&self, title: Option<Title>) -> MatchSession {
++        let mut s = self.clone();
++        let bo2 = |t: Option<Title>| matches!(t, Some(Title::T6Ps3 | Title::T6Ps4));
++        if bo2(title) && bo2(self.title) && title != self.title && s.title_fields.first() == Some(&0x0a) {
++            if let Some(id) = s.title_fields.get_mut(1..9) {
++                id.reverse();
++            }
++        }
++        s
++    }
+ }
+ 
+ struct SessionId(u64);
+@@ -135,6 +154,7 @@ impl LobbyHandler for MatchmakingHandler {
+         mut message: BdMessage,
+     ) -> Result<BdResponse, Box<dyn Error>> {
+         let owner = session.authentication().map(|a| a.user_id).unwrap_or(0);
++        let title = session.authentication().map(|a| a.title);
+         let task_id = message.reader.read_u8()?;
+         let reader = &mut message.reader;
+         let mut sessions = self.sessions.lock().unwrap();
+@@ -156,8 +176,13 @@ impl LobbyHandler for MatchmakingHandler {
+                     max_players,
+                     num_players: 1,
+                     title_fields,
++                    title: session.authentication().map(|a| a.title),
+                 });
+                 info!("Matchmaking: user {owner} hosts session {id} ({} open)", sessions.len());
++                if let Some(s) = sessions.last() {
++                    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
++                    info!("Matchmaking: session {id} host addr {} title fields {}", hex(&s.host_addr), hex(&s.title_fields));
++                }
+                 TaskReply::with_results(task_id, vec![Box::new(SessionId(id))]).to_response()
+             }
+             TASK_UPDATE_SESSION | TASK_UPDATE_SESSION_PLAYERS => {
+@@ -209,7 +234,7 @@ impl LobbyHandler for MatchmakingHandler {
+                     .filter(|s| s.owner != owner && s.num_players < s.max_players)
+                     .skip(offset)
+                     .take(max)
+-                    .map(|s| Box::new(s.clone()) as Box<dyn BdSerialize>)
++                    .map(|s| Box::new(s.for_searcher(title)) as Box<dyn BdSerialize>)
+                     .collect();
+                 info!("Matchmaking: user {owner} searched, {} sessions found", found.len());
+                 TaskReply::with_results(task_id, found).to_response()
+@@ -226,7 +251,7 @@ impl LobbyHandler for MatchmakingHandler {
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::typed_prefix_len;
++    use super::{typed_prefix_len, MatchSession, Title};
+ 
+     #[test]
+     fn title_fields_stop_at_message_end() {
+@@ -237,4 +262,25 @@ mod tests {
+         ];
+         assert_eq!(typed_prefix_len(&data), 27);
+     }
++
++    #[test]
++    fn bo2_security_id_is_swapped_for_the_other_build() {
++        let ps4 = MatchSession {
++            id: 1,
++            owner: 4,
++            connection: 0,
++            host_addr: vec![],
++            game_type: 0,
++            max_players: 18,
++            num_players: 1,
++            title_fields: vec![0x0a, 0xe5, 0x87, 0x4a, 0x3b, 0x32, 0x9b, 0x61, 0x40, 0x07, 1, 0, 0, 0],
++            title: Some(Title::T6Ps4),
++        };
++        // captured: the PS4 session's ID e5874a3b329b6140, a PS3 searcher probed with 40619b32 (needs e5874a3b)
++        let seen = ps4.for_searcher(Some(Title::T6Ps3)).title_fields;
++        assert_eq!(&seen[1..9], &[0x40, 0x61, 0x9b, 0x32, 0x3b, 0x4a, 0x87, 0xe5]);
++        assert_eq!(&seen[9..], &ps4.title_fields[9..]);
++        assert_eq!(ps4.for_searcher(Some(Title::T6Ps4)).title_fields, ps4.title_fields);
++        assert_eq!(ps4.for_searcher(None).title_fields, ps4.title_fields);
++    }
+ }
+-- 
+2.56.0
+

@@ -58,7 +58,9 @@ public:
 	// Starts Steam in the tray (-silent: no window) when it isn't running, so sessions and friends work without
 	// the Steam window popping up over the home screen
 	Q_INVOKABLE static void startSteam();
-	static bool steamRunning();
+	Q_INVOKABLE static bool steamRunning();
+	// games that go online by themselves when started, like on a PS3 (each in the player's own session)
+	Q_INVOKABLE static bool supports(const QString& serial);
 	// host: take a player out of this session (kick) or out of every session this PC hosts (ban); bans are
 	// keyed by Steam ID, so a new name doesn't get around them. The bridge applies both within 2 seconds.
 	Q_INVOKABLE void kick(const QString& id, const QString& name);
@@ -70,6 +72,9 @@ public:
 	static QString personaFromVdf(const QByteArray& vdf);
 	static QString setYamlValue(const QString& yml, const QString& section, const QString& key, const QString& value);
 	static QString yamlValue(const QString& yml, const QString& section, const QString& key);
+	// Sets up shadPS4's portable folder (it uses ./user when that exists) for a PS4 game: settings and the USCL
+	// game patches from the templates, player 1 signed in to shadNet as this player. Returns the folder.
+	static QString preparePs4();
 
 signals:
 	void stateChanged();
@@ -80,7 +85,7 @@ signals:
 	void notice(const QString& text);
 
 private:
-	enum service { rpcn, demonware, bridge };
+	enum service { rpcn, demonware, bridge, shadnet };
 	bool start(service s, const QString& tool, const QStringList& args, const QString& dir, const QProcessEnvironment& env);
 	void setState(const QString& state, const QString& message = {});
 	void setTest(int i, const QString& result, const QString& detail);
@@ -88,8 +93,9 @@ private:
 	static QString dataDir();
 	static QString templateDir();
 	static QString rpcs3File(const QString& name);
+	static QProcessEnvironment carryEnv(QProcessEnvironment env);
 
-	std::array<QProcess*, 3> m_services{};
+	std::array<QProcess*, 4> m_services{};
 	QString m_state = "off", m_session, m_game, m_message, m_host_game;
 	QVariantList m_players;
 	QProcess m_friends_proc;

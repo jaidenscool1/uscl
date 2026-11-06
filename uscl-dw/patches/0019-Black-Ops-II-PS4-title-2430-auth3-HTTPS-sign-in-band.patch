@@ -1,0 +1,1376 @@
+From ca772ed93fea87bc00ef6b0bd77078ce4576a11e Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 16:55:48 -0700
+Subject: [PATCH 19/19] Black Ops II PS4 (title 2430): auth3 HTTPS sign-in,
+ bandwidth test, files by title
+
+- Title::T6Ps4 = 2430; DW_AUTH3_ADDR serves the PS4 HTTPS sign-in (/auth/, self-made cert).
+- Bandwidth test (service 18) answered for T6 like MW2 (shared bandwidth_test_reply), so hosts open public slots.
+- User files are read per title: PS3 and PS4 player ids overlap, so the PS4 game got the PS3 stats file.
+- Stats check only for PS3; matchmaking logs search parameters.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Cargo.lock                                  | 525 +++++++++++++++++++-
+ dw-server/Cargo.toml                        |   3 +
+ dw-server/src/auth3.rs                      | 150 ++++++
+ dw-server/src/lobby/storage/user_file.rs    |  17 +-
+ dw-server/src/main.rs                       |   2 +
+ libbitdemon/src/auth/mod.rs                 |   2 +-
+ libbitdemon/src/domain/title.rs             |   1 +
+ libbitdemon/src/lobby/bandwidth/handler.rs  |  97 ++--
+ libbitdemon/src/lobby/bandwidth/mod.rs      |   5 +-
+ libbitdemon/src/lobby/bandwidth/result.rs   |  27 -
+ libbitdemon/src/lobby/matchmaking/mod.rs    |   5 +
+ libbitdemon/src/lobby/mw2.rs                |  28 +-
+ libbitdemon/src/lobby/response/lsg_reply.rs |  30 --
+ 13 files changed, 736 insertions(+), 156 deletions(-)
+ create mode 100644 dw-server/src/auth3.rs
+ delete mode 100644 libbitdemon/src/lobby/bandwidth/result.rs
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 20900ca..f3461c7 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -73,7 +73,7 @@ version = "1.1.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
+ dependencies = [
+- "windows-sys",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -84,7 +84,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
+ dependencies = [
+  "anstyle",
+  "once_cell_polyfill",
+- "windows-sys",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -93,6 +93,54 @@ version = "1.0.102"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+ 
++[[package]]
++name = "arc-swap"
++version = "1.9.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "380962b3d93b99642e50b9febf72c071e97e8b32d86eae9cf4ef582bb960ae6e"
++dependencies = [
++ "rustversion",
++]
++
++[[package]]
++name = "asn1-rs"
++version = "0.7.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b7f43a50ac4fdca5df8e885c21b835997f0a1cdee65494a6847694a98652d9d8"
++dependencies = [
++ "asn1-rs-derive",
++ "asn1-rs-impl",
++ "displaydoc",
++ "nom",
++ "num-traits",
++ "rusticata-macros",
++ "thiserror",
++ "time",
++]
++
++[[package]]
++name = "asn1-rs-derive"
++version = "0.6.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3109e49b1e4909e9db6515a30c633684d68cdeaa252f215214cb4fa1a5bfee2c"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.117",
++ "synstructure",
++]
++
++[[package]]
++name = "asn1-rs-impl"
++version = "0.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7b18050c2cd6fe86c3a76584ef5e0baf286d038cda203eb6223df2cc413565f7"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.117",
++]
++
+ [[package]]
+ name = "atomic-waker"
+ version = "1.1.2"
+@@ -105,6 +153,29 @@ version = "1.5.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
+ 
++[[package]]
++name = "aws-lc-rs"
++version = "1.18.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "faac5829c2b74c28f830747e7818ccfb684261b5f48a1118b1e2a13d36dfab13"
++dependencies = [
++ "aws-lc-sys",
++ "zeroize",
++]
++
++[[package]]
++name = "aws-lc-sys"
++version = "0.46.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f1622d8446a2d4b2ce0c7eefc73dd43a99779028d5ee5c2dd8073a658ba8a2bc"
++dependencies = [
++ "cc",
++ "cmake",
++ "dunce",
++ "fs_extra",
++ "pkg-config",
++]
++
+ [[package]]
+ name = "axum"
+ version = "0.8.9"
+@@ -180,6 +251,28 @@ dependencies = [
+  "tracing",
+ ]
+ 
++[[package]]
++name = "axum-server"
++version = "0.8.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b1df331683d982a0b9492b38127151e6453639cd34926eb9c07d4cd8c6d22bfc"
++dependencies = [
++ "arc-swap",
++ "bytes",
++ "either",
++ "fs-err",
++ "http",
++ "http-body",
++ "hyper",
++ "hyper-util",
++ "pin-project-lite",
++ "rustls",
++ "rustls-pki-types",
++ "tokio",
++ "tokio-rustls",
++ "tower-service",
++]
++
+ [[package]]
+ name = "base16ct"
+ version = "0.2.0"
+@@ -192,12 +285,27 @@ version = "0.22.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+ 
++[[package]]
++name = "base64"
++version = "0.23.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
++
+ [[package]]
+ name = "base64ct"
+ version = "1.8.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
+ 
++[[package]]
++name = "bit-vec"
++version = "0.9.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b71798fca2c1fe1086445a7258a4bc81e6e49dcd24c8d0dd9a1e57395b603f51"
++dependencies = [
++ "serde",
++]
++
+ [[package]]
+ name = "bitflags"
+ version = "2.11.0"
+@@ -265,6 +373,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "43c5703da9466b66a946814e1adf53ea2c90f10063b86290cc9eb67ce3478a20"
+ dependencies = [
+  "find-msvc-tools",
++ "jobserver",
++ "libc",
+  "shlex",
+ ]
+ 
+@@ -308,6 +418,15 @@ dependencies = [
+  "inout",
+ ]
+ 
++[[package]]
++name = "cmake"
++version = "0.1.58"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
++dependencies = [
++ "cc",
++]
++
+ [[package]]
+ name = "cmov"
+ version = "0.5.3"
+@@ -438,6 +557,12 @@ dependencies = [
+  "syn 2.0.117",
+ ]
+ 
++[[package]]
++name = "data-encoding"
++version = "2.11.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
++
+ [[package]]
+ name = "der"
+ version = "0.7.10"
+@@ -449,6 +574,26 @@ dependencies = [
+  "zeroize",
+ ]
+ 
++[[package]]
++name = "der-parser"
++version = "10.0.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "07da5016415d5a3c4dd39b11ed26f915f52fc4e0dc197d87908bc916e51bc1a6"
++dependencies = [
++ "asn1-rs",
++ "displaydoc",
++ "nom",
++ "num-bigint",
++ "num-traits",
++ "rusticata-macros",
++]
++
++[[package]]
++name = "deranged"
++version = "0.5.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
++
+ [[package]]
+ name = "des"
+ version = "0.9.0"
+@@ -482,12 +627,31 @@ dependencies = [
+  "ctutils",
+ ]
+ 
++[[package]]
++name = "displaydoc"
++version = "0.2.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c6232dd377dcc64799954cbd3a9bb882e9cdc1308ccd87b1c098f1fb2eaf82a8"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 3.0.3",
++]
++
++[[package]]
++name = "dunce"
++version = "1.0.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
++
+ [[package]]
+ name = "dw-server"
+ version = "0.1.0"
+ dependencies = [
+  "axum",
+  "axum-extra",
++ "axum-server",
++ "base64 0.23.1",
+  "chrono",
+  "env_logger",
+  "flate2",
+@@ -497,6 +661,7 @@ dependencies = [
+  "num-derive",
+  "num-traits",
+  "rand 0.10.3",
++ "rcgen",
+  "rusqlite",
+  "serde",
+  "serde_json",
+@@ -542,6 +707,12 @@ dependencies = [
+  "zeroize",
+ ]
+ 
++[[package]]
++name = "either"
++version = "1.19.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
++
+ [[package]]
+ name = "elliptic-curve"
+ version = "0.13.8"
+@@ -599,7 +770,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+ dependencies = [
+  "libc",
+- "windows-sys",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -647,6 +818,12 @@ dependencies = [
+  "zlib-rs",
+ ]
+ 
++[[package]]
++name = "fnv"
++version = "1.0.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
++
+ [[package]]
+ name = "foldhash"
+ version = "0.1.5"
+@@ -668,6 +845,22 @@ dependencies = [
+  "percent-encoding",
+ ]
+ 
++[[package]]
++name = "fs-err"
++version = "3.3.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b5c95b673b8f6f7235229ae11c5642d81b04c2e64c1e2fb417bc0cf73ca45f29"
++dependencies = [
++ "autocfg",
++ "tokio",
++]
++
++[[package]]
++name = "fs_extra"
++version = "1.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
++
+ [[package]]
+ name = "futures-channel"
+ version = "0.3.32"
+@@ -754,6 +947,25 @@ dependencies = [
+  "subtle",
+ ]
+ 
++[[package]]
++name = "h2"
++version = "0.4.20"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c18c05b8ab635fc118"
++dependencies = [
++ "atomic-waker",
++ "bytes",
++ "fnv",
++ "futures-core",
++ "futures-sink",
++ "http",
++ "indexmap",
++ "slab",
++ "tokio",
++ "tokio-util",
++ "tracing",
++]
++
+ [[package]]
+ name = "hashbrown"
+ version = "0.15.5"
+@@ -887,6 +1099,7 @@ dependencies = [
+  "bytes",
+  "futures-channel",
+  "futures-core",
++ "h2",
+  "http",
+  "http-body",
+  "httparse",
+@@ -1000,6 +1213,16 @@ dependencies = [
+  "syn 2.0.117",
+ ]
+ 
++[[package]]
++name = "jobserver"
++version = "0.1.35"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
++dependencies = [
++ "getrandom 0.4.2",
++ "libc",
++]
++
+ [[package]]
+ name = "js-sys"
+ version = "0.3.95"
+@@ -1016,7 +1239,7 @@ version = "11.1.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "e75fe14a82d81e5f5af639997db37d8b96045938a7ac6ab18cdbe1c7467e05e1"
+ dependencies = [
+- "base64",
++ "base64 0.22.1",
+  "ed25519-dalek",
+  "getrandom 0.2.17",
+  "hmac 0.12.1",
+@@ -1122,6 +1345,12 @@ version = "0.3.17"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+ 
++[[package]]
++name = "minimal-lexical"
++version = "0.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
++
+ [[package]]
+ name = "miniz_oxide"
+ version = "0.9.1"
+@@ -1140,7 +1369,27 @@ checksum = "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1"
+ dependencies = [
+  "libc",
+  "wasi",
+- "windows-sys",
++ "windows-sys 0.61.2",
++]
++
++[[package]]
++name = "nom"
++version = "7.1.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
++dependencies = [
++ "memchr",
++ "minimal-lexical",
++]
++
++[[package]]
++name = "num-bigint"
++version = "0.4.8"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
++dependencies = [
++ "num-integer",
++ "num-traits",
+ ]
+ 
+ [[package]]
+@@ -1159,6 +1408,12 @@ dependencies = [
+  "zeroize",
+ ]
+ 
++[[package]]
++name = "num-conv"
++version = "0.2.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
++
+ [[package]]
+ name = "num-derive"
+ version = "0.5.1"
+@@ -1200,6 +1455,15 @@ dependencies = [
+  "libm",
+ ]
+ 
++[[package]]
++name = "oid-registry"
++version = "0.8.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "12f40cff3dde1b6087cc5d5f5d4d65712f34016a03ed60e9c08dcc392736b5b7"
++dependencies = [
++ "asn1-rs",
++]
++
+ [[package]]
+ name = "once_cell"
+ version = "1.21.4"
+@@ -1259,6 +1523,16 @@ dependencies = [
+  "windows-link",
+ ]
+ 
++[[package]]
++name = "pem"
++version = "4.0.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d354a98a3d1251555de99e8fdd8afda05573c31b82f59063a7b0a29b5527f120"
++dependencies = [
++ "base64 0.23.1",
++ "serde_core",
++]
++
+ [[package]]
+ name = "pem-rfc7468"
+ version = "0.7.0"
+@@ -1322,6 +1596,12 @@ dependencies = [
+  "portable-atomic",
+ ]
+ 
++[[package]]
++name = "powerfmt"
++version = "0.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958"
++
+ [[package]]
+ name = "ppv-lite86"
+ version = "0.2.21"
+@@ -1421,6 +1701,20 @@ version = "0.10.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "0c8d0fd677905edcbeedbf2edb6494d676f0e98d54d5cf9bda0b061cb8fb8aba"
+ 
++[[package]]
++name = "rcgen"
++version = "0.14.10"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8774e05a7d0de114588e6a28fe7e71694b82614ed569d86d8b389dfbc98b8ad8"
++dependencies = [
++ "pem",
++ "ring",
++ "rustls-pki-types",
++ "time",
++ "x509-parser",
++ "yasna",
++]
++
+ [[package]]
+ name = "redox_syscall"
+ version = "0.5.18"
+@@ -1469,6 +1763,20 @@ dependencies = [
+  "subtle",
+ ]
+ 
++[[package]]
++name = "ring"
++version = "0.17.14"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
++dependencies = [
++ "cc",
++ "cfg-if",
++ "getrandom 0.2.17",
++ "libc",
++ "untrusted",
++ "windows-sys 0.52.0",
++]
++
+ [[package]]
+ name = "rsa"
+ version = "0.9.10"
+@@ -1523,6 +1831,50 @@ dependencies = [
+  "semver",
+ ]
+ 
++[[package]]
++name = "rusticata-macros"
++version = "4.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "faf0c4a6ece9950b9abdb62b1cfcf2a68b3b67a10ba445b3bb85be2a293d0632"
++dependencies = [
++ "nom",
++]
++
++[[package]]
++name = "rustls"
++version = "0.23.46"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
++dependencies = [
++ "aws-lc-rs",
++ "once_cell",
++ "rustls-pki-types",
++ "rustls-webpki",
++ "subtle",
++ "zeroize",
++]
++
++[[package]]
++name = "rustls-pki-types"
++version = "1.15.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2f4925028c7eb5d1fcdaf196971378ed9d2c1c4efc7dc5d011256f76c99c0a96"
++dependencies = [
++ "zeroize",
++]
++
++[[package]]
++name = "rustls-webpki"
++version = "0.103.16"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
++dependencies = [
++ "aws-lc-rs",
++ "ring",
++ "rustls-pki-types",
++ "untrusted",
++]
++
+ [[package]]
+ name = "rustversion"
+ version = "1.0.22"
+@@ -1721,7 +2073,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
+ dependencies = [
+  "libc",
+- "windows-sys",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -1786,6 +2138,17 @@ version = "1.0.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
+ 
++[[package]]
++name = "synstructure"
++version = "0.13.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.117",
++]
++
+ [[package]]
+ name = "thiserror"
+ version = "2.0.18"
+@@ -1815,6 +2178,36 @@ dependencies = [
+  "digest 0.11.2",
+ ]
+ 
++[[package]]
++name = "time"
++version = "0.3.55"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
++dependencies = [
++ "deranged",
++ "num-conv",
++ "powerfmt",
++ "serde_core",
++ "time-core",
++ "time-macros",
++]
++
++[[package]]
++name = "time-core"
++version = "0.1.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
++
++[[package]]
++name = "time-macros"
++version = "0.2.32"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
++dependencies = [
++ "num-conv",
++ "time-core",
++]
++
+ [[package]]
+ name = "tokio"
+ version = "1.53.2"
+@@ -1829,7 +2222,7 @@ dependencies = [
+  "signal-hook-registry",
+  "socket2",
+  "tokio-macros",
+- "windows-sys",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -1843,6 +2236,16 @@ dependencies = [
+  "syn 2.0.117",
+ ]
+ 
++[[package]]
++name = "tokio-rustls"
++version = "0.26.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
++dependencies = [
++ "rustls",
++ "tokio",
++]
++
+ [[package]]
+ name = "tokio-util"
+ version = "0.7.20"
+@@ -1852,6 +2255,7 @@ dependencies = [
+  "bytes",
+  "futures-core",
+  "futures-sink",
++ "libc",
+  "pin-project-lite",
+  "tokio",
+ ]
+@@ -1922,6 +2326,12 @@ version = "0.2.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+ 
++[[package]]
++name = "untrusted"
++version = "0.9.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
++
+ [[package]]
+ name = "utf8parse"
+ version = "0.2.2"
+@@ -2102,6 +2512,15 @@ dependencies = [
+  "windows-link",
+ ]
+ 
++[[package]]
++name = "windows-sys"
++version = "0.52.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
++dependencies = [
++ "windows-targets",
++]
++
+ [[package]]
+ name = "windows-sys"
+ version = "0.61.2"
+@@ -2111,6 +2530,70 @@ dependencies = [
+  "windows-link",
+ ]
+ 
++[[package]]
++name = "windows-targets"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973"
++dependencies = [
++ "windows_aarch64_gnullvm",
++ "windows_aarch64_msvc",
++ "windows_i686_gnu",
++ "windows_i686_gnullvm",
++ "windows_i686_msvc",
++ "windows_x86_64_gnu",
++ "windows_x86_64_gnullvm",
++ "windows_x86_64_msvc",
++]
++
++[[package]]
++name = "windows_aarch64_gnullvm"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3"
++
++[[package]]
++name = "windows_aarch64_msvc"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469"
++
++[[package]]
++name = "windows_i686_gnu"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8e9b5ad5ab802e97eb8e295ac6720e509ee4c243f69d781394014ebfe8bbfa0b"
++
++[[package]]
++name = "windows_i686_gnullvm"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66"
++
++[[package]]
++name = "windows_i686_msvc"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
++
++[[package]]
++name = "windows_x86_64_gnu"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "147a5c80aabfbf0c7d901cb5895d1de30ef2907eb21fbbab29ca94c5b08b1a78"
++
++[[package]]
++name = "windows_x86_64_gnullvm"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d"
++
++[[package]]
++name = "windows_x86_64_msvc"
++version = "0.52.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
++
+ [[package]]
+ name = "wit-bindgen"
+ version = "0.51.0"
+@@ -2199,6 +2682,34 @@ dependencies = [
+  "wasmparser",
+ ]
+ 
++[[package]]
++name = "x509-parser"
++version = "0.18.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d43b0f71ce057da06bc0851b23ee24f3f86190b07203dd8f567d0b706a185202"
++dependencies = [
++ "asn1-rs",
++ "data-encoding",
++ "der-parser",
++ "lazy_static",
++ "nom",
++ "oid-registry",
++ "ring",
++ "rusticata-macros",
++ "thiserror",
++ "time",
++]
++
++[[package]]
++name = "yasna"
++version = "0.6.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b5f6765e852b9b4dc8e2a76843e4d64d1cea8e79bcde0b6901aea8e7c7f08282"
++dependencies = [
++ "bit-vec",
++ "time",
++]
++
+ [[package]]
+ name = "zerocopy"
+ version = "0.8.48"
+diff --git a/dw-server/Cargo.toml b/dw-server/Cargo.toml
+index c50606c..3dc045e 100644
+--- a/dw-server/Cargo.toml
++++ b/dw-server/Cargo.toml
+@@ -22,3 +22,6 @@ num-derive.workspace = true
+ num-traits.workspace = true
+ rand.workspace = true
+ flate2 = "1.1.10"
++axum-server = { version = "0.8.0", features = ["tls-rustls"] }
++rcgen = "0.14.10"
++base64 = "0.23.1"
+diff --git a/dw-server/src/auth3.rs b/dw-server/src/auth3.rs
+new file mode 100644
+index 0000000..45616d1
+--- /dev/null
++++ b/dw-server/src/auth3.rs
+@@ -0,0 +1,150 @@
++//! USCL: Demonware's HTTPS sign-in ("auth3"), used by the PS4 Black Ops II port (title 2430).
++//!
++//! The game POSTs JSON to https://auth3.prod.demonware.net/auth/: auth_task 46, iv_seed, title_id and extra_data,
++//! whose token's id_token is the player (USCL's shadPS4 fork sends "uscl:<online id>:<account id>"). The reply
++//! (bdHTTPAuthService-ps4 handleReply) must carry auth_task 47, code 700, the iv_seed, a 128-byte client ticket
++//! (plain bdAuthTicket: magic, user id, name, session key) and a 128-byte server ticket the lobby accepts (the
++//! same signed proof the PS3 sign-in hands out), both base64.
++//! Off unless DW_AUTH3_ADDR is set (e.g. 127.0.0.1:443); the certificate is made at start (USCL's shadPS4 fork
++//! trusts the hosts it redirects to itself).
++
++use axum::extract::State;
++use axum::routing::post;
++use axum::{Json, Router};
++use base64::Engine;
++use bitdemon::auth::auth_proof::ClientOpaqueAuthProof;
++use bitdemon::auth::key_store::InMemoryKeyStore;
++use bitdemon::auth::result::auth_ticket::{AuthTicket, BdAuthTicketType};
++use bitdemon::domain::title::Title;
++use bitdemon::messaging::bd_serialization::BdSerialize;
++use bitdemon::messaging::bd_writer::BdWriter;
++use chrono::Utc;
++use log::{info, warn};
++use num_traits::FromPrimitive;
++use serde_json::{json, Value};
++use std::sync::Arc;
++
++const TICKET_LEN: usize = 128;
++const TICKET_SECONDS: i64 = 60 * 60 * 24;
++const AUTH_OK: &str = "700";
++
++/// "uscl:<online id>:<account id>" from the request's extra_data (a JSON string holding a JSON string token).
++pub fn player(extra_data: &str) -> Option<(String, u64)> {
++    let extra: Value = serde_json::from_str(extra_data).ok()?;
++    let token: Value = serde_json::from_str(extra.get("token")?.as_str()?).ok()?;
++    let mut parts = token.get("id_token")?.as_str()?.strip_prefix("uscl:")?.rsplitn(2, ':');
++    let account = parts.next()?.parse().ok()?;
++    let name = parts.next()?.to_string();
++    (!name.is_empty() && name.len() <= 16).then_some((name, account))
++}
++
++fn number(v: &Value, key: &str) -> Option<u64> {
++    match v.get(key)? {
++        Value::String(s) => s.parse().ok(),
++        n => n.as_u64(),
++    }
++}
++
++async fn auth(State(key_store): State<Arc<InMemoryKeyStore>>, Json(req): Json<Value>) -> Json<Value> {
++    let fail = |code: &str| Json(json!({ "auth_task": "47", "code": code }));
++    let (Some(46), Some(iv_seed), Some(title_id)) = (number(&req, "auth_task"), number(&req, "iv_seed"), number(&req, "title_id")) else {
++        warn!("auth3: unexpected request {req}");
++        return fail("701");
++    };
++    let Some(title) = Title::from_u64(title_id) else {
++        warn!("auth3: unknown title {title_id}");
++        return fail("701");
++    };
++    let Some((name, user_id)) = req.get("extra_data").and_then(Value::as_str).and_then(player) else {
++        warn!("auth3: no USCL player in the token");
++        return fail("701");
++    };
++
++    let now = Utc::now().timestamp();
++    let expires = now + TICKET_SECONDS;
++    let ticket = AuthTicket {
++        ticket_type: BdAuthTicketType::UserToService,
++        title,
++        time_issued: (now % u32::MAX as i64) as u32,
++        time_expires: (expires % u32::MAX as i64) as u32,
++        license_id: 1234,
++        user_id,
++        username: name.clone(),
++        session_key: rand::random(),
++    };
++    let mut client = Vec::new();
++    if let Err(e) = ticket.serialize(&mut BdWriter::new(&mut client)) {
++        warn!("auth3: ticket for {name}: {e}");
++        return fail("701");
++    }
++    client.resize(TICKET_LEN, 0);
++    let server = ClientOpaqueAuthProof {
++        title,
++        time_expires: expires,
++        license_id: ticket.license_id,
++        user_id,
++        session_key: ticket.session_key,
++        username: name.clone(),
++    }
++    .serialize(key_store.as_ref());
++
++    info!("auth3: signed in {name} ({user_id}) for {title:?}");
++    let b64 = base64::engine::general_purpose::STANDARD;
++    Json(json!({
++        "auth_task": "47",
++        "code": AUTH_OK,
++        "iv_seed": iv_seed.to_string(),
++        "client_ticket": b64.encode(&client),
++        "server_ticket": b64.encode(server),
++    }))
++}
++
++pub async fn serve(key_store: Arc<InMemoryKeyStore>) {
++    let Ok(addr) = std::env::var("DW_AUTH3_ADDR") else {
++        return;
++    };
++    let cert = rcgen::generate_simple_self_signed(vec!["auth3.prod.demonware.net".into()]).expect("auth3 certificate");
++    let tls = axum_server::tls_rustls::RustlsConfig::from_pem(
++        cert.cert.pem().into_bytes(),
++        cert.signing_key.serialize_pem().into_bytes(),
++    )
++    .await
++    .expect("auth3 TLS setup");
++    let app = Router::new().route("/auth/", post(auth)).with_state(key_store);
++    info!("auth3 (HTTPS sign-in) on {addr}");
++    let addr: std::net::SocketAddr = addr.parse().expect("DW_AUTH3_ADDR: host:port");
++    if let Err(e) = axum_server::bind_rustls(addr, tls).serve(app.into_make_service()).await {
++        warn!("auth3 stopped: {e}");
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn reads_the_uscl_player() {
++        let extra = r#"{"version": "17", "token": "{\"scope\": \"openid,openid:duid\", \"id_token\": \"uscl:test_player:7\"}", "extended_data": true}"#;
++        assert_eq!(player(extra), Some(("test_player".into(), 7)));
++        let placeholder = r#"{"version": "17", "token": "{\"scope\": \"openid\", \"id_token\": \"TOKEN\"}"}"#;
++        assert_eq!(player(placeholder), None);
++    }
++
++    #[test]
++    fn client_ticket_is_128_bytes_with_the_magic() {
++        let ticket = AuthTicket {
++            ticket_type: BdAuthTicketType::UserToService,
++            title: Title::T6Ps4,
++            time_issued: 1,
++            time_expires: 2,
++            license_id: 3,
++            user_id: 4,
++            username: "p".into(),
++            session_key: [9; 24],
++        };
++        let mut buf = Vec::new();
++        ticket.serialize(&mut BdWriter::new(&mut buf)).unwrap();
++        assert!(buf.len() <= TICKET_LEN);
++        assert_eq!(buf[..4], 0xefbdaddeu32.to_le_bytes());
++    }
++}
+diff --git a/dw-server/src/lobby/storage/user_file.rs b/dw-server/src/lobby/storage/user_file.rs
+index edb735a..567cef9 100644
+--- a/dw-server/src/lobby/storage/user_file.rs
++++ b/dw-server/src/lobby/storage/user_file.rs
+@@ -17,7 +17,11 @@ const MAX_USER_FILE_SIZE: usize = 50_000; // 50KB
+ 
+ /// Stat files are checked against the player's previous one; impossible ones are refused (and logged for the host).
+ fn check_upload(session: &BdSession, filename: &str, old: Option<Vec<u8>>, new: &[u8]) -> Result<(), StorageServiceError> {
+-    if filename != stats_check::MP_STATS_FILE {
++    // shortcut: only the PS3 1.19 layout is known (stats_check); the PS4 port (title 2430) packs 4 bytes fewer,
++    // so its files pass unchecked until that layout is read from its stats.ddl
++    if filename != stats_check::MP_STATS_FILE
++        || session.authentication().is_some_and(|a| a.title != bitdemon::domain::title::Title::T6Ps3)
++    {
+         return Ok(());
+     }
+     stats_check::check(old.as_deref(), new).map_err(|reason| {
+@@ -42,11 +46,12 @@ impl UserStorageService for DwUserStorageService {
+             return Err(StorageServiceError::PermissionDeniedError);
+         }
+ 
++        let title_num = from_title(session.authentication().unwrap().title);
+         let res = STORAGE_DB.with_borrow(|db| {
+             db.query_row(
+                 "SELECT data FROM user_file u
+-                     WHERE u.id = ?1 AND u.owner_id = ?2",
+-                (file_id, owner_id),
++                     WHERE u.id = ?1 AND u.owner_id = ?2 AND u.title = ?3",
++                (file_id, owner_id, title_num),
+                 |row| row.get(0),
+             )
+         });
+@@ -70,11 +75,13 @@ impl UserStorageService for DwUserStorageService {
+             return Err(StorageServiceError::StorageFileNotFoundError);
+         }
+ 
++        // one player id can own files of several titles (PS3 and PS4 Black Ops II): their layouts differ
++        let title_num = from_title(session.authentication().unwrap().title);
+         let res: rusqlite::Result<(u8, Vec<u8>)> = STORAGE_DB.with_borrow(|db| {
+             db.query_row(
+                 "SELECT u.visibility, u.data FROM user_file u
+-                     WHERE u.filename = ?1 AND u.owner_id = ?2",
+-                (filename.as_str(), owner_id),
++                     WHERE u.filename = ?1 AND u.owner_id = ?2 AND u.title = ?3",
++                (filename.as_str(), owner_id, title_num),
+                 |row| Ok((row.get(0)?, row.get(1)?)),
+             )
+         });
+diff --git a/dw-server/src/main.rs b/dw-server/src/main.rs
+index e4e4fa4..7660863 100644
+--- a/dw-server/src/main.rs
++++ b/dw-server/src/main.rs
+@@ -1,3 +1,4 @@
++mod auth3;
+ mod config;
+ mod lobby;
+ mod log;
+@@ -70,6 +71,7 @@ async fn main() {
+         .unwrap();
+     let http_promise = axum::serve(listener, lobby_router);
+     tokio::spawn(lobby::progress::serve_admin());
++    tokio::spawn(auth3::serve(key_store));
+ 
+     http_promise.await.unwrap();
+     for join in joins {
+diff --git a/libbitdemon/src/auth/mod.rs b/libbitdemon/src/auth/mod.rs
+index d25b622..9d49df5 100644
+--- a/libbitdemon/src/auth/mod.rs
++++ b/libbitdemon/src/auth/mod.rs
+@@ -4,4 +4,4 @@ pub mod auth_server;
+ pub mod authentication;
+ pub mod key_store;
+ pub mod response;
+-mod result;
++pub mod result;
+diff --git a/libbitdemon/src/domain/title.rs b/libbitdemon/src/domain/title.rs
+index 4ebf410..fa759ce 100644
+--- a/libbitdemon/src/domain/title.rs
++++ b/libbitdemon/src/domain/title.rs
+@@ -8,4 +8,5 @@ pub enum Title {
+     T6Ps3 = 18396,
+     T6Pc = 18397,
+     T6WiiU = 18480,
++    T6Ps4 = 2430, // Black Ops II (PS4, 2026 port): HTTPS sign-in (dw-server auth3), LSG lobby
+ }
+diff --git a/libbitdemon/src/lobby/bandwidth/handler.rs b/libbitdemon/src/lobby/bandwidth/handler.rs
+index 02ab139..3053810 100644
+--- a/libbitdemon/src/lobby/bandwidth/handler.rs
++++ b/libbitdemon/src/lobby/bandwidth/handler.rs
+@@ -1,54 +1,25 @@
+ use crate::lobby::LobbyHandler;
+-use crate::lobby::bandwidth::result::BandwidthTestRejected;
+-use crate::lobby::response::lsg_reply::LsgResponseCreator;
+-use crate::lobby::response::task_reply::TaskReply;
+-use crate::messaging::BdErrorCode;
+-use crate::messaging::BdErrorCode::NoError;
+ use crate::messaging::bd_message::BdMessage;
+-use crate::messaging::bd_reader::BdReader;
+-use crate::messaging::bd_response::{BdResponse, ResponseCreator};
++use crate::messaging::bd_response::BdResponse;
+ use crate::networking::bd_session::BdSession;
+-use log::{debug, warn};
+-use num_derive::{FromPrimitive, ToPrimitive};
+-use num_traits::FromPrimitive;
++use log::info;
+ use std::error::Error;
++use std::sync::atomic::{AtomicU64, Ordering};
+ 
+-pub struct BandwidthHandler {}
+-
+-#[derive(Debug, Eq, PartialEq, Hash, Copy, Clone, FromPrimitive, ToPrimitive)]
+-#[repr(u8)]
+-enum BandwidthTaskId {
+-    BandwidthTask = 1,
+-}
+-
+-#[derive(Debug, Eq, PartialEq, Hash, Copy, Clone, FromPrimitive, ToPrimitive)]
+-#[repr(u8)]
+-enum BandwidthTestType {
+-    UploadTest = 0,
+-    UploadDownloadTest = 1,
++pub struct BandwidthHandler {
++    transaction: AtomicU64,
+ }
+ 
+ impl LobbyHandler for BandwidthHandler {
+     fn handle_message(
+         &self,
+-        session: &mut BdSession,
+-        mut message: BdMessage,
++        _session: &mut BdSession,
++        message: BdMessage,
+     ) -> Result<BdResponse, Box<dyn Error>> {
+-        message.reader.set_type_checked(false);
+-
+-        let task_id_value = message.reader.read_u8()?;
+-        let maybe_task_id = BandwidthTaskId::from_u8(task_id_value);
+-        if maybe_task_id.is_none() {
+-            warn!("Client called unknown task {task_id_value}");
+-            return TaskReply::with_only_error_code(NoError, task_id_value).to_response();
+-        }
+-        let task_id = maybe_task_id.unwrap();
+-
+-        match task_id {
+-            BandwidthTaskId::BandwidthTask => {
+-                Self::handle_bandwidth_task(session, &mut message.reader)
+-            }
+-        }
++        let len = message.reader.remaining_data().len();
++        info!("Bandwidth test request ({len} bytes)");
++        // Black Ops II PS4 needs 644000 bit/s (band_18players + band_demosystem) to host a public lobby
++        bandwidth_test_reply(self.transaction.fetch_add(1, Ordering::Relaxed), len, 10)
+     }
+ }
+ 
+@@ -60,24 +31,38 @@ impl Default for BandwidthHandler {
+ 
+ impl BandwidthHandler {
+     pub fn new() -> BandwidthHandler {
+-        BandwidthHandler {}
++        BandwidthHandler {
++            transaction: AtomicU64::new(1),
++        }
+     }
++}
+ 
+-    fn handle_bandwidth_task(
+-        _session: &mut BdSession,
+-        reader: &mut BdReader,
+-    ) -> Result<BdResponse, Box<dyn Error>> {
+-        let test_type_value = reader.read_u8()?;
+-        match BandwidthTestType::from_u8(test_type_value) {
+-            Some(test_type) => {
+-                debug!("Client requested bandwidth test type={test_type:?}");
+-            }
+-            None => {
+-                warn!("Client requested unknown bandwidth test type={test_type_value}")
+-            }
++/// Service 18, plain little-endian bytes answered with message type 5. Phase 1 (19 bytes) gets the test
++/// setup: the client then sends 5 x 512 bytes to our UDP 3074 (the NAT discovery socket ignores them). Finalize
++/// (5 x u32 of its own, so longer) gets the measurement. The host computes its upload from it, and below
++/// 256000 bit/s (or with zeros: NaN) it opens its lobby with no public slots, so nobody can join it. So we
++/// report a fast send: MW2 uses 50 ms (Tustin/mw2-rpcs3 found 50 ms is what lets players join).
++/// Black Ops II PS4 waits on this test before it may host a public match: a rejection never completes it.
++pub fn bandwidth_test_reply(transaction: u64, request_len: usize, send_ms: u32) -> Result<BdResponse, Box<dyn Error>> {
++    let mut data = vec![5]; // BD_LSG_SERVICE_TASK_REPLY
++    data.extend_from_slice(&transaction.to_le_bytes());
++    data.push(0); // accepted
++    if request_len >= 21 {
++        for v in [512 * 5, send_ms, 2, 0, 4] {
++            data.extend_from_slice(&u32::to_le_bytes(v)); // bytes, ms, average / first / last sequence
+         }
+-
+-        // Bandwidth tests are not supported
+-        BandwidthTestRejected::with_reason(BdErrorCode::ServiceNotAvailable).to_response()
++    } else {
++        // packet size, count, sender wait, send time, receiver wait, receive time, linger
++        for v in [512, 5, 500, send_ms, 10000, 5000, 500] {
++            data.extend_from_slice(&u32::to_le_bytes(v));
++        }
++        let udp: std::net::SocketAddrV4 = std::env::var("DW_STUN_ADDR")
++            .ok()
++            .and_then(|a| a.parse().ok())
++            .unwrap_or_else(|| "127.0.0.1:3074".parse().unwrap());
++        data.extend_from_slice(&udp.port().to_le_bytes());
++        data.extend_from_slice(&udp.ip().octets());
++        data.extend_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7]); // token
+     }
++    Ok(BdResponse::encrypted_if_available(data))
+ }
+diff --git a/libbitdemon/src/lobby/bandwidth/mod.rs b/libbitdemon/src/lobby/bandwidth/mod.rs
+index 466b27c..6764648 100644
+--- a/libbitdemon/src/lobby/bandwidth/mod.rs
++++ b/libbitdemon/src/lobby/bandwidth/mod.rs
+@@ -1,4 +1,3 @@
+-﻿mod handler;
+-mod result;
++mod handler;
+ 
+-pub use handler::BandwidthHandler;
++pub use handler::{BandwidthHandler, bandwidth_test_reply};
+diff --git a/libbitdemon/src/lobby/bandwidth/result.rs b/libbitdemon/src/lobby/bandwidth/result.rs
+deleted file mode 100644
+index 581c833..0000000
+--- a/libbitdemon/src/lobby/bandwidth/result.rs
++++ /dev/null
+@@ -1,27 +0,0 @@
+-use crate::lobby::response::lsg_reply::LsgServiceTaskReply;
+-use crate::messaging::BdErrorCode;
+-use crate::messaging::bd_writer::BdWriter;
+-use num_traits::ToPrimitive;
+-use std::error::Error;
+-
+-pub struct BandwidthTestRejected {
+-    reason: BdErrorCode,
+-}
+-
+-impl BandwidthTestRejected {
+-    pub fn with_reason(reason: BdErrorCode) -> BandwidthTestRejected {
+-        BandwidthTestRejected { reason }
+-    }
+-}
+-
+-impl LsgServiceTaskReply for BandwidthTestRejected {
+-    fn write_task_reply_data(&self, mut writer: BdWriter) -> Result<(), Box<dyn Error>> {
+-        // Test rejected
+-        writer.write_bool(true)?;
+-
+-        // Rejected reason
+-        writer.write_u16(self.reason.to_u16().unwrap())?;
+-
+-        Ok(())
+-    }
+-}
+diff --git a/libbitdemon/src/lobby/matchmaking/mod.rs b/libbitdemon/src/lobby/matchmaking/mod.rs
+index adf88a6..d5d19c8 100644
+--- a/libbitdemon/src/lobby/matchmaking/mod.rs
++++ b/libbitdemon/src/lobby/matchmaking/mod.rs
+@@ -196,6 +196,11 @@ impl LobbyHandler for MatchmakingHandler {
+             }
+             TASK_FIND_SESSIONS | TASK_FIND_SESSIONS_PAGED | TASK_FIND_SESSIONS_TWO_PASS => {
+                 // query id, offset, max results, then the title's query parameters (not used for filtering yet)
++                let raw = reader.remaining_data();
++                info!(
++                    "Matchmaking find task {task_id}: {}",
++                    raw[..raw.len().min(128)].iter().map(|b| format!("{b:02x}")).collect::<String>()
++                );
+                 let _query = reader.read_u32()?;
+                 let offset = reader.read_u32()? as usize;
+                 let max = reader.read_u32()? as usize;
+diff --git a/libbitdemon/src/lobby/mw2.rs b/libbitdemon/src/lobby/mw2.rs
+index edec67c..2b93c98 100644
+--- a/libbitdemon/src/lobby/mw2.rs
++++ b/libbitdemon/src/lobby/mw2.rs
+@@ -281,34 +281,8 @@ impl Mw2Lobby {
+         })
+     }
+ 
+-    /// Service 18, plain little-endian bytes answered with message type 5. Phase 1 (19 bytes) gets the test
+-    /// setup: the client then sends 5 x 512 bytes to our UDP 3074 (the NAT discovery socket ignores them). Finalize
+-    /// (5 x u32 of its own, so longer) gets the measurement. The host computes its upload from it, and below
+-    /// 256000 bit/s (or with zeros: NaN) it opens its lobby with no public slots, so nobody can join it. So we
+-    /// report what a 50 ms send gives (Tustin/mw2-rpcs3 found 50 ms is what lets players join).
+     fn bandwidth_test(&self, len: usize) -> Result<BdResponse, Box<dyn Error>> {
+-        const SEND_MS: u32 = 50;
+-        let mut data = vec![5]; // BD_LSG_SERVICE_TASK_REPLY
+-        data.extend_from_slice(&self.transaction.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+-        data.push(0); // accepted
+-        if len >= 21 {
+-            for v in [512 * 5, SEND_MS, 2, 0, 4] {
+-                data.extend_from_slice(&u32::to_le_bytes(v)); // bytes, ms, average / first / last sequence
+-            }
+-        } else {
+-            // packet size, count, sender wait, send time, receiver wait, receive time, linger
+-            for v in [512, 5, 500, SEND_MS, 10000, 5000, 500] {
+-                data.extend_from_slice(&u32::to_le_bytes(v));
+-            }
+-            let udp: std::net::SocketAddrV4 = std::env::var("DW_STUN_ADDR")
+-                .ok()
+-                .and_then(|a| a.parse().ok())
+-                .unwrap_or_else(|| "127.0.0.1:3074".parse().unwrap());
+-            data.extend_from_slice(&udp.port().to_le_bytes());
+-            data.extend_from_slice(&udp.ip().octets());
+-            data.extend_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7]); // token
+-        }
+-        Ok(BdResponse::encrypted_if_available(data))
++        crate::lobby::bandwidth::bandwidth_test_reply(self.transaction.fetch_add(1, Ordering::Relaxed), len, 50)
+     }
+ 
+     /// The publisher files with stable ids (1-based, by name): the game asks for them by id.
+diff --git a/libbitdemon/src/lobby/response/lsg_reply.rs b/libbitdemon/src/lobby/response/lsg_reply.rs
+index 84dc35e..74ce769 100644
+--- a/libbitdemon/src/lobby/response/lsg_reply.rs
++++ b/libbitdemon/src/lobby/response/lsg_reply.rs
+@@ -1,4 +1,3 @@
+-use crate::lobby::response::BdMessageType;
+ use crate::lobby::response::BdMessageType::LsgServiceConnectionId;
+ use crate::messaging::StreamMode::ByteMode;
+ use crate::messaging::bd_response::{BdResponse, ResponseCreator};
+@@ -6,17 +5,6 @@ use crate::messaging::bd_writer::BdWriter;
+ use num_traits::ToPrimitive;
+ use std::error::Error;
+ 
+-pub trait LsgResponseCreator {
+-    fn to_response(&self) -> Result<BdResponse, Box<dyn Error>>;
+-}
+-
+-pub trait LsgServiceTaskReply {
+-    fn transaction_id(&self) -> u64 {
+-        0
+-    }
+-    fn write_task_reply_data(&self, writer: BdWriter) -> Result<(), Box<dyn Error>>;
+-}
+-
+ pub struct ConnectionIdResponse {
+     connection_id: u64,
+ }
+@@ -27,24 +15,6 @@ impl ConnectionIdResponse {
+     }
+ }
+ 
+-impl<T: LsgServiceTaskReply> LsgResponseCreator for T {
+-    fn to_response(&self) -> Result<BdResponse, Box<dyn Error>> {
+-        let mut data = Vec::new();
+-        {
+-            let mut writer = BdWriter::new(&mut data);
+-            writer.set_type_checked(false);
+-            writer.set_mode(ByteMode);
+-
+-            writer.write_u8(BdMessageType::LsgServiceTaskReply.to_u8().unwrap())?;
+-            writer.write_u64(self.transaction_id())?;
+-
+-            self.write_task_reply_data(writer)?;
+-        }
+-
+-        Ok(BdResponse::encrypted_if_available(data))
+-    }
+-}
+-
+ impl ResponseCreator for ConnectionIdResponse {
+     fn to_response(&self) -> Result<BdResponse, Box<dyn Error>> {
+         let mut data = Vec::new();
+-- 
+2.56.0
+

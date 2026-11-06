@@ -44,6 +44,24 @@ login uses its ticket). The older two-address setup (`DW_AUTH_ADDR` / `DW_LOBBY_
   than one match gives is refused (layout: `ddl_mp/stats.ddl` v244, see `games/BLUS31011.md`).
 - 0013: Modern Warfare 2 (title 5280, `lobby/mw2.rs`): its older Demonware (batched frames, bit-packed tasks and
   replies), publisher files by id, the player's stats file, matchmaking and the bandwidth test (see `games/BLUS30377.md`).
+- 0014: `DW_STUN_ALT_SHOWN`: the second server's address put in answers, when a relay sits in front of the stun
+  (behind the session tunnel: `DW_STUN_ADDR=127.0.0.1:3174 DW_STUN_ALT_ADDR=127.0.0.1:3177
+  DW_STUN_ALT_SHOWN=127.0.0.1:3077`, the bridge owns 3074/3077/3078 on every PC).
+- 0015: Player ids: BO2 names players by a 64-bit game id of its own, the login by the ticket's (RPCN) user id;
+  `lobby/player_id.rs` learns each player's game id from their first own file listing (`db/player_id.db`), so
+  profiles and files asked for by game id reach them (and ids above i64 no longer break file listings).
+- 0016: File share (content streaming): URLs name 127.0.0.1 instead of `localhost` (RPCS3 resolves names through
+  real DNS), and streams asked for by game id reach their owner. Members reach TCP 3076 through the bridge (`bo2`).
+- 0017: Progress travels with the player (`lobby/progress.rs`, PLAN.md): a player's files, profiles and file-share
+  streams as one JSON bundle; `dw-server --export <online id>` / `--import` (stdin) for the player's own PC; a
+  local-only admin port (`DW_ADMIN_ADDR`, 127.0.0.1:3180; `POST /progress` with `x-uscl-steam-id`,
+  `GET /progress/<online id>`) for the host's bridge. A Steam account is bound to one online id; newer copies win;
+  carried stats pass the stats check's bounds. A bundle for a player not yet logged in waits for their login.
+- 0018: Service 32 answered by the logging stub (BO2 calls it at login).
+- 0019: Black Ops II PS4 (title 2430, `games/CUSA57548.md`): `DW_AUTH3_ADDR` serves the PS4's HTTPS sign-in
+  (`/auth/`); bandwidth test answered for T6 too (shared with MW2), so hosts open public slots; user files are
+  read per title (PS3 and PS4 player ids overlap); the stats check only runs for PS3. PS4 publisher file:
+  `storage/publisher/2430/online_tu17_mp_english.wad` (the PS3 wad works).
 
 ## Status
 Modern Warfare 2 1.14: login, playlists, stats and matchmaking work; two copies played the same match (2026-10-25).

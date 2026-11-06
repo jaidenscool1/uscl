@@ -6,7 +6,7 @@
 
 namespace
 {
-	constexpr int repeat_delay_ms = 400, repeat_every_ms = 90, home_hold_ms = 1200;
+	constexpr int repeat_delay_ms = 400, repeat_every_ms = 90;
 	constexpr int stick_on = 24000, stick_off = 12000; // hysteresis, out of 32767
 }
 
@@ -92,18 +92,7 @@ void Gamepad::poll()
 			case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: if (down) emit pressed("l1"); break;
 			case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: if (down) emit pressed("r1"); break;
 			case SDL_GAMEPAD_BUTTON_START: if (down) emit pressed("options"); break;
-			case SDL_GAMEPAD_BUTTON_GUIDE:
-				if (down)
-				{
-					m_home_since.start();
-					m_home_fired = false;
-					emit pressed("home");
-				}
-				else
-				{
-					m_home_since.invalidate();
-				}
-				break;
+			case SDL_GAMEPAD_BUTTON_GUIDE: if (down) emit pressed("home"); break;
 			default: break;
 			}
 			break;
@@ -135,10 +124,5 @@ void Gamepad::poll()
 	{
 		m_next_repeat += repeat_every_ms;
 		emit pressed(m_held_dir);
-	}
-	if (m_home_since.isValid() && !m_home_fired && m_home_since.elapsed() >= home_hold_ms)
-	{
-		m_home_fired = true;
-		emit homeHeld();
 	}
 }
