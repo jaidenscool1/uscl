@@ -31,6 +31,22 @@ namespace
 		return GameModel::rpcs3ConfigDir() + "games.yml";
 #endif
 	}
+
+	// PS4 games (run by our shadPS4) are listed apart, so RPCS3 never sees them in its games.yml
+	QString ps4YmlPath() { return GameModel::rpcs3ConfigDir() + "uscl/ps4_games.yml"; }
+	QString ymlFor(const QString& serial) { return GameModel::isPs4Serial(serial) ? ps4YmlPath() : gamesYmlPath(); }
+
+	// An installed PS4 game: sce_sys/param.sfo next to eboot.bin. "<serial>-UPDATE" folders hold its patch.
+	bool isPs4Dir(const QString& dir)
+	{
+		return QFileInfo(dir + "/sce_sys/param.sfo").isFile() && QFileInfo(dir + "/eboot.bin").isFile()
+			&& !dir.endsWith("-UPDATE", Qt::CaseInsensitive);
+	}
+}
+
+bool GameModel::isPs4Serial(const QString& serial)
+{
+	return serial.startsWith("CUSA");
 }
 
 GameModel::GameModel(QObject* parent)
@@ -147,7 +163,11 @@ QString GameModel::gameHash(const QString& path, const QString& serial)
 	// game's other executables (USRDIR/*.self) if mismatched copies get through
 	QByteArray eboot;
 	QFile update(rpcs3ConfigDir() + "dev_hdd0/game/" + serial + "/USRDIR/EBOOT.BIN");
-	if (!serial.isEmpty() && update.open(QIODevice::ReadOnly))
+	if (QFile ps4(path + "/eboot.bin"); isPs4Dir(path) && ps4.open(QIODevice::ReadOnly))
+	{
+		eboot = ps4.readAll();
+	}
+	else if (!serial.isEmpty() && update.open(QIODevice::ReadOnly))
 	{
 		eboot = update.readAll();
 	}
@@ -183,7 +203,16 @@ bool GameModel::describe(const QString& path, Game& game) const
 	QByteArray sfo, icon;
 	QString icon_file;
 
-	if (info.isFile() && path.endsWith(".iso", Qt::CaseInsensitive))
+	bool ps4 = false;
+	if (isPs4Dir(path))
+	{
+		QFile f(path + "/sce_sys/param.sfo");
+		if (f.open(QIODevice::ReadOnly))
+			sfo = f.readAll();
+		icon_file = path + "/sce_sys/icon0.png";
+		ps4 = true;
+	}
+	else if (info.isFile() && path.endsWith(".iso", Qt::CaseInsensitive))
 	{
 		sfo = readIsoFile(path, {"PS3_GAME", "PARAM.SFO"});
 		icon = readIsoFile(path, {"PS3_GAME", "ICON0.PNG"});
@@ -216,10 +245,20 @@ bool GameModel::describe(const QString& path, Game& game) const
 	game.title = params.value("TITLE").simplified();
 	game.serial = params.value("TITLE_ID");
 	game.path = path;
-	game.console = "PS3";
+	game.console = ps4 ? "PS4" : "PS3";
 	game.version = params.value("APP_VER");
-	if (const QString update = GameUpdates::installedVersion(game.serial); GameUpdates::newer(update, game.version))
+	if (ps4)
+	{
+		// shadPS4 runs the patch from "<game>-UPDATE" next to the game
+		QFile f(path + "-UPDATE/sce_sys/param.sfo");
+		if (const QString update = f.open(QIODevice::ReadOnly) ? readSfo(f.readAll()).value("APP_VER") : QString();
+			GameUpdates::newer(update, game.version))
+			game.version = update;
+	}
+	else if (const QString update = GameUpdates::installedVersion(game.serial); GameUpdates::newer(update, game.version))
+	{
 		game.version = update;
+	}
 
 	if (!icon.isEmpty())
 	{
@@ -241,9 +280,11 @@ void GameModel::reload()
 	beginResetModel();
 	m_games.clear();
 
-	QFile yml(gamesYmlPath());
-	if (yml.open(QIODevice::ReadOnly))
+	for (const QString& list : {gamesYmlPath(), ps4YmlPath()})
 	{
+		QFile yml(list);
+		if (!yml.open(QIODevice::ReadOnly))
+			continue;
 		for (const QString& path : readGamesYml(yml.readAll()))
 		{
 			if (Game g; describe(path, g))
@@ -314,6 +355,12 @@ namespace
 			return f.open(QIODevice::ReadOnly) ? GameModel::readSfo(f.readAll()).value("TITLE_ID") : QString();
 		};
 		// a disc folder, or an installed game: this folder is the game, don't look inside it
+		if (isPs4Dir(dir))
+		{
+			if (const QString serial = serialOf(dir + "/sce_sys/param.sfo"); !serial.isEmpty() && !out.contains(serial))
+				out[serial] = dir;
+			return;
+		}
 		for (const QString& sfo : {dir + "/PS3_GAME/PARAM.SFO", dir + "/PARAM.SFO"})
 		{
 			if (QFileInfo(sfo).isFile() && (sfo.contains("PS3_GAME") || QFileInfo(dir + "/USRDIR").isDir()))
@@ -368,36 +415,44 @@ void GameModel::scanFolder(const QString& path)
 	QThread* t = QThread::create([found, encrypted, path] { *found = findGames(path, encrypted); });
 	connect(t, &QThread::finished, this, [this, t, found, encrypted] {
 		t->deleteLater();
-		QFile yml(gamesYmlPath());
-		QByteArray text;
-		if (yml.open(QIODevice::ReadOnly))
-			text = yml.readAll();
-		yml.close();
-		const QMap<QString, QString> known = readGamesYml(text);
 		int added = 0, listed = 0;
-		for (auto it = found->cbegin(); it != found->cend(); ++it)
+		for (const QString& list : {gamesYmlPath(), ps4YmlPath()})
 		{
-			if (known.contains(it.key()))
+			QFile yml(list);
+			QByteArray text;
+			if (yml.open(QIODevice::ReadOnly))
+				text = yml.readAll();
+			yml.close();
+			const QMap<QString, QString> known = readGamesYml(text);
+			int new_here = 0;
+			for (auto it = found->cbegin(); it != found->cend(); ++it)
 			{
-				listed++;
-				continue;
+				if (ymlFor(it.key()) != list)
+					continue;
+				if (known.contains(it.key()))
+				{
+					listed++;
+					continue;
+				}
+				if (!text.isEmpty() && !text.endsWith('\n'))
+					text += '\n';
+				text += ymlLine(it.key(), it.value()).toUtf8() + '\n';
+				new_here++;
 			}
-			if (!text.isEmpty() && !text.endsWith('\n'))
-				text += '\n';
-			text += ymlLine(it.key(), it.value()).toUtf8() + '\n';
-			added++;
+			if (new_here)
+			{
+				QDir().mkpath(QFileInfo(list).absolutePath());
+				if (yml.open(QIODevice::WriteOnly | QIODevice::Truncate))
+					yml.write(text);
+				yml.close(); // flush before reload() reads it back
+			}
+			added += new_here;
 		}
 		delete found;
 		const int scrambled = *encrypted;
 		delete encrypted;
 		if (added)
-		{
-			QDir().mkpath(QFileInfo(gamesYmlPath()).absolutePath());
-			if (yml.open(QIODevice::WriteOnly | QIODevice::Truncate))
-				yml.write(text);
-			yml.close(); // flush before reload() reads it back
 			reload();
-		}
 		m_scanning = false;
 		emit scanningChanged();
 		emit scanFinished(added, listed, scrambled);
@@ -433,7 +488,7 @@ QVariantList GameModel::folders(const QString& path)
 
 void GameModel::remove(const QString& serial)
 {
-	QFile yml(gamesYmlPath());
+	QFile yml(ymlFor(serial));
 	if (!yml.open(QIODevice::ReadOnly))
 		return;
 	QByteArrayList kept;

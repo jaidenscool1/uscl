@@ -1,0 +1,226 @@
+From e789b162727f3ac56651dcc532a1cd39e71c5a50 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 10:45:46 -0700
+Subject: [PATCH 15/19] Player ids: BO2's 64-bit game ids reach the player
+ behind them (profiles, files)
+
+---
+ dw-server/src/lobby/mod.rs               |  1 +
+ dw-server/src/lobby/player_id.rs         | 67 ++++++++++++++++++++++++
+ dw-server/src/lobby/profile/service.rs   |  5 +-
+ dw-server/src/lobby/storage/user_file.rs | 16 ++++--
+ 4 files changed, 85 insertions(+), 4 deletions(-)
+ create mode 100644 dw-server/src/lobby/player_id.rs
+
+diff --git a/dw-server/src/lobby/mod.rs b/dw-server/src/lobby/mod.rs
+index 0f36ea8..c978d3c 100644
+--- a/dw-server/src/lobby/mod.rs
++++ b/dw-server/src/lobby/mod.rs
+@@ -1,6 +1,7 @@
+ mod content_streaming;
+ mod counter;
+ mod group;
++mod player_id;
+ mod profile;
+ mod rich_presence;
+ mod storage;
+diff --git a/dw-server/src/lobby/player_id.rs b/dw-server/src/lobby/player_id.rs
+new file mode 100644
+index 0000000..cad29f5
+--- /dev/null
++++ b/dw-server/src/lobby/player_id.rs
+@@ -0,0 +1,67 @@
++//! Black Ops II (PS3) names players by a 64-bit id of its own (stable per player, not the one in the PSN ticket),
++//! while the login gives each player the ticket's user id (with RPCN, a small account number). Profiles, stats and
++//! files asked for by game id must reach the player behind it, so we learn each player's game id from the first
++//! listing of their own files (every login does one) and keep it.
++use bitdemon::networking::bd_session::BdSession;
++use log::info;
++use rusqlite::Connection;
++use std::cell::RefCell;
++use std::fs::create_dir_all;
++
++thread_local! {
++    static PLAYER_ID_DB: RefCell<Connection> = RefCell::new(initialized_db());
++}
++
++fn initialized_db() -> Connection {
++    create_dir_all("db").expect("to be able to create dir");
++    let conn = Connection::open("db/player_id.db").expect("expected db connection to be able to open");
++    conn.execute(
++        "CREATE TABLE IF NOT EXISTS game_id (game_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL UNIQUE)",
++        (),
++    )
++    .expect("Initialization to succeed");
++    conn
++}
++
++/// Ticket user ids (RPCN account numbers) are small; game ids use all 64 bits (SQLite keeps them as i64).
++fn is_game_id(id: u64) -> bool {
++    id > u64::from(u32::MAX)
++}
++
++/// Our user id for `id`: a known game id becomes its player's user id; anything else stays as it is.
++pub fn resolve(id: u64) -> u64 {
++    if !is_game_id(id) {
++        return id;
++    }
++    PLAYER_ID_DB
++        .with_borrow(|db| db.query_row("SELECT user_id FROM game_id WHERE game_id = ?1", [id as i64], |row| row.get::<_, i64>(0)))
++        .map(|user_id| user_id as u64)
++        .unwrap_or(id)
++}
++
++/// The session's player lists files by `id`. A game id nobody has yet, from a player who has none yet, is theirs
++/// (a listing of someone else's files comes after their own, so it can't take it).
++pub fn learn_own(session: &BdSession, id: u64) -> u64 {
++    let auth = session.authentication().unwrap();
++    if is_game_id(id) && resolve(id) == id {
++        let added = PLAYER_ID_DB.with_borrow(|db| {
++            db.execute("INSERT OR IGNORE INTO game_id (game_id, user_id) VALUES (?1, ?2)", (id as i64, auth.user_id as i64))
++        });
++        if added == Ok(1) {
++            info!("{} (user {}) is game id {id}", auth.username, auth.user_id);
++        }
++    }
++    resolve(id)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::is_game_id;
++
++    #[test]
++    fn game_ids_are_the_large_ones() {
++        assert!(!is_game_id(2));
++        assert!(is_game_id(15258544499090971638)); // Pete_Hegseth's in the 2026-10-27 two-PC test
++        assert!(is_game_id(1610465076020602188));
++    }
++}
+diff --git a/dw-server/src/lobby/profile/service.rs b/dw-server/src/lobby/profile/service.rs
+index 9ffec0b..c36011a 100644
+--- a/dw-server/src/lobby/profile/service.rs
++++ b/dw-server/src/lobby/profile/service.rs
+@@ -1,3 +1,4 @@
++use crate::lobby::player_id;
+ use crate::lobby::profile::db::{PROFILE_DB, ProfileType};
+ use bitdemon::auth::authentication::SessionAuthentication;
+ use bitdemon::lobby::profile::{ProfileInfo, ProfileService, ProfileServiceError};
+@@ -27,10 +28,11 @@ impl ProfileService for DwProfileService {
+                 .iter()
+                 .copied()
+                 .flat_map(|user_id| {
++                    // asked by game id (see player_id), answered under the id the game asked for
+                     transaction.query_row(
+                         "SELECT data FROM user_profile u
+                      WHERE u.title = ?1 AND u.owner_id = ?2 AND u.profile_type = ?3",
+-                        (title_num, user_id, u8::from(ProfileType::Public)),
++                        (title_num, player_id::resolve(user_id) as i64, u8::from(ProfileType::Public)),
+                         |row| {
+                             Ok(ProfileInfo {
+                                 user_id,
+@@ -42,6 +44,7 @@ impl ProfileService for DwProfileService {
+                 .collect()
+         });
+ 
++        info!("Public profiles asked for {user_ids:?}: {} found", res.len());
+         if !res.is_empty() || user_ids.is_empty() {
+             Ok(res)
+         } else {
+diff --git a/dw-server/src/lobby/storage/user_file.rs b/dw-server/src/lobby/storage/user_file.rs
+index 6d47ab6..7c15843 100644
+--- a/dw-server/src/lobby/storage/user_file.rs
++++ b/dw-server/src/lobby/storage/user_file.rs
+@@ -1,3 +1,4 @@
++use crate::lobby::player_id;
+ use crate::lobby::storage::db::{STORAGE_DB, from_file_visibility, from_title, to_file_visibility};
+ use crate::lobby::storage::stats_check;
+ use bitdemon::domain::result_slice::ResultSlice;
+@@ -33,6 +34,7 @@ impl UserStorageService for DwUserStorageService {
+         file_id: u64,
+     ) -> Result<Vec<u8>, StorageServiceError> {
+         info!("Requesting file file_id={file_id} owner_id={owner_id}");
++        let owner_id = player_id::resolve(owner_id);
+ 
+         if session.authentication().unwrap().user_id != owner_id {
+             return Err(StorageServiceError::PermissionDeniedError);
+@@ -57,6 +59,7 @@ impl UserStorageService for DwUserStorageService {
+         filename: String,
+     ) -> Result<Vec<u8>, StorageServiceError> {
+         info!("Requesting file filename={filename} owner_id={owner_id}",);
++        let owner_id = player_id::resolve(owner_id);
+ 
+         let is_owner = session.authentication().unwrap().user_id == owner_id;
+ 
+@@ -93,6 +96,7 @@ impl UserStorageService for DwUserStorageService {
+         page_size: usize,
+     ) -> Result<ResultSlice<StorageFileInfo>, StorageServiceError> {
+         info!("Listing files owner_id={owner_id} min_date_time={min_date_time}");
++        player_id::learn_own(session, owner_id);
+         query_files(
+             session,
+             owner_id,
+@@ -113,6 +117,7 @@ impl UserStorageService for DwUserStorageService {
+         filter: String,
+     ) -> Result<ResultSlice<StorageFileInfo>, StorageServiceError> {
+         info!("Filtering files owner_id={owner_id} min_date_time={min_date_time} filter={filter}");
++        player_id::learn_own(session, owner_id);
+         query_files(
+             session,
+             owner_id,
+@@ -135,6 +140,7 @@ impl UserStorageService for DwUserStorageService {
+         info!(
+             "Uploading file filename={filename} owner_id={owner_id} visibility={visibility:?} len={file_size}"
+         );
++        let owner_id = player_id::resolve(owner_id);
+ 
+         let user_id = session.authentication().unwrap().user_id;
+         if user_id != owner_id {
+@@ -232,6 +238,7 @@ impl UserStorageService for DwUserStorageService {
+     ) -> Result<(), StorageServiceError> {
+         let file_size = file_data.len();
+         info!("Uploading file file_id={file_id} owner_id={owner_id} len={file_size}");
++        let owner_id = player_id::resolve(owner_id);
+ 
+         if session.authentication().unwrap().user_id != owner_id {
+             warn!("Tried to update file for other user");
+@@ -294,6 +301,7 @@ impl UserStorageService for DwUserStorageService {
+         filename: String,
+     ) -> Result<(), StorageServiceError> {
+         info!("Removing file filename={filename} owner_id={owner_id}");
++        let owner_id = player_id::resolve(owner_id);
+ 
+         if session.authentication().unwrap().user_id != owner_id {
+             warn!("Tried to delete file for other user");
+@@ -325,15 +333,17 @@ impl DwUserStorageService {
+     }
+ }
+ 
+-/// The owner's files (or, for anyone else, the public ones) whose name starts with `prefix`, oldest first.
++/// The owner's files (or, for anyone else, the public ones) whose name starts with `prefix`, oldest first. The
++/// files name their owner the way the game asked (`asked_owner`, a game id or ours).
+ fn query_files(
+     session: &BdSession,
+-    owner_id: u64,
++    asked_owner: u64,
+     min_date_time: i64,
+     offset: usize,
+     count: usize,
+     prefix: &str,
+ ) -> Result<ResultSlice<StorageFileInfo>, StorageServiceError> {
++    let owner_id = player_id::resolve(asked_owner);
+     let auth = session.authentication().unwrap();
+     let (title, is_owner) = (auth.title, auth.user_id == owner_id);
+ 
+@@ -365,7 +375,7 @@ fn query_files(
+                     created: row.get(3)?,
+                     modified: row.get(4)?,
+                     visibility: to_file_visibility(row.get(5)?),
+-                    owner_id,
++                    owner_id: asked_owner,
+                 })
+             },
+         )?
+-- 
+2.56.0
+

@@ -1,0 +1,46 @@
+From 3e3d01d2f30ff4371e998022c638869f9d89ee99 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 06:41:05 -0700
+Subject: [PATCH] USCL: built-in BO2 patch: network messages little-endian like
+ the PS4 build (crossplay)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Utilities/bin_patch.cpp | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/Utilities/bin_patch.cpp b/Utilities/bin_patch.cpp
+index 4f9a6a0..24ce9bd 100644
+--- a/Utilities/bin_patch.cpp
++++ b/Utilities/bin_patch.cpp
+@@ -1483,6 +1483,27 @@ PPU-d26243d3556a8d446a97da71df8c12da4b7867a1:
+       - [ be32, 0x007fcd4c, 0x60000000 ] # receive: bne after the MAC memcmp -> nop (MAC not checked)
+       - [ be32, 0x007fcd88, 0x60000000 ] # receive: xor r5,r5,r6 -> nop
+       - [ be32, 0x007fcda8, 0x7ca32b78 ] # receive: xor r3,r5,r3 -> mr r3,r5
++  "USCL: little-endian messages":
++    Games:
++      "Call of Duty: Black Ops II":
++        BLUS31011: [ 01.19 ]
++    Author: "USCL"
++    Notes: "Multiplayer. Network messages (msg_t short/long/int64/float) in little-endian like the PS4 build, so PS3 and PS4 parse each other's lobby messages. Both sides of a PS3 game change together, so PS3 <-> PS3 is unaffected."
++    Patch Version: 1.0
++    Patch:
++      - [ be32, 0x0032b7b4, 0x480b9435 ] # in 0x32b720: short via the swapping function
++      - [ be32, 0x0032be84, 0x480b8d65 ] # in 0x32bde8: short via the swapping function
++      - [ be32, 0x0032c80c, 0x480b83dd ] # in 0x32c760: short via the swapping function
++      - [ be32, 0x0032edf4, 0x480b5df5 ] # in 0x32edc0: short via the swapping function
++      - [ be32, 0x0032b878, 0x480b9391 ] # in 0x32b7e4: long via the swapping function
++      - [ be32, 0x0032ba04, 0x480b9205 ] # in 0x32b970: long via the swapping function
++      - [ be32, 0x0032cabc, 0x480b814d ] # in 0x32ca00: long via the swapping function
++      - [ be32, 0x0032cebc, 0x480b7d4d ] # in 0x32cdd0: long via the swapping function
++      - [ be32, 0x0032e95c, 0x480b62ad ] # in 0x32e92c: long via the swapping function
++      - [ be32, 0x0032ee64, 0x480b5da5 ] # in 0x32ee34: long via the swapping function
++      - [ be32, 0x0032effc, 0x480b5c0d ] # in 0x32eeb0: long via the swapping function
++      - [ be32, 0x0032b424, 0x480b9811 ] # in 0x32b3f4: long64 via the swapping function
++      - [ be32, 0x0032b938, 0x480b92fd ] # in 0x32b8a8: long64 via the swapping function
+ )", true);
+ 		return map;
+ 	}();
+-- 
+2.56.0
+

@@ -1,0 +1,65 @@
+From 0f40e1ca8ec660dba545d190755574e4b5f44abb Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 19:02:47 -0700
+Subject: [PATCH] USCL: built-in game patches that always apply (online too);
+ BO2 plain peer data
+
+USCL's own patches are compiled in and keyed by PPU hash, so they only touch the executable they were made for and
+still apply when USCL_ONLINE turns players' patch.yml off. First one: Black Ops II multiplayer sends game-to-game
+data (bdDTLS DATA) unencrypted; the Steam tunnel encrypts between PCs and the bridge can translate it for PS4 crossplay.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Utilities/bin_patch.cpp | 36 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/Utilities/bin_patch.cpp b/Utilities/bin_patch.cpp
+index 61f92dc..4f9a6a0 100644
+--- a/Utilities/bin_patch.cpp
++++ b/Utilities/bin_patch.cpp
+@@ -1462,6 +1462,42 @@ void patch_engine::apply(std::vector<u32>& applied_total, const std::string& nam
+ {
+ 	// applied_total may be non-empty, do not clear it
+ 
++	// USCL: our own game patches are built in and always apply, also online (where players' patches are off).
++	// Keyed by PPU hash, so each one only touches the exact executable it was made for.
++	static const patch_map uscl_map = []
++	{
++		patch_map map;
++		load(map, "USCL built-in patches", R"(Version: 1.2
++
++PPU-d26243d3556a8d446a97da71df8c12da4b7867a1:
++  "USCL: plain peer data":
++    Games:
++      "Call of Duty: Black Ops II":
++        BLUS31011: [ 01.19 ]
++    Author: "USCL"
++    Notes: "Multiplayer. Game-to-game data (bdDTLS DATA) is sent unencrypted; the Steam tunnel encrypts between PCs, and the bridge can translate it for PS4 crossplay."
++    Patch Version: 1.0
++    Patch:
++      - [ be32, 0x007fca5c, 0x60000000 ] # send: xor r4,r4,r5 -> nop (block word 1 stays as is)
++      - [ be32, 0x007fca74, 0x60000000 ] # send: xor r4,r4,r5 -> nop (word 2)
++      - [ be32, 0x007fcd4c, 0x60000000 ] # receive: bne after the MAC memcmp -> nop (MAC not checked)
++      - [ be32, 0x007fcd88, 0x60000000 ] # receive: xor r5,r5,r6 -> nop
++      - [ be32, 0x007fcda8, 0x7ca32b78 ] # receive: xor r3,r5,r3 -> mr r3,r5
++)", true);
++		return map;
++	}();
++
++	if (uscl_map.contains(name))
++	{
++		for (const auto& [description, patch] : ::at32(uscl_map, name).patch_info_map)
++		{
++			patch_info p = patch;
++			const usz old_size = apply_modification(applied_total, p, mem_translate, filesz, min_addr);
++			patch_log.success("Applied USCL patch (hash='%s', description='%s') (<- %u)", p.hash, description, applied_total.size() - old_size);
++		}
++		std::sort(applied_total.begin(), applied_total.end());
++	}
++
+ 	if (!m_map.contains(name))
+ 	{
+ 		return;
+-- 
+2.56.0
+

@@ -32,6 +32,7 @@ ICONS = {
     "it_addgames": 0xE2CC, "it_host": 0xE7F0, "it_join": 0xEA77, "it_logout": 0xE9BA, "it_tune": 0xE429,
     "it_storage": 0xE1DB, "it_usb": 0xE1E0, "it_person": 0xE7FD, "it_face": 0xE87C, "it_speed": 0xE9E4,
     "it_desktop": 0xE30C, "it_play": 0xE1C4, "it_stream": 0xE308, "it_memory": 0xE322,
+    "cat_party": 0xE311, "it_server": 0xE875, "it_voice": 0xE91F,
 }
 
 

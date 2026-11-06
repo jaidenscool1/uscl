@@ -20,6 +20,14 @@ jobs:
       - uses: actions/checkout@v4
       - run: cargo build
       - run: cargo test
+      # a bridge testers can drop next to an installed USCL (two-PC tests between installer releases)
+      - if: runner.os == 'Windows'
+        run: cargo build --release
+      - if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: uscl-bridge-windows
+          path: uscl-bridge/target/release/uscl-bridge.exe
   # what Windows players get from rustup without Visual Studio
   uscl-bridge-windows-gnu:
     runs-on: windows-latest
