@@ -13,6 +13,8 @@ for the PS3's old online services. You and your friends connect through Steam, s
   sets up every connected controller and picks the sharpest picture your PC can handle.
 - 🌐 **Online with Steam friends.** Host a session for a game and your friends join from their Friends list.
   Test Connection checks that everything is ready.
+- 🛡️ **Keeps cheaters out.** Hosts can kick or ban players by Steam account, games in a session run without
+  cheat patches, and everyone's game files must match the host's.
 - 🔄 **Updates itself.** When a new version is out, USCL asks before installing it. Every update is signed, and
   USCL refuses any file that isn't.
 

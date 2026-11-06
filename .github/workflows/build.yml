@@ -1,0 +1,41 @@
+name: build
+# Only when the bridge changes, and once per change: pull requests and main (not every branch push, which
+# doubled every PR's runs)
+on:
+  pull_request:
+    paths: ['uscl-bridge/**']
+  push:
+    branches: [main]
+    paths: ['uscl-bridge/**']
+jobs:
+  uscl-bridge:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: uscl-bridge
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build
+      - run: cargo test
+      # a bridge testers can drop next to an installed USCL (two-PC tests between installer releases)
+      - if: runner.os == 'Windows'
+        run: cargo build --release
+      - if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: uscl-bridge-windows
+          path: uscl-bridge/target/release/uscl-bridge.exe
+  # what Windows players get from rustup without Visual Studio
+  uscl-bridge-windows-gnu:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: uscl-bridge
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+      - run: cargo +stable-x86_64-pc-windows-gnu build
+      - run: cargo +stable-x86_64-pc-windows-gnu test

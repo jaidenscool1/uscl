@@ -1,0 +1,790 @@
+diff --git a/src/core/libraries/kernel/threads/event_flag.cpp b/src/core/libraries/kernel/threads/event_flag.cpp
+index 2ac4b201..d58e040b 100644
+--- a/src/core/libraries/kernel/threads/event_flag.cpp
++++ b/src/core/libraries/kernel/threads/event_flag.cpp
+@@ -189,10 +189,13 @@ public:
+ 
+         m_bits |= bits;
+ 
+-        for (auto it : m_waiters) {
+-            Waiter* waiter = it;
++        // A woken waiter leaves the queue now, like on the PS4. Left in it until its thread ran, it
++        // matched the next Set again and its clear ate bits meant for other threads (lost wakeups).
++        for (auto it = m_waiters.begin(); it != m_waiters.end();) {
++            Waiter* waiter = *it;
+ 
+             if (!ConditionMet(*waiter)) {
++                ++it;
+                 continue;
+             }
+ 
+@@ -201,6 +204,7 @@ public:
+ 
+             waiter->ready = true;
+             waiter->cv.notify_one();
++            it = m_waiters.erase(it);
+         }
+     }
+ 
+diff --git a/src/core/libraries/kernel/threads/semaphore.cpp b/src/core/libraries/kernel/threads/semaphore.cpp
+index d5d18b82..f7b5976d 100644
+--- a/src/core/libraries/kernel/threads/semaphore.cpp
++++ b/src/core/libraries/kernel/threads/semaphore.cpp
+@@ -1,11 +1,14 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <atomic>
+ #include <condition_variable>
+ #include <limits>
+ #include <list>
++#include <memory>
+ #include <mutex>
+ #include <semaphore>
++#include <unordered_map>
+ 
+ #include "core/libraries/kernel/sync/semaphore.h"
+ 
+@@ -22,14 +25,44 @@ namespace Libraries::Kernel {
+ 
+ constexpr s32 ORBIS_KERNEL_SEM_VALUE_MAX = 0x7FFFFFFF;
+ 
++// sem_t is 16 bytes of guest memory, laid out as libkernel does: games may build it with their own
++// copy of that code (Black Ops II CUSA57548 does) and then wait and post through us. The count lives
++// there; the host side (waiters) is found by the sem_t's address.
++struct GuestSem {
++    u16 magic;
++    u16 named_id;
++    u32 has_waiters;
++    s32 count;
++    u32 pshared;
++};
++static_assert(sizeof(GuestSem) == 16);
++constexpr u16 GUEST_SEM_MAGIC = 0x736d;
++
+ struct PthreadSem {
+-    explicit PthreadSem(s32 value_) : value{value_} {}
++    explicit PthreadSem(GuestSem* guest) : value{guest->count} {}
+ 
+-    std::atomic<s32> value;
++    std::atomic_ref<s32> value;
+     std::mutex wait_mutex;
+     std::list<Pthread*> waiters;
+ };
+ 
++static std::mutex g_sems_mutex;
++static std::unordered_map<const void*, std::unique_ptr<PthreadSem>> g_sems;
++
++// The host semaphore for a guest sem_t, or nullptr when it isn't an initialized one.
++static PthreadSem* FindSem(PthreadSem** sem) {
++    auto* guest = reinterpret_cast<GuestSem*>(sem);
++    if (guest == nullptr || guest->magic != GUEST_SEM_MAGIC) {
++        return nullptr;
++    }
++    std::scoped_lock lock{g_sems_mutex};
++    auto& host = g_sems[guest];
++    if (!host) {
++        host = std::make_unique<PthreadSem>(guest);
++    }
++    return host.get();
++}
++
+ class ScopedPthreadCritical {
+ public:
+     explicit ScopedPthreadCritical(Pthread* thread_) : thread{thread_} {
+@@ -372,35 +405,41 @@ s32 PS4_SYSV_ABI posix_sem_init(PthreadSem** sem, s32 /*pshared*/, u32 value) {
+         return -1;
+     }
+     if (sem != nullptr) {
+-        *sem = new PthreadSem(static_cast<s32>(value));
++        auto* guest = reinterpret_cast<GuestSem*>(sem);
++        std::scoped_lock lock{g_sems_mutex};
++        g_sems.erase(guest);
++        *guest = {GUEST_SEM_MAGIC, 0xffff, 0, static_cast<s32>(value), 0};
+     }
+     return 0;
+ }
+ 
+ s32 PS4_SYSV_ABI posix_sem_destroy(PthreadSem** sem) {
+-    if (sem == nullptr || *sem == nullptr) {
++    if (FindSem(sem) == nullptr) {
+         *__Error() = POSIX_EINVAL;
+         return -1;
+     }
+-    delete *sem;
+-    *sem = nullptr;
++    std::scoped_lock lock{g_sems_mutex};
++    g_sems.erase(sem);
++    reinterpret_cast<GuestSem*>(sem)->magic = 0;
+     return 0;
+ }
+ 
+ s32 PS4_SYSV_ABI posix_sem_wait(PthreadSem** sem) {
+-    if (sem == nullptr || *sem == nullptr) {
++    PthreadSem* host = FindSem(sem);
++    if (host == nullptr) {
+         *__Error() = POSIX_EINVAL;
+         return -1;
+     }
+-    return PthreadSemWait(*sem, nullptr);
++    return PthreadSemWait(host, nullptr);
+ }
+ 
+ s32 PS4_SYSV_ABI posix_sem_trywait(PthreadSem** sem) {
+-    if (sem == nullptr || *sem == nullptr) {
++    PthreadSem* host = FindSem(sem);
++    if (host == nullptr) {
+         *__Error() = POSIX_EINVAL;
+         return -1;
+     }
+-    if (!PthreadSemTryAcquire(*sem)) {
++    if (!PthreadSemTryAcquire(host)) {
+         *__Error() = POSIX_EAGAIN;
+         return -1;
+     }
+@@ -408,55 +447,59 @@ s32 PS4_SYSV_ABI posix_sem_trywait(PthreadSem** sem) {
+ }
+ 
+ s32 PS4_SYSV_ABI posix_sem_timedwait(PthreadSem** sem, const OrbisKernelTimespec* t) {
+-    if (sem == nullptr || *sem == nullptr) {
++    PthreadSem* host = FindSem(sem);
++    if (host == nullptr) {
+         *__Error() = POSIX_EINVAL;
+         return -1;
+     }
+-    return PthreadSemWait(*sem, t);
++    return PthreadSemWait(host, t);
+ }
+ 
+ s32 PS4_SYSV_ABI posix_sem_reltimedwait_np(PthreadSem** sem, u32 usec) {
+-    if (sem == nullptr || *sem == nullptr) {
++    PthreadSem* host = FindSem(sem);
++    if (host == nullptr) {
+         *__Error() = POSIX_EINVAL;
+         return -1;
+     }
+-    return PthreadSemWait(*sem, THR_RELTIME, usec);
++    return PthreadSemWait(host, THR_RELTIME, usec);
+ }
+ 
+ s32 PS4_SYSV_ABI posix_sem_post(PthreadSem** sem) {
+-    if (sem == nullptr || *sem == nullptr) {
++    PthreadSem* host = FindSem(sem);
++    if (host == nullptr) {
+         *__Error() = POSIX_EINVAL;
+         return -1;
+     }
+     ScopedPthreadCritical critical{g_curthread};
+     // Atomically check for overflow and increment in one step.
+-    s32 current = (*sem)->value.load();
++    s32 current = host->value.load();
+     do {
+         if (current == ORBIS_KERNEL_SEM_VALUE_MAX) {
+             *__Error() = POSIX_EOVERFLOW;
+             return -1;
+         }
+-    } while (!(*sem)->value.compare_exchange_weak(current, current + 1));
++    } while (!host->value.compare_exchange_weak(current, current + 1));
+ 
+     {
+-        std::scoped_lock lock{(*sem)->wait_mutex};
++        std::scoped_lock lock{host->wait_mutex};
+         // libkernel wakes every waiter after incrementing the value. Only waiters that win the
+         // value CAS return; the rest publish themselves again and continue waiting.
+-        for (Pthread* waiter : (*sem)->waiters) {
++        for (Pthread* waiter : host->waiters) {
+             waiter->wake_sema.release();
+         }
+-        (*sem)->waiters.clear();
++        host->waiters.clear();
+     }
+     return 0;
+ }
+ 
+ s32 PS4_SYSV_ABI posix_sem_getvalue(PthreadSem** sem, s32* sval) {
+-    if (sem == nullptr || *sem == nullptr) {
++    PthreadSem* host = FindSem(sem);
++    if (host == nullptr) {
+         *__Error() = POSIX_EINVAL;
+         return -1;
+     }
+     if (sval) {
+-        *sval = (*sem)->value;
++        *sval = host->value.load();
+     }
+     return 0;
+ }
+diff --git a/src/core/libraries/libc_internal/libc_internal_memory.cpp b/src/core/libraries/libc_internal/libc_internal_memory.cpp
+index c98488fc..5e30e318 100644
+--- a/src/core/libraries/libc_internal/libc_internal_memory.cpp
++++ b/src/core/libraries/libc_internal/libc_internal_memory.cpp
+@@ -1,6 +1,12 @@
+ // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <algorithm>
++#include <atomic>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++
+ #include "common/assert.h"
+ #include "common/logging/log.h"
+ #include "core/libraries/error_codes.h"
+@@ -51,6 +57,185 @@ void PS4_SYSV_ABI sceLibcHeapGetTraceInfo(HeapInfoInfo* info) {
+     info->getSegmentInfo = 0;
+ }
+ 
++
++// Heap for modules that import the allocator from libSceLibcInternal (NpToolkit2 sets up its own mspace at
++// startup and gives up on a null one). Each block carries a header with its size and the address malloc gave,
++// so free, realloc and alignment work the same with every host C library. Mspaces share this heap.
++struct HeapHeader {
++    void* raw;
++    size_t size;
++};
++
++static void* HeapAlloc(size_t size, size_t align) {
++    align = std::max<size_t>(align, alignof(std::max_align_t));
++    if ((align & (align - 1)) != 0) {
++        return nullptr;
++    }
++    const size_t extra = sizeof(HeapHeader) + align;
++    if (size > SIZE_MAX - extra) {
++        return nullptr;
++    }
++    void* raw = std::malloc(size + extra);
++    if (!raw) {
++        return nullptr;
++    }
++    const uintptr_t start = reinterpret_cast<uintptr_t>(raw) + sizeof(HeapHeader);
++    const uintptr_t aligned = (start + align - 1) & ~(uintptr_t(align) - 1);
++    auto* header = reinterpret_cast<HeapHeader*>(aligned) - 1;
++    header->raw = raw;
++    header->size = size;
++    return reinterpret_cast<void*>(aligned);
++}
++
++static size_t HeapSize(void* ptr) {
++    return ptr ? (reinterpret_cast<HeapHeader*>(ptr) - 1)->size : 0;
++}
++
++static void HeapFree(void* ptr) {
++    if (ptr) {
++        std::free((reinterpret_cast<HeapHeader*>(ptr) - 1)->raw);
++    }
++}
++
++static void* HeapRealloc(void* ptr, size_t size) {
++    if (!ptr) {
++        return HeapAlloc(size, 0);
++    }
++    if (size == 0) {
++        HeapFree(ptr);
++        return nullptr;
++    }
++    void* moved = HeapAlloc(size, 0);
++    if (moved) {
++        std::memcpy(moved, ptr, std::min(size, HeapSize(ptr)));
++        HeapFree(ptr);
++    }
++    return moved;
++}
++
++static void* HeapCalloc(size_t count, size_t size) {
++    if (size != 0 && count > SIZE_MAX / size) {
++        return nullptr;
++    }
++    void* ptr = HeapAlloc(count * size, 0);
++    if (ptr) {
++        std::memset(ptr, 0, count * size);
++    }
++    return ptr;
++}
++
++void* PS4_SYSV_ABI internal_malloc(size_t size) {
++    return HeapAlloc(size, 0);
++}
++
++void PS4_SYSV_ABI internal_free(void* ptr) {
++    HeapFree(ptr);
++}
++
++void* PS4_SYSV_ABI internal_calloc(size_t count, size_t size) {
++    return HeapCalloc(count, size);
++}
++
++void* PS4_SYSV_ABI internal_realloc(void* ptr, size_t size) {
++    return HeapRealloc(ptr, size);
++}
++
++void* PS4_SYSV_ABI internal_memalign(size_t align, size_t size) {
++    return HeapAlloc(size, align);
++}
++
++s32 PS4_SYSV_ABI internal_posix_memalign(void** out, size_t align, size_t size) {
++    void* ptr = HeapAlloc(size, align);
++    if (!ptr) {
++        return 12; // ENOMEM
++    }
++    *out = ptr;
++    return 0;
++}
++
++size_t PS4_SYSV_ABI internal_malloc_usable_size(void* ptr) {
++    return HeapSize(ptr);
++}
++
++struct Mspace {
++    std::atomic<size_t> in_use{0};
++    std::atomic<size_t> max_in_use{0};
++};
++
++struct MallocManagedSize { // SceLibcMallocManagedSize
++    u16 size;
++    u16 version;
++    u32 reserved;
++    size_t max_system_size;
++    size_t current_system_size;
++    size_t max_inuse_size;
++    size_t current_inuse_size;
++};
++
++static void* MspaceTrack(Mspace* msp, void* ptr) {
++    if (msp && ptr) {
++        const size_t now = msp->in_use += HeapSize(ptr);
++        size_t max = msp->max_in_use;
++        while (now > max && !msp->max_in_use.compare_exchange_weak(max, now)) {
++        }
++    }
++    return ptr;
++}
++
++void* PS4_SYSV_ABI sceLibcMspaceCreate(const char* name, void* base, size_t capacity, u32 flag) {
++    LOG_INFO(Lib_LibcInternal, "name = {}, capacity = {:#x}, flag = {:#x}", name ? name : "", capacity, flag);
++    return new Mspace;
++}
++
++s32 PS4_SYSV_ABI sceLibcMspaceDestroy(Mspace* msp) {
++    delete msp;
++    return 0;
++}
++
++void* PS4_SYSV_ABI sceLibcMspaceMalloc(Mspace* msp, size_t size) {
++    return MspaceTrack(msp, HeapAlloc(size, 0));
++}
++
++void* PS4_SYSV_ABI sceLibcMspaceCalloc(Mspace* msp, size_t count, size_t size) {
++    return MspaceTrack(msp, HeapCalloc(count, size));
++}
++
++void* PS4_SYSV_ABI sceLibcMspaceMemalign(Mspace* msp, size_t align, size_t size) {
++    return MspaceTrack(msp, HeapAlloc(size, align));
++}
++
++s32 PS4_SYSV_ABI sceLibcMspaceFree(Mspace* msp, void* ptr) {
++    if (msp && ptr) {
++        msp->in_use -= HeapSize(ptr);
++    }
++    HeapFree(ptr);
++    return 0;
++}
++
++void* PS4_SYSV_ABI sceLibcMspaceRealloc(Mspace* msp, void* ptr, size_t size) {
++    if (msp && ptr) {
++        msp->in_use -= HeapSize(ptr);
++    }
++    void* moved = HeapRealloc(ptr, size);
++    if (!moved && ptr && size != 0 && msp) {
++        msp->in_use += HeapSize(ptr); // realloc failed, the old block stays
++    }
++    return MspaceTrack(msp, moved);
++}
++
++size_t PS4_SYSV_ABI sceLibcMspaceMallocUsableSize(void* ptr) {
++    return HeapSize(ptr);
++}
++
++s32 PS4_SYSV_ABI sceLibcMspaceMallocStats(Mspace* msp, MallocManagedSize* stats) {
++    if (!msp || !stats) {
++        return -1;
++    }
++    stats->max_system_size = stats->max_inuse_size = msp->max_in_use;
++    stats->current_system_size = stats->current_inuse_size = msp->in_use;
++    return 0;
++}
++
+ void RegisterlibSceLibcInternalMemory(Core::Loader::SymbolsResolver* sym) {
+ 
+     LIB_FUNCTION("NFLs+dRJGNg", "libSceLibcInternal", 1, "libSceLibcInternal", internal_memcpy_s);
+@@ -59,6 +244,26 @@ void RegisterlibSceLibcInternalMemory(Core::Loader::SymbolsResolver* sym) {
+     LIB_FUNCTION("8zTFvBIAIN8", "libSceLibcInternal", 1, "libSceLibcInternal", internal_memset);
+     LIB_FUNCTION("DfivPArhucg", "libSceLibcInternal", 1, "libSceLibcInternal", internal_memcmp);
+ 
++    LIB_FUNCTION("gQX+4GDQjpM", "libSceLibcInternal", 1, "libSceLibcInternal", internal_malloc);
++    LIB_FUNCTION("tIhsqj0qsFE", "libSceLibcInternal", 1, "libSceLibcInternal", internal_free);
++    LIB_FUNCTION("2X5agFjKxMc", "libSceLibcInternal", 1, "libSceLibcInternal", internal_calloc);
++    LIB_FUNCTION("Y7aJ1uydPMo", "libSceLibcInternal", 1, "libSceLibcInternal", internal_realloc);
++    LIB_FUNCTION("Ujf3KzMvRmI", "libSceLibcInternal", 1, "libSceLibcInternal", internal_memalign);
++    LIB_FUNCTION("cVSk9y8URbc", "libSceLibcInternal", 1, "libSceLibcInternal", internal_posix_memalign);
++    LIB_FUNCTION("NDcSfcYZRC8", "libSceLibcInternal", 1, "libSceLibcInternal",
++                 internal_malloc_usable_size);
++    LIB_FUNCTION("-hn1tcVHq5Q", "libSceLibcInternal", 1, "libSceLibcInternal", sceLibcMspaceCreate);
++    LIB_FUNCTION("W6SiVSiCDtI", "libSceLibcInternal", 1, "libSceLibcInternal", sceLibcMspaceDestroy);
++    LIB_FUNCTION("OJjm-QOIHlI", "libSceLibcInternal", 1, "libSceLibcInternal", sceLibcMspaceMalloc);
++    LIB_FUNCTION("LYo3GhIlB38", "libSceLibcInternal", 1, "libSceLibcInternal", sceLibcMspaceCalloc);
++    LIB_FUNCTION("iF1iQHzxBJU", "libSceLibcInternal", 1, "libSceLibcInternal", sceLibcMspaceMemalign);
++    LIB_FUNCTION("Vla-Z+eXlxo", "libSceLibcInternal", 1, "libSceLibcInternal", sceLibcMspaceFree);
++    LIB_FUNCTION("gigoVHZvVPE", "libSceLibcInternal", 1, "libSceLibcInternal", sceLibcMspaceRealloc);
++    LIB_FUNCTION("fEoW6BJsPt4", "libSceLibcInternal", 1, "libSceLibcInternal",
++                 sceLibcMspaceMallocUsableSize);
++    LIB_FUNCTION("mfHdJTIvhuo", "libSceLibcInternal", 1, "libSceLibcInternal", sceLibcMspaceMallocStats);
++    LIB_FUNCTION("k04jLXu3+Ic", "libSceLibcInternal", 1, "libSceLibcInternal", sceLibcMspaceMallocStats);
++
+     LIB_FUNCTION("NWtTN10cJzE", "libSceLibcInternalExt", 1, "libSceLibcInternal",
+                  sceLibcHeapGetTraceInfo);
+ }
+diff --git a/src/core/libraries/libc_internal/libc_internal_str.cpp b/src/core/libraries/libc_internal/libc_internal_str.cpp
+index e5c2e64b..90047c47 100644
+--- a/src/core/libraries/libc_internal/libc_internal_str.cpp
++++ b/src/core/libraries/libc_internal/libc_internal_str.cpp
+@@ -1,6 +1,9 @@
+ // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <cerrno>
++#include <cstring>
++
+ #include "common/assert.h"
+ #include "common/logging/log.h"
+ #include "core/libraries/error_codes.h"
+@@ -47,7 +50,17 @@ s32 PS4_SYSV_ABI internal_strncpy_s(char* dest, size_t destsz, const char* src,
+ #ifdef _WIN64
+     return strncpy_s(dest, destsz, src, count);
+ #else
+-    std::strcpy(dest, src);
++    // at most count chars, always terminated (a plain strcpy copied the whole source)
++    if (dest == nullptr || destsz == 0) {
++        return EINVAL;
++    }
++    const size_t len = strnlen(src, count);
++    if (len >= destsz) {
++        dest[0] = '\0';
++        return ERANGE;
++    }
++    std::memcpy(dest, src, len);
++    dest[len] = '\0';
+     return 0;
+ #endif
+ }
+diff --git a/src/core/libraries/libc_internal/libc_internal_threads.cpp b/src/core/libraries/libc_internal/libc_internal_threads.cpp
+index 2d8ddacc..9ec201ec 100644
+--- a/src/core/libraries/libc_internal/libc_internal_threads.cpp
++++ b/src/core/libraries/libc_internal/libc_internal_threads.cpp
+@@ -1,6 +1,8 @@
+ // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <mutex>
++
+ #include "core/libraries/kernel/threads.h"
+ #include "core/libraries/libc_internal/libc_internal_threads.h"
+ #include "core/libraries/libs.h"
+@@ -55,11 +57,42 @@ s32 PS4_SYSV_ABI internal__Mtxdst(Libraries::Kernel::PthreadMutexT* mtx) {
+     return result != 0;
+ }
+ 
++// C++ function-local static guards (Itanium ABI): the first byte of the guard is set once the object
++// is built. One recursive lock serializes all initializers, like libstdc++'s generic fallback.
++static std::recursive_mutex guard_mutex;
++
++s32 PS4_SYSV_ABI internal___cxa_guard_acquire(u64* guard) {
++    if (*reinterpret_cast<volatile u8*>(guard) != 0) {
++        return 0;
++    }
++    guard_mutex.lock();
++    if (*reinterpret_cast<volatile u8*>(guard) != 0) {
++        guard_mutex.unlock();
++        return 0;
++    }
++    return 1;
++}
++
++void PS4_SYSV_ABI internal___cxa_guard_release(u64* guard) {
++    *reinterpret_cast<volatile u8*>(guard) = 1;
++    guard_mutex.unlock();
++}
++
++void PS4_SYSV_ABI internal___cxa_guard_abort(u64*) {
++    guard_mutex.unlock();
++}
++
+ void RegisterlibSceLibcInternalThreads(Core::Loader::SymbolsResolver* sym) {
+     LIB_FUNCTION("z7STeF6abuU", "libSceLibcInternal", 1, "libSceLibcInternal", internal__Mtxinit);
+     LIB_FUNCTION("pE4Ot3CffW0", "libSceLibcInternal", 1, "libSceLibcInternal", internal__Mtxlock);
+     LIB_FUNCTION("cMwgSSmpE5o", "libSceLibcInternal", 1, "libSceLibcInternal", internal__Mtxunlock);
+     LIB_FUNCTION("LaPaA6mYA38", "libSceLibcInternal", 1, "libSceLibcInternal", internal__Mtxdst);
++    LIB_FUNCTION("3GPpjQdAMTw", "libSceLibcInternal", 1, "libSceLibcInternal",
++                 internal___cxa_guard_acquire);
++    LIB_FUNCTION("9rAeANT2tyE", "libSceLibcInternal", 1, "libSceLibcInternal",
++                 internal___cxa_guard_release);
++    LIB_FUNCTION("2emaaluWzUw", "libSceLibcInternal", 1, "libSceLibcInternal",
++                 internal___cxa_guard_abort);
+ }
+ 
+ } // namespace Libraries::LibcInternal
+\ No newline at end of file
+diff --git a/src/core/libraries/net/net_resolver.cpp b/src/core/libraries/net/net_resolver.cpp
+index 4e0fb4d5..eccce6b5 100644
+--- a/src/core/libraries/net/net_resolver.cpp
++++ b/src/core/libraries/net/net_resolver.cpp
+@@ -6,6 +6,8 @@
+ #include <cstring>
+ #include <memory>
+ #include <mutex>
++#include <optional>
++#include <string>
+ #include <thread>
+ #include <unordered_map>
+ #include <utility>
+@@ -63,11 +65,46 @@ bool IsOnline() {
+     return !check || check();
+ }
+ 
++// USCL_HOSTS="name=ip&&*.suffix=ip": names answered without DNS (USCL points game servers such as
++// Demonware at its own on 127.0.0.1), in RPCS3's "IP swap list" format.
++std::optional<u32> HostOverride(const std::string& hostname) {
++    const char* env = std::getenv("USCL_HOSTS");
++    if (env == nullptr) {
++        return std::nullopt;
++    }
++    const std::string list = env;
++    for (size_t pos = 0; pos <= list.size();) {
++        size_t end = list.find("&&", pos);
++        if (end == std::string::npos) {
++            end = list.size();
++        }
++        const std::string entry = list.substr(pos, end - pos);
++        pos = end + 2;
++        const size_t eq = entry.find('=');
++        if (eq == std::string::npos) {
++            continue;
++        }
++        const std::string name = entry.substr(0, eq);
++        const bool match =
++            name.starts_with("*.") ? hostname.ends_with(name.substr(1)) : name == hostname;
++        in_addr ip{};
++        if (match && inet_pton(AF_INET, entry.substr(eq + 1).c_str(), &ip) == 1) {
++            return ip.s_addr;
++        }
++    }
++    return std::nullopt;
++}
++
+ // IPv4 only, at most 10 records.
+ s32 Lookup(std::string hostname, bool allow_literal, std::vector<u32>* addrs) {
+     if (!hostname.empty() && hostname.back() == '.') {
+         hostname.pop_back();
+     }
++    if (const auto ip = HostOverride(hostname)) {
++        LOG_INFO(Lib_Net, "{} -> USCL_HOSTS", hostname);
++        addrs->push_back(*ip);
++        return 0;
++    }
+     if (hostname.compare(0, 9, "localhost") == 0) {
+         addrs->push_back(htonl(INADDR_LOOPBACK));
+         return 0;
+@@ -133,6 +170,21 @@ void Deliver(const ResolverOutput& output, const std::vector<u32>& addrs) {
+ 
+ } // namespace
+ 
++bool IsUsclHost(const std::string& hostname) {
++    return HostOverride(hostname).has_value();
++}
++
++std::string UsclHostAddress(const std::string& hostname) {
++    const auto ip = HostOverride(hostname);
++    if (!ip) {
++        return {};
++    }
++    in_addr addr{};
++    addr.s_addr = *ip;
++    char text[INET_ADDRSTRLEN]{};
++    return inet_ntop(AF_INET, &addr, text, sizeof(text)) ? text : std::string{};
++}
++
+ s32 CreateResolver(std::string name) {
+     const auto r = Core::Net::ReserveExternalId();
+     if (r.error != Error::Ok) {
+diff --git a/src/core/libraries/net/net_resolver.h b/src/core/libraries/net/net_resolver.h
+index d91aaf70..90aa19e0 100644
+--- a/src/core/libraries/net/net_resolver.h
++++ b/src/core/libraries/net/net_resolver.h
+@@ -11,6 +11,10 @@
+ 
+ namespace Libraries::Net {
+ 
++// The name is answered by USCL_HOSTS (one of USCL's own servers), not DNS.
++bool IsUsclHost(const std::string& hostname);
++// Its USCL_HOSTS address as text ("" if none), for clients that resolve on their own (cpp-httplib).
++std::string UsclHostAddress(const std::string& hostname);
+ s32 CreateResolver(std::string name);
+ int DestroyResolver(s32 id);
+ int AbortResolver(s32 id, u32 flags);
+diff --git a/src/core/libraries/network/http.cpp b/src/core/libraries/network/http.cpp
+index 9c7a45c8..40dda43a 100644
+--- a/src/core/libraries/network/http.cpp
++++ b/src/core/libraries/network/http.cpp
+@@ -25,6 +25,7 @@
+ #include "common/logging/log.h"
+ #include "common/path_util.h"
+ #include "core/emulator_settings.h"
++#include "core/libraries/net/net_resolver.h"
+ #include "core/libraries/error_codes.h"
+ #include "core/libraries/kernel/kernel.h"
+ #include "core/libraries/kernel/orbis_error.h"
+@@ -846,6 +847,10 @@ static s32 RunRealHttpRequest(const SendRequestPlan& plan_in, HttpResponse& out_
+             base_url += ":" + std::to_string(plan.port);
+         }
+         httplib::Client cli(base_url);
++        // cpp-httplib resolves on its own; send names USCL_HOSTS redirects to USCL's server too
++        if (const auto uscl = Libraries::Net::UsclHostAddress(plan.host); !uscl.empty()) {
++            cli.set_hostname_addr_map({{plan.host, uscl}});
++        }
+         cli.set_connection_timeout(pick_timeout_seconds(plan.settings.connect_timeout_us, 30));
+         cli.set_read_timeout(pick_timeout_seconds(plan.settings.recv_timeout_us, 120));
+         cli.set_write_timeout(pick_timeout_seconds(plan.settings.send_timeout_us, 120));
+@@ -868,6 +873,12 @@ static s32 RunRealHttpRequest(const SendRequestPlan& plan_in, HttpResponse& out_
+             const bool game_disabled_verify =
+                 (plan.settings.ssl_flags & ORBIS_HTTPS_FLAG_SERVER_VERIFY) == 0;
+             bool verify_server = !config_disabled_verify && !game_disabled_verify;
++            if (verify_server && Libraries::Net::IsUsclHost(plan.host)) {
++                // USCL_HOSTS sent this name to USCL's own server, which has a self-made cert
++                verify_server = false;
++                LOG_INFO(Lib_Http, "{}://{}: USCL server -> bypassing cert verification",
++                         plan.scheme, plan.host);
++            }
+             if (verify_server && plan.ctx_has_loaded_certs) {
+                 verify_server = false;
+                 LOG_INFO(Lib_Http,
+diff --git a/src/core/libraries/np/np_auth/np_auth.cpp b/src/core/libraries/np/np_auth/np_auth.cpp
+index 46506f6f..1c08ffbb 100644
+--- a/src/core/libraries/np/np_auth/np_auth.cpp
++++ b/src/core/libraries/np/np_auth/np_auth.cpp
+@@ -328,11 +328,16 @@ s32 GetIdToken(s32 req_id, const OrbisNpAuthGetIdTokenParameterA* param, s32 fla
+         return FinishStartedRequest(async, ctx);
+     }
+ 
+-    LOG_ERROR(Lib_NpAuth, "(STUBBED) called, req_id = {:#x}, async = {}", req_id, async);
+-
+-    // Not sure what values are expected here, so zeroing this for now.
++    // USCL: who is signed in, "uscl:<online id>:<account id>", for the game's servers (Demonware's PS4
++    // sign-in sends this token; USCL's own server reads the player from it). Not a PSN token.
++    auto& np = Libraries::Np::NpHandler::GetInstance();
++    const OrbisNpOnlineId online = np.GetOnlineId(param->user_id);
++    const std::string id = "uscl:" +
++                           std::string(online.data, strnlen(online.data, sizeof(online.data))) +
++                           ":" + std::to_string(np.GetAccountId(param->user_id));
+     std::memset(token, 0, sizeof(OrbisNpIdToken));
+-    std::strncpy(token->token, "TOKEN", 6);
++    std::strncpy(token->token, id.c_str(), sizeof(token->token) - 1);
++    LOG_INFO(Lib_NpAuth, "req_id = {:#x}, id token for {}", req_id, id);
+     ctx->SetResult(ORBIS_OK);
+     return FinishStartedRequest(async, ctx);
+ }
+diff --git a/src/core/libraries/sysmodule/sysmodule_internal.cpp b/src/core/libraries/sysmodule/sysmodule_internal.cpp
+index cc542b48..5ec9da01 100644
+--- a/src/core/libraries/sysmodule/sysmodule_internal.cpp
++++ b/src/core/libraries/sysmodule/sysmodule_internal.cpp
+@@ -480,6 +480,26 @@ s32 preloadModulesForLibkernel() {
+             }
+         }
+     }
++
++    // Game-shipped modules the eboot imports from (its needed list) come up with the game, as the
++    // PS4's dynamic linker loads them. Some games never request them through sceSysmodule: Black Ops
++    // II (CUSA57548) uses libSceNpCppWebApi this way, and without it its objects stay uninitialized.
++    auto* linker = Common::Singleton<Core::Linker>::Instance();
++    const auto sce_module = Common::ElfInfo::Instance().GetGameFolder() / "sce_module";
++    for (const auto& imported : linker->GetModule(0)->GetImportModules()) {
++        for (s32 i = 0; i < static_cast<s32>(g_modules_array.size()); i++) {
++            const auto& mod = g_modules_array[i];
++            if ((mod.flags & OrbisSysmoduleModuleInternalFlags::IsGame) == 0 || mod.is_loaded > 0 ||
++                imported.name != mod.name ||
++                !std::filesystem::exists(sce_module / (imported.name + ".prx"))) {
++                continue;
++            }
++            LOG_INFO(Lib_SysModule, "Loading needed game module {}", imported.name);
++            if (loadModuleInternal(i, 0, nullptr, nullptr) != ORBIS_OK) {
++                LOG_CRITICAL(Lib_SysModule, "Failed to load needed game module {}", imported.name);
++            }
++        }
++    }
+     return ORBIS_OK;
+ }
+ 
+diff --git a/src/core/linker.cpp b/src/core/linker.cpp
+index 44d216df..603253cc 100644
+--- a/src/core/linker.cpp
++++ b/src/core/linker.cpp
+@@ -29,6 +29,7 @@
+ #include "ipc/ipc.h"
+ 
+ #ifndef _WIN32
++#include <cstdlib>
+ #include <signal.h>
+ #endif
+ 
+@@ -374,6 +375,12 @@ void Linker::Relocate(Module* module) {
+             rel_is_resolved = (symbol_virtual_addr != 0);
+             rel_value = (rel_is_resolved ? symbol_virtual_addr + addend : 0);
+             rel_name = symrec.symbol.name;
++            // USCL_LOG_IMPORTS: which slot of which module holds which function (to name a game's call sites)
++            static const bool log_imports = std::getenv("USCL_LOG_IMPORTS") != nullptr;
++            if (log_imports && sym_bind != STB_LOCAL) {
++                LOG_INFO(Core_Linker, "import {} slot {:#x} -> {} [{}] ({:#x})", module->name,
++                         rel_virtual_addr, rel_name, names_tlb + sym.st_name, symbol_virtual_addr);
++            }
+             break;
+         }
+         default:
+diff --git a/src/core/net/host_net.cpp b/src/core/net/host_net.cpp
+index fa8cd412..861d5666 100644
+--- a/src/core/net/host_net.cpp
++++ b/src/core/net/host_net.cpp
+@@ -5,6 +5,8 @@
+ #include <array>
+ #include <climits>
+ #include <cstdint>
++#include <cstdlib>
++#include <cstring>
+ 
+ #include "core/net/host_net.h"
+ 
+@@ -21,6 +23,7 @@
+ #else
+ #include <cerrno>
+ #include <fcntl.h>
++#include <arpa/inet.h>
+ #include <netinet/in.h>
+ #include <poll.h>
+ #include <sys/ioctl.h>
+@@ -407,6 +410,18 @@ void PrepareClose(NativeSocket s, bool guest_blocking) {
+ }
+ 
+ Error Bind(NativeSocket s, const sockaddr* addr, socklen_t len) {
++    // USCL_BIND_ADDR (e.g. 127.0.0.2): wildcard IPv4 binds go to this player's own loopback address, like
++    // RPCS3's bind address, so USCL's bridge and servers can own the game's usual ports on 127.0.0.1.
++    sockaddr_in swapped{};
++    if (const char* bind_addr = std::getenv("USCL_BIND_ADDR");
++        bind_addr != nullptr && addr != nullptr && addr->sa_family == AF_INET &&
++        len >= static_cast<socklen_t>(sizeof(sockaddr_in))) {
++        std::memcpy(&swapped, addr, sizeof(swapped));
++        if (swapped.sin_addr.s_addr == htonl(INADDR_ANY) &&
++            inet_pton(AF_INET, bind_addr, &swapped.sin_addr) == 1) {
++            addr = reinterpret_cast<const sockaddr*>(&swapped);
++        }
++    }
+     return bind(s, addr, len) == 0 ? Error::Ok : LastError();
+ }
+ 

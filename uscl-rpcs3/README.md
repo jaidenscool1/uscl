@@ -1,0 +1,57 @@
+# uscl-rpcs3
+
+USCL's RPCS3 build: [RPCS3/rpcs3](https://github.com/RPCS3/rpcs3) (GPL-2.0) plus the patches in `patches/`.
+Only changes the server side can't make go here: game-specific sceNp fixes, an NP call trace for working out
+each game, and turning Steam invites into in-game invites. Rooms, friends, presence and P2P stay in uscl-rpcn.
+
+## Build
+```
+git clone --recursive https://github.com/RPCS3/rpcs3.git && cd rpcs3
+git checkout e53ac18            # the commit these patches were made against
+git am ../patches/*.patch
+```
+Then build as in RPCS3's `BUILDING.md`.
+
+## Patches
+- 0001: send `CELL_SYSUTIL_NP_INVITATION_SELECTED` after `sceNpBasicRecvMessageCustom` picks an invite. Skate 3 waits for it
+  before fading in after accepting an invite. Untested in game.
+- 0002: logpoints for working out what a game does. `USCL_LOGPOINTS=<file>`, lines `PPU-<hash> <hex address> <name>`
+  (the hash is the log's `PPU executable hash`). Needs `PPU Decoder: Interpreter (static)`. The first call logs name,
+  LR and r3–r5 and the game carries on; a name starting with `*` logs every call; ending in `@rN` also logs the string
+  rN points to. Unlike breakpoints it never pauses, so games with a hang watchdog keep running.
+
+- 0003: the GDB server survives a client leaving (a closed connection or `D` used to be a fatal error that froze
+  emulation; now the session ends and the game resumes). Reading/writing memory with `gdb` works with any decoder;
+  breakpoints need the interpreter. A logpoint named `!...` writes all mapped game memory to `$USCL_MEMDUMP_DIR`
+  (one file per range, named by start address) when hit.
+- 0004: the USCL app. Window title and app name say USCL, and settings/cache go to `~/.config/uscl` and
+  `~/.cache/uscl` (Windows: next to the exe, as RPCS3 does) so a regular RPCS3 is left alone. **USCL > Online...**
+  (`rpcs3qt/uscl_dialog.cpp`): "Save and set up" sets RPCN on the session tunnel, an online name and the Demonware
+  IP swap list; "Host"/"Join" start `uscl-rpcn`, `dw-server` and `uscl-bridge` from next to the executable, with
+  data copied from `share/uscl` (Linux) or `uscl-data` (Windows) into the settings folder, and make RPCN's
+  certificate the first time. Packaging: `packaging/` in this repo.
+- 0005: Open on a folder that isn't a game adds every game inside it (all subfolders).
+- 0006: `USCL_ONLINE=1` runs the game unmodified: no game patches (`patch.yml`), GDB server or logpoints. The home
+  screen sets it for games started during an online session. Anyone can build without it, so it keeps honest
+  players honest; bans are the real defence (see `uscl-bridge/src/tunnel.rs`).
+- 0007: no "experimental build" warning on start, and RPCS3's own updater is off: it would replace USCL's
+  patched RPCS3 with the official one. The USCL app updates itself.
+- 0008: with `USCL_SHELL=1` (set by the USCL home screen) the PS button doesn't open RPCS3's home menu: the game
+  gets the usual system-menu events, RPCS3 prints `USCL:home`, and the home screen takes over. The game keeps
+  running. `hide` / `show` on stdin hide and show the game window (fullscreen comes back as it was). RPCS3's
+  first-start welcome window is skipped (the home screen has its own; RPCS3's needs a mouse and Exit quits the game).
+- 0009: USCL's own game patches are built in (`Utilities/bin_patch.cpp`, keyed by PPU hash) and always apply, also
+  with `USCL_ONLINE` (players' `patch.yml` stays off there). BO2 multiplayer 1.19 (`PPU-d26243d3…`): "plain peer
+  data" sends game-to-game data unencrypted for PS4 crossplay (`games/CUSA57548.md`).
+- 0010: second built-in BO2 patch, "little-endian messages": the msg_t read/write primitives call the byte-swapping
+  helpers (13 `bl` rewrites in t6mp 0x32a600-0x32f500), so lobby and game messages are little-endian like the PS4
+  build's. PS3 <-> PS3 is unaffected (both sides change together); PS3 <-> PS4 binary messages become identical.
+- 0011: built-in patches are also read from `uscl_patches.yml` next to the RPCS3 executable (generated, too big for
+  the source; packaging ships it): BO2 "PS4 netfield order", the 22 network field tables in the PS4 build's order so
+  game state encodes alike (crossplay).
+
+## Building (Arch, 2026-10)
+The bundled LLVM doesn't compile with GCC 16's libstdc++ and `llvm-ar` isn't installed, so the debugging build is
+interpreter-only: `cmake -S . -B build-nollvm -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang
+-DCMAKE_CXX_COMPILER=clang++ -DWITH_LLVM=OFF -DUSE_LTO=OFF -DUSE_SYSTEM_FFMPEG=ON && ninja -C build-nollvm`.
+Set `SPU Decoder: Recompiler (ASMJIT)` for games run with it.
