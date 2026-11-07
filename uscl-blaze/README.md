@@ -56,6 +56,16 @@ decoder can't parse). `settings.json` gets `SecureRedirectPort` (the TLS proxy p
 
 **Verified (2026-11-07):** Madden's ProtoSSL accepts the forged cert over SSLv3/AES256-SHA and sends its Blaze
 redirector request (BlazeSDK 13.3.0.3.1, service `MADDEN2014_PS3`) through the proxy to our server.
-**Remaining:** Madden's main Blaze session uses the **Blaze 3.x TDF wire encoding** (new type codes, e.g. type 15,
-`type+length` field headers) which this server's 2.x codec does not implement — `preAuth`/login can't be decoded
-yet. Full Madden online needs a Blaze 3.x codec + the 13.3 components. The TLS hop and redirector are done.
+
+**Captured the real heat2 wire (2026-11-07).** `tlsproxy.py` takes an optional 5th arg — a capture file — that dumps
+the decrypted frames both directions. `heat2.py` decodes them. A sample getServerInstance exchange is checked in at
+`tls/madden-getserverinstance.hex`. From it:
+- **heat2 field format** (what the codec must implement): `3-byte tag + 1-byte type`; string = `varint length +
+  bytes (incl NUL)`; int = Blaze varint; types seen: 0=int, 1=string, 6=union. Madden's request decodes cleanly.
+- **The blocker is now the *response*, not the request.** Our getServerInstance reply is still 2.x-encoded (first
+  field type byte `0xd0`, invalid for heat2), so Madden can't read the `ServerAddress`/`SECU` — it falls back to
+  `127.0.0.1:443`, finds nothing, and never reaches `preAuth`.
+
+**Remaining:** write a heat2 **encoder** for the getServerInstance reply (ADDR union = host + 42127, `SECU=1`) so
+Madden reconnects to the session port; then capture `preAuth` and build the heat2 **decoder** + the 13.3 components.
+The TLS hop and the redirector request path are done. NHL 15 (Blaze 3.19) rides on the same codec.

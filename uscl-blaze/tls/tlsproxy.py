@@ -6,6 +6,7 @@ plaintext Blaze port for the main session."""
 import socket, ssl, sys, threading
 
 lport = int(sys.argv[1]); certdir = sys.argv[2]; bhost = sys.argv[3]; bport = int(sys.argv[4])
+cap = open(sys.argv[5], 'ab', buffering=0) if len(sys.argv) > 5 else None  # optional: dump decrypted frames for the Blaze 3.x codec
 
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 try: ctx.minimum_version = ssl.TLSVersion.SSLv3
@@ -14,11 +15,14 @@ ctx.set_ciphers('ALL:@SECLEVEL=0')
 ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
 ctx.load_cert_chain(certdir + '/server.pem', certdir + '/server.key')
 
-def pump(src, dst):
+def pump(src, dst, tag=None):
     try:
         while True:
             b = src.recv(4096)
             if not b: break
+            if cap and tag:
+                cap.write(b'\n--- %s %d bytes ---\n' % (tag, len(b)))
+                cap.write(b.hex().encode())
             dst.sendall(b)
     except Exception:
         pass
@@ -36,8 +40,8 @@ def handle(raw, addr):
         b = socket.create_connection((bhost, bport))
     except Exception as e:
         print(f'backend connect failed: {e}', flush=True); c.close(); return
-    threading.Thread(target=pump, args=(c, b), daemon=True).start()
-    pump(b, c)
+    threading.Thread(target=pump, args=(c, b, b'C>S'), daemon=True).start()
+    pump(b, c, b'S>C')
     c.close(); b.close()
 
 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
