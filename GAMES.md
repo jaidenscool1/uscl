@@ -29,7 +29,7 @@ with `np-profile.py` on your own dump before starting.
 
 | Game | Serial | Online service | Reuses | Status |
 |---|---|---|---|---|
-| Call of Duty: Black Ops | ? | Demonware ? | BO2's Demonware | 📋 |
+| Call of Duty: Black Ops | [BLUS30591](games/BLUS30591.md) | Demonware (cod7, bdLobby era) | MW2/BO2's Demonware (`uscl-dw`) | 📋 profiled 2026-11-07 |
 | Call of Duty: Modern Warfare 3 | ? | Demonware ? | BO2's Demonware | 📋 |
 | Call of Duty: Ghosts | ? | Demonware ? | BO2's Demonware | ⬜ |
 | Call of Duty: World at War | ? | Demonware ? | BO2's Demonware | ⬜ |
@@ -42,7 +42,9 @@ with `np-profile.py` on your own dump before starting.
 | Uncharted 2 / 3 | ? | ? | profile first | ⬜ |
 | Killzone 2 / 3 | ? | ? | profile first | ⬜ |
 | Gran Turismo 5 | ? | ? | profile first | ⬜ |
-| Midnight Club: Los Angeles | BLUS30442 | own (Rockstar) + PSN friends/invites, scores (profiled 2026-10-23: PARTIAL) | new service: find what its race lobbies talk to | ⬜ |
+| Midnight Club: Los Angeles | [BLUS30442](games/BLUS30442.md) | GameSpy (+ Sake) | GCI's GameSpy revival | ⬜ re-profiled 2026-11-07: GameSpy, not Rockstar |
+| LittleBigPlanet 3 | [BCUS98362](games/BCUS98362.md) | PSN (sceNpMatching2) | RPCN directly, like Minecraft | 📋 profiled 2026-11-07: boot test next |
+| NHL 15 | [BLUS31436](games/BLUS31436.md) | Blaze 3.19 (ProtoSSL) | Madden's Blaze 3.x work (`uscl-blaze`) | ⬜ profiled 2026-11-07: same 3.x codec blocker as Madden |
 | GTA IV, Red Dead Redemption | ? | own (Rockstar) ? | GTA V's ROS work | ⬜ |
 
 ## No online multiplayer
