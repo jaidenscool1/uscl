@@ -40,3 +40,22 @@ NBA Jam: two players sign in, matchmake into one lobby, and reach the head-to-he
 the relay carries game traffic both ways. Verified with two instances on one PC (RPCN accounts uscltest /
 uscltest2). Driving both automated pads through team-select to the tip-off is a two-controller test-harness issue
 (a leftover virtual pad on this PC scrambles SDL enumeration), not a game/server limitation.
+
+## TLS for Blaze 3.x games (Madden NFL 25 — in progress)
+Madden 25 is **Blaze 13.3** and runs the whole Blaze session over EA's **ProtoSSL** (legacy TLS), not plaintext.
+Two pieces in `tls/`:
+- `redirector.crt.pem` / `redirector.key.pem` — the forged `gosredirector.ea.com` certificate (CN matches, MD5-RSA
+  signed) that old ProtoSSL accepts. From jacobtread/blaze-ssl-async (MIT). Modern TLS libs won't present it without
+  a legacy profile (SSLv3, `@SECLEVEL=0`).
+- `tlsproxy.py` — terminates ProtoSSL on the redirector port (42127) and forwards the plaintext Blaze stream to the
+  C# server on 42100: `python3 tlsproxy.py 42127 tls 127.0.0.1 42100`.
+
+Patch **0004** makes `getServerInstance` return the secure redirector port with `SECU=1` for Blaze 3.x+ clients
+(it reads the `BSDK` version by a raw byte scan, since Madden's request uses the Blaze 3.x TDF encoding the 2.x
+decoder can't parse). `settings.json` gets `SecureRedirectPort` (the TLS proxy port).
+
+**Verified (2026-11-07):** Madden's ProtoSSL accepts the forged cert over SSLv3/AES256-SHA and sends its Blaze
+redirector request (BlazeSDK 13.3.0.3.1, service `MADDEN2014_PS3`) through the proxy to our server.
+**Remaining:** Madden's main Blaze session uses the **Blaze 3.x TDF wire encoding** (new type codes, e.g. type 15,
+`type+length` field headers) which this server's 2.x codec does not implement — `preAuth`/login can't be decoded
+yet. Full Madden online needs a Blaze 3.x codec + the 13.3 components. The TLS hop and redirector are done.
