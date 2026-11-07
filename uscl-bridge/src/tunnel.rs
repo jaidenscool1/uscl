@@ -70,6 +70,10 @@ fn preset(name: &str) -> Option<&'static str> {
         // (auth3, TCP 443) and the host's shadNet (UnsecuredPort 31513, WebApiPort 31515; 31313 is ours for RPCN).
         // One shadNet for everyone: its account ids are the players' Demonware user ids.
         "bo2ps4" => Some("tcp:3074,tcp:3076,tcp:443,tcp:31513,tcp:31515,sudp:3074,sudp:3077-3078"),
+        // Dolphin (Wii/GC) netplay: the host's Dolphin NetPlay server listens on TCP 2626, the joiner connects to
+        // it as 127.0.0.1:<slot> through the tunnel. Carries the full controller/Wiimote input stream (incl.
+        // MotionPlus), so it turns a local-only game like Wii Sports (SP2E01) into online play. See uscl-dolphin/.
+        "dolphin" => Some("tcp:2626"),
         _ => None,
     }
 }
@@ -947,6 +951,7 @@ mod tests {
         assert_eq!(parse_slot_udp("bo2ps4"), vec![3074, 3077, 3078]);
         assert_eq!(parse_forwards("bo2ps4").unwrap().len(), 5);
         assert_eq!(parse_slot_udp("skate3"), Vec::<u16>::new());
+        assert_eq!(parse_forwards("dolphin").unwrap(), vec![(false, 2626)]); // Dolphin netplay, one TCP port
         assert_eq!(slot_frame(3074, b"x"), [UDP_SLOT, 0x0c, 0x02, b'x']);
     }
 

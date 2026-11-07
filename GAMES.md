@@ -53,6 +53,19 @@ with `np-profile.py` on your own dump before starting.
 | Spider-Man: Shattered Dimensions | BLUS30499 |
 | Spider-Man: Edge of Time | BLUS30760 |
 
+## Wii (Dolphin)
+A second platform, via Dolphin instead of RPCS3 (notes in `uscl-dolphin/`). Early Wii games have no online service
+to revive, so online comes from **Dolphin NetPlay** (lockstep input sync, carries Wii Remote motion) tunnelled over
+Steam with `uscl-bridge host dolphin` (`tcp:2626`).
+
+| Game | ID | Online route | Status | Next step |
+|---|---|---|---|---|
+| Wii Sports + Wii Sports Resort | [SP2E01](games/SP2E01.md) | no native online → Dolphin NetPlay over the tunnel | 🧪 Dolphin 2609a boots to the game menu; bridge `dolphin` preset added (2026-11-07) | two-instance NetPlay input-sync test with motion, then two PCs over Steam |
+
+The *online*-capable "Wii Sports" are later/other platforms, not ready yet: **Wii Sports Club** (Wii U) needs a
+Nintendo-Network/Quazal-NEX stand-in (Pretendo doesn't support it online yet) — a future `uscl-cemu`; **Nintendo
+Switch Sports** runs on live Switch Online — a future `uscl-ryujinx` LDN tunnel. See `uscl-dolphin/README.md`.
+
 ## Routes (how much work a game is)
 - **PSN only:** RPCN plus the session tunnel already carry it. Test it and fix small things. No reverse engineering.
 - **Demonware / Blaze:** our own stand-in server for that service, shared by every game on it. The first game is
