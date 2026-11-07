@@ -7,10 +7,18 @@ each game, and turning Steam invites into in-game invites. Rooms, friends, prese
 ## Build
 ```
 git clone --recursive https://github.com/RPCS3/rpcs3.git && cd rpcs3
-git checkout e53ac18            # the commit these patches were made against
+git checkout eee3f0f            # the commit these patches were made against (upstream 2026-11-05)
 git am ../patches/*.patch
 ```
 Then build as in RPCS3's `BUILDING.md`.
+
+Since this base RPCS3 builds with LTO (`USE_LTO` defaults to ON): with clang, link with lld and archive with
+llvm-ar, or the link fails (`CMAKE_CXX_COMPILER_AR-NOTFOUND`, then `file format not recognized` from GNU ld):
+`-DCMAKE_LINKER_TYPE=LLD -DCMAKE_CXX_COMPILER_AR=<llvm>/bin/llvm-ar -DCMAKE_C_COMPILER_AR=<llvm>/bin/llvm-ar
+-DCMAKE_CXX_COMPILER_RANLIB=<llvm>/bin/llvm-ranlib -DCMAKE_C_COMPILER_RANLIB=<llvm>/bin/llvm-ranlib`, on a fresh
+build folder (the compiler's archiver is detected once and cached). LTO is a free speedup, keep it on.
+For a build you hand to other people (AppImage), configure with `-DUSE_NATIVE_INSTRUCTIONS=OFF`: ON tunes the
+binary to the build PC's CPU, and it can crash on older ones.
 
 ## Patches
 - 0001: send `CELL_SYSUTIL_NP_INVITATION_SELECTED` after `sceNpBasicRecvMessageCustom` picks an invite. Skate 3 waits for it

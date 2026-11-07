@@ -99,6 +99,7 @@ Item {
             visible: xmb.items.length > 0
             SequentialAnimation on opacity {
                 loops: Animation.Infinite
+                running: Window.active // a running animation redraws the window every frame, also behind a game
                 NumberAnimation { from: 0.11; to: 0.31; duration: 1700; easing.type: Easing.InOutSine }
                 NumberAnimation { to: 0.11; duration: 1700; easing.type: Easing.InOutSine }
             }

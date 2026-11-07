@@ -1,0 +1,267 @@
+From 0cbd64dc12583c9dbc9cdbcfe2090930ccc2b9c4 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 13:12:19 -0700
+Subject: [PATCH 1/3] NBA Jam: trust the host RPCN's ticket key,
+ fetchClientConfig, tolerant TDF fields, empty replies for unknown commands
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Handlers/Ps3LoginHandler.cs               | 22 ++++++++++
+ .../Util/Handlers/FetchClientConfigHandler.cs | 43 +++++++++++++++++++
+ .../Blaze/Routers/AuthenticationRouter.cs     |  3 +-
+ .../Blaze/Routers/UserSessionsRouter.cs       |  2 +-
+ .../Blaze/Routers/UtilRouter.cs               |  6 ++-
+ .../Blaze/Tdf/TdfReflection.cs                | 13 +++++-
+ Skate Custom Server/Program.cs                |  2 +
+ .../Servers/Blaze/BlazeServer.cs              |  8 ++--
+ .../Servers/Models/ServerSettings.cs          |  4 ++
+ Skate Custom Server/Servers/ServerGlobals.cs  |  1 +
+ Skate Custom Server/Servers/ServerUtils.cs    |  8 ++++
+ 11 files changed, 103 insertions(+), 9 deletions(-)
+ create mode 100644 Skate Custom Server/Blaze/Components/Util/Handlers/FetchClientConfigHandler.cs
+
+diff --git a/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs b/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs
+index 1d947b6..438cef6 100644
+--- a/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs	
++++ b/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs	
+@@ -34,6 +34,22 @@ namespace Blaze.Components.Authentication
+             public override string PublicKeyY => "93131936a54a0ea51117f74518e56aae95f6baff4b29f999";
+         }
+ 
++        // USCL: the host's own RPCN (settings.json HostTicketKey), same curve and digest as official RPCN
++        private class HostSigningKey : ITicketSigningKey
++        {
++            public HostSigningKey(string uncompressedHex)
++            {
++                string hex = uncompressedHex.StartsWith("04") ? uncompressedHex[2..] : uncompressedHex;
++                PublicKeyX = hex[..(hex.Length / 2)];
++                PublicKeyY = hex[(hex.Length / 2)..];
++            }
++            public string HashAlgorithm => "SHA-224";
++            public string CurveTable => "secp224k1";
++            public TicketSignatureMessageType MessageType => TicketSignatureMessageType.Body;
++            public string PublicKeyX { get; }
++            public string PublicKeyY { get; }
++        }
++
+         private static bool IsTicketValid(Ticket ps3Ticket, byte[] ticketBytes, User user)
+         {
+             if (ps3Ticket.ExpiryDate < DateTimeOffset.UtcNow)
+@@ -46,6 +62,12 @@ namespace Blaze.Components.Authentication
+                 user.Platform = UserPlatform.RPCS3;
+                 return true;
+             }
++            if (ServerGlobals.HostTicketKey.Length == 114 &&
++                new TicketVerifier(ticketBytes, ps3Ticket, new HostSigningKey(ServerGlobals.HostTicketKey)).IsTicketValid())
++            {
++                user.Platform = UserPlatform.RPCS3;
++                return true;
++            }
+             else
+             {
+                 // PS3 Ticket Verifying if RPCN ticket came back invalid
+diff --git a/Skate Custom Server/Blaze/Components/Util/Handlers/FetchClientConfigHandler.cs b/Skate Custom Server/Blaze/Components/Util/Handlers/FetchClientConfigHandler.cs
+new file mode 100644
+index 0000000..16436f1
+--- /dev/null
++++ b/Skate Custom Server/Blaze/Components/Util/Handlers/FetchClientConfigHandler.cs	
+@@ -0,0 +1,43 @@
++using Blaze.Components.Util.Commands;
++using Blaze.Tdf.Attributes;
++using Servers;
++using Servers.Blaze.Models;
++
++namespace Blaze.Components.Util.Handlers
++{
++    public struct FetchClientConfigRequest
++    {
++        [TdfMember("CFID")]
++        public string ConfigId;
++    }
++
++    // USCL: NBA Jam asks for client config sections before PS3 login (Skate 3 never does).
++    // Sections come from clientconfig/<CFID>.txt next to the server (key=value per line); a missing file is an
++    // empty section, which is what the game gets from a server that has nothing to say about it.
++    public class FetchClientConfigHandler
++    {
++        public static async Task HandleRequest(User user, byte[] packetBytes)
++        {
++            var request = BlazeMessage.CreateModelFromRequest<FetchClientConfigRequest>(packetBytes);
++            string id = request.ConfigId ?? "";
++            var fields = new Dictionary<string, string>();
++
++            // the id is the client's: keep it to a file name inside clientconfig/
++            if (id.Length > 0 && id.All(c => char.IsLetterOrDigit(c) || c == '_' || c == '-' || c == '.') && !id.Contains(".."))
++            {
++                string path = Path.Combine(ServerGlobals.BaseDirectory, "clientconfig", id + ".txt");
++                if (File.Exists(path))
++                    foreach (string line in File.ReadAllLines(path))
++                    {
++                        int eq = line.IndexOf('=');
++                        if (eq > 0 && !line.StartsWith('#'))
++                            fields[line[..eq].Trim()] = line[(eq + 1)..].Trim();
++                    }
++            }
++            ServerLogger.Log($"[Blaze] fetchClientConfig CFID={id} -> {fields.Count} fields");
++
++            BlazeMessage response = BlazeMessage.CreateResponseFromModel(packetBytes, new FetchConfigResponse { ConfigFields = fields });
++            await user.Stream.WriteAsync(response.Serialize());
++        }
++    }
++}
+diff --git a/Skate Custom Server/Blaze/Routers/AuthenticationRouter.cs b/Skate Custom Server/Blaze/Routers/AuthenticationRouter.cs
+index 0679e4e..20d7e0e 100644
+--- a/Skate Custom Server/Blaze/Routers/AuthenticationRouter.cs	
++++ b/Skate Custom Server/Blaze/Routers/AuthenticationRouter.cs	
+@@ -26,7 +26,8 @@ namespace Blaze
+                     await ServerUtils.SendEmptyResponse(user, receivedPacket);
+                     break;
+                 default:
+-                    await ServerUtils.SendError(user, receivedPacket, ServerUtils.ErrorCode.ERR_COMMAND_NOT_FOUND);
++                    // USCL: NBA Jam's getAccount (30) / getTosInfo (42) etc.: an error stops its login
++                    await ServerUtils.SendUnhandledEmpty(user, receivedPacket);
+                     break;
+             }
+         }
+diff --git a/Skate Custom Server/Blaze/Routers/UserSessionsRouter.cs b/Skate Custom Server/Blaze/Routers/UserSessionsRouter.cs
+index fff1eec..20e4efc 100644
+--- a/Skate Custom Server/Blaze/Routers/UserSessionsRouter.cs	
++++ b/Skate Custom Server/Blaze/Routers/UserSessionsRouter.cs	
+@@ -23,7 +23,7 @@ namespace Blaze
+                     await LookupUsersHandler.HandleRequest(user, receivedPacket);
+                     break;
+                 default:
+-                    await ServerUtils.SendError(user, receivedPacket, ServerUtils.ErrorCode.ERR_COMMAND_NOT_FOUND);
++                    await ServerUtils.SendUnhandledEmpty(user, receivedPacket);
+                     break;
+             }
+         }
+diff --git a/Skate Custom Server/Blaze/Routers/UtilRouter.cs b/Skate Custom Server/Blaze/Routers/UtilRouter.cs
+index 1661dd7..efe33bc 100644
+--- a/Skate Custom Server/Blaze/Routers/UtilRouter.cs	
++++ b/Skate Custom Server/Blaze/Routers/UtilRouter.cs	
+@@ -18,6 +18,9 @@ namespace Blaze
+                 case UtilMessage.preAuth:
+                     await PreAuthHandler.HandleRequest(user, receivedPacket);
+                     break;
++                case UtilMessage.fetchClientConfig:
++                    await FetchClientConfigHandler.HandleRequest(user, receivedPacket);
++                    break;
+                 case UtilMessage.ping:
+                     await PingHandler.HandleRequest(user, receivedPacket);
+                     break;
+@@ -54,7 +57,8 @@ namespace Blaze
+                     await FilterForProfanityHandler.HandleRequest(user, receivedPacket);
+                     break;
+                 default:
+-                    await ServerUtils.SendError(user, receivedPacket, ServerUtils.ErrorCode.ERR_COMMAND_NOT_FOUND);
++                    // USCL: userSettingsLoad (10) / userSettingsLoadAll (12): nothing stored yet
++                    await ServerUtils.SendUnhandledEmpty(user, receivedPacket);
+                     break;
+             }
+         }
+diff --git a/Skate Custom Server/Blaze/Tdf/TdfReflection.cs b/Skate Custom Server/Blaze/Tdf/TdfReflection.cs
+index 08253f9..01c10ad 100644
+--- a/Skate Custom Server/Blaze/Tdf/TdfReflection.cs	
++++ b/Skate Custom Server/Blaze/Tdf/TdfReflection.cs	
+@@ -277,8 +277,17 @@ namespace Blaze
+ 
+                 if (fieldDict.TryGetValue(attribute.Tag, out var fieldEquivalent))
+                 {
+-                    field.SetValue(model, TdfValueToCLRValue(
+-                        fieldEquivalent.Type, fieldEquivalent.Value, field.FieldType));
++                    try
++                    {
++                        field.SetValue(model, TdfValueToCLRValue(
++                            fieldEquivalent.Type, fieldEquivalent.Value, field.FieldType));
++                    }
++                    catch (ArgumentException)
++                    {
++                        // USCL: older BlazeSDKs (NBA Jam's 2.11) send some fields with another type; keep the
++                        // default for that field instead of failing the whole request
++                        Servers.ServerLogger.Log($"[Tdf] {actualType.Name}.{attribute.Tag}: got {fieldEquivalent.Type}, expected {field.FieldType.Name}, left default");
++                    }
+                 }
+             }
+ 
+diff --git a/Skate Custom Server/Program.cs b/Skate Custom Server/Program.cs
+index f555b0c..659397c 100644
+--- a/Skate Custom Server/Program.cs	
++++ b/Skate Custom Server/Program.cs	
+@@ -30,6 +30,8 @@ if (serverSettings.LocalHost)
+ else
+     ServerGlobals.ServerIP = await new HttpClient().GetStringAsync("https://api.ipify.org");
+ 
++ServerGlobals.HostTicketKey = serverSettings.HostTicketKey;
++
+ // Teams (Blaze Clubs)
+ ServerGlobals.ClubMaxMembers = Math.Clamp(serverSettings.TeamMaxMembers, 1, 1000);
+ ServerGlobals.ClubMaxGMs = Math.Clamp(serverSettings.TeamMaxLeaders, 1, ServerGlobals.ClubMaxMembers);
+diff --git a/Skate Custom Server/Servers/Blaze/BlazeServer.cs b/Skate Custom Server/Servers/Blaze/BlazeServer.cs
+index c9a8e50..472d473 100644
+--- a/Skate Custom Server/Servers/Blaze/BlazeServer.cs	
++++ b/Skate Custom Server/Servers/Blaze/BlazeServer.cs	
+@@ -190,10 +190,10 @@ namespace Servers.Blaze
+                     await ClubsComponentRouter.Handle(user, packetBytes);
+                     break;
+                 default:
+-                    await ServerUtils.SendError(
+-                        user,
+-                        packetBytes,
+-                        ServerUtils.ErrorCode.ERR_COMPONENT_NOT_FOUND);
++                    // USCL: components Skate 3 never uses (Rooms 21, Messaging 15, NBA Jam's 2249, ...).
++                    // An empty success reads as "nothing there" to the client, where an error stops its login.
++                    ServerLogger.Log($"[Blaze] unhandled component {(ushort)component} command {command}, sent empty response");
++                    await ServerUtils.SendEmptyResponse(user, packetBytes);
+                     break;
+             }
+         }
+diff --git a/Skate Custom Server/Servers/Models/ServerSettings.cs b/Skate Custom Server/Servers/Models/ServerSettings.cs
+index 610b07f..e67f865 100644
+--- a/Skate Custom Server/Servers/Models/ServerSettings.cs	
++++ b/Skate Custom Server/Servers/Models/ServerSettings.cs	
+@@ -5,6 +5,10 @@
+         public bool LocalHost = false;
+         public string LocalIPAddress = "127.0.0.1";
+ 
++        // USCL: public key (uncompressed hex "04" + X + Y, secp224k1) of the host's own RPCN, which signs
++        // tickets with ticket_private.pem. Tickets signed with it are accepted like official RPCN ones.
++        public string HostTicketKey = "";
++
+         // Teams (Blaze Clubs)
+         public int TeamMaxMembers = 50;
+         public int TeamMaxLeaders = 10;
+diff --git a/Skate Custom Server/Servers/ServerGlobals.cs b/Skate Custom Server/Servers/ServerGlobals.cs
+index d529663..a919b0c 100644
+--- a/Skate Custom Server/Servers/ServerGlobals.cs	
++++ b/Skate Custom Server/Servers/ServerGlobals.cs	
+@@ -10,6 +10,7 @@ namespace Servers
+         public static string ServerIP = IPAddress.Any.ToString();
+         public static ushort ServerPort = 42100;
+         public static ushort HttpServerPort = 80;
++        public static string HostTicketKey = "";
+         public static uint PingPeriodSecs = 20;
+         public static int ContentUploadCap = 100;
+         public static uint UploadSizeCap = 10_000_000;
+diff --git a/Skate Custom Server/Servers/ServerUtils.cs b/Skate Custom Server/Servers/ServerUtils.cs
+index 4e4abe9..420716a 100644
+--- a/Skate Custom Server/Servers/ServerUtils.cs	
++++ b/Skate Custom Server/Servers/ServerUtils.cs	
+@@ -65,6 +65,14 @@ namespace Servers
+             await receiver.Stream.WriteAsync(response.Serialize());
+         }
+ 
++        // USCL: a command this server doesn't implement gets an empty success (older clients such as NBA Jam stop
++        // their login on ERR_COMMAND_NOT_FOUND); logged so the ones that need real data can be found
++        public static async Task SendUnhandledEmpty(User receiver, byte[] packetBytes)
++        {
++            ServerLogger.Log($"[Blaze] unhandled component {TdfUtils.GetComponentFromPacket(packetBytes)} command {TdfUtils.GetCommandFromPacket(packetBytes)}, sent empty response");
++            await SendEmptyResponse(receiver, packetBytes);
++        }
++
+         public static async Task SendError(User receiver, byte[] packetBytes, ErrorCode errorCode)
+         {
+             await SendErrorCode(receiver, packetBytes, (ushort)errorCode);
+-- 
+2.56.0
+

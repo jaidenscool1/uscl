@@ -26,7 +26,8 @@ build caches RPCS3 and the servers in the `ci-cache` draft release (keyed by sou
 an unchanged RPCS3 isn't rebuilt. Latest release: `v0.3.3-test`.
 
 ## Merge order
-PRs #3 → #1 → #4 → #5 (all approved by the other agent). Then retarget #5 and later work to `main`.
+Done 2026-11-06: #3, #5, #4 and #7 merged; `collab-setup` now holds all of it. Left: #1 (`collab-setup` → `main`,
+conflict-free, needs a review or the owner's `--admin` merge). New work branches from `steam-tunnel` until #1 lands.
 
 ## Where each piece stands
 | Piece | State | Next step |
@@ -162,3 +163,17 @@ ids). Captures for that: RE folder `crossplay/ps3-2pc-plain.udp`, `ps4-2pc-plain
 - Pete's PC: `%LOCALAPPDATA%\Programs\USCL\patches\imported_patch.yml` holds the PS3 patch (inactive; enabling it =
   `config\patch_config.yml` entry, see message 14/17 in `C:\USCL-PS4\agents`). His RPCS3 needs
   `Shader Mode: "Async Recompiler (multi-threaded)"` when started outside the app (interpreter precompile stalls).
+
+## Update 2026-11-06: RPCS3 rebase, NBA Jam / Madden 25 / GTA V profiled
+- `uscl-rpcs3` rebased onto upstream eee3f0f (2026-11-05, +193 commits incl. SPU/PPU and Vulkan speedups, LTO on by
+  default). Two trivial conflicts (0002, 0008: both sides added a line/function at the same spot). Local branch
+  `uscl-perf-rebase` in `~/src/rpcs3-uscl/.claude/worktrees/perf-rebase`; LTO build notes in `uscl-rpcs3/README.md`.
+  Boot-tested: NBA Jam, Madden 25, GTA V reach their menus. Not yet re-tested: BO2, MW2, Minecraft.
+- Home screen: the two halo animations stop while the window isn't active (a running animation redraws the whole
+  window every frame, also behind a game).
+- NBA Jam (`games/BLUS30696.md`): plain-TCP Blaze 2.11 redirector, request captured; next: Skate3BlazeServer login.
+- Madden 25 (`games/BLUS31178.md`): Blaze 13.3, TLS redirector on 42127; next: ProtoSSL.
+- GTA V (`games/BLUS31156.md`): ROS over HTTPS; next: last title update, profile again.
+- Probe profile `~/.local/share/uscl/rpcs3-ea-probe` (RPCN uscltest, every EA/Rockstar name to 127.0.0.1).
+  A leftover virtual pad from 2026-11-01 (vpad.py, PID 1597453) is still `Xbox 360 Controller 1`, so this profile
+  binds Controller 2.
