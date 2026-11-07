@@ -43,7 +43,7 @@ with `np-profile.py` on your own dump before starting.
 | Killzone 2 / 3 | ? | ? | profile first | ⬜ |
 | Gran Turismo 5 | ? | ? | profile first | ⬜ |
 | Midnight Club: Los Angeles | [BLUS30442](games/BLUS30442.md) | GameSpy (+ Sake) | GCI's GameSpy revival | ⬜ re-profiled 2026-11-07: GameSpy, not Rockstar |
-| LittleBigPlanet 3 | [BCUS98362](games/BCUS98362.md) | PSN (sceNpMatching2) | RPCN directly, like Minecraft | 📋 profiled 2026-11-07: boot test next |
+| LittleBigPlanet 3 | [BCUS98362](games/BCUS98362.md) | PSN (Matching2) | RPCN directly, like Minecraft | 🧪 boots + connects to RPCN (2026-11-07); co-op via Matching2 should work, two-copy test next |
 | NHL 15 | [BLUS31436](games/BLUS31436.md) | Blaze 3.19 (ProtoSSL) | Madden's Blaze 3.x work (`uscl-blaze`) | ⬜ profiled 2026-11-07: same 3.x codec blocker as Madden |
 | GTA IV, Red Dead Redemption | ? | own (Rockstar) ? | GTA V's ROS work | ⬜ |
 
