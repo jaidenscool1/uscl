@@ -29,7 +29,7 @@ with `np-profile.py` on your own dump before starting.
 
 | Game | Serial | Online service | Reuses | Status |
 |---|---|---|---|---|
-| Call of Duty: Black Ops | [BLUS30591](games/BLUS30591.md) | Demonware (cod7, bdLobby era) | MW2/BO2's Demonware (`uscl-dw`) | 📋 profiled 2026-11-07 |
+| Call of Duty: Black Ops | [BLUS30591](games/BLUS30591.md) | Demonware (cod7, T5) | uscl-dw (MW2/BO2); needs T5 auth | 🚧 reaches our Demonware; auth needs T5 handling (2026-11-07) |
 | Call of Duty: Modern Warfare 3 | ? | Demonware ? | BO2's Demonware | 📋 |
 | Call of Duty: Ghosts | ? | Demonware ? | BO2's Demonware | ⬜ |
 | Call of Duty: World at War | ? | Demonware ? | BO2's Demonware | ⬜ |
