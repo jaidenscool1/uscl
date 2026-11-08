@@ -85,7 +85,7 @@ Window {
                                     { title: qsTr("Keep Running"), action: resumeGame }] })
             return
         }
-        if (g.console === "Wii" || g.console === "3DS") { launchGame(g); return }   // emulator games: no PS3 firmware / RPCN
+        if (g.console === "Wii" || g.console === "WiiU" || g.console === "3DS") { launchGame(g); return }   // emulator games: no PS3 firmware / RPCN
         if (!ps4 && !system.firmwareInstalled) {
             sound("error")
             dialog.show(qsTr("System Update"), qsTr("Games need the PS3 system software. Install it now?"),
@@ -117,7 +117,7 @@ Window {
         launchGame(g)
     }
     function launchGame(g) {
-        if (g.console === "Wii" || g.console === "3DS") {   // Wii -> Dolphin, 3DS -> Azahar
+        if (g.console === "Wii" || g.console === "WiiU" || g.console === "3DS") {   // Wii -> Dolphin, 3DS -> Azahar
             if (launcher.startEmu(g.path, g.title, g.console)) runningGame = g
             return
         }
@@ -641,7 +641,7 @@ Window {
     // games are split into one XMB column per console starting at gamesCat (3); Party/Friends follow them
     readonly property var presentConsoles: {
         games.count
-        var order = ["PS3", "PS4", "Wii", "3DS"], set = ({})
+        var order = ["PS3", "PS4", "Wii", "WiiU", "3DS"], set = ({})
         for (var i = 0; i < games.count; i++) set[games.get(i).console || "PS3"] = true
         var p = order.filter(function(c) { return set[c] })
         return p.length ? p : ["PS3"]
@@ -713,7 +713,8 @@ Window {
         ]
         // split the games into one XMB column per console, each with its own console icon (PS3/PS4/Wii/3DS)
         var consoleMeta = { "PS3": [qsTr("PlayStation 3"), "cat_ps3"], "PS4": [qsTr("PlayStation 4"), "cat_ps4"],
-                            "Wii": [qsTr("Wii"), "cat_wii"], "3DS": [qsTr("Nintendo 3DS"), "cat_3ds"] }
+                            "Wii": [qsTr("Wii"), "cat_wii"], "WiiU": [qsTr("Wii U"), "cat_wiiu"],
+                            "3DS": [qsTr("Nintendo 3DS"), "cat_3ds"] }
         var byConsole = {}
         gameItems.forEach(function(it) { var k = it.console || "PS3"; (byConsole[k] = byConsole[k] || []).push(it) })
         var consoleCats = presentConsoles.map(function(c, idx) {

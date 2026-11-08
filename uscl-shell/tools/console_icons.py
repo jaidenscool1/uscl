@@ -75,6 +75,17 @@ def wii(d, S):
     d.line([int(S*0.28), int(S*0.86), int(S*0.72), int(S*0.86)], fill=255, width=t)
     d.line([int(S*0.50), y1, int(S*0.50), int(S*0.86)], fill=255, width=int(t*0.8))
 
+# --- Wii U: the GamePad tablet -- a wide rounded slab with a central screen and two circle-pad dots ---
+def wiiu(d, S):
+    t = int(S * 0.05)
+    x0, x1 = int(S*0.08), int(S*0.92)
+    y0, y1 = int(S*0.30), int(S*0.70)
+    rrect(d, [x0, y0, x1, y1], int(S*0.10), outline_w=t)          # tablet body
+    rrect(d, [int(S*0.30), int(S*0.37), int(S*0.70), int(S*0.63)], int(S*0.03), outline_w=int(t*0.7))  # center screen
+    for cx in (int(S*0.20), int(S*0.80)):                          # two circle pads
+        r = int(S*0.035)
+        d.ellipse([cx-r, int(S*0.50)-r, cx+r, int(S*0.50)+r], outline=255, width=int(t*0.7))
+
 # --- 3DS: open clamshell, two hinged rounded screens (bottom wider) ---
 def nds3(d, S):
     t = int(S * 0.05)
@@ -87,7 +98,7 @@ def nds3(d, S):
 
 def main():
     os.makedirs(OUT, exist_ok=True)
-    for name, fn in [("cat_ps3", ps3), ("cat_ps4", ps4), ("cat_wii", wii), ("cat_3ds", nds3)]:
+    for name, fn in [("cat_ps3", ps3), ("cat_ps4", ps4), ("cat_wii", wii), ("cat_wiiu", wiiu), ("cat_3ds", nds3)]:
         render(fn).save(os.path.join(OUT, name + ".png"))
         print("wrote", name + ".png")
 

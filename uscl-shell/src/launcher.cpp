@@ -124,6 +124,8 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 		args = {"run", "org.DolphinEmu.dolphin-emu", "-b", "-e", path};
 	else if (console == "3DS")
 		args = {"run", "--env=LIBGL_ALWAYS_SOFTWARE=1", "org.azahar_emu.Azahar", path};
+	else if (console == "WiiU")
+		args = {"run", "info.cemu.Cemu", "-f", "-g", path};   // Cemu: fullscreen, load game
 	else
 		return false;
 	env.remove("USCL_ONLINE");
