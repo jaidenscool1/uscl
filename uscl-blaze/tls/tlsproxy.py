@@ -32,6 +32,11 @@ def pump(src, dst, tag=None):
 
 def handle(raw, addr):
     try:
+        head = raw.recv(64, socket.MSG_PEEK)  # peek the ClientHello so a failed handshake still shows the version bytes
+        print(f'hello from {addr}: {head[:48].hex()}', flush=True)
+    except Exception:
+        pass
+    try:
         c = ctx.wrap_socket(raw, server_side=True)
     except Exception as e:
         print(f'TLS handshake failed from {addr}: {e}', flush=True); raw.close(); return
