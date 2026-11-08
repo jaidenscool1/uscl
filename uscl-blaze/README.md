@@ -66,6 +66,15 @@ the decrypted frames both directions. `heat2.py` decodes them. A sample getServe
   field type byte `0xd0`, invalid for heat2), so Madden can't read the `ServerAddress`/`SECU` — it falls back to
   `127.0.0.1:443`, finds nothing, and never reaches `preAuth`.
 
-**Remaining:** write a heat2 **encoder** for the getServerInstance reply (ADDR union = host + 42127, `SECU=1`) so
-Madden reconnects to the session port; then capture `preAuth` and build the heat2 **decoder** + the 13.3 components.
-The TLS hop and the redirector request path are done. NHL 15 (Blaze 3.19) rides on the same codec.
+**Redirector + session reached (2026-11-07, patch 0005).** Two changes got Madden into the Blaze handshake:
+- **heat2 getServerInstance encoder** (`Heat2Writer.cs`): the 2.x model encoder produced heat1 Madden couldn't parse.
+  The response is now hand-built in heat2 (`3-byte tag + full type byte`; little-endian varint, unlike heat1's
+  big-endian `EncodeVlq`): `ADDR` union → `VALU{IP,PORT}`, `SECU`, `XDNS`.
+- **plaintext session (SECU=0)**: a secure address given as a bare IP makes ProtoSSL refuse to start TLS (no CN to
+  validate), so the session is returned as **SECU=0** and Madden connects **plaintext** to the Blaze port (42100).
+  Only the redirector hop stays TLS. (`env BLAZE3_SESSION=tls:<port>|plain:<port>` keeps the toggle.)
+
+Madden now connects 42127 (redirector) → 42100 (session, plaintext), sends `preAuth` + `fetchClientConfig OSDK_*`,
+and shows **"connecting to the EA Servers"**. Real session capture: `tls/madden-session-plaintext.hex`.
+**Remaining:** a heat2 **codec for the session** (the server still answers in heat1, so Madden stalls). The session
+commands are the same shape as NBA Jam's, so the handlers just need heat2 decode/encode. NHL 15 rides the same codec.

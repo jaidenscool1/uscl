@@ -1,0 +1,171 @@
+From 9e36fcfffaff2d23f3ac8d06b306f1c837a0bfda Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 18:10:24 -0700
+Subject: [PATCH] Blaze 3.x (Madden): heat2 getServerInstance + plaintext
+ session -> reaches EA handshake
+
+- Heat2Writer: a Blaze 3.x "heat2" wire encoder (3-byte tag + full type byte;
+  little-endian varint ints, distinct from heat1's big-endian EncodeVlq).
+- GetServerInstanceHandler: for BlazeSDK major>=3 (Madden 13.3, NHL), hand-build the
+  getServerInstance response in heat2 (ADDR union case 0 -> VALU{IP,PORT}; SECU; XDNS);
+  the 2.x model encoder produces heat1 the client can't parse.
+- Run the Blaze SESSION in plaintext (SECU=0) on the normal port. A SECU=1 address
+  given as a bare IP makes the client's ProtoSSL refuse to start TLS (no hostname/CN
+  to validate) -> "EA servers not available". Plaintext avoids it and the client
+  honours SECU=0. (env BLAZE3_SESSION=tls:<port>|plain:<port> keeps the toggle.)
+
+Verified 2026-11-07: Madden reaches the redirector over TLS, connects the session
+plaintext to 42100, sends preAuth (Util 0x07) + fetchClientConfig (OSDK_*), and the
+UI shows "uscltest is connecting to the EA Servers". Remaining: a heat2 codec for the
+session commands (the server still answers in heat1, so it stalls mid-handshake).
+---
+ .../Handlers/GetServerInstanceHandler.cs      | 76 ++++++++++++++-----
+ Skate Custom Server/Blaze/Tdf/Heat2Writer.cs  | 45 +++++++++++
+ 2 files changed, 103 insertions(+), 18 deletions(-)
+ create mode 100644 Skate Custom Server/Blaze/Tdf/Heat2Writer.cs
+
+diff --git a/Skate Custom Server/Blaze/Components/Redirector/Handlers/GetServerInstanceHandler.cs b/Skate Custom Server/Blaze/Components/Redirector/Handlers/GetServerInstanceHandler.cs
+index 1d10016..0b5304a 100644
+--- a/Skate Custom Server/Blaze/Components/Redirector/Handlers/GetServerInstanceHandler.cs	
++++ b/Skate Custom Server/Blaze/Components/Redirector/Handlers/GetServerInstanceHandler.cs	
+@@ -23,28 +23,68 @@ namespace Blaze.Components.Redirector.Handlers
+             string bsdk = ReadBsdkVersion(packetBytes);
+             int major = 0;
+             if (bsdk.Length > 0) int.TryParse(bsdk.Split('.')[0], out major);
+-            bool secure = major >= 3 && ServerGlobals.SecureRedirectPort != 0;
+-            ushort port = secure ? ServerGlobals.SecureRedirectPort : ServerGlobals.ServerPort;
+-            ServerLogger.Log($"[Blaze] getServerInstance BSDK={bsdk} -> {ServerGlobals.ServerIP}:{port} secure={secure}");
++            // Blaze 3.x (Madden/NHL): run the SESSION in plaintext (SECU=0) on the normal Blaze port. A SECU=1 address
++            // given as a bare IP makes the client's ProtoSSL refuse to even start TLS (no hostname/CN to validate), so
++            // it opens the socket and immediately closes -> "EA servers not available". Plaintext avoids that entirely,
++            // and the client honours SECU=0: verified 2026-11-07, Madden reaches preAuth + "connecting to EA servers".
++            // Only the redirector hop itself stays TLS (the game always dials gosredirector over ProtoSSL).
++            bool secure = false; // both 2.x and 3.x sessions run plaintext on the Blaze port
++            ushort port = ServerGlobals.ServerPort;
++            // Experiment toggle (env BLAZE3_SESSION=plain:<port> | tls:<port>) to try a secure session / capture port.
++            string sess = Environment.GetEnvironmentVariable("BLAZE3_SESSION");
++            if (major >= 3 && !string.IsNullOrEmpty(sess))
++            {
++                var parts = sess.Split(':');
++                secure = parts[0] == "tls";
++                if (parts.Length > 1 && ushort.TryParse(parts[1], out var p2)) port = p2;
++            }
++            ServerLogger.Log($"[Blaze] getServerInstance BSDK={bsdk} -> {ServerGlobals.ServerIP}:{port} secure={secure} heat={(major >= 3 ? "2" : "1")}");
+ 
+-            BlazeMessage responseMsg = BlazeMessage.CreateResponseFromModel(
+-                packetBytes,
+-                new ServerInstanceInfo
+-                {
+-                    Address = new ServerAddress
++            byte[] response;
++            if (major >= 3)
++            {
++                // Hand-build the getServerInstance response in heat2 (the 2.x model encoder produces heat1 the client
++                // can't parse). Structure matches the model below: ADDR(union case 0) -> VALU{ IP, PORT } ; SECU ; XDNS.
++                response = BuildHeat2ServerInstance(packetBytes, serverIP, port, secure);
++            }
++            else
++            {
++                BlazeMessage responseMsg = BlazeMessage.CreateResponseFromModel(
++                    packetBytes,
++                    new ServerInstanceInfo
+                     {
+-                        IpAddress = new IpAddress
+-                        {
+-                            IP = serverIP,
+-                            Port = port
+-                        }
+-                    },
+-                    Secure = secure,
+-                    DefaultDnsAddress = 0
+-                });
++                        Address = new ServerAddress { IpAddress = new IpAddress { IP = serverIP, Port = port } },
++                        Secure = secure,
++                        DefaultDnsAddress = 0
++                    });
++                response = responseMsg.Serialize();
++            }
++
++            await user.Stream.WriteAsync(response);
++        }
+ 
+-            await user.Stream.WriteAsync(responseMsg.Serialize());
++        // Build the getServerInstance response frame with a heat2 body for Blaze 3.x clients.
++        private static byte[] BuildHeat2ServerInstance(byte[] req, uint serverIP, ushort port, bool secure)
++        {
++            var body = new List<byte>(48);
++            Blaze.Tdf.Heat2Writer.BeginUnion(body, "ADDR", 0x00);     // ServerAddress union, case 0 = IpAddress
++            Blaze.Tdf.Heat2Writer.BeginStruct(body, "VALU");
++            Blaze.Tdf.Heat2Writer.IntField(body, "IP", serverIP);
++            Blaze.Tdf.Heat2Writer.IntField(body, "PORT", port);
++            Blaze.Tdf.Heat2Writer.EndStruct(body);                   // close VALU struct
++            Blaze.Tdf.Heat2Writer.IntField(body, "SECU", secure ? 1u : 0u);
++            Blaze.Tdf.Heat2Writer.IntField(body, "XDNS", 0);
+ 
++            var packet = new List<byte>(0x0C + body.Count);
++            packet.AddRange(TdfUtils.SwapEndianess((ushort)body.Count));
++            packet.AddRange(TdfUtils.SwapEndianess(TdfUtils.GetComponentFromPacket(req)));
++            packet.AddRange(TdfUtils.SwapEndianess(TdfUtils.GetCommandFromPacket(req)));
++            packet.AddRange(TdfUtils.SwapEndianess((ushort)0));      // error
++            packet.Add((byte)BlazeMessageType.Response);
++            packet.Add(0x00);
++            packet.AddRange(TdfUtils.SwapEndianess(TdfUtils.GetMessageIDFromPacket(req)));
++            packet.AddRange(body);
++            return packet.ToArray();
+         }
+ 
+         // USCL: pull the BSDK version string out of the raw packet without the TDF model (Madden's Blaze 3.x
+diff --git a/Skate Custom Server/Blaze/Tdf/Heat2Writer.cs b/Skate Custom Server/Blaze/Tdf/Heat2Writer.cs
+new file mode 100644
+index 0000000..a7e2e22
+--- /dev/null
++++ b/Skate Custom Server/Blaze/Tdf/Heat2Writer.cs	
+@@ -0,0 +1,45 @@
++using System.Collections.Generic;
++
++namespace Blaze.Tdf
++{
++    // Blaze 3.x "heat2" wire encoder, separate from the 2.x "heat1" encoder in TdfUtils/BlazeMessage.
++    // heat2 differs from heat1 in two ways that matter here:
++    //   - a field is [3-byte tag][1-byte type]; the type is a full byte, not the high nibble of a length byte.
++    //   - integers/lengths are a LITTLE-endian varint: first byte = low 6 bits + 0x80 continue, then 7 bits + 0x80.
++    //     (heat1's EncodeVlq is big-endian, so it cannot be reused.)
++    // Type codes (heat2): 0=int, 1=string, 2=blob, 3=struct, 4=list, 5=map, 6=union. A struct ends with 0x00.
++    // Used for Blaze 3.x clients (Madden 25 = BlazeSDK 13.3, NHL 15). See uscl-blaze/ and games/BLUS31178.md.
++    public static class Heat2Writer
++    {
++        public const byte INT = 0x00, STRING = 0x01, STRUCT = 0x03, UNION = 0x06;
++
++        public static void VarInt(List<byte> o, ulong v)
++        {
++            if (v < 0x40) { o.Add((byte)v); return; }
++            o.Add((byte)((v & 0x3F) | 0x80));
++            v >>= 6;
++            while (v >= 0x80) { o.Add((byte)((v & 0x7F) | 0x80)); v >>= 7; }
++            o.Add((byte)v);
++        }
++
++        static void Tag(List<byte> o, string tag) => o.AddRange(TdfUtils.EncodeTdfTag(tag));
++
++        public static void IntField(List<byte> o, string tag, ulong value)
++        {
++            Tag(o, tag); o.Add(INT); VarInt(o, value);
++        }
++
++        // A union whose active member is a struct tagged VALU (the ServerAddress shape: ADDR -> selector -> VALU{..}).
++        public static void BeginUnion(List<byte> o, string tag, byte selector)
++        {
++            Tag(o, tag); o.Add(UNION); o.Add(selector);
++        }
++
++        public static void BeginStruct(List<byte> o, string tag)
++        {
++            Tag(o, tag); o.Add(STRUCT);
++        }
++
++        public static void EndStruct(List<byte> o) => o.Add(0x00);
++    }
++}
+-- 
+2.56.0
+
