@@ -85,6 +85,7 @@ Window {
                                     { title: qsTr("Keep Running"), action: resumeGame }] })
             return
         }
+        if (g.console === "Wii" || g.console === "3DS") { launchGame(g); return }   // emulator games: no PS3 firmware / RPCN
         if (!ps4 && !system.firmwareInstalled) {
             sound("error")
             dialog.show(qsTr("System Update"), qsTr("Games need the PS3 system software. Install it now?"),
@@ -116,6 +117,10 @@ Window {
         launchGame(g)
     }
     function launchGame(g) {
+        if (g.console === "Wii" || g.console === "3DS") {   // Wii -> Dolphin, 3DS -> Azahar
+            if (launcher.startEmu(g.path, g.title, g.console)) runningGame = g
+            return
+        }
         if (!games.isPs4Serial(g.serial)) {
             if (prefs.autoControllers) launcher.prepareInput(gamepad.names)
             if (prefs.autoScale) system.setRpcs3Value("Video", "Resolution Scale", String(autoScaleValue))
