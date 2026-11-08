@@ -74,6 +74,12 @@ fn preset(name: &str) -> Option<&'static str> {
         // it as 127.0.0.1:<slot> through the tunnel. Carries the full controller/Wiimote input stream (incl.
         // MotionPlus), so it turns a local-only game like Wii Sports (SP2E01) into online play. See uscl-dolphin/.
         "dolphin" => Some("tcp:2626"),
+        // Nintendo 3DS (Azahar/Citra) multiplayer: the host runs `azahar-room` (or hosts a room in the GUI) on TCP
+        // 24872, the joiner's Azahar connects to it as 127.0.0.1:<slot> through the tunnel. Carries the emulated
+        // local-wireless session (Download Play / local multiplayer), so MK7 local, Luigi's Mansion co-op, Pokemon
+        // trades/battles and NSMB2 co-op work over Steam. Nintendo-Network *online* (MK7 worldwide, Pokemon GTS)
+        // needs a Pretendo/NEX stand-in instead. See uscl-3ds/.
+        "3ds" => Some("tcp:24872"),
         _ => None,
     }
 }

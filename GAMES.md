@@ -66,6 +66,20 @@ The *online*-capable "Wii Sports" are later/other platforms, not ready yet: **Wi
 Nintendo-Network/Quazal-NEX stand-in (Pretendo doesn't support it online yet) — a future `uscl-cemu`; **Nintendo
 Switch Sports** runs on live Switch Online — a future `uscl-ryujinx` LDN tunnel. See `uscl-dolphin/README.md`.
 
+## Nintendo 3DS (Azahar)
+A third platform, via **Azahar** (Citra successor; notes in `uscl-3ds/`). Early-shutdown reality: Nintendo's 3DS
+online ended April 2024. Two paths: **Azahar rooms** (local/Download-Play multiplayer, `uscl-bridge host 3ds`,
+`tcp:24872`) work now; **worldwide online** (MK7 global, Pokémon GTS) needs a future **Pretendo/NEX** stand-in.
+Rendering on this machine is blocked by an Azahar flatpak OpenGL issue on NVIDIA (see `uscl-3ds/README.md`).
+
+| Game | Multiplayer | USCL path | Status |
+|---|---|---|---|
+| Mario Kart 7 | local + worldwide | rooms (local) now; Pretendo (worldwide) | 📋 profiled 2026-11-07; Azahar GL blocker |
+| Luigi's Mansion: Dark Moon | co-op (ScareScraper) | rooms (local co-op) | 📋 profiled |
+| Pokémon X / Y / Omega Ruby / Ultra Sun / Ultra Moon | trade/battle (local) + GTS online | rooms (local); Pretendo (GTS) | 📋 profiled |
+| New Super Mario Bros. 2 | co-op (local) | rooms (local co-op) | 📋 profiled |
+| Super Mario 3D Land; Zelda OoT3D / MM3D / ALBW | single-player (ALBW StreetPass only) | runs on USCL, no online | ⬜ no MP |
+
 ## Routes (how much work a game is)
 - **PSN only:** RPCN plus the session tunnel already carry it. Test it and fix small things. No reverse engineering.
 - **Demonware / Blaze:** our own stand-in server for that service, shared by every game on it. The first game is
