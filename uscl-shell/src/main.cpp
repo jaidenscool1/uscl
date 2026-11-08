@@ -227,7 +227,7 @@ int main(int argc, char* argv[])
 			byConsole[g.value("console").toString()] << g.value("title").toString();
 		}
 		for (const QString& c : {QStringLiteral("PS3"), QStringLiteral("PS4"), QStringLiteral("Wii"),
-		                         QStringLiteral("WiiU"), QStringLiteral("3DS")})
+		                         QStringLiteral("WiiU"), QStringLiteral("3DS"), QStringLiteral("Xbox360")})
 			if (byConsole.contains(c))
 			{
 				std::printf("== %s (%d) ==\n", qPrintable(c), int(byConsole[c].size()));

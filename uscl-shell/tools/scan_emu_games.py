@@ -9,11 +9,12 @@ usage: python3 -I uscl-shell/tools/scan_emu_games.py <folder> [<folder> ...]
 import os, sys, json, glob, re
 
 DEFAULTS = ["/home/main/Downloads/GAME_DUMPS/WII", "/home/main/Downloads/organized game dumps/Wii",
-            "/home/main/Downloads/organized game dumps/3DS", "/home/main/Downloads/organized game dumps/WiiU"]
+            "/home/main/Downloads/organized game dumps/3DS", "/home/main/Downloads/organized game dumps/WiiU",
+            "/home/main/Downloads/GAME_DUMPS/XBOX360_GAMES", "/mnt/games/GAME_DUMPS/XBOX360_GAMES"]
 WII_EXT = (".wbfs", ".rvz")
 TDS_EXT = (".cci", ".3ds", ".cxi")
 WIIU_EXT = (".wua", ".rpx", ".wud", ".wux")
-EMU = {"Wii": "dolphin", "3DS": "azahar", "WiiU": "cemu"}
+EMU = {"Wii": "dolphin", "3DS": "azahar", "WiiU": "cemu", "Xbox360": "xenia"}
 
 def clean_title(name):
     t = re.sub(r"\s*\((USA|USA, [^)]*|En|Fr|Es|De|It|Ja|Ko|Zh|Nl|Pt|Sv|No|Da|Fi|Pl|Ru|Tr|Rev \d|Asia)[^)]*\)", "", name)
@@ -27,7 +28,8 @@ def main():
         for p in sorted(glob.glob(os.path.join(folder, "**", "*"), recursive=True)):
             ext = os.path.splitext(p)[1].lower()
             console = ("Wii" if ext in WII_EXT else "3DS" if ext in TDS_EXT
-                       else "WiiU" if ext in WIIU_EXT else None)
+                       else "WiiU" if ext in WIIU_EXT
+                       else "Xbox360" if ext == ".iso" and "xbox" in p.lower() else None)
             if not console or p in seen:
                 continue
             seen.add(p)

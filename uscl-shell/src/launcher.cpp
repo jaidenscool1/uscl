@@ -126,6 +126,15 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 		args = {"run", "--env=LIBGL_ALWAYS_SOFTWARE=1", "org.azahar_emu.Azahar", path};
 	else if (console == "WiiU")
 		args = {"run", "info.cemu.Cemu", "-f", "-g", path};   // Cemu: fullscreen, load game
+	else if (console == "Xbox360")
+	{
+		// Xenia is a Windows build (no flatpak); run it under Wine. Experimental on Linux.
+		const QString xenia = qEnvironmentVariableIsSet("USCL_XENIA")
+			? qEnvironmentVariable("USCL_XENIA")
+			: QDir::homePath() + "/.local/share/uscl/xenia/xenia.exe";
+		program = "wine";
+		args = {xenia, "--fullscreen", path};
+	}
 	else
 		return false;
 	env.remove("USCL_ONLINE");

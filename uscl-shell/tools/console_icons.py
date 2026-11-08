@@ -75,6 +75,15 @@ def wii(d, S):
     d.line([int(S*0.28), int(S*0.86), int(S*0.72), int(S*0.86)], fill=255, width=t)
     d.line([int(S*0.50), y1, int(S*0.50), int(S*0.86)], fill=255, width=int(t*0.8))
 
+# --- Xbox 360: the Xbox nexus -- a ring with a stylized X inside ---
+def x360(d, S):
+    t = int(S * 0.06)
+    cx, cy, r = int(S*0.5), int(S*0.5), int(S*0.34)
+    d.ellipse([cx-r, cy-r, cx+r, cy+r], outline=255, width=t)   # ring
+    a = int(r*0.5)
+    d.line([cx-a, cy-a, cx+a, cy+a], fill=255, width=t)         # X
+    d.line([cx-a, cy+a, cx+a, cy-a], fill=255, width=t)
+
 # --- Wii U: the GamePad tablet -- a wide rounded slab with a central screen and two circle-pad dots ---
 def wiiu(d, S):
     t = int(S * 0.05)
@@ -98,7 +107,8 @@ def nds3(d, S):
 
 def main():
     os.makedirs(OUT, exist_ok=True)
-    for name, fn in [("cat_ps3", ps3), ("cat_ps4", ps4), ("cat_wii", wii), ("cat_wiiu", wiiu), ("cat_3ds", nds3)]:
+    for name, fn in [("cat_ps3", ps3), ("cat_ps4", ps4), ("cat_wii", wii), ("cat_wiiu", wiiu),
+                     ("cat_3ds", nds3), ("cat_x360", x360)]:
         render(fn).save(os.path.join(OUT, name + ".png"))
         print("wrote", name + ".png")
 

@@ -336,7 +336,7 @@ void GameModel::loadEmuGames()
 		g.icon = o.value("icon").toString();   // usually empty -> the home screen uses its default game icon
 		g.version = o.value("version").toString();
 		if (!g.title.isEmpty() && !g.path.isEmpty()
-		    && (g.console == "Wii" || g.console == "WiiU" || g.console == "3DS")
+		    && (g.console == "Wii" || g.console == "WiiU" || g.console == "3DS" || g.console == "Xbox360")
 		    && QFileInfo::exists(g.path))
 			m_games.push_back(g);
 	}
