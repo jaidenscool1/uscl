@@ -29,12 +29,20 @@ shows up as input delay, not rubber-banding.
 
 ## Motion input (each player supplies their own)
 
-NetPlay sends inputs; it does not give you a remote. Each player needs a motion source feeding their Dolphin:
-- **Real Wii Remote over Bluetooth passthrough** — the accurate option; Dolphin drives the PC Bluetooth adapter as
-  the Wii's, MotionPlus is detected. (Dolphin → Controllers → Wii Remotes → *Passthrough*.)
+NetPlay sends inputs; it does not give you a remote. Each player needs a motion source feeding their Dolphin. Any of
+these works — whatever a player emits as the emulated Wii Remote is what NetPlay syncs:
+- **PS5 DualSense (or PS4 DualShock 4) — the easy, recommended option.** It has a 3-axis gyro + accelerometer, the
+  same sensors as a Wii Remote. Dolphin 2609a reads its IMU **natively** (USB or Bluetooth, via the SDL backend — no
+  DSU server needed): emulated Wii Remote → *Motion Input* / *Motion Simulation* bound to the pad's gyro/accel, with
+  the IR pointer on the gyro or right stick. Wii Sports (2006) is mostly accelerometer swings, so it maps naturally;
+  expect to tune sensitivity/calibration for the right feel. A Switch Pro/Joy-Con IMU works the same way.
+- **Real Wii Remote over Bluetooth passthrough** — the most accurate; Dolphin drives the PC Bluetooth adapter as the
+  Wii's and MotionPlus is detected. (Dolphin → Controllers → Wii Remotes → *Passthrough*.)
 - **Real Wii Remote as a plain Bluetooth controller** ("Real Wii Remote" source, continuous scan, press sync).
-- **Emulated Wii Remote with a motion source** — a DSU/cemuhook provider (phone gyro, a DS4/Switch pad's IMU) mapped
-  to the emulated MotionPlus, for players without a remote.
+- **Phone gyro via DSU/cemuhook** — the fallback for a player with none of the above.
+
+(Note: USCL's automated test harness can't exercise this — its virtual pads are synthetic button/stick gamepads with
+no IMU — so the motion test is a real-hardware step, not something the harness drives.)
 
 ## The "newer, online" Wii Sports — the alternatives, and why not yet
 
