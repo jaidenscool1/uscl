@@ -1,0 +1,304 @@
+From f06b66a3771ff1b50bb2e2cae9d051527774eae5 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 18:24:32 -0700
+Subject: [PATCH] Blaze: full heat2 response encoder for Blaze 3.x clients
+ (Madden/NHL)
+
+Heat2Writer now serializes a whole TdfField model in heat2 (structs, lists, maps,
+unions, strings, ints) mirroring the heat1 path. A per-connection User.IsHeat2 flag is
+set from the preAuth BSDK version (major >= 3) and surfaced to BlazeMessage.Serialize
+via an AsyncLocal set in DispatchPacket, so a Blaze 3.x connection's responses are all
+heat2 without threading a flag through every handler. preAuth is rebuilt in heat2 for
+such clients (heat1 clients keep the cached bytes). Heat1 clients (NBA Jam/Skate 3)
+never set the flag, so their path is unchanged.
+
+Verified 2026-11-07 (replay + live): Madden's preAuth response round-trips as valid
+heat2 (CIDS list, CONF map, nested QOSS struct, SVER). Live, Madden now consumes
+preAuth + 8 fetchClientConfig responses with zero server errors and shows "connecting
+to the EA Servers". It then waits after fetchClientConfig -- next blocker is config
+*content* (we return empty OSDK_* configs) and/or QoS, which need a heat2 request
+decoder + the real config keys Madden expects (reverse-engineering, not encoding).
+---
+ .../Util/Handlers/PreAuthHandler.cs           |  63 ++++++----
+ Skate Custom Server/Blaze/Tdf/BlazeMessage.cs |  14 ++-
+ Skate Custom Server/Blaze/Tdf/Heat2Writer.cs  | 108 ++++++++++++++++++
+ .../Servers/Blaze/BlazeServer.cs              |   3 +
+ .../Servers/Blaze/Models/User.cs              |   1 +
+ 5 files changed, 166 insertions(+), 23 deletions(-)
+
+diff --git a/Skate Custom Server/Blaze/Components/Util/Handlers/PreAuthHandler.cs b/Skate Custom Server/Blaze/Components/Util/Handlers/PreAuthHandler.cs
+index 735ae58..c02ae28 100644
+--- a/Skate Custom Server/Blaze/Components/Util/Handlers/PreAuthHandler.cs	
++++ b/Skate Custom Server/Blaze/Components/Util/Handlers/PreAuthHandler.cs	
+@@ -7,44 +7,67 @@ namespace Blaze.Components.Util.Handlers
+ {
+     public static class PreAuthHandler
+     {
+-        // preAuth response is pretty much same so cache it instead of rebuilding always
+-        private static byte[] _cachedBytes;
++        // preAuth response is pretty much the same, so cache the heat1 bytes (NBA Jam / Skate 3).
++        private static readonly byte[] _cachedBytes;
+ 
+         static PreAuthHandler()
+         {
+-            Dictionary<string, string> config = new Dictionary<string, string>
++            _cachedBytes = BuildMessage(new byte[] { 0, 0, 0, 9, 0, 7, 0, 0, 0, 0, 0, 0 }).Serialize();
++        }
++
++        private static BlazeMessage BuildMessage(byte[] packetBytes)
++        {
++            var config = new Dictionary<string, string>
+             {
+                 { "pingPeriodInMs", (ServerGlobals.PingPeriodSecs * 1000).ToString() },
+                 { "voipHeadsetUpdateRate", "1000" }
+             };
+-
+-            BlazeMessage response = BlazeMessage.CreateResponseFromModel(
+-                new byte[] { 0, 0, 0, 9, 0, 7, 0, 0, 0, 0, 0, 0 },
++            return BlazeMessage.CreateResponseFromModel(
++                packetBytes,
+                 new PreAuthResponse
+                 {
+                     ComponentIds = new List<ushort> { 1, 4, 7, 8, 9, 11, 12, 15, 25, 30720, 30722, 30723 },
+-                    Config =
+-                    {
+-                        ConfigFields = config
+-                    },
+-                    QosSettings =
+-                    {
+-                        NumLatencyProbes = 0,
+-                        PingSiteInfoByAliasMap = new Dictionary<string, QosPingSiteInfo> {  }
+-                    },
++                    Config = { ConfigFields = config },
++                    QosSettings = { NumLatencyProbes = 0, PingSiteInfoByAliasMap = new Dictionary<string, QosPingSiteInfo> { } },
+                     ServerVersion = "Custom Blaze 2.11.3.1 Server"
+                 });
++        }
+ 
+-            _cachedBytes = response.Serialize();
++        // BSDK tag (8B 39 2B) + ASCII version in the preAuth request; major >= 3 means a heat2 (Blaze 3.x) client.
++        private static readonly byte[] BsdkTag = { 0x8B, 0x39, 0x2B };
++        private static int BsdkMajor(byte[] p)
++        {
++            for (int i = 0; i + 3 < p.Length; i++)
++            {
++                if (p[i] != BsdkTag[0] || p[i + 1] != BsdkTag[1] || p[i + 2] != BsdkTag[2]) continue;
++                int j = i + 3;
++                while (j < p.Length && !(p[j] >= '0' && p[j] <= '9')) j++;
++                int start = j;
++                while (j < p.Length && p[j] >= '0' && p[j] <= '9') j++;
++                if (j > start && int.TryParse(System.Text.Encoding.ASCII.GetString(p, start, j - start), out int m)) return m;
++                return 0;
++            }
++            return 0;
+         }
+ 
+         public static async Task HandleRequest(User user, byte[] packetBytes)
+         {
+-            byte[] response = (byte[])_cachedBytes.Clone();
+-            for (int i = 0; i < 2; i++)
+-                response[10 + i] = packetBytes[10+i];
++            user.IsHeat2 = BsdkMajor(packetBytes) >= 3;
++            Blaze.Tdf.Heat2Writer.Mode.Value = user.IsHeat2;
++            ServerLogger.Log($"[Blaze] preAuth heat2={user.IsHeat2}");
+ 
+-			await user.Stream.WriteAsync(response);
++            byte[] response;
++            if (user.IsHeat2)
++            {
++                response = BuildMessage(packetBytes).Serialize(); // heat2 via Mode
++            }
++            else
++            {
++                response = (byte[])_cachedBytes.Clone();
++                for (int i = 0; i < 2; i++)
++                    response[10 + i] = packetBytes[10 + i]; // copy the request's message id
++            }
++            await user.Stream.WriteAsync(response);
+         }
+     }
+ }
+diff --git a/Skate Custom Server/Blaze/Tdf/BlazeMessage.cs b/Skate Custom Server/Blaze/Tdf/BlazeMessage.cs
+index c1c9e4b..81367c4 100644
+--- a/Skate Custom Server/Blaze/Tdf/BlazeMessage.cs	
++++ b/Skate Custom Server/Blaze/Tdf/BlazeMessage.cs	
+@@ -482,9 +482,17 @@ namespace Blaze
+ 
+         public byte[] Serialize()
+         {
+-            var payload = new List<byte>(256);
+-            foreach (var field in Fields)
+-                payload.AddRange(field.Serialize());
++            List<byte> payload;
++            if (Blaze.Tdf.Heat2Writer.Mode.Value)
++            {
++                payload = new List<byte>(Blaze.Tdf.Heat2Writer.SerializeFields(Fields));
++            }
++            else
++            {
++                payload = new List<byte>(256);
++                foreach (var field in Fields)
++                    payload.AddRange(field.Serialize());
++            }
+ 
+             var packet = new List<byte>(0x0C + payload.Count);
+             packet.AddRange(TdfUtils.SwapEndianess((ushort)payload.Count));
+diff --git a/Skate Custom Server/Blaze/Tdf/Heat2Writer.cs b/Skate Custom Server/Blaze/Tdf/Heat2Writer.cs
+index a7e2e22..44194b4 100644
+--- a/Skate Custom Server/Blaze/Tdf/Heat2Writer.cs	
++++ b/Skate Custom Server/Blaze/Tdf/Heat2Writer.cs	
+@@ -1,4 +1,7 @@
++using System;
+ using System.Collections.Generic;
++using System.Text;
++using Blaze.Tdf.Types;
+ 
+ namespace Blaze.Tdf
+ {
+@@ -13,6 +16,10 @@ namespace Blaze.Tdf
+     {
+         public const byte INT = 0x00, STRING = 0x01, STRUCT = 0x03, UNION = 0x06;
+ 
++        // Set per request-dispatch from the connection's User.IsHeat2; read by BlazeMessage.Serialize so a Blaze 3.x
++        // connection's responses are heat2 without threading a flag through every handler.
++        public static readonly System.Threading.AsyncLocal<bool> Mode = new();
++
+         public static void VarInt(List<byte> o, ulong v)
+         {
+             if (v < 0x40) { o.Add((byte)v); return; }
+@@ -41,5 +48,106 @@ namespace Blaze.Tdf
+         }
+ 
+         public static void EndStruct(List<byte> o) => o.Add(0x00);
++
++        // ---- Full model serializer: turn the TdfField model (built with heat1 TdfType) into heat2 bytes. ----
++        // Used to re-encode whole responses for Blaze 3.x clients; mirrors the heat1 path in BlazeMessage/TdfCodec.
++
++        public const byte BLOB = 0x02, LIST = 0x04, MAP = 0x05, FLOAT = 0x0A;
++
++        // heat1 TdfType -> heat2 type code
++        public static byte Heat2Type(TdfType t) => t switch
++        {
++            TdfType.Struct => STRUCT,
++            TdfType.String => STRING,
++            TdfType.Blob => BLOB,
++            TdfType.Array => LIST,
++            TdfType.Map => MAP,
++            TdfType.Union => UNION,
++            _ => INT, // all int widths collapse to one heat2 varint int
++        };
++
++        public static byte[] SerializeFields(IEnumerable<TdfField> fields)
++        {
++            var o = new List<byte>(128);
++            foreach (var f in fields) WriteField(o, f.Tag, f.Type, f.Value);
++            return o.ToArray();
++        }
++
++        static void WriteField(List<byte> o, string tag, TdfType type, object value)
++        {
++            o.AddRange(TdfUtils.EncodeTdfTag(tag));
++            o.Add(Heat2Type(type));
++            WriteValue(o, type, value);
++        }
++
++        static void VarIntSigned(List<byte> o, object value)
++        {
++            if (value is bool b) { VarInt(o, b ? 1UL : 0UL); return; }
++            long lv = Convert.ToInt64(value);
++            VarInt(o, unchecked((ulong)lv)); // non-negative in practice; two's-complement otherwise, matching Blaze
++        }
++
++        static void WriteString(List<byte> o, string s)
++        {
++            var bytes = Encoding.Latin1.GetBytes(s ?? string.Empty);
++            VarInt(o, (ulong)(bytes.Length + 1)); // length includes the NUL terminator
++            o.AddRange(bytes);
++            o.Add(0x00);
++        }
++
++        // Write just a value (no tag), given its heat1 type. For struct: fields + 0x00 terminator.
++        static void WriteValue(List<byte> o, TdfType type, object value)
++        {
++            switch (type)
++            {
++                case TdfType.Struct:
++                    foreach (var f in ((TdfStruct)value).Fields) WriteField(o, f.Tag, f.Type, f.Value);
++                    o.Add(0x00);
++                    break;
++                case TdfType.String:
++                    WriteString(o, (string)value);
++                    break;
++                case TdfType.Blob:
++                    var blob = (byte[])value ?? Array.Empty<byte>();
++                    VarInt(o, (ulong)blob.Length); o.AddRange(blob);
++                    break;
++                case TdfType.Array:
++                    WriteList(o, (TdfArray)value);
++                    break;
++                case TdfType.Map:
++                    WriteMap(o, (TdfDictionary)value);
++                    break;
++                case TdfType.Union:
++                    var u = (TdfUnion)value;
++                    o.Add(u.SelectedUnionValue);
++                    if (u.SelectedUnionValue != 0x7F && u.Field != null)
++                        WriteField(o, "VALU", u.Field.Type, u.Field.Value);
++                    break;
++                default: // any int width
++                    VarIntSigned(o, value);
++                    break;
++            }
++        }
++
++        static void WriteList(List<byte> o, TdfArray a)
++        {
++            o.Add(Heat2Type(a.ArrayType));
++            VarInt(o, (ulong)a.Items.Count);
++            foreach (var item in a.Items) WriteValue(o, a.ArrayType, item);
++        }
++
++        static void WriteMap(List<byte> o, TdfDictionary d)
++        {
++            o.Add(Heat2Type(d.KeyType));
++            o.Add(Heat2Type(d.ValueType));
++            int count = d?.Map?.Count ?? 0;
++            VarInt(o, (ulong)count);
++            if (count == 0) return;
++            foreach (var kv in d.Map)
++            {
++                WriteValue(o, d.KeyType, kv.Key);
++                WriteValue(o, d.ValueType, kv.Value);
++            }
++        }
+     }
+ }
+diff --git a/Skate Custom Server/Servers/Blaze/BlazeServer.cs b/Skate Custom Server/Servers/Blaze/BlazeServer.cs
+index 472d473..9d02f5e 100644
+--- a/Skate Custom Server/Servers/Blaze/BlazeServer.cs	
++++ b/Skate Custom Server/Servers/Blaze/BlazeServer.cs	
+@@ -150,6 +150,9 @@ namespace Servers.Blaze
+             BlazeComponent component =
+                 (BlazeComponent)TdfUtils.GetComponentFromPacket(packetBytes);
+             ushort command = (ushort)TdfUtils.GetCommandFromPacket(packetBytes);
++            // Blaze 3.x connections (Madden/NHL) get heat2-encoded responses. Set per packet from the connection flag
++            // (preAuth sets it); flows into the handler's awaited Serialize calls via AsyncLocal.
++            global::Blaze.Tdf.Heat2Writer.Mode.Value = user.IsHeat2;
+             // Request trace (Util ping/keepalive left out): compare the invite join with a matchmaking join
+             if (!(component == BlazeComponent.Util && command == 2))
+                 ServerLogger.Log($"[Blaze] {user.UserIdentification.Name ?? "?"} -> {component} command {command}");
+diff --git a/Skate Custom Server/Servers/Blaze/Models/User.cs b/Skate Custom Server/Servers/Blaze/Models/User.cs
+index cd5be0f..8e735d3 100644
+--- a/Skate Custom Server/Servers/Blaze/Models/User.cs	
++++ b/Skate Custom Server/Servers/Blaze/Models/User.cs	
+@@ -9,6 +9,7 @@ namespace Servers.Blaze.Models
+     {
+         public bool HasSentPreAuth = false;
+         public bool IsAuthenticated = false;
++        public bool IsHeat2 = false; // Blaze 3.x client (Madden/NHL): encode responses in heat2, not heat1
+         public UserPlatform Platform;
+         public NetworkStream Stream;
+         public SessionDetails Session = new SessionDetails();
+-- 
+2.56.0
+
