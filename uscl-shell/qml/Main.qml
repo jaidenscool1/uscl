@@ -633,9 +633,17 @@ Window {
     // ---------------------------------------------------------------- the crossbar
 
     // column order: Users, Settings, Online, Games, Party, Friends
+    // games are split into one XMB column per console starting at gamesCat (3); Party/Friends follow them
+    readonly property var presentConsoles: {
+        games.count
+        var order = ["PS3", "PS4", "Wii", "3DS"], set = ({})
+        for (var i = 0; i < games.count; i++) set[games.get(i).console || "PS3"] = true
+        var p = order.filter(function(c) { return set[c] })
+        return p.length ? p : ["PS3"]
+    }
     readonly property int gamesCat: 3
-    readonly property int partyCat: 4
-    readonly property int friendsCat: 5
+    readonly property int partyCat: 3 + presentConsoles.length
+    readonly property int friendsCat: 4 + presentConsoles.length
     property var cats: {
         games.count; games.scanning; system.onlineName; system.firmwareInstalled; system.firmwareVersion; gamepad.count; prefs.avatar
         online.state; online.session; online.message; online.friends; online.friendsLoading; online.friendsError; online.players; online.bans; cfgTick
@@ -657,6 +665,7 @@ Window {
         if (launcher.running && runningGame) {
             let g = runningGame
             gameItems.push({ title: g.title, desc: qsTr("Running"), icon: g.icon || ic("it_games"), wide: !!g.icon, badge: qsTr("Running"),
+                             console: g.console || "PS3",
                              action: resumeGame,
                              options: function() { return [{ title: qsTr("Resume Game"), action: resumeGame },
                                                            { title: qsTr("Close Game"), action: closeGame }] } })
@@ -665,6 +674,7 @@ Window {
             let g = games.get(i)
             gameItems.push({
                 title: g.title, desc: gameUpdates.available[g.serial] ? updateInfo(g.serial) : g.serial, icon: g.icon || ic("it_games"), wide: !!g.icon,
+                console: g.console || "PS3",
                 badge: gameUpdates.available[g.serial] ? qsTr("Update") : "",
                 action: function() { play(g) },
                 options: function() {
@@ -684,15 +694,29 @@ Window {
                 }
             })
         }
-        gameItems.push({ title: qsTr("Add Games"), icon: ic("it_addgames"), action: addGames,
-                         desc: games.scanning ? qsTr("Looking for games...") : qsTr("Find the games in a folder, and every folder inside it") })
         var pending = Object.keys(gameUpdates.available).length
-        gameItems.push({ title: qsTr("Game Updates"), icon: ic("it_update"), badge: pending ? String(pending) : "",
-                         action: function() { updatePick = ({}); openPage(updatesPage, ic("it_update"), gamesCat) },
-                         desc: gameUpdates.busy ? gameUpdates.status
-                             : pending ? qsTr("%n game(s) have updates: choose which to install", "", pending)
-                             : gameUpdates.checking ? qsTr("Checking for updates...") : qsTr("All your games are up to date") })
-        gameItems.push({ title: qsTr("How to Play"), icon: ic("it_help"), action: guide, desc: qsTr("Controls, quitting a game, and playing online") })
+        // the library-wide items live at the end of the first (default) console column
+        var util = [
+            { title: qsTr("Add Games"), icon: ic("it_addgames"), action: addGames,
+              desc: games.scanning ? qsTr("Looking for games...") : qsTr("Find the games in a folder, and every folder inside it") },
+            { title: qsTr("Game Updates"), icon: ic("it_update"), badge: pending ? String(pending) : "",
+              action: function() { updatePick = ({}); openPage(updatesPage, ic("it_update"), gamesCat) },
+              desc: gameUpdates.busy ? gameUpdates.status
+                  : pending ? qsTr("%n game(s) have updates: choose which to install", "", pending)
+                  : gameUpdates.checking ? qsTr("Checking for updates...") : qsTr("All your games are up to date") },
+            { title: qsTr("How to Play"), icon: ic("it_help"), action: guide, desc: qsTr("Controls, quitting a game, and playing online") }
+        ]
+        // split the games into one XMB column per console, each with its own console icon (PS3/PS4/Wii/3DS)
+        var consoleMeta = { "PS3": [qsTr("PlayStation 3"), "cat_ps3"], "PS4": [qsTr("PlayStation 4"), "cat_ps4"],
+                            "Wii": [qsTr("Wii"), "cat_wii"], "3DS": [qsTr("Nintendo 3DS"), "cat_3ds"] }
+        var byConsole = {}
+        gameItems.forEach(function(it) { var k = it.console || "PS3"; (byConsole[k] = byConsole[k] || []).push(it) })
+        var consoleCats = presentConsoles.map(function(c, idx) {
+            var meta = consoleMeta[c] || [c, "cat_game"]
+            var items = (byConsole[c] || []).slice()
+            if (idx === 0) items = items.concat(util)   // default column also carries Add Games / Updates / Help
+            return { name: meta[0], icon: ic(meta[1]), items: items }
+        })
 
         var active = online.state !== "off"
         var steam = online.steamRunning()
@@ -763,11 +787,11 @@ Window {
                 settingsItem(qsTr("Accessory Settings"), qsTr("Controllers and button assignments"), "it_gamepad", accessoryPage),
                 settingsItem(qsTr("Network Settings"), qsTr("Online ID and the connection test"), "it_network", networkSettingsPage),
                 settingsItem(qsTr("System Settings"), qsTr("Language, system information and setup"), "it_system", systemSettingsPage) ] },
-            { name: qsTr("Online"), icon: ic("cat_network"), items: network },
-            { name: qsTr("Games"), icon: ic("cat_game"), items: gameItems },
+            { name: qsTr("Online"), icon: ic("cat_network"), items: network }
+        ].concat(consoleCats, [
             { name: qsTr("Party"), icon: ic("cat_party"), items: partyItems() },
             { name: qsTr("Friends"), icon: ic("cat_friends"), items: friends }
-        ]
+        ])
     }
 
     // ---------------------------------------------------------------- sounds
