@@ -70,7 +70,8 @@ Switch Sports** runs on live Switch Online — a future `uscl-ryujinx` LDN tunne
 A third platform, via **Azahar** (Citra successor; notes in `uscl-3ds/`). Early-shutdown reality: Nintendo's 3DS
 online ended April 2024. Two paths: **Azahar rooms** (local/Download-Play multiplayer, `uscl-bridge host 3ds`,
 `tcp:24872`) work now; **worldwide online** (MK7 global, Pokémon GTS) needs a future **Pretendo/NEX** stand-in.
-Rendering on this machine is blocked by an Azahar flatpak OpenGL issue on NVIDIA (see `uscl-3ds/README.md`).
+Azahar runs (GL fixed with `LIBGL_ALWAYS_SOFTWARE=1`; games are decrypted, no keys needed); booting a game is a GUI
+click the harness can't drive (see `uscl-3ds/README.md`).
 
 | Game | Multiplayer | USCL path | Status |
 |---|---|---|---|
