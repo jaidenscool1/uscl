@@ -166,6 +166,9 @@ the publisher's servers. The player decided:
    most 2009–2013 EA PS3 titles (Skate 3, Battlefield 3, FIFA, Madden, NFS, Mass Effect 3), so one engine covers
    many games, with per-game components on top. Test game: Skate 3. Protocol reference: the Skate3BlazeServer
    community server, which has no license, so it's used as reference only unless its author agrees.
+   **Status (2026-11-09):** the engine now covers both Blaze generations — 2.x "heat1" (Skate 3, NBA Jam —
+   matchmaking works) and **3.x "heat2"** (NHL 15, Madden 25): the heat2 codec and the full login are solved, and
+   NHL 15 connects to the EA servers. See `uscl-blaze/README.md` and `games/BLUS31436.md`.
    Activision's Demonware (Call of Duty) would be a second engine of the same shape.
    **Goal (player, 2026-10-23):** online services that work like Steam's for every such game, bypassing the
    publisher's servers completely: our own stand-ins for Blaze (EA) and Demonware (Activision), backed by Steam.

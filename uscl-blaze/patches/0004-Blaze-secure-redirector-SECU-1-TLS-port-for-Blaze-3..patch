@@ -1,8 +1,8 @@
 From 4b63bc13f5aeeed9afcb5fe18b4ecd7bced18ca3 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 10:13:31 -0700
-Subject: [PATCH] Blaze: secure redirector (SECU=1 + TLS port) for Blaze 3.x
- clients like Madden 25
+Subject: [PATCH 04/14] Blaze: secure redirector (SECU=1 + TLS port) for Blaze
+ 3.x clients like Madden 25
 
 Madden 25 (Blaze 13.3) runs the whole Blaze session over ProtoSSL TLS, not just the
 redirector. getServerInstance now reads the BSDK version by a raw scan (Madden's 3.x

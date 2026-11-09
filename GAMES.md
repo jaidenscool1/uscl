@@ -20,7 +20,8 @@ own = the publisher's own servers · GameSpy (revived by OpenSpy) · ? = not pro
 | Call of Duty: Black Ops II (PS4, shadPS4) | [CUSA57548](games/CUSA57548.md) | update in `CUSA57548-UPDATE` | Demonware (title 2430, auth3 HTTPS) + shadNet | ✅ public Free-for-All matches between two PCs over Steam, also hosted from the USCL app (2026-10-28) | in-game friends / invites (PlayerSessions); Windows app build |
 | Gotham City Impostors (PSN) | [NPUB30252](games/NPUB30252.md) | 1.00 trial + full-game unlock | GameSpy (`sirenps3`, shut down 2014) + PSN tickets | 🚧 full-game licence accepted; stuck at the title without GameSpy (2026-10-26) | answer the SSLv3 GameSpy login (`sirenps3.api.gamespy.net`) |
 | NBA Jam | [BLUS30696](games/BLUS30696.md) | 1.00 | Blaze 2.11 + RPCN ticket | 🧪 two players matchmake into one lobby through our Blaze stand-in (`uscl-blaze`) and the relay carries game traffic both ways (2026-11-07) | clean two-PC test to see the match play; tunnel the relay over Steam |
-| Madden NFL 25 | [BLUS31178](games/BLUS31178.md) | 1.00 | Blaze 13.3 (ProtoSSL TLS) + RPCN ticket | 🚧 heat2 session codec done: preAuth + 8 fetchClientConfig answered with 0 errors, shows "connecting to EA Servers"; waits after fetchClientConfig (2026-11-07) | heat2 request decoder + real OSDK_* config / QoS content Madden needs |
+| NHL 15 | [BLUS31436](games/BLUS31436.md) | 1.01 | Blaze 3.19 (ProtoSSL TLS) + RPCN ticket | 🚧 **logs in & connects to the EA servers** — full heat2 login solved (ConsoleLoginResponse + UserAuthenticated), online ticker plays, reaches "Retrieving data" (2026-11-09) | one diagnosed, server-fixable crash (`O_SG_TCKR` ticker group): skip the ticker (error for OsdkTicker2/2249) or RE its RegisterResponse |
+| Madden NFL 25 | [BLUS31178](games/BLUS31178.md) | 1.00 | Blaze 13.3 (ProtoSSL TLS) + RPCN ticket | 🚧 shares NHL's now-solved heat2 login; blocked earlier by an unrelated RPCS3 FGGameSim PPU crash ~52s (2026-11-09) | use NHL 15 to finish the EA Sports flow first; then revisit Madden's emulation crash |
 | Grand Theft Auto V | [BLUS31156](games/BLUS31156.md) | disc 1.01 (Online needs the last update) | own (Rockstar ROS, HTTPS 443) + PSN ticket | 🚧 profiled 2026-11-06: boots, signs in to RPCN, calls `prod.ros.rockstargames.com` | install the last title update, profile again; ROS stand-in after the EA games |
 
 ## Next up
@@ -34,10 +35,10 @@ with `np-profile.py` on your own dump before starting.
 | Call of Duty: Ghosts | ? | Demonware ? | BO2's Demonware | ⬜ |
 | Call of Duty: World at War | ? | Demonware ? | BO2's Demonware | ⬜ |
 | Call of Duty 4: Modern Warfare | ? | Demonware ? | BO2's Demonware | ⬜ |
-| Battlefield 3 | ? | Blaze ? | Skate 3's Blaze work | 📋 |
-| FIFA (2012–2014) | ? | Blaze ? | Skate 3's Blaze work | ⬜ |
-| Need for Speed: Hot Pursuit / Most Wanted (2012) | ? | Blaze ? | Skate 3's Blaze work | ⬜ |
-| Mass Effect 3 | ? | Blaze ? | Skate 3's Blaze work | ⬜ |
+| Battlefield 3 | ? | Blaze ? | the heat2 login (NHL/Madden) + Skate 3's Blaze work | 📋 |
+| FIFA (2012–2014) | ? | Blaze ? | the heat2 login (NHL/Madden) + Skate 3's Blaze work | ⬜ |
+| Need for Speed: Hot Pursuit / Most Wanted (2012) | ? | Blaze ? | the heat2 login (NHL/Madden) + Skate 3's Blaze work | ⬜ |
+| Mass Effect 3 | ? | Blaze ? | the heat2 login (NHL/Madden) + Skate 3's Blaze work | ⬜ |
 | LittleBigPlanet 1 / 2 | ? | ? | profile first | ⬜ |
 | Uncharted 2 / 3 | ? | ? | profile first | ⬜ |
 | Killzone 2 / 3 | ? | ? | profile first | ⬜ |

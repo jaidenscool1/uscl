@@ -1,8 +1,8 @@
 From f06b66a3771ff1b50bb2e2cae9d051527774eae5 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 18:24:32 -0700
-Subject: [PATCH] Blaze: full heat2 response encoder for Blaze 3.x clients
- (Madden/NHL)
+Subject: [PATCH 07/14] Blaze: full heat2 response encoder for Blaze 3.x
+ clients (Madden/NHL)
 
 Heat2Writer now serializes a whole TdfField model in heat2 (structs, lists, maps,
 unions, strings, ints) mirroring the heat1 path. A per-connection User.IsHeat2 flag is

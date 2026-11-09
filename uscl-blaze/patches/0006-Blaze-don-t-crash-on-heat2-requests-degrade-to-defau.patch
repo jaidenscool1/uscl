@@ -1,8 +1,8 @@
 From 5fb725c81c3727de2dd740840b6e080559d11dbb Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 18:18:07 -0700
-Subject: [PATCH] Blaze: don't crash on heat2 requests (degrade to default
- model)
+Subject: [PATCH 06/14] Blaze: don't crash on heat2 requests (degrade to
+ default model)
 
 CreateModelFromRequest now catches the heat1 parser's exceptions on Blaze 3.x
 (heat2) requests and returns a default model instead of throwing, so the handler

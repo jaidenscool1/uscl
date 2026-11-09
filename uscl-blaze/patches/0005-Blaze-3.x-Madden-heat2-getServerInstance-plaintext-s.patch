@@ -1,7 +1,7 @@
 From 9e36fcfffaff2d23f3ac8d06b306f1c837a0bfda Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 18:10:24 -0700
-Subject: [PATCH] Blaze 3.x (Madden): heat2 getServerInstance + plaintext
+Subject: [PATCH 05/14] Blaze 3.x (Madden): heat2 getServerInstance + plaintext
  session -> reaches EA handshake
 
 - Heat2Writer: a Blaze 3.x "heat2" wire encoder (3-byte tag + full type byte;

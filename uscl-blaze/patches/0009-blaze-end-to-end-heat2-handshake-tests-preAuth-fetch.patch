@@ -1,0 +1,161 @@
+From bb3ea81b9da468297de1976cdb4feb93dd460227 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 10:38:37 -0700
+Subject: [PATCH 09/14] blaze: end-to-end heat2 handshake tests (preAuth +
+ fetchClientConfig)
+
+Drive the real PreAuthHandler and FetchClientConfigHandler over a loopback
+socket pair (no game, no full server boot):
+ - preAuth carrying BSDK tag + "13.3" flips the connection to heat2 and its
+   response decodes as heat2.
+ - fetchClientConfig with a heat2 CFID decodes, the handler finds
+   clientconfig/<CFID>.txt, and the heat2 response carries it back -- which
+   only happens if the CFID decoded (the old empty-model bug gave "").
+
+25/25 checks pass (codec round-trips + reflection bind + these two E2E).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ Tests/Heat2Test/Program.cs | 112 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 112 insertions(+)
+
+diff --git a/Tests/Heat2Test/Program.cs b/Tests/Heat2Test/Program.cs
+index 23dacf4..8bd09fc 100644
+--- a/Tests/Heat2Test/Program.cs
++++ b/Tests/Heat2Test/Program.cs
+@@ -1,9 +1,14 @@
+ // Round-trip self-check for the heat2 request codec: encode a TdfField model with Heat2Writer, frame it like a real
+ // Blaze packet, decode it with Heat2Reader, and confirm every field survives. This is the inverse pairing that lets
+ // Blaze 3.x clients (Madden 25, NHL 15) have their requests actually read instead of falling back to empty models.
++using System.Net;
++using System.Net.Sockets;
+ using Blaze;
+ using Blaze.Tdf;
+ using Blaze.Tdf.Types;
++using Blaze.Components.Util.Handlers;
++using Servers;
++using Servers.Blaze.Models;
+ 
+ static class T
+ {
+@@ -95,10 +100,117 @@ static class T
+             Check(m.Flag && m.Num == 7 && m.Txt == "configname", "reflection model bind (bool/int/string)");
+         }
+ 
++        // --- end-to-end through the REAL FetchClientConfigHandler over a socket pair ---
++        // Proves the whole fix: heat2 CFID decodes, the handler finds clientconfig/<CFID>.txt, and the heat2 response
++        // carries it back. With the old empty-model bug CFID would be "" -> file not found -> empty CONF map.
++        IntegrationFetchClientConfig();
++        IntegrationPreAuthDetect();
++
+         Console.WriteLine($"\nheat2 round-trip: {pass} passed, {fail} failed");
+         return fail == 0 ? 0 : 1;
+     }
+ 
++    static void IntegrationFetchClientConfig()
++    {
++        // a config file the handler can only find if CFID decoded to exactly this name
++        string dir = Path.Combine(ServerGlobals.BaseDirectory, "clientconfig");
++        Directory.CreateDirectory(dir);
++        File.WriteAllText(Path.Combine(dir, "OSDK_CORE.txt"), "pingPeriodInMs=15000\ntestkey=testval\n");
++
++        // a loopback socket pair gives us a real NetworkStream for User.Stream, and the other end to read the reply
++        var listener = new TcpListener(IPAddress.Loopback, 0);
++        listener.Start();
++        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
++        using var clientSock = new TcpClient();
++        var connectTask = clientSock.ConnectAsync(IPAddress.Loopback, port);
++        using var serverSock = listener.AcceptTcpClient();
++        connectTask.GetAwaiter().GetResult();
++        listener.Stop();
++
++        var user = new User { Stream = serverSock.GetStream(), IsHeat2 = true };
++        Heat2Writer.Mode.Value = true;
++
++        // heat2 fetchClientConfig request: Util(9)/cmd 1, body = CFID string
++        byte[] body = Heat2Writer.SerializeFields(new List<TdfField> { new("CFID", TdfType.String, "OSDK_CORE") });
++        byte[] packet = new byte[0x0C + body.Length];
++        packet[0] = (byte)(body.Length >> 8); packet[1] = (byte)body.Length;
++        packet[3] = 9;      // component Util
++        packet[5] = 1;      // command FetchClientConfig
++        packet[11] = 1;     // message id
++        Buffer.BlockCopy(body, 0, packet, 0x0C, body.Length);
++
++        FetchClientConfigHandler.HandleRequest(user, packet).GetAwaiter().GetResult();
++
++        // read the framed response the handler wrote back
++        var cs = clientSock.GetStream();
++        cs.ReadTimeout = 3000;
++        byte[] hdr = ReadExactly(cs, 0x0C);
++        int rlen = (hdr[0] << 8) | hdr[1];
++        byte[] full = new byte[0x0C + rlen];
++        Buffer.BlockCopy(hdr, 0, full, 0, 0x0C);
++        Buffer.BlockCopy(ReadExactly(cs, rlen), 0, full, 0x0C, rlen);
++
++        var fields = Heat2Reader.ReadFields(full);
++        var conf = fields.Find(f => f.Tag == "CONF")?.Value as TdfDictionary;
++        bool ok = conf != null && conf.Map.TryGetValue("testkey", out var tv) && (string)tv == "testval";
++        Check(ok, "E2E handler: heat2 CFID decoded -> config served back");
++    }
++
++    // A Madden-style preAuth (BSDK tag 8B 39 2B + ASCII "13.3") must flip the connection into heat2 and the response
++    // must come back heat2-encoded. A heat1 client (no tag / major < 3) must stay heat1.
++    static void IntegrationPreAuthDetect()
++    {
++        var listener = new TcpListener(IPAddress.Loopback, 0);
++        listener.Start();
++        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
++        using var clientSock = new TcpClient();
++        var connectTask = clientSock.ConnectAsync(IPAddress.Loopback, port);
++        using var serverSock = listener.AcceptTcpClient();
++        connectTask.GetAwaiter().GetResult();
++        listener.Stop();
++
++        var user = new User { Stream = serverSock.GetStream() };
++
++        // body: a BSDK blob field carrying the tag + version "13.3" (BlazeSDK 13.3 = Madden 25)
++        var body = new List<byte>();
++        body.AddRange(TdfUtils.EncodeTdfTag("BSDK"));
++        body.Add(0x02);                                  // heat2 blob
++        var blob = new byte[] { 0x8B, 0x39, 0x2B }.Concat(System.Text.Encoding.ASCII.GetBytes("13.3")).ToArray();
++        Heat2Writer.VarInt(body, (ulong)blob.Length);
++        body.AddRange(blob);
++        byte[] packet = new byte[0x0C + body.Count];
++        packet[0] = (byte)(body.Count >> 8); packet[1] = (byte)body.Count;
++        packet[3] = 9; packet[5] = 7; packet[11] = 1;    // Util / preAuth / msgId
++        Buffer.BlockCopy(body.ToArray(), 0, packet, 0x0C, body.Count);
++
++        PreAuthHandler.HandleRequest(user, packet).GetAwaiter().GetResult();
++        Check(user.IsHeat2, "E2E preAuth: BSDK 13.3 detected as heat2");
++
++        // the response must be heat2 and decode to a struct carrying the server component list / config
++        var cs = clientSock.GetStream();
++        cs.ReadTimeout = 3000;
++        byte[] hdr = ReadExactly(cs, 0x0C);
++        int rlen = (hdr[0] << 8) | hdr[1];
++        byte[] full = new byte[0x0C + rlen];
++        Buffer.BlockCopy(hdr, 0, full, 0, 0x0C);
++        Buffer.BlockCopy(ReadExactly(cs, rlen), 0, full, 0x0C, rlen);
++        var fields = Heat2Reader.ReadFields(full);
++        Check(fields.Count > 0, "E2E preAuth: heat2 response decodes");
++    }
++
++    static byte[] ReadExactly(Stream s, int n)
++    {
++        var b = new byte[n];
++        int got = 0;
++        while (got < n)
++        {
++            int r = s.Read(b, got, n - got);
++            if (r <= 0) break;
++            got += r;
++        }
++        return b;
++    }
++
+     class Sample
+     {
+         [Blaze.Tdf.Attributes.TdfMember("BVAL")] public bool Flag;
+-- 
+2.56.0
+

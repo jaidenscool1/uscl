@@ -1,0 +1,163 @@
+From afab422357dd5151d5d5b19bff8a48ab1fa43659 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 10:17:23 -0700
+Subject: [PATCH 13/14] Blaze: add Stats component with getKeyScopesMap (shared
+ EA Sports)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+New wire component 7 = Stats, routing getKeyScopesMap (15) to a typed
+KeyScopes{KSIT: map<string,KeyScopeItem>} reply instead of the generic
+empty fallback. The EA Sports client's Stats manager dereferences the
+KSIT field unconditionally; a reply without it is a null-deref risk.
+Shared across all EA Sports titles (NHL/Madden/FIFA), part of the base
+template.
+
+Note: NHL 15's "Retrieving data from server" PPU crash (null-deref at
+0x008b1aec, a 'stgm' subsystem lookup returning null) is NOT fixed by
+this and is independent of the getKeyScopesMap response content —
+needs EBOOT disassembly to identify the 'stgm' data the game expects.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ .../Stats/Handlers/GetKeyScopesMap.cs         | 20 ++++++++++++++
+ .../Components/Stats/Models/KeyScopes.cs      | 21 +++++++++++++++
+ .../Blaze/MessageLists/ComponentsList.cs      |  1 +
+ .../Blaze/MessageLists/StatsMessages.cs       |  7 +++++
+ .../Blaze/Routers/StatsRouter.cs              | 27 +++++++++++++++++++
+ .../Servers/Blaze/BlazeServer.cs              |  3 +++
+ 6 files changed, 79 insertions(+)
+ create mode 100644 Skate Custom Server/Blaze/Components/Stats/Handlers/GetKeyScopesMap.cs
+ create mode 100644 Skate Custom Server/Blaze/Components/Stats/Models/KeyScopes.cs
+ create mode 100644 Skate Custom Server/Blaze/MessageLists/StatsMessages.cs
+ create mode 100644 Skate Custom Server/Blaze/Routers/StatsRouter.cs
+
+diff --git a/Skate Custom Server/Blaze/Components/Stats/Handlers/GetKeyScopesMap.cs b/Skate Custom Server/Blaze/Components/Stats/Handlers/GetKeyScopesMap.cs
+new file mode 100644
+index 0000000..037d483
+--- /dev/null
++++ b/Skate Custom Server/Blaze/Components/Stats/Handlers/GetKeyScopesMap.cs	
+@@ -0,0 +1,20 @@
++using Blaze.Components.Stats.Models;
++using Servers.Blaze.Models;
++
++namespace Blaze.Components.Stats
++{
++    public class GetKeyScopesMap
++    {
++        public static async Task HandleRequest(User user, byte[] packetBytes)
++        {
++            // Empty map is fine — the client only needs the KSIT field to exist so its Stats manager can read it.
++            var responseModel = new KeyScopes
++            {
++                KeyScopeItemsMap = new Dictionary<string, KeyScopeItem>()
++            };
++
++            BlazeMessage response = BlazeMessage.CreateResponseFromModel(packetBytes, responseModel);
++            await user.Stream.WriteAsync(response.Serialize());
++        }
++    }
++}
+diff --git a/Skate Custom Server/Blaze/Components/Stats/Models/KeyScopes.cs b/Skate Custom Server/Blaze/Components/Stats/Models/KeyScopes.cs
+new file mode 100644
+index 0000000..b9da53b
+--- /dev/null
++++ b/Skate Custom Server/Blaze/Components/Stats/Models/KeyScopes.cs	
+@@ -0,0 +1,21 @@
++using Blaze.Tdf.Attributes;
++
++namespace Blaze.Components.Stats.Models
++{
++    // Blaze::Stats::KeyScopes — response to Stats::getKeyScopesMap (7/15). The EA Sports client's Stats manager
++    // dereferences the KSIT map unconditionally, so the field MUST be present even when empty; a generic empty
++    // reply (no KSIT) is what crashed NHL 15's main PPU thread during "Retrieving data from server". Shape from
++    // the real BlazeSDK (ZamboniDevelopment Blaze3SDK/Blaze/Stats). Shared across EA Sports titles.
++    public struct KeyScopes
++    {
++        [TdfMember("KSIT")]
++        public Dictionary<string, KeyScopeItem> KeyScopeItemsMap;
++    }
++
++    public struct KeyScopeItem
++    {
++        [TdfMember("AGKY")] public long AggregateKeyValue;
++        [TdfMember("ENAG")] public uint EnableAggregation;
++        [TdfMember("KSVL")] public Dictionary<long, long> KeyScopeValues;
++    }
++}
+diff --git a/Skate Custom Server/Blaze/MessageLists/ComponentsList.cs b/Skate Custom Server/Blaze/MessageLists/ComponentsList.cs
+index 319d250..eca9822 100644
+--- a/Skate Custom Server/Blaze/MessageLists/ComponentsList.cs	
++++ b/Skate Custom Server/Blaze/MessageLists/ComponentsList.cs	
+@@ -5,6 +5,7 @@
+         Authentication = 1,
+         Gamemanager = 4,
+         Redirector = 5,
++        Stats = 7,
+         Util = 9,
+         Clubs = 11,
+         GameReporting = 12,
+diff --git a/Skate Custom Server/Blaze/MessageLists/StatsMessages.cs b/Skate Custom Server/Blaze/MessageLists/StatsMessages.cs
+new file mode 100644
+index 0000000..2002cb5
+--- /dev/null
++++ b/Skate Custom Server/Blaze/MessageLists/StatsMessages.cs	
+@@ -0,0 +1,7 @@
++namespace Blaze.MessageLists
++{
++    public enum StatsMessage : ushort
++    {
++        getKeyScopesMap = 15,
++    }
++}
+diff --git a/Skate Custom Server/Blaze/Routers/StatsRouter.cs b/Skate Custom Server/Blaze/Routers/StatsRouter.cs
+new file mode 100644
+index 0000000..b844d7b
+--- /dev/null
++++ b/Skate Custom Server/Blaze/Routers/StatsRouter.cs	
+@@ -0,0 +1,27 @@
++using Blaze.Components.Stats;
++using Servers;
++using Servers.Blaze.Models;
++using Blaze.MessageLists;
++
++namespace Blaze
++{
++    public static class StatsComponentRouter
++    {
++        public static async Task Handle(User user, byte[] receivedPacket)
++        {
++            StatsMessage statsMessage = (StatsMessage)TdfUtils.GetCommandFromPacket(receivedPacket);
++
++            switch (statsMessage)
++            {
++                case StatsMessage.getKeyScopesMap:
++                    await GetKeyScopesMap.HandleRequest(user, receivedPacket);
++                    break;
++                default:
++                    // Other Stats commands (getStatGroup, getStatsByGroupAsync, …) aren't needed yet; an empty
++                    // success reads as "no stats" rather than stopping the client.
++                    await ServerUtils.SendEmptyResponse(user, receivedPacket);
++                    break;
++            }
++        }
++    }
++}
+diff --git a/Skate Custom Server/Servers/Blaze/BlazeServer.cs b/Skate Custom Server/Servers/Blaze/BlazeServer.cs
+index 9d02f5e..47fc237 100644
+--- a/Skate Custom Server/Servers/Blaze/BlazeServer.cs	
++++ b/Skate Custom Server/Servers/Blaze/BlazeServer.cs	
+@@ -192,6 +192,9 @@ namespace Servers.Blaze
+                 case BlazeComponent.Clubs:
+                     await ClubsComponentRouter.Handle(user, packetBytes);
+                     break;
++                case BlazeComponent.Stats:
++                    await StatsComponentRouter.Handle(user, packetBytes);
++                    break;
+                 default:
+                     // USCL: components Skate 3 never uses (Rooms 21, Messaging 15, NBA Jam's 2249, ...).
+                     // An empty success reads as "nothing there" to the client, where an error stops its login.
+-- 
+2.56.0
+

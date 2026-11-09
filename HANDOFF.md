@@ -1,4 +1,4 @@
-# Handoff (updated 2026-10-28)
+# Handoff (updated 2026-11-09)
 
 Start here if you're picking USCL up. Background: `PLAN.md` (design), `GAMES.md` (per-game status),
 `AGENTS.md` (workflow), `games/<serial>.md` (details). Everything below is pushed on
@@ -177,3 +177,44 @@ ids). Captures for that: RE folder `crossplay/ps3-2pc-plain.udp`, `ps4-2pc-plain
 - Probe profile `~/.local/share/uscl/rpcs3-ea-probe` (RPCN uscltest, every EA/Rockstar name to 127.0.0.1).
   A leftover virtual pad from 2026-11-01 (vpad.py, PID 1597453) is still `Xbox 360 Controller 1`, so this profile
   binds Controller 2.
+
+## Update 2026-11-09: EA Sports Blaze 3.x "heat2" login SOLVED — NHL 15 connects
+Full details: `games/BLUS31436.md` (NHL 15, now the lead EA Sports title), `games/BLUS31178.md` (Madden),
+`uscl-blaze/README.md`, and the server's `docs/EA-Sports-Blaze3-heat2.md` (carried by `uscl-blaze` patch 0014).
+
+**Done — NHL 15 logs in and reaches "Retrieving data from server"** (online ticker playing), up from an instant
+"EA servers not available". The whole Blaze 3.x "heat2" login is reverse-engineered and working. Four pieces:
+1. **TLS**: NHL's ProtoSSL only speaks SSLv3+RC4, which OpenSSL 3.x removed — the old `tlsproxy.py` silently
+   broke. Use **`uscl-blaze/tls/tlsproxy_legacy.py`** (tlslite-ng, keeps SSLv3/RC4) on 42127, `PYTHONPATH=<pylib>`.
+2. **Ticket**: `HostTicketKey` in `settings.json` = our RPCN's uncompressed public point (self-signed tickets).
+3. **`ps3Login` response = the real `ConsoleLoginResponse`**, persona under **`DSNM`** (the DS2-derived
+   `PNAM/DPTS` tags were unreadable — the SDK read no persona and logged out).
+4. **`UserAuthenticated` (UserSessions notification 8)** — the local-user login-completion signal the SDK blocks
+   on; sent after login as **8 → 2 → 5**. Without it the client pings then logs out.
+Also added the shared **Stats** component (`getKeyScopesMap`). `uscl-blaze/patches` regenerated to **0001–0014**
+(new: heat2 decoder, tests, login, UserAuthenticated, Stats, docs). The single most useful reference was
+**`ceinydO/fifa17-ps3-online`** (FIFA 17 on RPCS3).
+
+**Pick up here — one diagnosed, server-fixable NHL crash.** After the full online bootstrap NHL's PPU null-derefs
+at **PC `0x008b1aec`** (deterministic, ~89s, "retrieving data"). It's the game: `stgm_manager->lookup("O_SG_TCKR")`
+(the ticker settings group) returns null and it derefs it. **Proven server-fixable, not an emulator bug** — the
+PPU **interpreter** crashes identically. Ruled out: Stats content and `OSDK_TICKER` config content. The game calls
+the `OsdkTicker2` component (2249/1 + 2249/2) just before the crash and we return empty success.
+- **Next (cheapest):** return an error (`OSDKTICKER2_ERR_NOT_REGISTERED`) for component 2249 so the game disables
+  the ticker and continues to the menu.
+- **Next (proper):** RE the `OsdkTicker2` `RegisterResponse` so the group is created.
+- **Madden 25** shares this login path now; its earlier blocker is an unrelated RPCS3 FGGameSim PPU crash (~52s),
+  so finish the EA Sports flow on NHL first.
+
+**New capability — PS3 EBOOT disassembly** (reusable for any PS3 game's crashes): extract with
+`xorriso -osirrox on -indev <iso> -extract /PS3_GAME/USRDIR/EBOOT.BIN .`, decrypt the SELF with
+`rpcs3 --decrypt EBOOT.BIN` (→ `EBOOT.elf`, PowerPC64; no scetool needed). System `objdump` has **no** PPC
+support — use **capstone** (`CS_ARCH_PPC | CS_MODE_64 | CS_MODE_BIG_ENDIAN`). Helper `ppc_analyze.py`
+(disas/xref) is in the server tree's `tools/ea-sports/` (also `tap.py` plaintext MITM, `decode_heat2.py`). Code
+segment maps `vaddr 0x10000 → file 0x0` (file offset = vaddr − 0x10000).
+
+**Local state (jaiden-pc, not in git):** server source `~/src/nbajam-blaze` (branch `uscl-nbajam-work`, worktree
+`.claude/worktrees/nba`), deployed to `~/.local/share/uscl/skate3-server/server/out/linux-x64` (publish
+self-contained; run with `USCL_BLAZE_LISTEN=42101` so a plaintext `tap.py` can sit on the advertised 42100).
+Probe `~/.local/share/uscl/rpcs3-ea-probe` (`USCL_ONLINE=1`); RPCN `~/.local/share/uscl/rpcn-probe` (run from
+there — needs its cert.pem/rpcn.cfg/ticket_private.pem). Chain: NHL → TLS(42127) → tap(42100) → Blaze(42101).
