@@ -64,16 +64,16 @@ Item {
     readonly property string body: {
         switch (stepName) {
         case "welcome":
-            return qsTr("Play your PS3 games, and play them online with your Steam friends.\n\n") +
+            return qsTr("Play your PS3 and Switch games with your Steam friends.\n\n") +
                    (gamepad.count ? qsTr("Controller: %1").arg(gamepad.name) : qsTr("No controller found. The keyboard works too: arrows, Enter, Esc."))
         case "name":
             return qsTr("This is the name other players see in games. You can change it later in Settings.")
         case "firmware":
             if (system.firmwareBusy || system.firmwareStatus) return system.firmwareStatus
-            return system.firmwareInstalled ? qsTr("Already installed.") : qsTr("Games need the PS3 system software. USCL installs it for you.")
+            return system.firmwareInstalled ? qsTr("Already installed.") : qsTr("PS3 games need the PS3 system software. For Switch games, skip this step and use Settings → Switch Emulation.")
         case "games":
             if (games.scanning) return qsTr("Looking for games...")
-            return games.count ? qsTr("%n game(s) in your library.", "", games.count) : qsTr("Point USCL at the folder your games are in. Disc folders, ISOs and installed games are all found, in any subfolder.")
+            return games.count ? qsTr("%n game(s) in your library.", "", games.count) : qsTr("Choose your games folder. USCL finds PS3 games and extracted Switch .nsp, .xci and .nro files. Switch setup is in Settings → Switch Emulation.")
         default:
             return qsTr("Everything else is in Settings. Online play is under Network, and your Steam friends are under Friends.")
         }

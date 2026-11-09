@@ -1,5 +1,6 @@
 #include "online.h"
 #include "games.h"
+#include "switchcore.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -516,7 +517,7 @@ bool Online::start(service s, const QString& tool, const QStringList& args, cons
 				return;
 			// one part stopped on its own: end the session so nothing is left half running
 			const QString why = m_message.isEmpty()
-				? (s == bridge ? tr("The Steam connection closed.") : s == rpcn ? tr("The online server stopped.") : tr("The Call of Duty server stopped."))
+				? (s == bridge ? tr("The Steam connection closed.") : s == rpcn ? tr("The online server stopped.") : s == switch_room ? tr("The Switch room stopped.") : tr("The Call of Duty server stopped."))
 				: m_message;
 			stop();
 			setState("off", why);
@@ -536,10 +537,42 @@ bool Online::start(service s, const QString& tool, const QStringList& args, cons
 	return true;
 }
 
-void Online::host(const QString& serial, const QString& title, const QString& path)
+void Online::host(const QString& serial, const QString& title, const QString& path, const QString& console)
 {
 	if (m_state != "off")
 		return;
+	if (console == "Switch")
+	{
+		if (!QFileInfo(SwitchCore::roomExecutable()).isExecutable())
+		{
+			setState("off", tr("The Switch room server (eden-room) is missing. Set USCL_SWITCH_ROOM to its executable path."));
+			return;
+		}
+		const QString problem = SwitchCore::prerequisiteError(path);
+		if (!problem.isEmpty())
+		{
+			setState("off", problem);
+			return;
+		}
+		m_game = title;
+		setState("starting");
+		m_host_game = serial;
+		const QString data = dataDir();
+		QDir().mkpath(data);
+		QStringList room_args{"--room-name", "USCL Switch", "--bind-address", "127.0.0.1", "--port", "24872",
+		                      "--max-members", "16", "--preferred-game", title};
+		if (serial.size() == 16)
+			room_args << "--preferred-game-id" << serial;
+		if (!start(switch_room, SwitchCore::roomExecutable(), room_args, data, SwitchCore::environment()))
+			return;
+		QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+		QFile::remove(data + "/kicks.txt");
+		env.insert("USCL_BANS", data + "/bans.txt");
+		env.insert("USCL_KICKS", data + "/kicks.txt");
+		env.insert("USCL_GAME", serial);
+		start(bridge, toolPath("uscl-bridge"), {"host", "switch"}, QCoreApplication::applicationDirPath(), env);
+		return;
+	}
 	const preset p = presetFor(serial);
 	const QString data = dataDir();
 	if (const QString templates = templateDir(); !templates.isEmpty())
@@ -551,6 +584,7 @@ void Online::host(const QString& serial, const QString& title, const QString& pa
 	}
 	m_game = title;
 	setState("starting");
+	m_host_game = serial;
 
 	// RPCN needs a TLS certificate of its own; make one the first time this PC hosts
 	if (!QFileInfo::exists(data + "/rpcn/cert.pem"))
@@ -732,7 +766,7 @@ void Online::setTest(int i, const QString& result, const QString& detail)
 	emit testsChanged();
 }
 
-void Online::testConnection()
+void Online::testConnection(const QString& console)
 {
 	if (m_test_proc.state() != QProcess::NotRunning)
 		return;
@@ -742,22 +776,33 @@ void Online::testConnection()
 	emit testsChanged();
 
 	// 1. our programs and their data are where they should be
+	const bool is_switch = console == "Switch";
 	QStringList missing;
-	for (const QString& tool : {"uscl-rpcn", "dw-server", "uscl-bridge"})
+	const QStringList tools = is_switch ? QStringList{"uscl-bridge"} : QStringList{"uscl-rpcn", "dw-server", "uscl-bridge"};
+	for (const QString& tool : tools)
 	{
 		if (!QFileInfo(toolPath(tool)).isExecutable())
 			missing << tool;
 	}
-	if (templateDir().isEmpty())
+	if (is_switch)
+	{
+		if (!QFileInfo(SwitchCore::executable()).isExecutable()) missing << "eden-cli";
+		if (!QFileInfo(SwitchCore::roomExecutable()).isExecutable()) missing << "eden-room";
+	}
+	else if (templateDir().isEmpty())
 		missing << tr("server data");
-	setTest(0, missing.isEmpty() ? "ok" : "fail", missing.isEmpty() ? tr("Everything is installed") : tr("Missing: %1. Reinstalling USCL fixes this.").arg(missing.join(", ")));
+	setTest(0, missing.isEmpty() ? "ok" : "fail", missing.isEmpty() ? tr("Everything is installed") :
+	        (is_switch ? tr("Missing: %1. Choose these components in Settings → Switch Emulation.") : tr("Missing: %1. Reinstalling USCL fixes this.")).arg(missing.join(", ")));
 
 	// 2. RPCS3 is set up for USCL
 	const QString cfg = readFile(rpcs3File("config.yml")), rpcn_cfg = readFile(rpcs3File("rpcn.yml"));
 	const QString npid = yamlValue(rpcn_cfg, {}, "NPID");
-	const bool settings_ok = yamlValue(cfg, "Net", "PSN status") == "RPCN" && yamlValue(cfg, "Net", "Internet enabled") == "Connected" &&
+	const QString switch_problem = is_switch ? SwitchCore::prerequisiteError() : QString();
+	const bool settings_ok = is_switch ? switch_problem.isEmpty() :
+	                         yamlValue(cfg, "Net", "PSN status") == "RPCN" && yamlValue(cfg, "Net", "Internet enabled") == "Connected" &&
 	                         yamlValue(rpcn_cfg, {}, "Host") == "127.0.0.1" && validName(npid);
-	setTest(1, settings_ok ? "ok" : "fail", settings_ok ? tr("Online name: %1").arg(npid) : tr("Not set up yet: Settings → Online Name"));
+	setTest(1, settings_ok ? "ok" : "fail", is_switch ? (settings_ok ? tr("Switch console files imported") : switch_problem) :
+	        settings_ok ? tr("Online name: %1").arg(npid) : tr("Not set up yet: Settings → Online Name"));
 
 	// 3. nothing else holds the ports a session needs (our own session holds them while it runs)
 	if (m_state != "off")
@@ -767,13 +812,15 @@ void Online::testConnection()
 	else
 	{
 		QStringList busy;
-		for (const quint16 port : {quint16(31313), quint16(31413), quint16(3074)})
+		const QList<quint16> tcp_ports = is_switch ? QList<quint16>{} : QList<quint16>{31313, 31413, 3074};
+		for (const quint16 port : tcp_ports)
 		{
 			QTcpServer t;
 			if (!t.listen(QHostAddress::LocalHost, port))
 				busy << QString("TCP %1").arg(port);
 		}
-		for (const quint16 port : {quint16(3657), quint16(3757), quint16(3074), quint16(3077), quint16(3078), quint16(3174), quint16(3177), quint16(3178)})
+		const QList<quint16> udp_ports = is_switch ? QList<quint16>{24872} : QList<quint16>{3657, 3757, 3074, 3077, 3078, 3174, 3177, 3178};
+		for (const quint16 port : udp_ports)
 		{
 			QUdpSocket u;
 			if (!u.bind(QHostAddress::LocalHost, port))

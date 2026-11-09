@@ -83,6 +83,8 @@ updates around the same time). The test is to capture each edition's session tra
 Treat it as research, not a feature.
 
 ### One app for more consoles (later)
+
+**Switch integration (2026-11-09):** Eden is integrated as an external core with its own game library and profile. Host sessions run an Eden local-wireless room; `uscl-bridge host switch` carries UDP 24872 over Steam, and the SDL frontend auto-connects at launch. Initial target: Mario Kart 8 Deluxe. Discovery and local builds/tests pass; game boot and two-PC play remain unverified pending console files and players. Setup and limitations: `docs/SWITCH.md`.
 The USCL program will later run Xbox 360 and PS4/PS5 games too (player, 2026-10-24). Until then, keep
 uscl-bridge, the servers and the USCL panel free of RPCS3-only assumptions (per-game presets, no RPCS3 config
 inside the bridge), so other emulator cores can sit next to RPCS3 in the same install.

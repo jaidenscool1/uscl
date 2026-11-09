@@ -20,7 +20,13 @@ own = the publisher's own servers · GameSpy (revived by OpenSpy) · ? = not pro
 | Call of Duty: Black Ops II (PS4, shadPS4) | [CUSA57548](games/CUSA57548.md) | update in `CUSA57548-UPDATE` | Demonware (title 2430, auth3 HTTPS) + shadNet | ✅ public Free-for-All matches between two PCs over Steam, also hosted from the USCL app (2026-10-28) | in-game friends / invites (PlayerSessions); Windows app build |
 | Gotham City Impostors (PSN) | [NPUB30252](games/NPUB30252.md) | 1.00 trial + full-game unlock | GameSpy (`sirenps3`, shut down 2014) + PSN tickets | 🚧 full-game licence accepted; stuck at the title without GameSpy (2026-10-26) | answer the SSLv3 GameSpy login (`sirenps3.api.gamespy.net`) |
 
-## Next up
+## Switch integration
+
+| Game | Title ID | Multiplayer route | Status | Next step |
+|---|---|---|---|---|
+| Mario Kart 8 Deluxe | [0100152000022000](games/0100152000022000.md) | Eden local wireless room over the Steam UDP tunnel | 🚧 library/launcher/room integration implemented; game boot and multiplayer unverified | import console files, boot locally, then validate a two-PC Wireless Play race |
+
+## Next up (PS3)
 Ordered by how much existing work each one reuses. Serials and services marked `?` are from memory: confirm them
 with `np-profile.py` on your own dump before starting.
 

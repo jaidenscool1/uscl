@@ -92,7 +92,10 @@ void Gamepad::poll()
 			case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: if (down) emit pressed("l1"); break;
 			case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: if (down) emit pressed("r1"); break;
 			case SDL_GAMEPAD_BUTTON_START: if (down) emit pressed("options"); break;
-			case SDL_GAMEPAD_BUTTON_GUIDE: if (down) emit pressed("home"); break;
+			case SDL_GAMEPAD_BUTTON_GUIDE:
+				m_home_down = down;
+				if (down) { m_home_since.start(); emit pressed("home"); }
+				break;
 			default: break;
 			}
 			break;
@@ -120,6 +123,11 @@ void Gamepad::poll()
 		}
 	}
 
+	if (m_home_down && m_home_since.elapsed() >= 1500)
+	{
+		m_home_down = false;
+		emit homeHeld();
+	}
 	if (!m_held_dir.isEmpty() && m_held_since.elapsed() >= m_next_repeat)
 	{
 		m_next_repeat += repeat_every_ms;

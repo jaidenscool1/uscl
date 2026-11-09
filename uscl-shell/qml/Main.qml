@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Window
 import QtMultimedia
 import QtCore
+import QtQuick.Dialogs
 
 Window {
     id: root
@@ -76,7 +77,10 @@ Window {
     }
     function play(g) {
         var ps4 = games.isPs4Serial(g.serial) // runs in our shadPS4: no RPCS3 or PS3 system software needed
-        if (ps4 ? !launcher.ps4CoreFound() : !launcher.coreFound()) { coreMissing(); return }
+        if (g.console === "Switch") {
+            var problem = launcher.switchStatus(g.path)
+            if (problem) { dialog.show(qsTr("Switch Emulation"), problem); return }
+        } else if (ps4 ? !launcher.ps4CoreFound() : !launcher.coreFound()) { coreMissing(); return }
         if (launcher.running) {
             if (runningGame && runningGame.serial === g.serial) { resumeGame(); return }
             dialog.show(qsTr("Start %1").arg(g.title), qsTr("%1 is still running. Close it and start %2?").arg(launcher.title).arg(g.title),
@@ -85,20 +89,23 @@ Window {
                                     { title: qsTr("Keep Running"), action: resumeGame }] })
             return
         }
-        if (!ps4 && !system.firmwareInstalled) {
+        if (!ps4 && g.console !== "Switch" && !system.firmwareInstalled) {
             sound("error")
             dialog.show(qsTr("System Update"), qsTr("Games need the PS3 system software. Install it now?"),
                         { buttons: [{ title: qsTr("Yes"), action: function() { openPage(systemUpdatePage, ic("it_update"), 1) } }, { title: qsTr("No") }] })
             return
         }
         // joined: the host's game files must match ours (same update, nothing changed)
-        if (online.state === "joined" && online.hostGame) {
+        if ((online.state === "joined" || online.state === "hosting") && online.hostGame) {
             var host = online.hostGame.split(" ")
             if (host[0] !== g.serial) {
+                if (g.console === "Switch" || /^[0-9A-Fa-f]{16}$|^SWITCH-/.test(host[0])) {
+                    dialog.show(qsTr("Online Session"), qsTr("This session is for %1. Leave it before starting a different game.").arg(gameTitle(host[0]))); return
+                }
                 dialog.confirm(qsTr("Online Session"), qsTr("The host is playing %1, not this game. Start it anyway?").arg(gameTitle(host[0])), function() { startGame(g) })
                 return
             }
-            if (host[1] && games.gameHash(g.path, g.serial) !== host[1]) {
+            if (g.console !== "Switch" && host[1] && games.gameHash(g.path, g.serial) !== host[1]) {
                 sound("error")
                 dialog.show(qsTr("Online Session"), qsTr("Your copy of %1 doesn't match the host's: a different update, or changed game files. Install the same update as the host to play together.").arg(g.title))
                 return
@@ -107,21 +114,24 @@ Window {
         startGame(g)
     }
     function startGame(g) {
+        if (online.state === "starting" || online.state === "waiting") {
+            dialog.show(qsTr("Online Session"), qsTr("Wait for the session to connect before starting the game.")); return
+        }
         if (online.state === "off" && online.supports(g.serial) && system.onlineName && online.steamRunning()) {
             onlineGame = g
             ownSession = true
-            online.host(g.serial, g.title, g.path) // the game starts once the session is up (onStateChanged)
+            online.host(g.serial, g.title, g.path, g.console) // the game starts once the session is up (onStateChanged)
             return
         }
         launchGame(g)
     }
     function launchGame(g) {
-        if (!games.isPs4Serial(g.serial)) {
+        if (!games.isPs4Serial(g.serial) && g.console !== "Switch") {
             if (prefs.autoControllers) launcher.prepareInput(gamepad.names)
             if (prefs.autoScale) system.setRpcs3Value("Video", "Resolution Scale", String(autoScaleValue))
         }
         // shortcut: a game started before the session runs as it started (patches on); restart it to play online
-        if (launcher.startGame(g.path, g.title, online.state !== "off")) runningGame = g
+        if (launcher.startGame(g.path, g.title, online.state !== "off", g.console, system.onlineName || online.steamName)) runningGame = g
     }
     function gameTitle(serial) {
         for (var i = 0; i < games.count; i++)
@@ -229,7 +239,7 @@ Window {
     property var updatePick: ({})     // serial -> true: games picked on the Game Updates page
     function checkGameUpdates() {
         var list = []
-        for (var i = 0; i < games.count; i++) { var g = games.get(i); list.push({ serial: g.serial, version: g.version }) }
+        for (var i = 0; i < games.count; i++) { var g = games.get(i); if (g.console === "PS3") list.push({ serial: g.serial, version: g.version }) }
         gameUpdates.check(list)
     }
     function updateInfo(serial) {
@@ -371,8 +381,8 @@ Window {
                 dialog.confirm(qsTr("Ban"), qsTr("Remove %1 and keep them out of every session you host? Bans follow their Steam account.").arg(p.name), function() { online.ban(p.id, p.name) }) } }
         ], 0)
     }
-    function testConnection() {
-        online.testConnection()
+    function testConnection(console) {
+        online.testConnection(typeof console === "string" ? console : "PS3")
         dialog.show(qsTr("Internet Connection Test"), "", { live: function() {
             return online.tests.map(function(t) {
                 var mark = t.result === "ok" ? qsTr("Succeeded") : t.result === "fail" ? qsTr("Failed") : qsTr("Testing...")
@@ -566,6 +576,44 @@ Window {
             allSettingsRow()
         ]
     }
+    function switchResult(problem) {
+        cfgTick++
+        if (problem) dialog.show(qsTr("Switch Emulation"), problem)
+        else notice.show(qsTr("Saved"), ic("it_games"))
+    }
+    function switchSettingsPage() {
+        cfgTick;
+        return [
+            { title: qsTr("Setup Status"), help: launcher.switchStatus() || qsTr("Ready to launch. Match game updates and DLC with your friends."), disabled: true },
+            { title: qsTr("Choose Switch Emulator"), help: qsTr("Select eden-cli"), action: function() { switchToolDialog.kind = "CORE"; switchToolDialog.open() } },
+            { title: qsTr("Choose Switch Settings App"), help: qsTr("Select eden"), action: function() { switchToolDialog.kind = "GUI"; switchToolDialog.open() } },
+            { title: qsTr("Choose Switch Room Server"), help: qsTr("Select eden-room for hosting friends"), action: function() { switchToolDialog.kind = "ROOM"; switchToolDialog.open() } },
+            { title: qsTr("Import Console Keys"), help: qsTr("Choose prod.keys dumped from your Switch"), action: switchKeysDialog.open },
+            { title: qsTr("Import System Software"), help: qsTr("Choose your extracted Switch firmware folder"), action: switchFirmwareDialog.open },
+            { title: qsTr("Controllers, Updates and DLC"), help: qsTr("Configure controllers and install game updates in Eden"), action: launcher.openSwitchSettings },
+            { title: qsTr("Test Switch Connection"), help: qsTr("Check the Switch core, console files, room port and Steam"), action: function() { testConnection("Switch") } },
+            { title: qsTr("Playing with Friends"), action: function() {
+                dialog.show(qsTr("Switch Multiplayer"), qsTr("Host this game from its options menu, then have friends join your USCL session before starting it.\n\nIn Mario Kart 8 Deluxe, choose Wireless Play. The host creates a room in the game; friends join it. Use matching emulator versions, game updates and DLC.\n\nNintendo's Online Play service is not used."))
+            } }
+        ]
+    }
+    FileDialog {
+        id: switchToolDialog
+        property string kind: "CORE"
+        title: qsTr("Choose Switch component")
+        onAccepted: switchResult(launcher.configureSwitchTool(kind, selectedFile.toString()))
+    }
+    FileDialog {
+        id: switchKeysDialog
+        title: qsTr("Choose prod.keys")
+        nameFilters: [qsTr("Console keys (*.keys)")]
+        onAccepted: switchResult(launcher.importSwitchKeys(selectedFile.toString()))
+    }
+    FolderDialog {
+        id: switchFirmwareDialog
+        title: qsTr("Choose extracted Switch firmware")
+        onAccepted: switchResult(launcher.importSwitchFirmware(selectedFolder.toString()))
+    }
     function systemUpdatePage() {
         return [
             { title: qsTr("Update via Internet"), help: qsTr("Downloads the latest PS3 system software from Sony and installs it"),
@@ -669,14 +717,16 @@ Window {
                 action: function() { play(g) },
                 options: function() {
                     return [{ title: qsTr("Start"), action: function() { play(g) } },
-                            gameUpdates.available[g.serial]
+                            g.console === "Switch"
+                                ? { title: qsTr("Controllers, Updates and DLC"), action: launcher.openSwitchSettings }
+                                : gameUpdates.available[g.serial]
                                 ? { title: qsTr("Update Game"), action: function() { installUpdates([g.serial]) } }
                                 : { title: qsTr("Check for Update"), action: function() {
                                       gameUpdates.check([{ serial: g.serial, version: g.version }])
                                       notice.show(qsTr("Checking for updates..."), ic("it_update"))
                                   } },
-                            { title: qsTr("Host Online Session"), action: function() { needsName(function() { online.host(g.serial, g.title, g.path) }) } },
-                            games.isPs4Serial(g.serial) ? null : { title: qsTr("Downloadable Content"), action: function() { openDlc(g) } },
+                            { title: qsTr("Host Online Session"), action: function() { needsName(function() { online.host(g.serial, g.title, g.path, g.console) }) } },
+                            g.console === "PS3" ? { title: qsTr("Downloadable Content"), action: function() { openDlc(g) } } : null,
                             { title: qsTr("Information"), action: function() { dialog.show(qsTr("Information"), gameInfo(g)) } },
                             { title: qsTr("Remove from List"), action: function() {
                                 dialog.confirm(qsTr("Remove"), qsTr("Take %1 off the list? The game's files stay where they are.").arg(g.title), function() { games.remove(g.serial) })
@@ -756,6 +806,7 @@ Window {
                 settingsItem(qsTr("System Update"), updater.state === "available" ? qsTr("USCL %1 is available").arg(updater.latest)
                              : system.firmwareInstalled ? qsTr("PS3 system software %1 installed").arg(system.firmwareVersion) : qsTr("Install the PS3 system software (games need it)"), "it_update", systemUpdatePage),
                 settingsItem(qsTr("Game Settings"), qsTr("How games look and run: resolution, frame rate, upscaling"), "it_games", gameSettingsPage),
+                settingsItem(qsTr("Switch Emulation"), qsTr("Emulator, console keys, firmware and controllers"), "it_games", switchSettingsPage),
                 settingsItem(qsTr("Video Settings"), qsTr("Screen shape and stretching"), "it_display", videoSettingsPage),
                 settingsItem(qsTr("Sound Settings"), qsTr("Game volume, surround sound and menu sounds"), "it_sound", soundSettingsPage),
                 settingsItem(qsTr("Theme Settings"), qsTr("Change the theme and background color"), "it_theme", themeSettingsPage),
@@ -801,6 +852,7 @@ Window {
     Connections {
         target: gamepad
         function onPressed(b) { if (root.active) root.input(b) }
+        function onHomeHeld() { if (runningGame && runningGame.console === "Switch") launcher.stop() }
     }
     Connections {
         target: launcher
@@ -850,6 +902,7 @@ Window {
     }
     Connections {
         target: games
+        function onScanFailed(message) { dialog.show(qsTr("Add Games"), message) }
         function onCountChanged() { checkGameUpdates() }
         function onScanFinished(added, known, encrypted) {
             sound("notify")
@@ -860,7 +913,7 @@ Window {
             if (encrypted)
                 dialog.show(qsTr("Add Games"), qsTr("%n disc image(s) there are still encrypted, so no emulator can read them. Decrypt them first (a .dec.iso, or the extracted disc folder), then add them again.", "", encrypted))
             else if (!added && !known)
-                dialog.show(qsTr("Add Games"), qsTr("No PS3 games were found in that folder. USCL looks for disc folders (with PS3_GAME inside), installed games and decrypted .iso images."))
+                dialog.show(qsTr("Add Games"), qsTr("No games were found. Choose PS3 disc folders or ISOs, or extracted Switch .nsp, .xci or .nro files. Extract .rar and .zip archives first; Switch updates and DLC are installed through Switch Settings."))
         }
     }
     Connections {
@@ -1013,8 +1066,10 @@ Window {
     }
 
     Component.onCompleted: {
-        online.startSteam()
-        checkGameUpdates()
+        if (!smokeTest) {
+            online.startSteam()
+            checkGameUpdates()
+        }
         if (prefs.bootScreen) boot.start()
         else { boot.quick(); sound("startup") }
     }

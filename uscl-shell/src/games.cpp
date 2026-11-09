@@ -1,6 +1,7 @@
 #include "games.h"
 
 #include "gameupdates.h"
+#include "switchcore.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -9,6 +10,7 @@
 #include <QFileInfo>
 #include <QStandardPaths>
 #include <QStorageInfo>
+#include <QSaveFile>
 #include <QThread>
 #include <QUrl>
 #include <QtEndian>
@@ -199,6 +201,11 @@ QString GameModel::gameHash(const QString& path, const QString& serial)
 
 bool GameModel::describe(const QString& path, Game& game) const
 {
+	if (const QVariantMap entry = SwitchCore::describe(path); !entry.isEmpty())
+	{
+		game = {entry["title"].toString(), entry["serial"].toString(), entry["path"].toString(), {}, "Switch", {}};
+		return true;
+	}
 	const QFileInfo info(path);
 	QByteArray sfo, icon;
 	QString icon_file;
@@ -279,6 +286,11 @@ void GameModel::reload()
 {
 	beginResetModel();
 	m_games.clear();
+	for (const QString& path : SwitchCore::library())
+	{
+		if (Game g; describe(path, g))
+			m_games.push_back(g);
+	}
 
 	for (const QString& list : {gamesYmlPath(), ps4YmlPath()})
 	{
@@ -371,6 +383,12 @@ namespace
 			}
 		}
 		const QDir d(dir);
+		for (const QFileInfo& file : d.entryInfoList(QDir::Files))
+		{
+			const auto entry = SwitchCore::describe(file.absoluteFilePath());
+			if (!entry.isEmpty())
+				out[entry["serial"].toString()] = file.absoluteFilePath();
+		}
 		for (const QFileInfo& f : d.entryInfoList({"*.iso", "*.ISO"}, QDir::Files))
 		{
 			const QByteArray sfo = GameModel::readIsoFile(f.absoluteFilePath(), {"PS3_GAME", "PARAM.SFO"});
@@ -416,6 +434,21 @@ void GameModel::scanFolder(const QString& path)
 	connect(t, &QThread::finished, this, [this, t, found, encrypted] {
 		t->deleteLater();
 		int added = 0, listed = 0;
+		QString problem;
+		auto switch_games = SwitchCore::library();
+		int switch_added = 0;
+		for (auto it = found->cbegin(); it != found->cend(); ++it)
+		{
+			if (!SwitchCore::isSerial(it.key()))
+				continue;
+			if (switch_games.contains(it.key()) && QFileInfo::exists(switch_games.value(it.key())))
+				listed++;
+			else
+			{
+				switch_games[it.key()] = it.value();
+				switch_added++;
+			}
+		}
 		for (const QString& list : {gamesYmlPath(), ps4YmlPath()})
 		{
 			QFile yml(list);
@@ -427,7 +460,7 @@ void GameModel::scanFolder(const QString& path)
 			int new_here = 0;
 			for (auto it = found->cbegin(); it != found->cend(); ++it)
 			{
-				if (ymlFor(it.key()) != list)
+				if (SwitchCore::isSerial(it.key()) || ymlFor(it.key()) != list)
 					continue;
 				if (known.contains(it.key()))
 				{
@@ -442,20 +475,29 @@ void GameModel::scanFolder(const QString& path)
 			if (new_here)
 			{
 				QDir().mkpath(QFileInfo(list).absolutePath());
-				if (yml.open(QIODevice::WriteOnly | QIODevice::Truncate))
-					yml.write(text);
-				yml.close(); // flush before reload() reads it back
+				QSaveFile output(list);
+				if (!output.open(QIODevice::WriteOnly) || output.write(text) != text.size() || !output.commit())
+				{
+					new_here = 0;
+					problem += tr(" Couldn't save the %1 game library.").arg(list == ps4YmlPath() ? "PS4" : "PS3");
+				}
 			}
 			added += new_here;
 		}
 		delete found;
 		const int scrambled = *encrypted;
 		delete encrypted;
-		if (added)
-			reload();
+		if (switch_added && !SwitchCore::saveLibrary(switch_games))
+		{
+			switch_added = 0;
+			problem += tr(" Couldn't save the Switch game library.");
+		}
+		reload();
 		m_scanning = false;
 		emit scanningChanged();
-		emit scanFinished(added, listed, scrambled);
+		emit scanFinished(added + switch_added, listed, scrambled);
+		if (!problem.isEmpty())
+			emit scanFailed(problem.trimmed());
 	});
 	t->start();
 }
@@ -488,6 +530,15 @@ QVariantList GameModel::folders(const QString& path)
 
 void GameModel::remove(const QString& serial)
 {
+	if (SwitchCore::isSerial(serial))
+	{
+		auto entries = SwitchCore::library();
+		entries.remove(serial);
+		if (!SwitchCore::saveLibrary(entries))
+			emit scanFailed(tr("Couldn't save the Switch game library."));
+		reload();
+		return;
+	}
 	QFile yml(ymlFor(serial));
 	if (!yml.open(QIODevice::ReadOnly))
 		return;

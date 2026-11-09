@@ -4,8 +4,7 @@
 #include <QMap>
 #include <QVector>
 
-// The games RPCS3 knows about: games.yml (discs, ISOs, folders added with Open / Add Games) and games
-// installed to dev_hdd0, plus installed PS4 games (uscl/ps4_games.yml, run by our shadPS4). Title, serial and icon come from each game's PARAM.SFO and ICON0.PNG.
+// PS3 and PS4 games keep their existing YAML lists; Switch uses a separate JSON library.
 class GameModel : public QAbstractListModel
 {
 	Q_OBJECT
@@ -30,8 +29,8 @@ public:
 	Q_INVOKABLE void reload();
 	Q_INVOKABLE QVariantMap get(int row) const;
 
-	// Add Games: finds every PS3 game under a folder (disc folders, installed games, ISOs) and adds the new ones
-	// to RPCS3's games.yml; scanFinished reports how many were new, already listed, and encrypted ISOs it can't read
+	// Add Games: PS3 entries go to games.yml; Switch entries go to their separate library.
+	// scanFinished reports persisted additions, known entries, and apparently encrypted PS3 ISOs.
 	Q_INVOKABLE void scanFolder(const QString& path);
 	// takes a game off the list (games.yml); its files stay where they are
 	Q_INVOKABLE void remove(const QString& serial);
@@ -61,6 +60,7 @@ signals:
 	void countChanged();
 	void scanningChanged();
 	void scanFinished(int added, int known, int encrypted);
+	void scanFailed(const QString& message);
 
 private:
 	bool describe(const QString& path, Game& game) const;

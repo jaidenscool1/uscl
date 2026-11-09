@@ -70,6 +70,8 @@ fn preset(name: &str) -> Option<&'static str> {
         // (auth3, TCP 443) and the host's shadNet (UnsecuredPort 31513, WebApiPort 31515; 31313 is ours for RPCN).
         // One shadNet for everyone: its account ids are the players' Demonware user ids.
         "bo2ps4" => Some("tcp:3074,tcp:3076,tcp:443,tcp:31513,tcp:31515,sudp:3074,sudp:3077-3078"),
+        // Eden local wireless room, forwarded over Steam.
+        "switch" => Some("udp:24872"),
         _ => None,
     }
 }
@@ -324,10 +326,6 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
     let mut announced_ours = false;
     let (tx, rx) = channel::<Ev>();
 
-    // Bind before touching Steam so a port clash (RPCN or another bridge already running) fails fast.
-    let listener = TcpListener::bind(local(RPCN_TCP)).map_err(|e| format!("bind TCP 127.0.0.1:{RPCN_TCP}: {e} (stop RPCN/other bridge on this port)"))?;
-    let rpcn_sock = bind_udp(RPCN_UDP)?;
-
     let t = tx.clone();
     let _h1 = client.register_callback(move |_: LobbyChatUpdate| {
         let _ = t.send(Ev::Changed);
@@ -401,8 +399,11 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
     println!("uscl-bridge: session {} ({}); give friends this number or invite them from Steam", lobby.raw(), if host { "hosting" } else { "joined" });
     client.friends().set_rich_presence("status", Some("USCL session"));
 
-    // progress travels with the player: a member hands the host its own copy (exported off the loop, it runs uscl-dw)
-    let carry = progress::Carry::from_env().map(Arc::new);
+    let fwd = if host { fwd } else { parse_forwards(&mm.lobby_data(lobby, "fwd").unwrap_or_default())? };
+    let sudp = if host { sudp } else { parse_slot_udp(&mm.lobby_data(lobby, "sudp").unwrap_or_default()) };
+    let switch_room = fwd == [(true, 24872)] && sudp.is_empty();
+    // Switch saves stay in the emulator profile; Demonware progress is only carried for its own route.
+    let carry = if switch_room { None } else { progress::Carry::from_env().map(Arc::new) };
     if let (Some(c), false) = (carry.clone(), host) {
         let (t, to) = (tx.clone(), host_id.raw());
         std::thread::spawn(move || match c.export() {
@@ -426,12 +427,15 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
             }
         });
     };
-    accept(listener, RPCN_TCP);
-
     // Forwards: the host connects to its own list only; a member listens on the host's list.
-    let fwd = if host { fwd } else { parse_forwards(&mm.lobby_data(lobby, "fwd").unwrap_or_default())? };
-    let sudp = if host { sudp } else { parse_slot_udp(&mm.lobby_data(lobby, "sudp").unwrap_or_default()) };
-    // our sockets on the server's ports, and the game socket that last used them
+    let rpcn_sock = if switch_room {
+        None
+    } else {
+        let listener = TcpListener::bind(local(RPCN_TCP)).map_err(|e| format!("bind TCP 127.0.0.1:{RPCN_TCP}: {e} (stop RPCN/other bridge on this port)"))?;
+        accept(listener, RPCN_TCP);
+        Some(bind_udp(RPCN_UDP)?)
+    };
+    // member: our sockets on the server's ports, and the game socket that last used them
     let mut slot_udp: HashMap<u16, UdpSocket> = HashMap::new();
     let mut slot_game: Option<SocketAddr> = None;
     for &port in &sudp {
@@ -456,6 +460,9 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
         }
         println!("uscl-bridge: forwarding {} ports to the host's server", fwd.len() - failed.len());
         if !failed.is_empty() {
+            if fwd == [(true, 24872)] {
+                return Err("the Switch room port UDP 24872 is in use; close other Switch rooms and try again".into());
+            }
             // e.g. port 80 on Linux needs privileges
             eprintln!("uscl-bridge: couldn't listen on {} (in use, or a port below 1024 on Linux)", failed.join(", "));
             if cfg!(target_os = "linux") && fwd.iter().any(|&(_, p)| p < 1024) {
@@ -598,7 +605,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                     next_slot = next_slot.max(s);
                     slot_of.insert(m.raw(), s);
                     member_at.insert(s, m.raw());
-                    if !socks.contains_key(&s) {
+                    if !switch_room && !socks.contains_key(&s) {
                         socks.insert(s, bind_udp(SLOT_BASE + s)?);
                     }
                 }
@@ -675,15 +682,17 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
         let my_slot = slot_of.get(&me.raw()).copied();
 
         // Our RPCS3 -> RPCN signaling port
-        while let Ok((n, _)) = rpcn_sock.recv_from(&mut buf) {
-            if host {
-                if let Some(s) = my_slot.and_then(|s| socks.get(&s)) {
-                    let _ = s.send_to(&buf[..n], local(HOST_RPCN_UDP));
+        if let Some(rpcn_sock) = &rpcn_sock {
+            while let Ok((n, _)) = rpcn_sock.recv_from(&mut buf) {
+                if host {
+                    if let Some(s) = my_slot.and_then(|s| socks.get(&s)) {
+                        let _ = s.send_to(&buf[..n], local(HOST_RPCN_UDP));
+                    }
+                } else {
+                    let mut f = vec![UDP_RPCN];
+                    f.extend_from_slice(&buf[..n]);
+                    send(host_id.raw(), CH_UDP, &f, false);
                 }
-            } else {
-                let mut f = vec![UDP_RPCN];
-                f.extend_from_slice(&buf[..n]);
-                send(host_id.raw(), CH_UDP, &f, false);
             }
         }
 
@@ -703,7 +712,9 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                     continue;
                 }
                 if from_rpcn && Some(slot) == my_slot {
-                    let _ = rpcn_sock.send_to(&buf[..n], local(RPCS3_P2P));
+                    if let Some(rpcn_sock) = &rpcn_sock {
+                        let _ = rpcn_sock.send_to(&buf[..n], local(RPCS3_P2P));
+                    }
                 } else if Some(slot) != my_slot {
                     if let Some(&peer) = member_at.get(&slot) {
                         let f = if from_rpcn {
@@ -791,7 +802,11 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
             let Some(sock) = slot_of.get(&peer).and_then(|s| socks.get(s)) else { continue };
             match m.data().split_first() {
                 Some((&UDP_RPCN, d)) if host => { let _ = sock.send_to(d, local(HOST_RPCN_UDP)); }
-                Some((&UDP_RPCN, d)) if peer == host_id.raw() => { let _ = rpcn_sock.send_to(d, local(RPCS3_P2P)); }
+                Some((&UDP_RPCN, d)) if peer == host_id.raw() => {
+                    if let Some(rpcn_sock) = &rpcn_sock {
+                        let _ = rpcn_sock.send_to(d, local(RPCS3_P2P));
+                    }
+                }
                 Some((&UDP_P2P, d)) => { let _ = sock.send_to(d, local(RPCS3_P2P)); }
                 Some((&UDP_P2P_PORT, [a, b, d @ ..])) => {
                     if let Some(port) = delivery_port(u16::from_be_bytes([*a, *b]), slot_game) {
@@ -817,6 +832,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
         // progress: host hands members' bundles to its uscl-dw (with the Steam id Steam vouched for); member keeps
         // the host's copies at home. uscl-dw work runs off the loop.
         for m in net.receive_messages_on_channel(CH_PROGRESS, 16) {
+            if switch_room { continue; }
             let Some(peer) = m.identity_peer().steam_id().map(|s| s.raw()) else { continue };
             let Ok(bundle) = String::from_utf8(m.data().to_vec()) else { continue };
             if removed.borrow().contains(&peer) || bundle.len() > progress::MAX_BUNDLE {
@@ -851,6 +867,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
         }
 
         for m in net.receive_messages_on_channel(CH_TCP, 256) {
+            if switch_room { continue; }
             let Some(peer) = m.identity_peer().steam_id().map(|s| s.raw()) else { continue };
             if removed.borrow().contains(&peer) {
                 continue;
@@ -965,6 +982,8 @@ mod tests {
         assert_eq!(&f[..3], &[(false, 42100), (false, 80), (true, 17001)]);
         assert_eq!(parse_forwards(&fwd_spec(&f)).unwrap(), f);
         assert_eq!(parse_forwards("").unwrap(), vec![]);
+        assert_eq!(parse_forwards("switch").unwrap(), vec![(true, 24872)]);
+        assert!(parse_slot_udp("switch").is_empty());
         for bad in ["tcp", "sctp:1", "udp:0", "udp:5-4", "tcp:70000", "udp:1-1000"] {
             assert!(parse_forwards(bad).is_err(), "{bad}");
         }
