@@ -1,7 +1,7 @@
 From 720157a2ae46431e9ce17884a9e9e45dbc35181a Mon Sep 17 00:00:00 2001
 From: Codex <codex@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 03:32:04 -0700
-Subject: [PATCH 1/4] Include standard and fmt declarations explicitly for
+Subject: [PATCH 1/5] Include standard and fmt declarations explicitly for
  current toolchains
 
 ---

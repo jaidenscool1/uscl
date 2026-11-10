@@ -11,6 +11,7 @@ Apply the `git format-patch` files in order with `git am patches/*.patch` from a
 - 0003 adds `--uscl-room NAME@127.0.0.1:PORT` to the graphical frontend. It validates the private loopback endpoint, waits up to 15 seconds for connection, and exits unsuccessfully if it cannot join. Startup failures flush the log and exit before a game starts, avoiding an upstream partially initialized shutdown hang. Automatic joins keep the room-chat window closed so it cannot take focus from fullscreen play. Offline launches use the normal `-f -g <game>` options. Nintendo's online service is not used.
 
 - 0004 adds a headless, loopback-only private-service client probe with a three-second deadline and bounded JSON frames. It negotiates USCL capabilities without loading a profile or booting a game. It does not implement the native Online Play menu. See [the development backend](../uscl-switch-online/README.md).
+- 0005 adds an off-by-default NSD diagnostic route for MK8 Deluxe's exact observed hostname template and title ID, enabled only by `USCL_MK8_NATIVE_DIAGNOSTIC=1`. Real native-menu attempts reached a local TCP 443 observer; diagnostic TLS exposed WebSocket upgrade headers before strict nonce validation failed with game error 2306-0502. It supplies no login or matchmaking service. See [the evidence and reproduction](../uscl-switch-online/NATIVE-DIAGNOSTIC.md).
 
 ## Linux development build
 

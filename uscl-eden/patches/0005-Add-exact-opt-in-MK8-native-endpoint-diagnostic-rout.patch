@@ -1,0 +1,107 @@
+From 9c384cf6d14b5b0a055764b99dab86b4d4dfbbb6 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 08:04:44 -0700
+Subject: [PATCH 5/5] Add exact opt-in MK8 native endpoint diagnostic route
+
+---
+ src/core/hle/service/sockets/nsd.cpp          | 26 ++++++++++++++-----
+ .../hle/service/sockets/uscl_native_route.h   | 20 ++++++++++++++
+ 2 files changed, 40 insertions(+), 6 deletions(-)
+ create mode 100644 src/core/hle/service/sockets/uscl_native_route.h
+
+diff --git a/src/core/hle/service/sockets/nsd.cpp b/src/core/hle/service/sockets/nsd.cpp
+index 241f297..09730aa 100644
+--- a/src/core/hle/service/sockets/nsd.cpp
++++ b/src/core/hle/service/sockets/nsd.cpp
+@@ -4,8 +4,13 @@
+ // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <cstdlib>
++#include <string_view>
++
++#include "core/core.h"
+ #include "core/hle/service/ipc_helpers.h"
+ #include "core/hle/service/sockets/nsd.h"
++#include "core/hle/service/sockets/uscl_native_route.h"
+ 
+ #include "common/string_util.h"
+ 
+@@ -63,7 +68,15 @@ NSD::NSD(Core::System& system_, const char* name) : ServiceFramework{system_, na
+     RegisterHandlers(functions);
+ }
+ 
+-static std::string ResolveImpl(const std::string& fqdn_in) {
++static std::string ResolveImpl(const std::string& fqdn_in, Core::System& system) {
++    const char* option = std::getenv("USCL_MK8_NATIVE_DIAGNOSTIC");
++    const bool enabled = option && std::string_view{option} == "1";
++    const auto routed = UsclNativeDiagnosticRoute(
++        fqdn_in, system.GetApplicationProcessProgramID(), enabled);
++    if (routed != fqdn_in) {
++        LOG_WARNING(Service, "USCL MK8 native diagnostic route selected; native play unsupported");
++        return std::string{routed};
++    }
+     // The real implementation makes various substitutions.
+     // For now we just return the string as-is, which is good enough when not
+     // connecting to real Nintendo servers.
+@@ -71,8 +84,9 @@ static std::string ResolveImpl(const std::string& fqdn_in) {
+     return fqdn_in;
+ }
+ 
+-static Result ResolveCommon(const std::string& fqdn_in, std::array<char, 0x100>& fqdn_out) {
+-    const auto res = ResolveImpl(fqdn_in);
++static Result ResolveCommon(const std::string& fqdn_in, std::array<char, 0x100>& fqdn_out,
++                            Core::System& system) {
++    const auto res = ResolveImpl(fqdn_in, system);
+     if (res.size() >= fqdn_out.size()) {
+         return ResultOverflow;
+     }
+@@ -94,7 +108,7 @@ void NSD::Resolve(HLERequestContext& ctx) {
+     const std::string fqdn_in = Common::StringFromBuffer(ctx.ReadBuffer(0));
+ 
+     std::array<char, 0x100> fqdn_out{};
+-    const Result res = ResolveCommon(fqdn_in, fqdn_out);
++    const Result res = ResolveCommon(fqdn_in, fqdn_out, system);
+ 
+     ctx.WriteBuffer(fqdn_out);
+     IPC::ResponseBuilder rb{ctx, 2};
+@@ -104,8 +118,8 @@ void NSD::Resolve(HLERequestContext& ctx) {
+ void NSD::ResolveEx(HLERequestContext& ctx) {
+     const std::string fqdn_in = Common::StringFromBuffer(ctx.ReadBuffer(0));
+ 
+-    std::array<char, 0x100> fqdn_out;
+-    const Result res = ResolveCommon(fqdn_in, fqdn_out);
++    std::array<char, 0x100> fqdn_out{};
++    const Result res = ResolveCommon(fqdn_in, fqdn_out, system);
+ 
+     if (res.IsError()) {
+         IPC::ResponseBuilder rb{ctx, 2};
+diff --git a/src/core/hle/service/sockets/uscl_native_route.h b/src/core/hle/service/sockets/uscl_native_route.h
+new file mode 100644
+index 0000000..2314f4e
+--- /dev/null
++++ b/src/core/hle/service/sockets/uscl_native_route.h
+@@ -0,0 +1,20 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#pragma once
++
++#include <cstdint>
++#include <string_view>
++
++namespace Service::Sockets {
++
++// Diagnostic only: this is the unresolved NSD name observed in MK8D 4.0.1.
++// Keep the allowlist exact. This does not supply authentication or NEX services.
++constexpr std::string_view UsclNativeDiagnosticRoute(std::string_view host,
++                                                    std::uint64_t program_id, bool enabled) {
++    if (enabled && program_id == 0x0100152000022000ULL &&
++        host == "g2b309e01-%.s.n.srv.nintendo.net") {
++        return "127.0.0.1";
++    }
++    return host;
++}
++
++} // namespace Service::Sockets
+-- 
+2.56.0
+
