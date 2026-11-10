@@ -168,9 +168,9 @@ class NativeRooms:
             raise PermissionError("room_identity_or_capacity")
         if any(pid in room.members for room in self.rooms.values()):
             raise PermissionError("already_in_room")
-        code = "".join(secrets.choice("ABCDEFGHIJKLMNPQRSTUVWXYZ23456789") for _ in range(5))
+        code = f"{secrets.randbelow(10 ** 12):012d}"
         while any(room.code == code for room in self.rooms.values()):
-            code = "".join(secrets.choice("ABCDEFGHIJKLMNPQRSTUVWXYZ23456789") for _ in range(5))
+            code = f"{secrets.randbelow(10 ** 12):012d}"
         session.assign_codeword(code)
         result = self.control.call(op="create_room", token=self.control.credentials[pid], game=GAME,
                                    region="NA", capacity=session.maximum, visibility="invite")
