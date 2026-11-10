@@ -239,7 +239,7 @@ class NativeRooms:
         # The request wraps the code in a structure whose exact padding varies;
         # find the private code digits wherever they appear in the payload.
         for gid, room in self.rooms.items():
-            if room.code.encode() in data:
+            if room.code.lower().encode() in data.lower():
                 return struct.pack("<I", gid)
         return struct.pack("<I", 0)
 
