@@ -1,7 +1,7 @@
 From da95978c0eb96d545766a37ea3d3f3eab16f04d2 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 07:48:59 -0700
-Subject: [PATCH 4/5] Add opt-in loopback client probe for private USCL online
+Subject: [PATCH 4/6] Add opt-in loopback client probe for private USCL online
  service
 
 ---

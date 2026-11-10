@@ -41,7 +41,7 @@ def describe(data):
     return result
 
 
-def websocket_observation(channel, initial, deadline):
+def websocket_observation(channel, initial, deadline, mk8_short_nonce=False):
     """One strict, bounded RFC6455 upgrade and binary frame; no NEX replies."""
     buffer = bytearray(initial)
 
@@ -78,7 +78,8 @@ def websocket_observation(channel, initial, deadline):
         raise ValueError("upgrade")
     key = headers.get(b"sec-websocket-key", b"")
     try:
-        if len(base64.b64decode(key, validate=True)) != 16:
+        short = mk8_short_nonce and len(key) == 3 and len(base64.b64decode(key + b"=", validate=True)) == 2
+        if not short and len(base64.b64decode(key, validate=True)) != 16:
             raise ValueError("key")
     except ValueError:
         raise ValueError("key") from None
@@ -116,7 +117,7 @@ def websocket_observation(channel, initial, deadline):
     return result
 
 
-def observe(port, duration, limit, tls=None, websocket=False):
+def observe(port, duration, limit, tls=None, websocket=False, mk8_short_nonce=False):
     with selectors.DefaultSelector() as selector, socket.socket() as tcp, socket.socket(type=socket.SOCK_DGRAM) as udp:
         tcp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         tcp.bind(("127.0.0.1", port))
@@ -156,7 +157,7 @@ def observe(port, duration, limit, tls=None, websocket=False):
                                 channel = tls.wrap_socket(channel, server_side=True)
                             data = channel.recv(4097)
                             if websocket:
-                                extra = websocket_observation(channel, data, min(deadline, time.monotonic() + 2))
+                                extra = websocket_observation(channel, data, min(deadline, time.monotonic() + 2), mk8_short_nonce)
                         except ValueError as error:
                             reason = str(error)
                             extra = {"event": "websocket-rejected", "reason": reason if reason in {"incomplete", "header_size", "request", "headers", "upgrade", "key", "frame", "frame_size"} else "invalid"}
@@ -192,6 +193,7 @@ def main():
     parser.add_argument("--cert", help="optional local PEM certificate for diagnostic TLS termination")
     parser.add_argument("--key", help="matching private key; never commit or publish it")
     parser.add_argument("--websocket", action="store_true", help="upgrade GET / and observe one binary frame; requires TLS")
+    parser.add_argument("--mk8-short-nonce", action="store_true", help="diagnostic support for the observed three-character MK8 nonce")
     args = parser.parse_args()
     if not 0 <= args.port <= 65535 or not 0 < args.duration <= 120 or not 1 <= args.limit <= 64:
         parser.error("port must be 0..65535, duration (0,120], limit 1..64")
@@ -199,11 +201,13 @@ def main():
         parser.error("--cert and --key must be supplied together")
     if args.websocket and not args.cert:
         parser.error("--websocket requires --cert and --key")
+    if args.mk8_short_nonce and not args.websocket:
+        parser.error("--mk8-short-nonce requires --websocket")
     tls = None
     if args.cert:
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(args.cert, args.key)
-    observe(args.port, args.duration, args.limit, tls, args.websocket)
+    observe(args.port, args.duration, args.limit, tls, args.websocket, args.mk8_short_nonce)
 
 
 if __name__ == "__main__":

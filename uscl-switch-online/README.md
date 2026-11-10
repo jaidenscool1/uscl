@@ -55,12 +55,15 @@ Run `python tools/dev-scripts/test-switch-online.py --eden build/switch-core/bin
 
 ## Native game adapter work remaining
 
-The [native diagnostic implementation and evidence](NATIVE-DIAGNOSTIC.md) establish an opt-in NSD route from the real MK8 Online Play menu to a local TCP 443 observer. Diagnostic TLS termination exposed an HTTP GET with WebSocket upgrade headers; strict nonce validation rejected it and the game reported 2306-0502. The observer supports a bounded, tested WebSocket upgrade/frame parser, but no real-game binary frame or authentication operation has passed. The JSON backend is still not game-facing.
+The [native diagnostic implementation and evidence](NATIVE-DIAGNOSTIC.md) establish an opt-in NSD route from the real MK8 Online Play menu to a local TCP 443 observer. Diagnostic TLS termination exposed an HTTP GET with WebSocket upgrade headers and a nonstandard three-character nonce; strict validation rejected it and the game reported 2306-0502. The observer supports a bounded, tested WebSocket upgrade/frame parser.
 
-1. Extend the recorded native-menu trace in isolated profiles and map requests to a documented private account/friend contract. The first local attempt produced 2306-0520: Eden rejected the game-server hostname with `EAI_AGAIN` after placeholder account-token calls. This is not a PC DNS configuration diagnosis. Eden currently returns a placeholder ID-token buffer in `IManagerForApplication::LoadIdTokenCache`; several authorization/license/friend handlers are absent. This source observation is not a complete runtime trace.
-2. Implement a private game-facing protocol adapter. Mario Kart uses game services beyond the emulator's IPC layer; the JSON protocol above is USCL's own control plane and is not accepted by the unmodified game. Public research describes the NEX family in [NintendoClients](https://github.com/kinnay/NintendoClients/wiki). Validate the exact game's method versions and payloads rather than guessing from another title.
-3. Add opt-in guest integration and emulator-owned backend credentials. Preserve normal emulator behavior when disabled. An unsupported operation must produce a clear error; reporting every service successful does not implement online play.
-4. Bind identity and signaling to Steam-authenticated peers, then add a transport preset and shell-managed lifecycle. Do not trust claimed player IDs from request JSON.
-5. Prove native room discovery/join and race completion with two isolated clients, followed by two PCs. Add friends, worldwide/regional policies, tournaments and durable state only with meaningful compatibility tests.
+An original game-facing adapter now lives in [`native/`](native/README.md). It implements TLS/WebSocket termination, PRUDP Lite framing, RMC dispatch, a private ticket authority, NEX matchmaking objects backed by the JSON room service, and loopback-only NAT checks. Its twelve tests pass, but no real-game binary frame, authentication, room join, or race has yet passed through it. The JSON backend remains a USCL control plane; the game speaks NEX/PRUDP, which this adapter translates.
+
+Remaining before any native compatibility claim:
+
+1. Validate the adapter against the real game in an isolated profile: confirm the account route and identity are consumed, authentication completes, and a private room is created and joined. The first local attempt produced 2306-0520 (Eden rejected the game-server hostname with `EAI_AGAIN` after placeholder account-token calls); the route now covers the account hosts too, and Eden supplies a parsed private identity instead of a placeholder token.
+2. Fix any protocol boundary the real game exposes (method versions, payload layouts, NAT addresses) using runtime evidence rather than another title's guesses.
+3. Bind identity and signaling to Steam-authenticated peers, then add a transport preset and shell-managed lifecycle. Do not trust claimed player IDs from request JSON.
+4. Prove native room discovery/join and race completion with two isolated clients, followed by two PCs. Add friends, worldwide/regional policies, tournaments and durable state only with meaningful compatibility tests.
 
 Until those stages pass, the native Online Play menu remains unsupported. Existing local Wireless Play results are recorded separately in [the game notes](../games/0100152000022000.md).

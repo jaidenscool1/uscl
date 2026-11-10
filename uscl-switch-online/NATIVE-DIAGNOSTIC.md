@@ -1,8 +1,10 @@
 # MK8 Deluxe native-menu diagnostic — 2026-11-10
 
-Native Online Play remains **unsupported**. This change implements an opt-in
-emulator diagnostic route and a request observer, not a game-facing service.
-Private rooms in the JSON backend and playable Wireless Play are separate results.
+Native Online Play remains **unsupported**. This work implements an opt-in
+emulator diagnostic route, a request observer, and an original game-facing
+adapter in [`native/`](native/README.md); none of them is yet a validated
+game-facing service. Private rooms in the JSON backend and playable Wireless
+Play are separate results.
 
 ## Observed locally
 
@@ -12,11 +14,13 @@ no Booster Course DLC; existing isolated preview profile, patched graphical Eden
 1. The previous log shows account-token stubs, followed by NSD returning the
    unresolved template `g2b309e01-%.s.n.srv.nintendo.net`. The resolver then
    rejects that template. There was no observed native server exchange.
-2. Patch 0005 routes that **exact template**, only for this title and only with
-   `USCL_MK8_NATIVE_DIAGNOSTIC=1`, to IPv4 loopback. Other names, other titles,
-   and disabled launches retain their previous routing. DNS rejection rules
-   are unchanged. This covers the observed explicit NSD call; the separate
-   resolver TODO for requests that rely solely on `use_nsd_resolve` remains.
+2. Patch 0005 routes the **exact observed templates**, only for this title and
+   only with `USCL_MK8_NATIVE_DIAGNOSTIC=1`, to IPv4 loopback: the game server
+   and `nncs1` to 127.0.0.1, `nncs2` to 127.0.0.2. It applies through both NSD
+   and the socket DNS resolver. Other names, other titles, and disabled launches
+   retain their previous routing. Patch 0006 additionally parses a private
+   `USCL_NATIVE_ID_V1` identity from `USCL_MK8_NATIVE_CREDENTIAL_FILE` and
+   reports a loopback IP address under the same opt-in.
 3. Selecting Online Play in the real game selected this route. A local observer
    on TCP 443 received a 1,551-byte first chunk beginning with a TLS record
    header declaring 1,546 bytes. This initial observer did not decrypt TLS.
@@ -28,11 +32,12 @@ no Booster Course DLC; existing isolated preview profile, patched graphical Eden
    156-byte HTTP GET to `/`. A subsequent run confirmed `Upgrade: websocket`,
    `Connection: Upgrade` and WebSocket version 13. The guest requested verification
    option 0 in Eden's existing SSL API; no verification-policy patch was made.
-   The strict diagnostic WebSocket adapter rejected the request's key during
-   the standard base64/16-byte nonce check. Its value was not logged. Whether
-   this is an emulator defect or a game-specific handshake variant is unresolved.
-   The game again displayed 2306-0502. No real-game WebSocket binary frame was
-   observed and no authentication request was identified.
+   The strict diagnostic WebSocket adapter rejected the request's key because
+   the game sent a three-character nonce rather than the standard 24-character
+   key; the value was not logged. The observer now accepts that nonce only with
+   an explicit `--mk8-short-nonce` option. The game again displayed 2306-0502.
+   No real-game WebSocket binary frame was observed and no authentication
+   request was identified.
 
 REA 6.8.0 `capture-process` Evidence:
 `ev_3aea0a136fb5f694883e081e8dd3fa71376da48eb856845c56407efc6fd59812`.
@@ -102,15 +107,21 @@ synthetic frame is not evidence of receiving PRUDP from the real game. Optional
 `--tls-cert <localhost.pem> --tls-key <localhost.key>` on the test script exercises
 real TLS with a verified local certificate, including request-value redaction.
 
-## Remaining protocol boundary
+## Current adapter and remaining boundary
 
-The next observed boundary is WebSocket nonce validation after TLS on TCP 443.
+The [`native/`](native/README.md) adapter now terminates TLS/WebSocket, accepts
+the observed short nonce, and implements PRUDP Lite framing, RMC dispatch, a
+private ticket authority, NEX matchmaking objects backed by the JSON room
+service, and loopback-only NAT checks. Its twelve unit tests pass, but this is
+not real-game compatibility: the adapter has not yet been driven end-to-end by
+the game through authentication, private-room discovery/join, or a race.
+
 The [public PRUDP reference](https://github.com/kinnay/NintendoClients/wiki/PRUDP-Protocol#lite-format)
-describes Switch WebSocket/Lite framing; the observer's original framing parser
-uses that documented layout. No candidate server implementation was imported.
-There is no runtime evidence yet identifying authentication schemas, NEX method
-versions, PRUDP exchanges, friend methods, or native private-room operations for this build.
-Do not guess these from another game's implementation or treat a JSON room test
-as native compatibility. No native client has logged in, discovered/joined a
-private room, or raced through this service. Windows/macOS and independent review
-remain required before merge.
+describes Switch WebSocket/Lite framing; the adapter uses that documented
+layout but was written against the observed headers, not an imported server
+implementation. There is no runtime evidence yet identifying the exact NEX
+method versions, PRUDP exchanges, friend methods, or native private-room
+operations for this build. Do not guess these from another game's
+implementation or treat a JSON room test as native compatibility. No native
+client has logged in, discovered/joined a private room, or raced through this
+service. Windows/macOS and independent review remain required before merge.

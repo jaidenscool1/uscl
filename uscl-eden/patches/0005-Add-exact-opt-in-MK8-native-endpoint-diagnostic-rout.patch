@@ -1,12 +1,13 @@
-From 9c384cf6d14b5b0a055764b99dab86b4d4dfbbb6 Mon Sep 17 00:00:00 2001
+From 0c04661a0de9743f52a5fd9cea852b68d1d7826b Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 08:04:44 -0700
-Subject: [PATCH 5/5] Add exact opt-in MK8 native endpoint diagnostic route
+Subject: [PATCH 5/6] Add exact opt-in MK8 native endpoint diagnostic route
 
 ---
- src/core/hle/service/sockets/nsd.cpp          | 26 ++++++++++++++-----
- .../hle/service/sockets/uscl_native_route.h   | 20 ++++++++++++++
- 2 files changed, 40 insertions(+), 6 deletions(-)
+ src/core/hle/service/sockets/nsd.cpp          | 26 +++++++++++----
+ src/core/hle/service/sockets/sfdnsres.cpp     | 32 ++++++++++++++-----
+ .../hle/service/sockets/uscl_native_route.h   | 25 +++++++++++++++
+ 3 files changed, 69 insertions(+), 14 deletions(-)
  create mode 100644 src/core/hle/service/sockets/uscl_native_route.h
 
 diff --git a/src/core/hle/service/sockets/nsd.cpp b/src/core/hle/service/sockets/nsd.cpp
@@ -76,12 +77,118 @@ index 241f297..09730aa 100644
  
      if (res.IsError()) {
          IPC::ResponseBuilder rb{ctx, 2};
+diff --git a/src/core/hle/service/sockets/sfdnsres.cpp b/src/core/hle/service/sockets/sfdnsres.cpp
+index fa92179..8103014 100644
+--- a/src/core/hle/service/sockets/sfdnsres.cpp
++++ b/src/core/hle/service/sockets/sfdnsres.cpp
+@@ -4,6 +4,7 @@
+ // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <cstdlib>
+ #include <string_view>
+ #include <utility>
+ #include <vector>
+@@ -15,6 +16,7 @@
+ #include "core/hle/service/sockets/sfdnsres.h"
+ #include "core/hle/service/sockets/sockets.h"
+ #include "core/hle/service/sockets/sockets_translate.h"
++#include "core/hle/service/sockets/uscl_native_route.h"
+ #include "core/internal_network/network.h"
+ #include "core/memory.h"
+ 
+@@ -181,7 +183,20 @@ static std::vector<u8> SerializeAddrInfoAsHostEnt(const std::vector<Network::Add
+     return data;
+ }
+ 
+-static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestContext& ctx) {
++static std::string UsclResolveHost(std::string host, Core::System& system) {
++    const char* option = std::getenv("USCL_MK8_NATIVE_DIAGNOSTIC");
++    const bool enabled = option && std::string_view{option} == "1";
++    const auto routed = UsclNativeDiagnosticRoute(
++        host, system.GetApplicationProcessProgramID(), enabled);
++    if (routed != host) {
++        LOG_WARNING(Network, "USCL MK8 native resolver route selected");
++        return std::string{routed};
++    }
++    return host;
++}
++
++static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestContext& ctx,
++                                                              Core::System& system) {
+     struct InputParameters {
+         u8 use_nsd_resolve;
+         u32 cancel_handle;
+@@ -198,7 +213,7 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
+         parameters.use_nsd_resolve, parameters.cancel_handle, parameters.process_id);
+ 
+     const auto host_buffer = ctx.ReadBuffer(0);
+-    const std::string host = Common::StringFromBuffer(host_buffer);
++    const std::string host = UsclResolveHost(Common::StringFromBuffer(host_buffer), system);
+     // For now, ignore options, which are in input buffer 1 for GetHostByNameRequestWithOptions.
+ 
+     // Prevent resolution of Nintendo servers
+@@ -220,7 +235,7 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
+ }
+ 
+ void SFDNSRES::GetHostByNameRequest(HLERequestContext& ctx) {
+-    auto [data_size, emu_gai_err] = GetHostByNameRequestImpl(ctx);
++    auto [data_size, emu_gai_err] = GetHostByNameRequestImpl(ctx, system);
+ 
+     struct OutputParameters {
+         NetDbError netdb_error;
+@@ -239,7 +254,7 @@ void SFDNSRES::GetHostByNameRequest(HLERequestContext& ctx) {
+ }
+ 
+ void SFDNSRES::GetHostByNameRequestWithOptions(HLERequestContext& ctx) {
+-    auto [data_size, emu_gai_err] = GetHostByNameRequestImpl(ctx);
++    auto [data_size, emu_gai_err] = GetHostByNameRequestImpl(ctx, system);
+ 
+     struct OutputParameters {
+         u32 data_size;
+@@ -296,7 +311,8 @@ static std::vector<u8> SerializeAddrInfo(const std::vector<Network::AddrInfo>& v
+     return data;
+ }
+ 
+-static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext& ctx) {
++static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext& ctx,
++                                                            Core::System& system) {
+     struct InputParameters {
+         u8 use_nsd_resolve;
+         u32 cancel_handle;
+@@ -316,7 +332,7 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
+     // before looking up.
+ 
+     const auto host_buffer = ctx.ReadBuffer(0);
+-    const std::string host = Common::StringFromBuffer(host_buffer);
++    const std::string host = UsclResolveHost(Common::StringFromBuffer(host_buffer), system);
+ 
+     // Prevent resolution of Nintendo servers
+     if (IsBlockedHost(host)) {
+@@ -345,7 +361,7 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
+ }
+ 
+ void SFDNSRES::GetAddrInfoRequest(HLERequestContext& ctx) {
+-    auto [data_size, emu_gai_err] = GetAddrInfoRequestImpl(ctx);
++    auto [data_size, emu_gai_err] = GetAddrInfoRequestImpl(ctx, system);
+ 
+     struct OutputParameters {
+         Errno bsd_errno;
+@@ -379,7 +395,7 @@ void SFDNSRES::GetGaiStringErrorRequest(HLERequestContext& ctx) {
+ 
+ void SFDNSRES::GetAddrInfoRequestWithOptions(HLERequestContext& ctx) {
+     // Additional options are ignored
+-    auto [data_size, emu_gai_err] = GetAddrInfoRequestImpl(ctx);
++    auto [data_size, emu_gai_err] = GetAddrInfoRequestImpl(ctx, system);
+ 
+     struct OutputParameters {
+         u32 data_size;
 diff --git a/src/core/hle/service/sockets/uscl_native_route.h b/src/core/hle/service/sockets/uscl_native_route.h
 new file mode 100644
-index 0000000..2314f4e
+index 0000000..b64fcd3
 --- /dev/null
 +++ b/src/core/hle/service/sockets/uscl_native_route.h
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,25 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#pragma once
 +
@@ -94,9 +201,14 @@ index 0000000..2314f4e
 +// Keep the allowlist exact. This does not supply authentication or NEX services.
 +constexpr std::string_view UsclNativeDiagnosticRoute(std::string_view host,
 +                                                    std::uint64_t program_id, bool enabled) {
-+    if (enabled && program_id == 0x0100152000022000ULL &&
-+        host == "g2b309e01-%.s.n.srv.nintendo.net") {
-+        return "127.0.0.1";
++    if (enabled && program_id == 0x0100152000022000ULL) {
++        if (host == "g2b309e01-%.s.n.srv.nintendo.net" ||
++            host == "nncs1-%.n.n.srv.nintendo.net") {
++            return "127.0.0.1";
++        }
++        if (host == "nncs2-%.n.n.srv.nintendo.net") {
++            return "127.0.0.2";
++        }
 +    }
 +    return host;
 +}

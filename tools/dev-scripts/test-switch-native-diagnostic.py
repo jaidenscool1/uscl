@@ -62,6 +62,21 @@ def main():
         else:
             assert result == ["rejected"]
     print("PASS: split WebSocket upgrade, RFC accept digest, masked Lite framing, unmasked rejection")
+    class Sink:
+        def sendall(self, data):
+            assert data.startswith(b"HTTP/1.1 101 ")
+    short = request.replace(b"dGhlIHNhbXBsZSBub25jZQ==", b"abc")
+    mask = b"abcd"
+    payload = b"\x80\0\0\0\xaa\x1f\x01\0\0\0\0\0"
+    frame = bytes([0x82, 0x80 | len(payload)]) + mask + bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+    try:
+        module.websocket_observation(Sink(), short + frame, time.monotonic() + 2)
+        raise AssertionError("nonstandard nonce accepted without explicit option")
+    except ValueError:
+        pass
+    result = module.websocket_observation(Sink(), short + frame, time.monotonic() + 2, mk8_short_nonce=True)
+    assert result["framing"] == "prudp-lite-header"
+    print("PASS: observed short nonce requires explicit diagnostic option")
     process = subprocess.Popen([sys.executable, str(observer), "--port", "0", "--limit", "3", "--duration", "5"], stdout=subprocess.PIPE, text=True)
     try:
         ready = json.loads(process.stdout.readline())
@@ -116,12 +131,25 @@ def main():
             binary = Path(directory) / "route-test"
             source = r'''
 #include "core/hle/service/sockets/uscl_native_route.h"
+#include "core/hle/service/acc/uscl_native_identity.h"
 #include <cassert>
 int main() {
+    using Service::Account::ParseUsclNativeIdentity;
+    const std::string valid = "USCL_NATIVE_ID_V1\n123\n" + std::string(64, 'a') + "\n";
+    const auto identity = ParseUsclNativeIdentity(valid);
+    assert(identity && identity->id == 123 && identity->token == std::string(64, 'a'));
+    assert(!ParseUsclNativeIdentity(valid + "extra"));
+    assert(!ParseUsclNativeIdentity("USCL_NATIVE_ID_V1\n0\n" + std::string(64, 'a') + "\n"));
+    assert(!ParseUsclNativeIdentity("USCL_NATIVE_ID_V1\n18446744073709551616\n" + std::string(64, 'a') + "\n"));
+    assert(!ParseUsclNativeIdentity("USCL_NATIVE_ID_V1\n123\n" + std::string(64, 'z') + "\n"));
     using Service::Sockets::UsclNativeDiagnosticRoute;
     constexpr auto title = 0x0100152000022000ULL;
     constexpr auto host = "g2b309e01-%.s.n.srv.nintendo.net";
     assert(UsclNativeDiagnosticRoute(host, title, true) == "127.0.0.1");
+    assert(UsclNativeDiagnosticRoute("nncs1-%.n.n.srv.nintendo.net", title, true) == "127.0.0.1");
+    assert(UsclNativeDiagnosticRoute("nncs2-%.n.n.srv.nintendo.net", title, true) == "127.0.0.2");
+    assert(UsclNativeDiagnosticRoute("nncs1-%.n.n.srv.nintendo.net", title, false) == "nncs1-%.n.n.srv.nintendo.net");
+    assert(UsclNativeDiagnosticRoute("nncs1-%.n.n.srv.nintendo.net", title + 1, true) == "nncs1-%.n.n.srv.nintendo.net");
     assert(UsclNativeDiagnosticRoute(host, title, false) == host);
     assert(UsclNativeDiagnosticRoute(host, title + 1, true) == host);
     for (auto other : {"example.com", "srv.nintendo.net", "127.0.0.1",
