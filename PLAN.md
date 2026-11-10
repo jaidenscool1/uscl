@@ -176,3 +176,5 @@ the publisher's servers. The player decided:
    player's own session, Host/Join move to an advanced option; (b) joining moves you into the other session;
    (c) public sessions tagged by title/version, listed in the game's own search; (d) a member takes over when
    the host leaves.
+
+**Independent Switch service (2026-11-10, in progress):** `uscl-switch-online` implements a loopback-only private room control plane with ephemeral player credentials, exact game/update/DLC compatibility, public/invite rooms, region filters and expiry cleanup. Eden patch 0004 negotiates capabilities through an explicit headless probe. This is a foundation analogous in architecture to RPCN, not native Mario Kart Online Play compatibility. Guest account/friend integration, game-facing NEX/PRUDP methods, Steam identity binding, durable accounts, tournaments and native-menu race validation remain open. The current working play path stays Wireless Play; the prototype port is not forwarded. See `uscl-switch-online/README.md`.

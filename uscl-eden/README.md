@@ -10,9 +10,11 @@ Apply the `git format-patch` files in order with `git am patches/*.patch` from a
 - 0002 initializes networking in the SDL frontend and waits for an actual room join before starting an explicitly online launch. The stock frontend advertised `--multiplayer` but never called `Network::Init()`, causing `Could not access RoomMember`. Two patched SDL instances joined a real room; graphical gameplay in that frontend remains unresolved.
 - 0003 adds `--uscl-room NAME@127.0.0.1:PORT` to the graphical frontend. It validates the private loopback endpoint, waits up to 15 seconds for connection, and exits unsuccessfully if it cannot join. Startup failures flush the log and exit before a game starts, avoiding an upstream partially initialized shutdown hang. Automatic joins keep the room-chat window closed so it cannot take focus from fullscreen play. Offline launches use the normal `-f -g <game>` options. Nintendo's online service is not used.
 
+- 0004 adds a headless, loopback-only private-service client probe with a three-second deadline and bounded JSON frames. It negotiates USCL capabilities without loading a profile or booting a game. It does not implement the native Online Play menu. See [the development backend](../uscl-switch-online/README.md).
+
 ## Linux development build
 
-Run `tools/dev-scripts/build-switch-core.sh` from the USCL repository after installing Eden's native build dependencies, including Qt Widgets, Charts and Concurrent, SDL2, FFmpeg, OpenSSL, and a C++20 toolchain. Dependency sources not supplied by the system are downloaded by Eden's pinned CMake configuration. `USCL_EDEN_SOURCE` can select an existing checkout; `USCL_BUILD_JOBS` sets compilation parallelism.
+Run `tools/dev-scripts/build-switch-core.sh` from the USCL repository after installing Eden's native build dependencies, including Qt Widgets, Charts, Concurrent and Network, SDL2, FFmpeg, OpenSSL, and a C++20 toolchain. Dependency sources not supplied by the system are downloaded by Eden's pinned CMake configuration. `USCL_EDEN_SOURCE` can select an existing checkout; `USCL_BUILD_JOBS` sets compilation parallelism.
 
 The helper installs a local development core under the ignored `build/switch-core` folder. It is not a portable distribution package. `switch-preview.sh` selects this graphical core automatically when present; the regular installed USCL applications remain separate.
 

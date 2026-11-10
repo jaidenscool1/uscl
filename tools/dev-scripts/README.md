@@ -21,3 +21,5 @@ scratch folder: adjust before use. See `tools/autotest/README.md` for the virtua
 
 `tools/ghidra/toc_str.py` / `abs_str.py`: find code that uses a string in a PS3 ELF (TOC slot or lis/addi loads),
 for strings Ghidra's references miss.
+
+`test-switch-online.py --eden <patched-eden>` exercises the independent Switch service and Eden’s headless probe against real and malformed local peers. Build the backend with the commands in [its README](../../uscl-switch-online/README.md) first. This does not test Mario Kart’s native Online Play menu.

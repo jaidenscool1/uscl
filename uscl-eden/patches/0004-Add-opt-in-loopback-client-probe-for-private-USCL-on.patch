@@ -1,0 +1,179 @@
+From da95978c0eb96d545766a37ea3d3f3eab16f04d2 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 07:48:59 -0700
+Subject: [PATCH 4/4] Add opt-in loopback client probe for private USCL online
+ service
+
+---
+ src/yuzu/CMakeLists.txt         |  6 ++--
+ src/yuzu/main.cpp               | 19 ++++++++++
+ src/yuzu/uscl_online_client.cpp | 64 +++++++++++++++++++++++++++++++++
+ src/yuzu/uscl_online_client.h   | 22 ++++++++++++
+ 4 files changed, 109 insertions(+), 2 deletions(-)
+ create mode 100644 src/yuzu/uscl_online_client.cpp
+ create mode 100644 src/yuzu/uscl_online_client.h
+
+diff --git a/src/yuzu/CMakeLists.txt b/src/yuzu/CMakeLists.txt
+index ff03126..145de2b 100644
+--- a/src/yuzu/CMakeLists.txt
++++ b/src/yuzu/CMakeLists.txt
+@@ -12,9 +12,11 @@ if (YUZU_USE_BUNDLED_QT AND PLATFORM_LINUX)
+     set(CMAKE_BUILD_RPATH "${CMAKE_BINARY_DIR}/bin/lib/")
+ endif()
+ 
+-find_package(Qt6 REQUIRED COMPONENTS Widgets)
++find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
+ 
+ add_executable(yuzu
++    uscl_online_client.cpp
++    uscl_online_client.h
+     Info.plist
+     about_dialog.cpp
+     about_dialog.h
+@@ -411,7 +413,7 @@ endif()
+ 
+ target_link_libraries(yuzu PRIVATE nlohmann_json::nlohmann_json)
+ target_link_libraries(yuzu PRIVATE common core input_common frontend_common network video_core qt_common)
+-target_link_libraries(yuzu PRIVATE Boost::headers Qt6::Widgets Qt6::Charts Qt6::Concurrent)
++target_link_libraries(yuzu PRIVATE Boost::headers Qt6::Widgets Qt6::Charts Qt6::Concurrent Qt6::Network)
+ target_link_libraries(yuzu PRIVATE ${PLATFORM_LIBRARIES} Threads::Threads)
+ if (ENABLE_OPENGL)
+     target_link_libraries(yuzu PRIVATE glad)
+diff --git a/src/yuzu/main.cpp b/src/yuzu/main.cpp
+index 29a1f07..36df3fb 100644
+--- a/src/yuzu/main.cpp
++++ b/src/yuzu/main.cpp
+@@ -2,6 +2,11 @@
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ 
+ #include <QApplication>
++#include <QJsonDocument>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include "uscl_online_client.h"
+ #include "startup_checks.h"
+ 
+ #if YUZU_ROOM
+@@ -75,6 +80,20 @@ static Qt::HighDpiScaleFactorRoundingPolicy GetHighDpiRoundingPolicy() {
+ }
+ 
+ int main(int argc, char* argv[]) {
++    // Explicit developer probe: no graphics, profile loading, guest services or
++    // Nintendo endpoints. Use QCoreApplication so it also works without a display.
++    for (int i = 1; i < argc; ++i) {
++        if (std::strcmp(argv[i], "--uscl-online-probe") != 0) continue;
++        const auto endpoint = i + 1 < argc ? QString::fromLocal8Bit(argv[i + 1]) : QString{};
++        QCoreApplication app(argc, argv);
++        const USCL::Online::Client client(endpoint);
++        const auto response = client.Probe();
++        const auto output = QJsonDocument(response).toJson(QJsonDocument::Compact);
++        std::fwrite(output.constData(), 1, output.size(), stdout);
++        std::fputc('\n', stdout);
++        return response.value(QStringLiteral("ok")).toBool() ? EXIT_SUCCESS : EXIT_FAILURE;
++    }
++
+ #if YUZU_ROOM
+     bool launch_room = false;
+     for (int i = 1; i < argc; i++) {
+diff --git a/src/yuzu/uscl_online_client.cpp b/src/yuzu/uscl_online_client.cpp
+new file mode 100644
+index 0000000..5b14111
+--- /dev/null
++++ b/src/yuzu/uscl_online_client.cpp
+@@ -0,0 +1,64 @@
++// SPDX-FileCopyrightText: Copyright 2026 USCL contributors
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include "uscl_online_client.h"
++
++#include <QElapsedTimer>
++#include <QJsonDocument>
++#include <QJsonParseError>
++#include <QRegularExpression>
++#include <QTcpSocket>
++
++namespace USCL::Online {
++namespace {
++QJsonObject Error(const char* code) {
++    return {{QStringLiteral("ok"), false}, {QStringLiteral("error"), QString::fromLatin1(code)}};
++}
++constexpr qsizetype MaxFrame = 16 * 1024;
++constexpr int Timeout = 3000;
++} // namespace
++
++Client::Client(const QString& endpoint) {
++    const auto match = QRegularExpression(QStringLiteral("^127\\.0\\.0\\.1:([0-9]{1,5})$")).match(endpoint);
++    const auto value = match.captured(1).toUInt();
++    if (match.hasMatch() && value > 0 && value <= 65535) port = static_cast<quint16>(value);
++}
++
++QJsonObject Client::Call(const QJsonObject& request) const {
++    if (!port) return Error("invalid_loopback_endpoint");
++    const auto frame = QJsonDocument(request).toJson(QJsonDocument::Compact) + '\n';
++    if (frame.size() > MaxFrame) return Error("request_too_large");
++    QElapsedTimer deadline;
++    deadline.start();
++    const auto remaining = [&] { return qMax(0, Timeout - static_cast<int>(deadline.elapsed())); };
++    QTcpSocket socket;
++    socket.connectToHost(QStringLiteral("127.0.0.1"), port);
++    if (!socket.waitForConnected(remaining())) return Error("backend_unavailable");
++    if (socket.write(frame) != frame.size()) return Error("backend_write_failed");
++    while (socket.bytesToWrite() > 0) {
++        if (remaining() <= 0 || !socket.waitForBytesWritten(remaining())) return Error("backend_timeout");
++    }
++    socket.setReadBufferSize(MaxFrame + 1);
++    QByteArray response;
++    while (!response.contains('\n')) {
++        response += socket.readAll();
++        if (response.size() > MaxFrame) return Error("response_too_large");
++        if (response.contains('\n')) break;
++        if (remaining() <= 0 || !socket.waitForReadyRead(remaining())) return Error("backend_incomplete_response");
++    }
++    if (response.indexOf('\n') != response.size() - 1) return Error("invalid_backend_response");
++    QJsonParseError parse_error;
++    const auto document = QJsonDocument::fromJson(response, &parse_error);
++    if (parse_error.error != QJsonParseError::NoError || !document.isObject() ||
++        !document.object().value(QStringLiteral("ok")).isBool()) return Error("invalid_backend_response");
++    return document.object();
++}
++
++QJsonObject Client::Probe() const {
++    auto response = Call({{QStringLiteral("op"), QStringLiteral("hello")}, {QStringLiteral("protocol"), 1}});
++    if (!response.value(QStringLiteral("ok")).toBool()) return response;
++    const auto result = response.value(QStringLiteral("result")).toObject();
++    if (result.value(QStringLiteral("service")) != QStringLiteral("uscl-switch-online") || result.value(QStringLiteral("protocol")).toInt() != 1 ||
++        !result.value(QStringLiteral("native_online_play")).isBool()) return Error("incompatible_backend");
++    return response;
++}
++} // namespace USCL::Online
+diff --git a/src/yuzu/uscl_online_client.h b/src/yuzu/uscl_online_client.h
+new file mode 100644
+index 0000000..4b4a539
+--- /dev/null
++++ b/src/yuzu/uscl_online_client.h
+@@ -0,0 +1,22 @@
++// SPDX-FileCopyrightText: Copyright 2026 USCL contributors
++// SPDX-License-Identifier: GPL-3.0-or-later
++#pragma once
++
++#include <QJsonObject>
++#include <QString>
++
++namespace USCL::Online {
++
++// Transport for USCL's private protocol. This is not a Nintendo account client
++// or a guest-game protocol adapter. Connections are restricted to loopback.
++class Client {
++public:
++    explicit Client(const QString& endpoint);
++    QJsonObject Call(const QJsonObject& request) const;
++    QJsonObject Probe() const;
++
++private:
++    quint16 port{};
++};
++
++} // namespace USCL::Online
+-- 
+2.56.0
+

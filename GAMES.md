@@ -24,7 +24,7 @@ own = the publisher's own servers · GameSpy (revived by OpenSpy) · ? = not pro
 
 | Game | Title ID | Multiplayer route | Status | Next step |
 |---|---|---|---|---|
-| Mario Kart 8 Deluxe | [0100152000022000](games/0100152000022000.md) | Eden local wireless room over the Steam UDP tunnel | 🚧 two local instances: Wireless Play race and keyboard driving pass with 4.0.1 + firmware 22.5.0 | two-PC Steam relay test and physical controllers |
+| Mario Kart 8 Deluxe | [0100152000022000](games/0100152000022000.md) | Eden local wireless room over the Steam UDP tunnel | 🚧 two local instances: Wireless Play race and keyboard driving pass with 4.0.1 + firmware 22.5.0 | two-PC Steam relay test and physical controllers; native Online Play backend in development, unsupported |
 
 ## Next up (PS3)
 Ordered by how much existing work each one reuses. Serials and services marked `?` are from memory: confirm them
