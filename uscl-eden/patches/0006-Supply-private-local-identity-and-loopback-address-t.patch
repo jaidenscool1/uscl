@@ -1,7 +1,7 @@
 From f5e073b611266cbb95923fd39d74343c27fae219 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 10:24:24 -0700
-Subject: [PATCH 6/6] Supply private local identity and loopback address to the
+Subject: [PATCH 6/7] Supply private local identity and loopback address to the
  MK8 native adapter
 
 ---

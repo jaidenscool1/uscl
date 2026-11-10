@@ -112,16 +112,33 @@ real TLS with a verified local certificate, including request-value redaction.
 The [`native/`](native/README.md) adapter now terminates TLS/WebSocket, accepts
 the observed short nonce, and implements PRUDP Lite framing, RMC dispatch, a
 private ticket authority, NEX matchmaking objects backed by the JSON room
-service, and loopback-only NAT checks. Its twelve unit tests pass, but this is
-not real-game compatibility: the adapter has not yet been driven end-to-end by
-the game through authentication, private-room discovery/join, or a race.
+service, and loopback-only NAT checks. Its twelve unit tests pass.
+
+## Native login — validated 2026-11-10
+
+With Eden patches 0005/0006, a private identity file, the local adapter on TCP
+443, the JSON control plane on 24873, and the
+[`tools/dev-scripts/dsu-pad.py`](../../tools/dev-scripts/dsu-pad.py) DSU pad
+server on UDP 26760 (plus `USCL_UDP_POLL_MS` set fine enough to navigate the
+menus), the real MK8 Deluxe 4.0.1 Online Play menu was reached and the game
+completed the native authentication flow against the local adapter. Observed
+in order: WebSocket upgrade with the three-character nonce, PRUDP Lite
+SYN/CONNECT/DATA, RMC `Authentication::Login`, a private ticket issued, the
+secure connection, station registration, utility integer settings, and
+matchmaking/data-store queries. The game then displayed the Online Play
+submenu (Worldwide / Regional / Friends / Tournaments) and reached the
+Friends → Create Room screen.
+
+This validates native account/authentication compatibility. It does not yet
+validate private-room creation/join or racing: those methods were reached by
+the game's UI but have not completed against the matchmaking adapter.
 
 The [public PRUDP reference](https://github.com/kinnay/NintendoClients/wiki/PRUDP-Protocol#lite-format)
 describes Switch WebSocket/Lite framing; the adapter uses that documented
 layout but was written against the observed headers, not an imported server
-implementation. There is no runtime evidence yet identifying the exact NEX
-method versions, PRUDP exchanges, friend methods, or native private-room
-operations for this build. Do not guess these from another game's
-implementation or treat a JSON room test as native compatibility. No native
-client has logged in, discovered/joined a private room, or raced through this
-service. Windows/macOS and independent review remain required before merge.
+implementation. The exact NEX method versions for private-room
+discovery/join and racing are still unverified against the real game, and the
+matchmaking methods the adapter implements were not imported from another
+title. Do not treat the JSON room test as native compatibility. No native
+client has created/joined a private room or raced through this service.
+Windows/macOS and independent review remain required before merge.
