@@ -133,19 +133,22 @@ This validates native account/authentication compatibility. It does not yet
 validate private-room creation/join or racing: those methods were reached by
 the game's UI but have not completed against the matchmaking adapter.
 
-## Native room creation — in progress
+## Native room creation — validated 2026-11-10
 
-Confirming the create-room prompt drives the matchmaking adapter further: the
-game sends `MatchmakeExtension::CreateMatchmakeSessionWithParam` (protocol 109,
-method 38), the adapter creates the private room (logged as
-`native_private_room_created`), and the game then asks for a relay signature
-key (protocol 3, method 6 `GetRelaySignatureKey`). The adapter answers that
-with a "no relay offered" payload so the game proceeds on its direct mesh.
-Eden patch 0008 additionally implements `ISslConnection::Peek`, which the
-game calls while the room flow is open and which previously threw an
-unimplemented-function assertion. Reaching and confirming the full
-create-room → relay-key → race sequence is the next validation step; a
-complete private-room join and race have not yet passed.
+Confirming the create-room prompt now drives the full matchmaking room flow.
+Observed in order: `CreateMatchmakeSessionWithParam` (protocol 109, method 38)
+creates the private room (`native_private_room_created`), the game asks for a
+relay signature key (protocol 3, method 6), the adapter answers with a "no
+relay offered" payload, the game runs its NAT checks against the loopback
+responder (`--nat`, UDP 10025/10125), reports NAT properties (protocol 3,
+method 5), updates room progress (protocol 109, method 34), and requests the
+room code (protocol 109, method 68). The game then shows the room lobby.
+Without the NAT responder the game aborted the same flow with 2618-0201.
+
+This validates private-room creation. A second client joining via the room
+code and a completed race remain unverified. Eden patch 0008 implements
+`ISslConnection::Peek`, which the game calls during this flow and which
+previously threw an unimplemented-function assertion.
 
 The [public PRUDP reference](https://github.com/kinnay/NintendoClients/wiki/PRUDP-Protocol#lite-format)
 describes Switch WebSocket/Lite framing; the adapter uses that documented

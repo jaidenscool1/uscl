@@ -52,6 +52,10 @@ adapter. The service still reports `native_online_play: false`.
      --control-port 24873 --nat
    ```
 
+   `--nat` is required for the room flow: after the game creates a room it
+   runs Nintendo NAT checks on UDP 10025/10125, and without the responder it
+   aborts with error 2618-0201.
+
 4. Launch patched Eden with `USCL_MK8_NATIVE_DIAGNOSTIC=1` and
    `USCL_MK8_NATIVE_CREDENTIAL_FILE=/path/to/player1.identity`, then select
    Online Play. See the Eden patches and reproduction in
