@@ -14,6 +14,7 @@ Apply the `git format-patch` files in order with `git am patches/*.patch` from a
 - 0005 adds an off-by-default diagnostic route for MK8 Deluxe's exact observed hostname templates and title ID, enabled only by `USCL_MK8_NATIVE_DIAGNOSTIC=1`. Both the game server host (`g2b309e01-%.s.n.srv.nintendo.net`) and the account hosts (`nncs1-%.n.n.srv.nintendo.net`, `nncs2-%.n.n.srv.nintendo.net`) resolve to loopback (127.0.0.1 and 127.0.0.2), through both NSD and the DNS resolver. It supplies no login or matchmaking service. See [the evidence and reproduction](../uscl-switch-online/NATIVE-DIAGNOSTIC.md).
 - 0006 supplies a private local identity and loopback address under the same opt-in: the account service parses `USCL_MK8_NATIVE_CREDENTIAL_FILE` (`USCL_NATIVE_ID_V1` id plus 64-hex token) and returns that id/token where the game requests account identity, and NIFM reports 127.0.0.1 so the game dials the local adapter. It does not implement authentication or matchmaking itself.
 - 0007 lets the UDP controller poll interval be overridden with `USCL_UDP_POLL_MS` (1–3000 ms; default 3000). The stock 3-second poll is too coarse to navigate the game's menus through an injected controller, so the native diagnostic route sets a finer interval.
+- 0008 implements `ISslConnection::Peek` (OpenSSL backend), which MK8 Deluxe calls during the online room flow and which previously triggered an unimplemented-function assertion.
 
 ## Linux development build
 

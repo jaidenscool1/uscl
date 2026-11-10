@@ -1,7 +1,7 @@
 From 0c04661a0de9743f52a5fd9cea852b68d1d7826b Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 08:04:44 -0700
-Subject: [PATCH 5/7] Add exact opt-in MK8 native endpoint diagnostic route
+Subject: [PATCH 5/8] Add exact opt-in MK8 native endpoint diagnostic route
 
 ---
  src/core/hle/service/sockets/nsd.cpp          | 26 +++++++++++----

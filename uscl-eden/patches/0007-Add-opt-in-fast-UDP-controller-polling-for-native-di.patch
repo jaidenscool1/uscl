@@ -1,7 +1,7 @@
 From e1dc55977e8cd6c9b830609bbe693ec222ce59a3 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 11:43:12 -0700
-Subject: [PATCH 7/7] Add opt-in fast UDP controller polling for native
+Subject: [PATCH 7/8] Add opt-in fast UDP controller polling for native
  diagnostics
 
 ---

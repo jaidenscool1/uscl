@@ -15,7 +15,7 @@ import secrets
 import ssl
 import struct
 
-from auth import Authority, Reader, string, structure
+from auth import Authority, Reader, datetime_wire, string, structure
 from identity import load_identity
 from rooms import ControlPlane, NativeRooms
 from nat import NatGroup
@@ -293,6 +293,13 @@ class Session:
                 return rmc_success(protocol, call, method, rooms.end_participation(state.pid, data[offset + 8:]))
             if protocol == 3 and method == 5:
                 return rmc_success(protocol, call, method, self.authority.report_nat(state.pid, data[offset + 8:]))
+            if protocol == 3 and method == 6 and len(data) == offset + 8:
+                # GetRelaySignatureKey: advertise no relay so the game proceeds on its
+                # direct mesh. Layout follows the NEX reference server.
+                event("private_relay_signature_key")
+                result = (struct.pack("<I", 0) + struct.pack("<Q", datetime_wire()) + string("") +
+                          struct.pack("<H", 0) + struct.pack("<I", 0) + struct.pack("<I", 0))
+                return rmc_success(protocol, call, method, result)
             if protocol == 112 and method == 4:
                 result = self.authority.upload_common(state.pid, data[offset + 8:])
                 return rmc_success(protocol, call, method, result)

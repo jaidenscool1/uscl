@@ -133,6 +133,20 @@ This validates native account/authentication compatibility. It does not yet
 validate private-room creation/join or racing: those methods were reached by
 the game's UI but have not completed against the matchmaking adapter.
 
+## Native room creation — in progress
+
+Confirming the create-room prompt drives the matchmaking adapter further: the
+game sends `MatchmakeExtension::CreateMatchmakeSessionWithParam` (protocol 109,
+method 38), the adapter creates the private room (logged as
+`native_private_room_created`), and the game then asks for a relay signature
+key (protocol 3, method 6 `GetRelaySignatureKey`). The adapter answers that
+with a "no relay offered" payload so the game proceeds on its direct mesh.
+Eden patch 0008 additionally implements `ISslConnection::Peek`, which the
+game calls while the room flow is open and which previously threw an
+unimplemented-function assertion. Reaching and confirming the full
+create-room → relay-key → race sequence is the next validation step; a
+complete private-room join and race have not yet passed.
+
 The [public PRUDP reference](https://github.com/kinnay/NintendoClients/wiki/PRUDP-Protocol#lite-format)
 describes Switch WebSocket/Lite framing; the adapter uses that documented
 layout but was written against the observed headers, not an imported server
