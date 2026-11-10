@@ -45,6 +45,9 @@ class RoomTests(unittest.TestCase):
         match = MatchSession.read(result)
         result.finish()
         self.assertNotEqual(match.gid, 0)
+        code = rooms.rooms[match.gid].code
+        self.assertEqual(rooms.resolve_code(456, string(code)), struct.pack("<I", match.gid))
+        self.assertEqual(rooms.resolve_code(456, string("000000000000")), struct.pack("<I", 0))
         self.assertEqual((match.owner, match.host, match.count), (123, 123, 1))
         self.assertEqual(len(match.key), 32)
         self.assertEqual(match.application, b"game-metadata")

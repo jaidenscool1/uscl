@@ -235,6 +235,23 @@ class NativeRooms:
                  expiry.hour << 12 | expiry.minute << 6 | expiry.second)
         return structure(string(room.code) + struct.pack("<Q", stamp))
 
+    def resolve_code(self, pid, data):
+        # The room code arrives as a NEX String, possibly after a short prefix.
+        for skip in (0, 5):
+            try:
+                reader = Reader(data[skip:])
+                code = reader.string()
+                reader.finish()
+                break
+            except ValueError:
+                continue
+        else:
+            raise ValueError("room_code_format")
+        for gid, room in self.rooms.items():
+            if room.code == code:
+                return struct.pack("<I", gid)
+        return struct.pack("<I", 0)
+
     def end_participation(self, pid, data):
         reader = Reader(data)
         gid = reader.number(4)

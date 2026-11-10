@@ -280,7 +280,7 @@ class Session:
                 request = b"\x8e" + struct.pack("<II", self.notification_call, 1) + notification
                 self.notifications.append(struct.pack("<I", len(request)) + request)
                 self.notification_call += 1
-                event("native_private_room_created")
+                event("native_private_room_created", room_code=rooms.rooms[gid].code)
                 return rmc_success(protocol, call, method, result)
             if rooms and protocol == 21 and method == 2:
                 result = rooms.unregister(state.pid, data[offset + 8:])
@@ -289,6 +289,10 @@ class Session:
                 return rmc_success(protocol, call, method, rooms.update_progress(state.pid, data[offset + 8:]))
             if rooms and protocol == 109 and method == 68:
                 return rmc_success(protocol, call, method, rooms.get_code(state.pid, data[offset + 8:]))
+            if rooms and protocol == 109 and method == 69:
+                result = rooms.resolve_code(state.pid, data[offset + 8:])
+                event("native_room_code_resolved", gid=int.from_bytes(result, "little"))
+                return rmc_success(protocol, call, method, result)
             if rooms and protocol == 50 and method == 1:
                 return rmc_success(protocol, call, method, rooms.end_participation(state.pid, data[offset + 8:]))
             if protocol == 3 and method == 5:
