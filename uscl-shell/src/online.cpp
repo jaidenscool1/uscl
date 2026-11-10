@@ -801,7 +801,7 @@ void Online::testConnection(const QString& console)
 	const bool settings_ok = is_switch ? switch_problem.isEmpty() :
 	                         yamlValue(cfg, "Net", "PSN status") == "RPCN" && yamlValue(cfg, "Net", "Internet enabled") == "Connected" &&
 	                         yamlValue(rpcn_cfg, {}, "Host") == "127.0.0.1" && validName(npid);
-	setTest(1, settings_ok ? "ok" : "fail", is_switch ? (settings_ok ? tr("Switch console files imported") : switch_problem) :
+	setTest(1, settings_ok ? "ok" : "fail", is_switch ? (settings_ok ? tr("Switch core and key file found; firmware requirements depend on the game") : switch_problem) :
 	        settings_ok ? tr("Online name: %1").arg(npid) : tr("Not set up yet: Settings → Online Name"));
 
 	// 3. nothing else holds the ports a session needs (our own session holds them while it runs)

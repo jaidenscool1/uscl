@@ -66,6 +66,11 @@ QProcessEnvironment SwitchCore::environment()
 	env.insert("XDG_CONFIG_HOME", profileDir() + "config");
 	env.insert("XDG_DATA_HOME", profileDir() + "data");
 	env.insert("XDG_CACHE_HOME", profileDir() + "cache");
+#ifdef __linux__
+	// Eden's bundled SDL2 needs XWayland on desktops that force the Wayland driver globally.
+	if (env.value("SDL_VIDEODRIVER") == "wayland" && !env.value("DISPLAY").isEmpty())
+		env.insert("SDL_VIDEODRIVER", "x11");
+#endif
 #ifdef _WIN32
 	env.insert("APPDATA", profileDir() + "data");
 #endif
@@ -169,8 +174,6 @@ QString SwitchCore::prerequisiteError(const QString& path)
 		return {};
 	if (!QFileInfo(dataDir() + "keys/prod.keys").isFile())
 		return QCoreApplication::translate("SwitchCore", "Import prod.keys dumped from your Switch in Settings → Switch Emulation.");
-	if (QDir(dataDir() + "nand/system/Contents/registered").entryList({"*.nca"}, QDir::Files).isEmpty())
-		return QCoreApplication::translate("SwitchCore", "Import your extracted Switch firmware folder in Settings → Switch Emulation.");
 	return {};
 }
 

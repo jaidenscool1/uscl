@@ -250,6 +250,20 @@ namespace
 				const QString program = write("fake-core", "#!/bin/sh\nprintf '%s\\n' \"$@\"\nprintf 'DATA=%s\\n' \"$XDG_DATA_HOME\"\nprintf 'ONLINE=%s\\n' \"$USCL_ONLINE\"\n");
 				QFile::setPermissions(program, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
 				qputenv("USCL_SWITCH_CORE", program.toUtf8());
+				const QString test_keys = write("test-prod.keys", "header_key = " + QByteArray(64, '0') + '\n');
+				check(SwitchCore::importKeys(test_keys).isEmpty() && SwitchCore::prerequisiteError(kart).isEmpty(),
+				      "Switch games can reach the core without a blanket firmware requirement");
+#ifdef __linux__
+				const QByteArray old_driver = qgetenv("SDL_VIDEODRIVER"), old_display = qgetenv("DISPLAY");
+				const bool driver_set = qEnvironmentVariableIsSet("SDL_VIDEODRIVER"), display_set = qEnvironmentVariableIsSet("DISPLAY");
+				qputenv("SDL_VIDEODRIVER", "wayland");
+				qputenv("DISPLAY", ":99");
+				check(SwitchCore::environment().value("SDL_VIDEODRIVER") == "x11", "Switch SDL2 uses XWayland when desktop forces Wayland");
+				qputenv("SDL_VIDEODRIVER", "dummy");
+				check(SwitchCore::environment().value("SDL_VIDEODRIVER") == "dummy", "Switch preserves other video driver choices");
+				if (driver_set) qputenv("SDL_VIDEODRIVER", old_driver); else qunsetenv("SDL_VIDEODRIVER");
+				if (display_set) qputenv("DISPLAY", old_display); else qunsetenv("DISPLAY");
+#endif
 				Launcher launcher;
 				QEventLoop loop;
 				bool completed = false;

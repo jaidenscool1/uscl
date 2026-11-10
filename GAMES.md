@@ -24,7 +24,7 @@ own = the publisher's own servers · GameSpy (revived by OpenSpy) · ? = not pro
 
 | Game | Title ID | Multiplayer route | Status | Next step |
 |---|---|---|---|---|
-| Mario Kart 8 Deluxe | [0100152000022000](games/0100152000022000.md) | Eden local wireless room over the Steam UDP tunnel | 🚧 library/launcher/room integration implemented; game boot and multiplayer unverified | import console files, boot locally, then validate a two-PC Wireless Play race |
+| Mario Kart 8 Deluxe | [0100152000022000](games/0100152000022000.md) | Eden local wireless room over the Steam UDP tunnel | 🚧 title boot verified; 4.0.1 stalls at Mii selection in Eden v0.2.1; no race or multiplayer verified | firmware/core compatibility validation, then a local race before two-PC testing |
 
 ## Next up (PS3)
 Ordered by how much existing work each one reuses. Serials and services marked `?` are from memory: confirm them

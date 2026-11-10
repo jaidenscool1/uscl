@@ -589,7 +589,7 @@ Window {
             { title: qsTr("Choose Switch Settings App"), help: qsTr("Select eden"), action: function() { switchToolDialog.kind = "GUI"; switchToolDialog.open() } },
             { title: qsTr("Choose Switch Room Server"), help: qsTr("Select eden-room for hosting friends"), action: function() { switchToolDialog.kind = "ROOM"; switchToolDialog.open() } },
             { title: qsTr("Import Console Keys"), help: qsTr("Choose prod.keys dumped from your Switch"), action: switchKeysDialog.open },
-            { title: qsTr("Import System Software"), help: qsTr("Choose your extracted Switch firmware folder"), action: switchFirmwareDialog.open },
+            { title: qsTr("Import System Software"), help: qsTr("Some games require firmware. Choose your extracted Switch firmware folder."), action: switchFirmwareDialog.open },
             { title: qsTr("Controllers, Updates and DLC"), help: qsTr("Configure controllers and install game updates in Eden"), action: launcher.openSwitchSettings },
             { title: qsTr("Test Switch Connection"), help: qsTr("Check the Switch core, console files, room port and Steam"), action: function() { testConnection("Switch") } },
             { title: qsTr("Playing with Friends"), action: function() {
