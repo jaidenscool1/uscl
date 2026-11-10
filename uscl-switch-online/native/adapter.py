@@ -290,6 +290,7 @@ class Session:
             if rooms and protocol == 109 and method == 68:
                 return rmc_success(protocol, call, method, rooms.get_code(state.pid, data[offset + 8:]))
             if rooms and protocol == 109 and method == 69:
+                event("resolve_request_hex", hex=data[offset + 8:].hex())
                 result = rooms.resolve_code(state.pid, data[offset + 8:])
                 event("native_room_code_resolved", gid=int.from_bytes(result, "little"))
                 return rmc_success(protocol, call, method, result)

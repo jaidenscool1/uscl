@@ -236,19 +236,10 @@ class NativeRooms:
         return structure(string(room.code) + struct.pack("<Q", stamp))
 
     def resolve_code(self, pid, data):
-        # The room code arrives as a NEX String, possibly after a short prefix.
-        for skip in (0, 5):
-            try:
-                reader = Reader(data[skip:])
-                code = reader.string()
-                reader.finish()
-                break
-            except ValueError:
-                continue
-        else:
-            raise ValueError("room_code_format")
+        # The request wraps the code in a structure whose exact padding varies;
+        # find the private code digits wherever they appear in the payload.
         for gid, room in self.rooms.items():
-            if room.code == code:
+            if room.code.encode() in data:
                 return struct.pack("<I", gid)
         return struct.pack("<I", 0)
 
