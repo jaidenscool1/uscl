@@ -585,7 +585,8 @@ Window {
         cfgTick;
         return [
             { title: qsTr("Setup Status"), help: launcher.switchStatus() || qsTr("Ready to launch. Match game updates and DLC with your friends."), disabled: true },
-            { title: qsTr("Choose Switch Emulator"), help: qsTr("Select eden-cli"), action: function() { switchToolDialog.kind = "CORE"; switchToolDialog.open() } },
+            { title: qsTr("Choose Switch Emulator"), help: qsTr("Select the USCL Eden build for playing with friends"), action: function() { switchToolDialog.kind = "QT"; switchToolDialog.open() } },
+            { title: qsTr("Use Alternative CLI Emulator"), help: qsTr("Advanced: select an eden-cli build with multiplayer support"), action: function() { switchToolDialog.kind = "CORE"; switchToolDialog.open() } },
             { title: qsTr("Choose Switch Settings App"), help: qsTr("Select eden"), action: function() { switchToolDialog.kind = "GUI"; switchToolDialog.open() } },
             { title: qsTr("Choose Switch Room Server"), help: qsTr("Select eden-room for hosting friends"), action: function() { switchToolDialog.kind = "ROOM"; switchToolDialog.open() } },
             { title: qsTr("Import Console Keys"), help: qsTr("Choose prod.keys dumped from your Switch"), action: switchKeysDialog.open },
@@ -926,6 +927,10 @@ Window {
                 var g = onlineGame
                 onlineGame = null
                 if (online.state === "off") ownSession = false
+                if (online.state === "off" && g.console === "Switch") {
+                    dialog.show(qsTr("Online Session"), online.message || qsTr("Couldn't start the Switch session. Try hosting again."))
+                    return
+                }
                 launchGame(g)
             }
             if (online.state === "hosting" || online.state === "joined") { sound("notify"); notice.show(sessionText(), ic("it_stream")) }

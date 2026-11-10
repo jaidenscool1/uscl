@@ -5,7 +5,7 @@
 #include <QStringList>
 
 // Starts the emulator core as its own process, so a game crash brings the player back home instead of
-// taking the home screen down with it. PS3 uses RPCS3; Switch uses Eden's SDL frontend.
+// taking the home screen down with it. PS3 uses RPCS3; Switch uses an external Eden frontend.
 class Launcher : public QObject
 {
 	Q_OBJECT

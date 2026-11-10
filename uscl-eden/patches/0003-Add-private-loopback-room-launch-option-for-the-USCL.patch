@@ -1,0 +1,139 @@
+From 758a32838775f63819009fcab6945c3bc121d05b Mon Sep 17 00:00:00 2001
+From: Codex <codex@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 03:32:04 -0700
+Subject: [PATCH 3/3] Add private loopback room launch option for the USCL Qt
+ frontend
+
+---
+ src/yuzu/main_window.cpp       | 53 ++++++++++++++++++++++++++++++++++
+ src/yuzu/multiplayer/state.cpp |  2 +-
+ src/yuzu/multiplayer/state.h   |  2 ++
+ 3 files changed, 56 insertions(+), 1 deletion(-)
+
+diff --git a/src/yuzu/main_window.cpp b/src/yuzu/main_window.cpp
+index 7549325..d4bce25 100644
+--- a/src/yuzu/main_window.cpp
++++ b/src/yuzu/main_window.cpp
+@@ -16,6 +16,7 @@
+ #include "common/fs/ryujinx_compat.h"
+ #include "main_window.h"
+ #include "network/network.h"
++#include "core/internal_network/network_interface.h"
+ #include "qt_common/discord/discord.h"
+ #include "ui_main.h"
+ 
+@@ -62,6 +63,10 @@
+ #endif
+ 
+ #include <QActionGroup>
++#include <QEventLoop>
++#include <QRegularExpression>
++#include <cstdio>
++#include <cstdlib>
+ #include <QCheckBox>
+ #include <QClipboard>
+ #include <QDesktopServices>
+@@ -638,12 +643,15 @@ MainWindow::MainWindow(bool has_broken_vulkan)
+     bool should_launch_setup = false;
+     bool has_gamepath = false;
+     bool is_fullscreen = false;
++    QString uscl_room;
+ 
+     // Preserves drag/drop functionality
+     for (int i = 1; i < args.size(); ++i) {
+         if (args[i] == QStringLiteral("-f")) {
+             // Launch game in fullscreen mode
+             is_fullscreen = true;
++        } else if (args[i] == QStringLiteral("--uscl-room") && i < args.size() - 1) {
++            uscl_room = args[++i];
+         } else if (args[i] == QStringLiteral("-u") && i < args.size() - 1) {
+             // Launch game with a specific user
+             int user_arg_idx = ++i;
+@@ -684,6 +692,51 @@ MainWindow::MainWindow(bool has_broken_vulkan)
+         }
+     }
+ 
++    // USCL carries a private loopback room over its Steam tunnel. Join before boot
++    // so the game cannot silently run outside the requested multiplayer session.
++    if (!uscl_room.isEmpty()) {
++        const auto cancel_launch = [] {
++            std::fputs("USCL: Couldn't join the Switch room. Check the session connection and try again.\n", stderr);
++            Common::Log::Stop();
++            // No game has started. Avoid the partially initialized frontend's
++            // shutdown deadlock; the OS reclaims the room socket and workers.
++            std::_Exit(EXIT_FAILURE);
++        };
++        const QRegularExpression room_pattern(
++            QStringLiteral("^([A-Za-z0-9_. -]{4,20})@127\\.0\\.0\\.1:([0-9]{1,5})$"));
++        const auto match = room_pattern.match(uscl_room);
++        const auto port = match.captured(2).toUInt();
++        auto member = Network::GetRoomMember().lock();
++        if (!match.hasMatch() || port == 0 || port > 65535 || !member ||
++            !Network::GetSelectedNetworkInterface()) {
++            LOG_ERROR(Network, "Invalid or unavailable USCL multiplayer room");
++            cancel_launch();
++        }
++        // A modal error dialog would defeat the bounded startup wait. USCL reports
++        // the failed process; restore normal in-game error dialogs after joining.
++        multiplayer_state->SetShowRoomOnConnect(false);
++        disconnect(multiplayer_state, &MultiplayerState::NetworkError, multiplayer_state,
++                   &MultiplayerState::OnNetworkError);
++        member->Join(match.captured(1).toStdString(), "127.0.0.1", static_cast<u16>(port),
++                     0, Network::NoPreferredIP, "");
++        QEventLoop wait;
++        QTimer poll;
++        poll.setInterval(20);
++        connect(&poll, &QTimer::timeout, &wait, [&] {
++            if (member->GetState() != Network::RoomMember::State::Joining) wait.quit();
++        });
++        QTimer::singleShot(15000, &wait, &QEventLoop::quit);
++        poll.start();
++        if (!member->IsConnected()) wait.exec();
++        if (!member->IsConnected()) {
++            LOG_ERROR(Network, "USCL room join failed; game launch cancelled");
++            cancel_launch();
++        }
++        connect(multiplayer_state, &MultiplayerState::NetworkError, multiplayer_state,
++                &MultiplayerState::OnNetworkError);
++        LOG_INFO(Network, "Successfully joined the USCL room");
++    }
++
+     // Override fullscreen setting if gamepath or argument is provided
+     if (has_gamepath || is_fullscreen) {
+         ui->action_Fullscreen->setChecked(is_fullscreen);
+diff --git a/src/yuzu/multiplayer/state.cpp b/src/yuzu/multiplayer/state.cpp
+index f682c29..6bfef48 100644
+--- a/src/yuzu/multiplayer/state.cpp
++++ b/src/yuzu/multiplayer/state.cpp
+@@ -152,7 +152,7 @@ void MultiplayerState::OnNetworkStateChanged(const Network::RoomMember::State& s
+     if (state == Network::RoomMember::State::Joined ||
+         state == Network::RoomMember::State::Moderator) {
+ 
+-        OnOpenNetworkRoom();
++        if (show_room_on_connect) OnOpenNetworkRoom();
+         SetNotificationStatus(NotificationStatus::Connected);
+     } else {
+         SetNotificationStatus(NotificationStatus::Disconnected);
+diff --git a/src/yuzu/multiplayer/state.h b/src/yuzu/multiplayer/state.h
+index a0cf8f7..8f023bf 100644
+--- a/src/yuzu/multiplayer/state.h
++++ b/src/yuzu/multiplayer/state.h
+@@ -41,6 +41,7 @@ public:
+     void Close();
+ 
+     void SetNotificationStatus(NotificationStatus state);
++    void SetShowRoomOnConnect(bool show) { show_room_on_connect = show; }
+ 
+     void UpdateNotificationStatus();
+ 
+@@ -89,6 +90,7 @@ signals:
+     void SaveConfig();
+ 
+ private:
++    bool show_room_on_connect{true};
+     Lobby* lobby = nullptr;
+     HostRoomWindow* host_room = nullptr;
+     ClientRoomWindow* client_room = nullptr;
+-- 
+2.56.0
+

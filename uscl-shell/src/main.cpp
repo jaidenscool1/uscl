@@ -12,6 +12,7 @@
 #include <QFontDatabase>
 #include <QGuiApplication>
 #include <QScreen>
+#include <QSettings>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QBuffer>
@@ -211,6 +212,9 @@ namespace
 			const bool was_set = qEnvironmentVariableIsSet("XDG_CONFIG_HOME");
 			const QByteArray old_profile = qgetenv("USCL_SWITCH_PROFILE");
 			const bool profile_set = qEnvironmentVariableIsSet("USCL_SWITCH_PROFILE");
+			const QByteArray old_frontend = qgetenv("USCL_SWITCH_FRONTEND");
+			const bool frontend_set = qEnvironmentVariableIsSet("USCL_SWITCH_FRONTEND");
+			qputenv("USCL_SWITCH_FRONTEND", "sdl");
 			qputenv("XDG_CONFIG_HOME", root.path().toUtf8());
 			qputenv("USCL_SWITCH_PROFILE", root.filePath("profile").toUtf8());
 			const auto write = [&](const QString& name, const QByteArray& bytes) {
@@ -238,9 +242,37 @@ namespace
 			check(found.size() == 2 && found.value("0100152000022000") == kart, "Switch scan excludes archives, updates, DLC and truncated containers");
 			check(SwitchCore::describe(kart).value("console") == "Switch" && SwitchCore::describe(kart).value("title") == "Mario Kart 8 Deluxe", "Switch description");
 			check(SwitchCore::isSerial("0100152000022000") && !SwitchCore::isSerial("BLUS31426"), "console ID separation");
+			check(Online::supports("0100152000022000"), "Switch games support automatic USCL session hosting");
 			const auto args = SwitchCore::arguments(kart, true, "A@:B");
 			check(args.contains("--game") && args.last() == kart && args.contains("A__B@127.0.0.1:24872") &&
 			      !SwitchCore::arguments(kart, false, "Player").contains("--multiplayer"), "Switch launch and room arguments");
+			qputenv("USCL_SWITCH_FRONTEND", "qt");
+			const auto qt_args = SwitchCore::arguments(kart, true, "TestPlayer");
+			check(qt_args.contains("--uscl-room") && qt_args.contains("-g") && !qt_args.contains("--config") &&
+			      qt_args.last() == kart && !SwitchCore::arguments(kart, false, "Player").contains("--uscl-room"), "Switch Qt room and offline launch arguments");
+			qputenv("USCL_SWITCH_FRONTEND", "sdl");
+			{
+				const QString sdl_path = args.at(args.indexOf("--config") + 1);
+				const QString gui_path = QFileInfo(sdl_path).absolutePath() + "/qt-config.ini";
+				QDir().mkpath(QFileInfo(gui_path).absolutePath());
+				QSettings gui(gui_path, QSettings::IniFormat);
+				gui.setValue("Controls/player_0_button_a", "engine:keyboard,code:67");
+				gui.setValue("Controls/player_0_button_a/default", true);
+				gui.setValue("Controls/player_0_button_l", "engine:sdl,guid:test-device,button:4");
+				gui.setValue("Controls/player_0_lstick", "engine:analog_from_button,up:engine$0keyboard$1code$016777235,down:engine$0keyboard$1code$083,modifier:engine$0keyboard$1code$016777248");
+				gui.setValue("Renderer/use_asynchronous_gpu_emulation", true);
+				gui.sync();
+				check(SwitchCore::prepareLaunchConfig().isEmpty(), "Switch SDL configuration generated");
+				QSettings sdl(sdl_path, QSettings::IniFormat);
+				check(sdl.value("Controls/player_0_button_a").toString().contains("code:6") &&
+				      !sdl.value("Controls/player_0_button_a/default").toBool() &&
+				      sdl.value("Controls/player_0_lstick").toString().contains("code$082") &&
+				      sdl.value("Controls/player_0_lstick").toString().contains("code$022") &&
+				      sdl.value("Controls/player_0_lstick").toString().contains("code$0225"), "Switch converts Qt buttons and nested keyboard bindings to SDL scancodes");
+				check(sdl.value("Controls/player_0_button_l").toString().contains("guid:test-device") &&
+				      sdl.value("Renderer/use_asynchronous_gpu_emulation").toBool(), "Switch preserves controller identity and renderer settings");
+				check(gui.value("Controls/player_0_button_a").toString() == "engine:keyboard,code:67", "Switch preserves graphical frontend controls");
+			}
 			check(!SwitchCore::importKeys(kart).isEmpty(), "Switch rejects a game as a key file");
 			check(!SwitchCore::importFirmware(root.filePath("games")).isEmpty(), "Switch rejects firmware folder without NCAs");
 #ifndef _WIN32
@@ -261,6 +293,15 @@ namespace
 				check(SwitchCore::environment().value("SDL_VIDEODRIVER") == "x11", "Switch SDL2 uses XWayland when desktop forces Wayland");
 				qputenv("SDL_VIDEODRIVER", "dummy");
 				check(SwitchCore::environment().value("SDL_VIDEODRIVER") == "dummy", "Switch preserves other video driver choices");
+				const QByteArray old_platform = qgetenv("QT_QPA_PLATFORM");
+				const bool platform_set = qEnvironmentVariableIsSet("QT_QPA_PLATFORM");
+				qputenv("USCL_SWITCH_FRONTEND", "qt");
+				qputenv("QT_QPA_PLATFORM", "wayland;xcb");
+				check(SwitchCore::environment().value("QT_QPA_PLATFORM") == "xcb", "Switch Qt core uses XWayland on a forced Wayland desktop");
+				qputenv("QT_QPA_PLATFORM", "offscreen");
+				check(SwitchCore::environment().value("QT_QPA_PLATFORM") == "offscreen", "Switch preserves explicit non-Wayland Qt platforms");
+				qputenv("USCL_SWITCH_FRONTEND", "sdl");
+				if (platform_set) qputenv("QT_QPA_PLATFORM", old_platform); else qunsetenv("QT_QPA_PLATFORM");
 				if (driver_set) qputenv("SDL_VIDEODRIVER", old_driver); else qunsetenv("SDL_VIDEODRIVER");
 				if (display_set) qputenv("DISPLAY", old_display); else qunsetenv("DISPLAY");
 #endif
@@ -310,6 +351,7 @@ namespace
 			check(added == 0 && scan_error, "Switch persistence failure reports no games added");
 			if (was_set) qputenv("XDG_CONFIG_HOME", previous); else qunsetenv("XDG_CONFIG_HOME");
 			if (profile_set) qputenv("USCL_SWITCH_PROFILE", old_profile); else qunsetenv("USCL_SWITCH_PROFILE");
+			if (frontend_set) qputenv("USCL_SWITCH_FRONTEND", old_frontend); else qunsetenv("USCL_SWITCH_FRONTEND");
 		}
 
 		std::fprintf(stderr, failed ? "self-test: %d failed\n" : "self-test: ok\n", failed);

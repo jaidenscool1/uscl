@@ -15,6 +15,7 @@ public:
 	static QString roomExecutable();
 	static QProcessEnvironment environment();
 	static QStringList arguments(const QString& path, bool online, const QString& nickname);
+	static QString prepareLaunchConfig();
 	static QString prerequisiteError(const QString& path = {});
 	static QString importKeys(const QString& path);
 	static QString importFirmware(const QString& path);

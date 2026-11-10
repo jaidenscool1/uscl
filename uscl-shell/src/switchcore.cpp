@@ -12,10 +12,83 @@
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QSettings>
+#include <QTemporaryFile>
 #include <QtEndian>
+#include <SDL3/SDL.h>
 
 namespace
 {
+	bool qtFrontend()
+	{
+		return qEnvironmentVariable("USCL_SWITCH_FRONTEND", QSettings().value("switch/frontend", "sdl").toString()) == "qt";
+	}
+
+	QString configDir()
+	{
+#ifdef _WIN32
+		return SwitchCore::dataDir() + "config/";
+#else
+		return SwitchCore::profileDir() + "config/eden/";
+#endif
+	}
+
+	int keyboardScancode(int key)
+	{
+		if (key >= Qt::Key_A && key <= Qt::Key_Z)
+			return SDL_SCANCODE_A + key - Qt::Key_A;
+		if (key >= Qt::Key_F1 && key <= Qt::Key_F24)
+			return key <= Qt::Key_F12 ? SDL_SCANCODE_F1 + key - Qt::Key_F1 : SDL_SCANCODE_F13 + key - Qt::Key_F13;
+		switch (key)
+		{
+		case Qt::Key_Left: return SDL_SCANCODE_LEFT;
+		case Qt::Key_Right: return SDL_SCANCODE_RIGHT;
+		case Qt::Key_Up: return SDL_SCANCODE_UP;
+		case Qt::Key_Down: return SDL_SCANCODE_DOWN;
+		case Qt::Key_Shift: return SDL_SCANCODE_LSHIFT;
+		case Qt::Key_Control: return SDL_SCANCODE_LCTRL;
+		case Qt::Key_Alt: return SDL_SCANCODE_LALT;
+		case Qt::Key_Meta: return SDL_SCANCODE_LGUI;
+		case Qt::Key_Return: return SDL_SCANCODE_RETURN;
+		case Qt::Key_Enter: return SDL_SCANCODE_KP_ENTER;
+		case Qt::Key_Escape: return SDL_SCANCODE_ESCAPE;
+		case Qt::Key_Tab: return SDL_SCANCODE_TAB;
+		case Qt::Key_Backspace: return SDL_SCANCODE_BACKSPACE;
+		case Qt::Key_Delete: return SDL_SCANCODE_DELETE;
+		case Qt::Key_Insert: return SDL_SCANCODE_INSERT;
+		case Qt::Key_Home: return SDL_SCANCODE_HOME;
+		case Qt::Key_End: return SDL_SCANCODE_END;
+		case Qt::Key_PageUp: return SDL_SCANCODE_PAGEUP;
+		case Qt::Key_PageDown: return SDL_SCANCODE_PAGEDOWN;
+		default: return key >= 32 && key <= 126 ? SDL_GetScancodeFromKey(SDL_Keycode(key), nullptr) : SDL_SCANCODE_UNKNOWN;
+		}
+	}
+
+	// Eden serializes nested bindings with $0/:, $1/, and $2/$. Only keyboard
+	// parameters change; physical controller GUIDs and button numbers stay intact.
+	QString sdlBinding(const QString& binding, int depth = 0)
+	{
+		if (depth > 8 || !binding.contains(':'))
+			return binding;
+		QMap<QString, QString> params;
+		for (const QString& pair : binding.split(','))
+		{
+			const auto at = pair.indexOf(':');
+			if (at < 0) return binding;
+			auto decode = [](QString s) { return s.replace("$0", ":").replace("$1", ",").replace("$2", "$"); };
+			params.insert(decode(pair.left(at)), decode(pair.mid(at + 1)));
+		}
+		if (params.value("engine") == "keyboard" && params.contains("code"))
+			params["code"] = QString::number(keyboardScancode(params.value("code").toInt()));
+		else
+			for (auto it = params.begin(); it != params.end(); ++it)
+				if (it.value().contains("engine:")) it.value() = sdlBinding(it.value(), depth + 1);
+		QStringList pairs;
+		auto encode = [](QString s) { return s.replace("$", "$2").replace(",", "$1").replace(":", "$0"); };
+		for (auto it = params.cbegin(); it != params.cend(); ++it)
+			pairs << encode(it.key()) + ':' + encode(it.value());
+		return pairs.join(',');
+	}
+
 	QString findTool(const QString& variable, const QString& name)
 	{
 		if (qEnvironmentVariableIsSet(variable.toLatin1().constData()))
@@ -70,6 +143,10 @@ QProcessEnvironment SwitchCore::environment()
 	// Eden's bundled SDL2 needs XWayland on desktops that force the Wayland driver globally.
 	if (env.value("SDL_VIDEODRIVER") == "wayland" && !env.value("DISPLAY").isEmpty())
 		env.insert("SDL_VIDEODRIVER", "x11");
+	// The tested Qt/Vulkan core also needs XWayland on this desktop.
+	const QString platform = env.value("QT_QPA_PLATFORM");
+	if (qtFrontend() && platform.startsWith("wayland") && !env.value("DISPLAY").isEmpty())
+		env.insert("QT_QPA_PLATFORM", "xcb");
 #endif
 #ifdef _WIN32
 	env.insert("APPDATA", profileDir() + "data");
@@ -143,13 +220,10 @@ QVariantMap SwitchCore::describe(const QString& path)
 
 QStringList SwitchCore::arguments(const QString& path, bool online, const QString& nickname)
 {
-#ifdef _WIN32
-	const QString config = dataDir() + "config/qt-config.ini";
-#else
-	const QString config = profileDir() + "config/eden/qt-config.ini";
-#endif
-	QStringList args{"--config", config, "--fullscreen"};
-	if (executable().endsWith(".AppImage", Qt::CaseInsensitive))
+	const QString config = configDir() + "sdl2-config.ini";
+	const bool qt = qtFrontend();
+	QStringList args = qt ? QStringList{"-f"} : QStringList{"--config", config, "--fullscreen"};
+	if (!qt && executable().endsWith(".AppImage", Qt::CaseInsensitive))
 		args.prepend("eden-cli");
 	if (online)
 	{
@@ -157,15 +231,41 @@ QStringList SwitchCore::arguments(const QString& path, bool online, const QStrin
 		name.replace(QRegularExpression("[^A-Za-z0-9_. -]"), "_");
 		if (name.size() < 4)
 			name = "USCL_" + name;
-		args << "--multiplayer" << name.left(20) + "@127.0.0.1:24872";
+		args << (qt ? "--uscl-room" : "--multiplayer") << name.left(20) + "@127.0.0.1:24872";
 	}
-	return args << "--game" << QFileInfo(path).absoluteFilePath();
+	return args << (qt ? "-g" : "--game") << QFileInfo(path).absoluteFilePath();
+}
+
+QString SwitchCore::prepareLaunchConfig()
+{
+	if (qtFrontend()) return {};
+	const QString source = configDir() + "qt-config.ini";
+	// With no GUI configuration, let the SDL frontend create its own defaults.
+	if (!QFileInfo::exists(source)) return {};
+	QSettings gui(source, QSettings::IniFormat);
+	QTemporaryFile temporary(configDir() + "sdl-launch-XXXXXX.ini");
+	if (!temporary.open())
+		return QCoreApplication::translate("SwitchCore", "Couldn't prepare Switch controls.");
+	temporary.close();
+	QSettings sdl(temporary.fileName(), QSettings::IniFormat);
+	for (const QString& key : gui.allKeys())
+	{
+		const QVariant value = gui.value(key);
+		sdl.setValue(key, key.startsWith("Controls/") && value.toString().contains("engine:") ? sdlBinding(value.toString()) : value);
+	}
+	for (const QString& key : gui.allKeys())
+		if (key.startsWith("Controls/") && gui.value(key).toString().contains("engine:"))
+			sdl.setValue(key + "/default", false);
+	sdl.sync();
+	if (gui.status() != QSettings::NoError || sdl.status() != QSettings::NoError || !copyFile(temporary.fileName(), configDir() + "sdl2-config.ini"))
+		return QCoreApplication::translate("SwitchCore", "Couldn't save Switch launch settings.");
+	return {};
 }
 
 QString SwitchCore::prerequisiteError(const QString& path)
 {
 	if (!QFileInfo(executable()).isExecutable())
-		return QCoreApplication::translate("SwitchCore", "The Switch emulator (eden-cli) is missing. Configure it in Settings → Switch Emulation.");
+		return QCoreApplication::translate("SwitchCore", "The Switch emulator is missing. Configure it in Settings → Switch Emulation.");
 #ifdef _WIN32
 	if (QFileInfo(QFileInfo(executable()).absolutePath() + "/user").isDir())
 		return QCoreApplication::translate("SwitchCore", "Use an Eden installation without a portable user folder so USCL can keep a separate Switch profile.");

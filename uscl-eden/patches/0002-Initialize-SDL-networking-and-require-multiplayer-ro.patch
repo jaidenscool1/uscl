@@ -1,0 +1,79 @@
+From c4ef60fc8e631b36b7982e208449fdb0f9056529 Mon Sep 17 00:00:00 2001
+From: Codex <codex@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 03:32:04 -0700
+Subject: [PATCH 2/3] Initialize SDL networking and require multiplayer room
+ join before boot
+
+---
+ src/yuzu_cmd/yuzu.cpp | 23 +++++++++++++++++++++--
+ 1 file changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/src/yuzu_cmd/yuzu.cpp b/src/yuzu_cmd/yuzu.cpp
+index 54cc832..c419083 100644
+--- a/src/yuzu_cmd/yuzu.cpp
++++ b/src/yuzu_cmd/yuzu.cpp
+@@ -5,15 +5,18 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <iostream>
++#include <chrono>
+ #include <memory>
+ #include <regex>
+ #include <string>
++#include <thread>
+ 
+ #include <fmt/ostream.h>
+ 
+ #include "common/detached_tasks.h"
+ #include "common/logging.h"
+ #include "common/scm_rev.h"
++#include "common/scope_exit.h"
+ #include "common/settings.h"
+ #include "common/string_util.h"
+ #include "core/core.h"
+@@ -89,10 +92,10 @@ static void OnStateChanged(const Network::RoomMember::State& state) {
+         LOG_DEBUG(Network, "Connection sequence to room started");
+         break;
+     case Network::RoomMember::State::Joined:
+-        LOG_DEBUG(Network, "Successfully joined to the room");
++        LOG_INFO(Network, "Successfully joined the room");
+         break;
+     case Network::RoomMember::State::Moderator:
+-        LOG_DEBUG(Network, "Successfully joined the room as a moderator");
++        LOG_INFO(Network, "Successfully joined the room as a moderator");
+         break;
+     default:
+         break;
+@@ -341,6 +344,13 @@ int main(int argc, char** argv) {
+         return -1;
+     }
+ 
++    // BSD services and --multiplayer both require a live RoomMember, even for offline boots.
++    if (!Network::Init()) {
++        LOG_CRITICAL(Network, "Failed to initialize networking");
++        return -1;
++    }
++    SCOPE_EXIT { Network::Shutdown(); };
++
+     Core::System system{};
+     system.Initialize();
+ 
+@@ -422,6 +432,15 @@ int main(int argc, char** argv) {
+             LOG_DEBUG(Network, "Start connection to {}:{} with nickname {}", address, port,
+                       nickname);
+             member->Join(nickname, address.c_str(), port, 0, Network::NoPreferredIP, password);
++            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
++            while (member->GetState() == Network::RoomMember::State::Joining &&
++                   std::chrono::steady_clock::now() < deadline) {
++                std::this_thread::sleep_for(std::chrono::milliseconds(20));
++            }
++            if (!member->IsConnected()) {
++                LOG_ERROR(Network, "Could not join the multiplayer room; game launch cancelled");
++                return -1;
++            }
+         } else {
+             LOG_ERROR(Network, "Could not access RoomMember");
+             return 0;
+-- 
+2.56.0
+

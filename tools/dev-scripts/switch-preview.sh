@@ -18,6 +18,13 @@ export XDG_CACHE_HOME="$preview/profile/cache"
 export USCL_SWITCH_PROFILE="$preview/profile/switch"
 export USCL_TOOLS="$preview/bin"
 export APPIMAGE_EXTRACT_AND_RUN=1
+# The unbundled bridge needs the Steam runtime library copied beside it above.
+export LD_LIBRARY_PATH="$preview/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if [[ -z "${USCL_SWITCH_CORE:-}" && -x "$repo/build/switch-core/bin/eden" ]]; then
+  export USCL_SWITCH_CORE="$repo/build/switch-core/bin/eden"
+  export USCL_SWITCH_FRONTEND=qt
+  export USCL_SWITCH_GUI="${USCL_SWITCH_GUI:-$repo/build/switch-core/bin/eden}"
+fi
 if [[ -x "$HOME/Applications/Eden-v0.2.1.AppImage" ]]; then
   cat > "$preview/bin/eden-cli" <<'CORE'
 #!/bin/sh

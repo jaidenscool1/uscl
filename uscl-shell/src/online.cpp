@@ -293,7 +293,7 @@ bool Online::supports(const QString& serial)
 {
 	// RPCN alone is enough for these (GAMES.md); the rest need a preset's servers
 	static const QStringList rpcn_only = {"BLUS31426"}; // Minecraft
-	return *presetFor(serial).bridge || rpcn_only.contains(serial);
+	return SwitchCore::isSerial(serial) || *presetFor(serial).bridge || rpcn_only.contains(serial);
 }
 
 bool Online::steamRunning()
@@ -786,7 +786,7 @@ void Online::testConnection(const QString& console)
 	}
 	if (is_switch)
 	{
-		if (!QFileInfo(SwitchCore::executable()).isExecutable()) missing << "eden-cli";
+		if (!QFileInfo(SwitchCore::executable()).isExecutable()) missing << "Eden";
 		if (!QFileInfo(SwitchCore::roomExecutable()).isExecutable()) missing << "eden-room";
 	}
 	else if (templateDir().isEmpty())

@@ -124,7 +124,8 @@ bool Launcher::startGame(const QString& path, const QString& title, bool online,
 {
 	if (console == "Switch")
 	{
-		const QString problem = SwitchCore::prerequisiteError(path);
+		QString problem = SwitchCore::prerequisiteError(path);
+		if (problem.isEmpty()) problem = SwitchCore::prepareLaunchConfig();
 		if (!problem.isEmpty())
 		{
 			emit finished(true, problem);
@@ -158,13 +159,15 @@ QString Launcher::importSwitchFirmware(const QString& path) { return SwitchCore:
 
 QString Launcher::configureSwitchTool(const QString& kind, const QString& path)
 {
-	if (kind != "CORE" && kind != "GUI" && kind != "ROOM")
+	if (kind != "CORE" && kind != "QT" && kind != "GUI" && kind != "ROOM")
 		return tr("Unknown Switch component.");
 	const QString local = QUrl(path).isLocalFile() ? QUrl(path).toLocalFile() : path;
 	if (!QFileInfo(local).isExecutable())
 		return tr("Choose an executable file.");
 	QSettings settings;
-	settings.setValue("switch/USCL_SWITCH_" + kind, QFileInfo(local).absoluteFilePath());
+	settings.setValue("switch/USCL_SWITCH_" + (kind == "QT" ? QString("CORE") : kind), QFileInfo(local).absoluteFilePath());
+	if (kind == "QT" || kind == "CORE") settings.setValue("switch/frontend", kind == "QT" ? "qt" : "sdl");
+	if (kind == "QT") settings.setValue("switch/USCL_SWITCH_GUI", QFileInfo(local).absoluteFilePath());
 	settings.sync();
 	return settings.status() == QSettings::NoError ? QString() : tr("Couldn't save the emulator location.");
 }
