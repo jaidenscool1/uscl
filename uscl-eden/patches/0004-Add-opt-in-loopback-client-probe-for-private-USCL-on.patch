@@ -1,4 +1,4 @@
-From da95978c0eb96d545766a37ea3d3f3eab16f04d2 Mon Sep 17 00:00:00 2001
+From 7e56c292017b846963802513fe7462663cfba96c Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 07:48:59 -0700
 Subject: [PATCH 4/8] Add opt-in loopback client probe for private USCL online
@@ -175,5 +175,5 @@ index 0000000..4b4a539
 +
 +} // namespace USCL::Online
 -- 
-2.56.0
+2.53.0.windows.1
 

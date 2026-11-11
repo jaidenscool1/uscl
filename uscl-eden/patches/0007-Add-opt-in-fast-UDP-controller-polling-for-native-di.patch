@@ -1,4 +1,4 @@
-From e1dc55977e8cd6c9b830609bbe693ec222ce59a3 Mon Sep 17 00:00:00 2001
+From ffa12db7ca9122d5f4c3534e1b291a3dd1070d0c Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 11:43:12 -0700
 Subject: [PATCH 7/8] Add opt-in fast UDP controller polling for native
@@ -40,5 +40,5 @@ index fc216e3..8c35f30 100644
      }
  
 -- 
-2.56.0
+2.53.0.windows.1
 

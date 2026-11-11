@@ -1,28 +1,20 @@
-From 758a32838775f63819009fcab6945c3bc121d05b Mon Sep 17 00:00:00 2001
+From d0ae5e3ec297a1c77620c2481e5c3e7d86e68546 Mon Sep 17 00:00:00 2001
 From: Codex <codex@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 03:32:04 -0700
 Subject: [PATCH 3/8] Add private loopback room launch option for the USCL Qt
  frontend
 
 ---
- src/yuzu/main_window.cpp       | 53 ++++++++++++++++++++++++++++++++++
+ src/yuzu/main_window.cpp       | 55 ++++++++++++++++++++++++++++++++++
  src/yuzu/multiplayer/state.cpp |  2 +-
  src/yuzu/multiplayer/state.h   |  2 ++
- 3 files changed, 56 insertions(+), 1 deletion(-)
+ 3 files changed, 58 insertions(+), 1 deletion(-)
 
 diff --git a/src/yuzu/main_window.cpp b/src/yuzu/main_window.cpp
-index 7549325..d4bce25 100644
+index 7549325..6d47911 100644
 --- a/src/yuzu/main_window.cpp
 +++ b/src/yuzu/main_window.cpp
-@@ -16,6 +16,7 @@
- #include "common/fs/ryujinx_compat.h"
- #include "main_window.h"
- #include "network/network.h"
-+#include "core/internal_network/network_interface.h"
- #include "qt_common/discord/discord.h"
- #include "ui_main.h"
- 
-@@ -62,6 +63,10 @@
+@@ -62,6 +62,10 @@
  #endif
  
  #include <QActionGroup>
@@ -33,7 +25,17 @@ index 7549325..d4bce25 100644
  #include <QCheckBox>
  #include <QClipboard>
  #include <QDesktopServices>
-@@ -638,12 +643,15 @@ MainWindow::MainWindow(bool has_broken_vulkan)
+@@ -175,6 +179,9 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
+ 
+ #include "qt_common/gamemode.h"
+ 
++// After the VFS wrappers: <winsock2.h> pulls in <windows.h> and its CreateFile macros.
++#include "core/internal_network/network_interface.h"
++
+ #ifdef _WIN32
+ #include "common/windows/timer_resolution.h"
+ #include "core/core_timing.h"
+@@ -638,12 +645,15 @@ MainWindow::MainWindow(bool has_broken_vulkan)
      bool should_launch_setup = false;
      bool has_gamepath = false;
      bool is_fullscreen = false;
@@ -49,7 +51,7 @@ index 7549325..d4bce25 100644
          } else if (args[i] == QStringLiteral("-u") && i < args.size() - 1) {
              // Launch game with a specific user
              int user_arg_idx = ++i;
-@@ -684,6 +692,51 @@ MainWindow::MainWindow(bool has_broken_vulkan)
+@@ -684,6 +694,51 @@ MainWindow::MainWindow(bool has_broken_vulkan)
          }
      }
  
@@ -135,5 +137,5 @@ index a0cf8f7..8f023bf 100644
      HostRoomWindow* host_room = nullptr;
      ClientRoomWindow* client_room = nullptr;
 -- 
-2.56.0
+2.53.0.windows.1
 

@@ -1,4 +1,4 @@
-From 0c04661a0de9743f52a5fd9cea852b68d1d7826b Mon Sep 17 00:00:00 2001
+From d9f027b899b1767803507519a8ee430f73312122 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 08:04:44 -0700
 Subject: [PATCH 5/8] Add exact opt-in MK8 native endpoint diagnostic route
@@ -215,5 +215,5 @@ index 0000000..b64fcd3
 +
 +} // namespace Service::Sockets
 -- 
-2.56.0
+2.53.0.windows.1
 

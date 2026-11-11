@@ -1,4 +1,4 @@
-From c4ef60fc8e631b36b7982e208449fdb0f9056529 Mon Sep 17 00:00:00 2001
+From 634a65f24f36a3b69ce999b1467f8600d6bfad1e Mon Sep 17 00:00:00 2001
 From: Codex <codex@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 03:32:04 -0700
 Subject: [PATCH 2/8] Initialize SDL networking and require multiplayer room
@@ -75,5 +75,5 @@ index 54cc832..c419083 100644
              LOG_ERROR(Network, "Could not access RoomMember");
              return 0;
 -- 
-2.56.0
+2.53.0.windows.1
 

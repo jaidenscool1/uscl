@@ -1,4 +1,4 @@
-From f5e073b611266cbb95923fd39d74343c27fae219 Mon Sep 17 00:00:00 2001
+From 02186e042b6c106b18e0406eca1eca13646640a8 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 10:24:24 -0700
 Subject: [PATCH 6/8] Supply private local identity and loopback address to the
@@ -190,5 +190,5 @@ index a0302a5..21f7db8 100644
  
      auto ipv4 = Network::GetHostIPv4Address();
 -- 
-2.56.0
+2.53.0.windows.1
 

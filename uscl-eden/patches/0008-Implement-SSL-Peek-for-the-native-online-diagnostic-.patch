@@ -1,4 +1,4 @@
-From b849ce46aada82760cafa2ca3f62c90f1c63d4da Mon Sep 17 00:00:00 2001
+From b02264a6ccbd9a879931815a2901021e077bf1f8 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 11:59:35 -0700
 Subject: [PATCH 8/8] Implement SSL Peek for the native online diagnostic route
@@ -125,5 +125,5 @@ index 65f81be..ffc8003 100644
          OSStatus status = SSLWrite(context, data.data(), data.size(), out_size);
          return HandleReturn("SSLWrite", out_size, status);
 -- 
-2.56.0
+2.53.0.windows.1
 
