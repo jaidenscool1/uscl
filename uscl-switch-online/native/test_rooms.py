@@ -22,6 +22,8 @@ class RoomTests(unittest.TestCase):
     def setUpClass(cls):
         binary = Path(__file__).resolve().parents[2] / "build/switch-online-target/debug/uscl-switch-online"
         if not binary.exists():
+            binary = binary.with_suffix(".exe")  # Windows build
+        if not binary.exists():
             raise unittest.SkipTest("build the Rust control plane first")
         cls.backend = subprocess.Popen([str(binary), "--port", "0"], stdout=subprocess.PIPE, text=True)
         line = cls.backend.stdout.readline().strip()
@@ -62,6 +64,42 @@ class RoomTests(unittest.TestCase):
             rooms.unregister(456, struct.pack("<I", match.gid))
         self.assertEqual(rooms.unregister(123, struct.pack("<I", match.gid)), b"\x01")
         self.assertNotIn(123, authority.playing_sessions)
+
+    def test_second_player_joins_by_gathering(self):
+        control = ControlPlane([123, 456, 789], self.port)
+        authority = Authority([(123, "a" * 64), (456, "b" * 64), (789, "c" * 64)])
+        for pid in (123, 456):
+            authority.registrations[pid] = (pid, f"prudp:/address=127.0.0.1;port={pid};PID={pid}")
+        rooms = NativeRooms(authority, control)
+        host = sample()
+        host.maximum = 2
+        gid = MatchSession.read(Reader(rooms.create(123, create_request(host)))).gid
+
+        def join_request(target, pid_count=1):
+            return structure(struct.pack("<IIIIB", target, 0, 0, 0, 0) + string("") * 3 +
+                             struct.pack("<HH", pid_count, 0) + structure(struct.pack("<I", 0)))
+
+        with self.assertRaises(PermissionError):
+            rooms.session_urls(456, struct.pack("<I", gid))  # not a member yet
+        joined = MatchSession.read(Reader(rooms.join(456, join_request(gid))))
+        self.assertEqual((joined.gid, joined.owner, joined.count), (gid, 123, 2))
+        self.assertEqual(rooms.session_urls(456, struct.pack("<I", gid)),
+                         struct.pack("<I", 1) + string("prudp:/address=127.0.0.1;port=123;PID=123"))
+        self.assertIn(456, authority.playing_sessions)
+        backend = control.call(op="room", token=control.credentials[456])
+        self.assertEqual(len(backend["members"]), 2)
+        with self.assertRaises(PermissionError):
+            rooms.join(456, join_request(gid))  # already in a room
+        with self.assertRaises(PermissionError):
+            rooms.join(789, join_request(gid))  # no station registration
+        authority.registrations[789] = (789, "prudp:/address=127.0.0.1;port=789")
+        with self.assertRaises(PermissionError):
+            rooms.join(789, join_request(gid))  # capacity 2 reached
+        with self.assertRaises(PermissionError):
+            rooms.join(789, join_request(gid + 1))  # unknown room
+        rooms.disconnect(456)
+        self.assertEqual(rooms.rooms[gid].session.count, 1)
+        rooms.unregister(123, struct.pack("<I", gid))
 
     def test_match_object_bounds(self):
         raw = sample().encode()

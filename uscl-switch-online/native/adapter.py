@@ -142,7 +142,19 @@ class Session:
         self.notifications = []
         self.notification_call = 1
 
+    def notify(self, pid, source, gid, participant, count):
+        """Queue a NotificationEvent (protocol 14, method 1) for pid's own secure connection."""
+        target = self.authority.sessions.get(pid)
+        if target is None:
+            return
+        notification = structure(struct.pack("<QIQQ", source, 3001, gid, participant) + string("") + struct.pack("<Q", count))
+        request = b"\x8e" + struct.pack("<II", target.notification_call, 1) + notification
+        target.notifications.append(struct.pack("<I", len(request)) + request)
+        target.notification_call += 1
+
     def close(self):
+        for pid in [pid for pid, session in self.authority.sessions.items() if session is self]:
+            del self.authority.sessions[pid]
         for state in self.connections.values():
             registration = self.authority.registrations.get(state.pid)
             if state.registration is not None and registration and registration[0] == state.registration:
@@ -182,6 +194,13 @@ class Session:
             def reply(kind_, flags_, sequence_, opts_=b"", body=b""):
                 current.append(packet(0xaa, destination, source, kind_, flags_, sequence_, opts_, body))
 
+            def flush():
+                # shortcut: other players' events wait for this client's next DATA or PING; push from the server loop if that lags in game.
+                for notification in self.notifications:
+                    reply(2, 6, state.next_sequence, body=notification)
+                    state.next_sequence = (state.next_sequence + 1) & 65535
+                self.notifications.clear()
+
             if kind == 0:
                 if state.phase != "new" or len(opts.get(0, b"")) != 4 or payload:
                     raise ValueError("lite_syn")
@@ -198,6 +217,7 @@ class Session:
                         raise ValueError("lite_auth_connect")
                 else:
                     state.pid, _, response = self.authority.connect(payload)
+                    self.authority.sessions[state.pid] = self
                     event("private_secure_connected")
                 reply(1, 1, seq, b"\0\x04" + struct.pack("<I", state.minor), response)
                 state.phase = "connected"
@@ -220,12 +240,11 @@ class Session:
                     if body:
                         reply(2, 6, state.next_sequence, body=body)
                         state.next_sequence = (state.next_sequence + 1) & 65535
-                    for notification in self.notifications:
-                        reply(2, 6, state.next_sequence, body=notification)
-                        state.next_sequence = (state.next_sequence + 1) & 65535
-                    self.notifications.clear()
+                    flush()
             elif kind in (3, 4):
                 reply(kind, 1, seq)
+                if kind == 4 and state.phase == "connected" and destination == 2:
+                    flush()
                 if kind == 3:
                     state.phase = "closed"
             else:
@@ -276,11 +295,24 @@ class Session:
             if rooms and protocol == 109 and method == 38:
                 result = rooms.create(state.pid, data[offset + 8:])
                 gid = Reader(result).structure()[1].number(4)
-                notification = structure(struct.pack("<QIQQ", state.pid, 3001, gid, state.pid) + string("") + struct.pack("<Q", 1))
-                request = b"\x8e" + struct.pack("<II", self.notification_call, 1) + notification
-                self.notifications.append(struct.pack("<I", len(request)) + request)
-                self.notification_call += 1
+                self.notify(state.pid, state.pid, gid, state.pid, 1)
                 event("native_private_room_created", room_code=rooms.rooms[gid].code)
+                return rmc_success(protocol, call, method, result)
+            if rooms and protocol == 109 and method == 39:
+                try:
+                    result = rooms.join(state.pid, data[offset + 8:])
+                except PermissionError as error:
+                    event("native_room_join_denied", reason=str(error))
+                    return rmc_error(protocol, call, 0x80030064)  # RendezVous::PermissionDenied
+                gid = Reader(result).structure()[1].number(4)
+                room = rooms.rooms[gid]
+                for member in room.members:
+                    self.notify(member, state.pid, gid, state.pid, room.session.count)
+                event("native_room_joined", members=len(room.members))
+                return rmc_success(protocol, call, method, result)
+            if rooms and protocol == 21 and method == 41:
+                result = rooms.session_urls(state.pid, data[offset + 8:])
+                event("native_session_urls", count=int.from_bytes(result[:4], "little"))
                 return rmc_success(protocol, call, method, result)
             if rooms and protocol == 21 and method == 2:
                 result = rooms.unregister(state.pid, data[offset + 8:])

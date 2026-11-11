@@ -20,7 +20,8 @@ adapter. The service still reports `native_online_play: false`.
   (Authentication, Kerberos-style ticket issuance, SecureConnection,
   Utility, and friends/presence/competition queries that return empty sets).
 - `rooms.py` — NEX matchmaking `MatchSession` read/write plus private room
-  create/unregister/progress/codeword/leave, backed by the Rust room service.
+  create/join/unregister/progress/codeword/leave and the host station URL
+  for joiners (`GetSessionURLs`), backed by the Rust room service.
 - `nat.py` — loopback-only Nintendo NAT-check responder on UDP
   127.0.0.1/127.0.0.2 ports 10025/10125.
 - `identity.py` — creates/loads the `USCL_NATIVE_ID_V1` private local identity
@@ -68,7 +69,7 @@ cd uscl-switch-online/native
 python3 -m unittest discover -v
 ```
 
-Twelve tests cover the connection/RPC codec, ticket authority and integrity,
+Thirteen tests cover the connection/RPC codec, ticket authority and integrity,
 NAT-check round trips, and native room creation backed by a real Rust control
 plane. They do not establish game compatibility.
 

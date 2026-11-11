@@ -243,6 +243,51 @@ class NativeRooms:
                 return struct.pack("<I", gid)
         return struct.pack("<I", 0)
 
+    def join(self, pid, data):
+        """JoinMatchmakeSessionWithParam (109/39); layout from the public NEX JoinMatchmakeSessionParam."""
+        reader = Reader(data)
+        _, request = reader.structure()
+        gid = request.number(4)
+        if request.number(4) != 0:
+            raise ValueError("additional_participants_unsupported")
+        request.number(4)  # participation-check gathering
+        request.number(4)  # join options
+        request.number(1)  # join behavior
+        request.string()  # user password
+        request.string()  # system password
+        request.string()  # join message
+        participation = request.number(2)
+        # NEX 4 extra participants and block list follow inside the same bounded structure.
+        reader.finish()
+        room = self.rooms.get(gid)
+        if room is None:
+            raise PermissionError("room_not_found")
+        if pid not in self.authority.registrations or not 1 <= participation <= 2:
+            raise PermissionError("room_identity")
+        if any(pid in other.members for other in self.rooms.values()):
+            raise PermissionError("already_in_room")
+        if room.session.count + participation > room.session.maximum:
+            raise PermissionError("room_full")
+        self.control.call(op="join_room", token=self.control.credentials[pid], room=room.backend_id,
+                          game=GAME, invite=room.invite)
+        room.members.add(pid)
+        room.session.count += participation
+        session = room.session
+        self.authority.playing_sessions[pid] = structure(struct.pack("<QIII", pid, gid, session.mode, session.attributes[0] if session.attributes else 0))
+        return session.encode()
+
+    def session_urls(self, pid, data):
+        """MatchMaking::GetSessionURLs (21/41): the host's registered station URL."""
+        reader = Reader(data)
+        gid = reader.number(4)
+        reader.finish()
+        room = self.rooms.get(gid)
+        if room is None or pid not in room.members:
+            raise PermissionError("room_member_required")
+        registration = self.authority.registrations.get(room.session.host)
+        urls = [registration[1]] if registration else []
+        return struct.pack("<I", len(urls)) + b"".join(string(url) for url in urls)
+
     def end_participation(self, pid, data):
         reader = Reader(data)
         gid = reader.number(4)

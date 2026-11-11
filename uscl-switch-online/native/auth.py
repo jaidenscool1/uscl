@@ -128,6 +128,7 @@ class Authority:
         self.common_data = {}
         self.playing_sessions = {}
         self.nat_properties = {}
+        self.sessions = {}  # pid -> adapter Session, for notifications to other players
 
     def cleanup(self):
         now = self.clock()

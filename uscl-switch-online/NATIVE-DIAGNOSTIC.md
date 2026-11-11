@@ -112,7 +112,7 @@ real TLS with a verified local certificate, including request-value redaction.
 The [`native/`](native/README.md) adapter now terminates TLS/WebSocket, accepts
 the observed short nonce, and implements PRUDP Lite framing, RMC dispatch, a
 private ticket authority, NEX matchmaking objects backed by the JSON room
-service, and loopback-only NAT checks. Its twelve unit tests pass.
+service, and loopback-only NAT checks. Its thirteen unit tests pass.
 
 ## Native login — validated 2026-11-10
 
@@ -159,3 +159,22 @@ matchmaking methods the adapter implements were not imported from another
 title. Do not treat the JSON room test as native compatibility. No native
 client has created/joined a private room or raced through this service.
 Windows/macOS and independent review remain required before merge.
+
+## Native room join — implemented, not yet game-validated (2026-11-11)
+
+The adapter now answers `JoinMatchmakeSessionWithParam` (protocol 109,
+method 39) and `MatchMaking::GetSessionURLs` (protocol 21, method 41), whose
+IDs and `JoinMatchmakeSessionParam` layout come from the public NEX method
+tables. A join adds the player to the private backend room, returns the
+room's `MatchmakeSession`, gives the joiner the host's loopback station URL,
+and queues a participation notification (3001) for every member. Other
+players' notifications reach a client on its next DATA or PING packet.
+
+Methods 68 (room code) and 69 (code to gathering) are above the public
+tables; their layouts come only from the earlier runs. The method 69 reply
+(a bare gathering ID) is unverified. The next real-game run should use two
+isolated Eden instances with separate identity files against one adapter:
+host creates a room, the second enters the code. Check the adapter log for
+`native_room_code_resolved`, `native_room_joined` and `native_session_urls`
+in that order. Any `rmc_request` without a following success names the next
+method to implement.
