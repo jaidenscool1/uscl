@@ -128,7 +128,9 @@ class Authority:
         self.common_data = {}
         self.playing_sessions = {}
         self.nat_properties = {}
-        self.sessions = {}  # pid -> adapter Session, for notifications to other players
+        self.sessions = {}
+        self.nat = None  # NatGroup, when the adapter serves NAT checks
+        self.p2p_ports = {}  # pid -> game peer-to-peer port seen by the NAT responder  # pid -> adapter Session, for notifications to other players
 
     def cleanup(self):
         now = self.clock()
@@ -198,7 +200,7 @@ class Authority:
             if not port.isascii() or not port.isdigit() or not 0 < int(port) <= 65535:
                 raise ValueError("station_port")
             numeric = {}
-            for name in ("port", "stream", "sid", "CID", "natf", "natm", "upnp", "pmp"):
+            for name in ("port", "stream", "sid", "CID", "natf", "natm", "upnp", "pmp", "Pl", "Tpt"):
                 if name in fields:
                     value = fields[name]
                     if not value.isascii() or not value.isdigit() or int(value) >= 2 ** 64:
@@ -228,6 +230,9 @@ class Authority:
         values = tuple(reader.number(4) for _ in range(3))
         reader.finish()
         self.nat_properties[pid] = values
+        # shortcut: the latest NAT check is attributed to whoever reports NAT next; fine for one local client at a time.
+        if self.nat is not None and self.nat.observed_port:
+            self.p2p_ports[pid] = self.nat.observed_port
         return b""
 
     def playing(self, data):

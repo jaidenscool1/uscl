@@ -1,7 +1,7 @@
 From b02264a6ccbd9a879931815a2901021e077bf1f8 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 11:59:35 -0700
-Subject: [PATCH 8/8] Implement SSL Peek for the native online diagnostic route
+Subject: [PATCH 8/9] Implement SSL Peek for the native online diagnostic route
 
 ---
  src/core/hle/service/ssl/ssl.cpp              | 26 ++++++++++++++++++-

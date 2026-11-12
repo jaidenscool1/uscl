@@ -58,5 +58,23 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(self.output.getvalue().count('"rmc_request"'), 1)
 
 
+    def test_notification_reaches_other_player_without_its_packet(self):
+        from adapter import Connection
+        host, joiner = Session(), Session(self.session.authority)
+        host.authority = joiner.authority
+        host.connections[(31, 2)] = Connection(phase="connected", next_sequence=7)
+        joiner.authority.sessions[123] = host
+        woken = []
+        host.wake = type("Wake", (), {"set": lambda self: woken.append(1)})()
+        joiner.notify(123, 456, 99, 456, 2)
+        self.assertEqual(woken, [1])
+        packets = host.drain()
+        self.assertEqual(len(packets), 1)
+        header = HEADER.unpack_from(packets[0])
+        self.assertEqual((header[4], header[5], header[7] & 15, header[8]), (2, 31, 2, 7))
+        self.assertIn(struct.pack("<I", 3001), packets[0])
+        self.assertEqual(host.drain(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

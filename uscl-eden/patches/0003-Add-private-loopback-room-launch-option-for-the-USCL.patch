@@ -1,7 +1,7 @@
 From d0ae5e3ec297a1c77620c2481e5c3e7d86e68546 Mon Sep 17 00:00:00 2001
 From: Codex <codex@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 03:32:04 -0700
-Subject: [PATCH 3/8] Add private loopback room launch option for the USCL Qt
+Subject: [PATCH 3/9] Add private loopback room launch option for the USCL Qt
  frontend
 
 ---

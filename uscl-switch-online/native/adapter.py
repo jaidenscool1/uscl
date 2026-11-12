@@ -141,6 +141,7 @@ class Session:
         self.authority = authority or Authority()
         self.notifications = []
         self.notification_call = 1
+        self.wake = None  # asyncio.Event set by the server; notify() pushes without waiting for a packet
 
     def notify(self, pid, source, gid, participant, count):
         """Queue a NotificationEvent (protocol 14, method 1) for pid's own secure connection."""
@@ -151,6 +152,20 @@ class Session:
         request = b"\x8e" + struct.pack("<II", target.notification_call, 1) + notification
         target.notifications.append(struct.pack("<I", len(request)) + request)
         target.notification_call += 1
+        if target.wake is not None:
+            target.wake.set()
+
+    def drain(self):
+        """Pending notifications as DATA packets on this client's secure connection."""
+        packets = []
+        for (source, destination), state in self.connections.items():
+            if destination == 2 and state.phase == "connected":
+                for notification in self.notifications:
+                    packets.append(packet(0xaa, destination, source, 2, 6, state.next_sequence, payload=notification))
+                    state.next_sequence = (state.next_sequence + 1) & 65535
+                self.notifications.clear()
+                break
+        return packets
 
     def close(self):
         for pid in [pid for pid, session in self.authority.sessions.items() if session is self]:
@@ -280,7 +295,8 @@ class Session:
             if method == 1:
                 result = self.authority.register(state.pid, data[offset + 8:])
                 state.registration = int.from_bytes(result[4:8], "little")
-                event("private_station_registered")
+                station = self.authority.registrations[state.pid][1]
+                event("private_station_registered", port=int(station.split("port=")[1].split(";")[0]))
                 return rmc_success(protocol, call, method, result)
             if method == 5 and len(data) == offset + 8:
                 return rmc_success(protocol, call, method, b"")
@@ -296,7 +312,15 @@ class Session:
                 result = rooms.create(state.pid, data[offset + 8:])
                 gid = Reader(result).structure()[1].number(4)
                 self.notify(state.pid, state.pid, gid, state.pid, 1)
-                event("native_private_room_created", room_code=rooms.rooms[gid].code)
+                event("native_private_room_created", room_id=rooms.rooms[gid].room_id)
+                return rmc_success(protocol, call, method, result)
+            if rooms and protocol == 109 and method == 49:
+                try:
+                    result = rooms.find(state.pid, data[offset + 8:])
+                except PermissionError:
+                    event("native_room_find_missing")
+                    return rmc_error(protocol, call, 0x8003006B)  # RendezVous::SessionVoid
+                event("native_room_found")
                 return rmc_success(protocol, call, method, result)
             if rooms and protocol == 109 and method == 39:
                 try:
@@ -322,14 +346,15 @@ class Session:
             if rooms and protocol == 109 and method == 68:
                 return rmc_success(protocol, call, method, rooms.get_code(state.pid, data[offset + 8:]))
             if rooms and protocol == 109 and method == 69:
-                event("resolve_request_hex", hex=data[offset + 8:].hex())
                 result = rooms.resolve_code(state.pid, data[offset + 8:])
                 event("native_room_code_resolved", gid=int.from_bytes(result, "little"))
                 return rmc_success(protocol, call, method, result)
             if rooms and protocol == 50 and method == 1:
                 return rmc_success(protocol, call, method, rooms.end_participation(state.pid, data[offset + 8:]))
             if protocol == 3 and method == 5:
-                return rmc_success(protocol, call, method, self.authority.report_nat(state.pid, data[offset + 8:]))
+                result = self.authority.report_nat(state.pid, data[offset + 8:])
+                event("p2p_port", port=self.authority.p2p_ports.get(state.pid))
+                return rmc_success(protocol, call, method, result)
             if protocol == 3 and method == 6 and len(data) == offset + 8:
                 # GetRelaySignatureKey: advertise no relay so the game proceeds on its
                 # direct mesh. Layout follows the NEX reference server.
@@ -364,14 +389,29 @@ class Server:
             return
         self.clients += 1
         session = None
+        read = None
         try:
             async with asyncio.timeout(None):
                 await asyncio.wait_for(websocket_upgrade(reader, writer), 10)
                 session = Session(self.authority)
+                session.wake = asyncio.Event()
                 fragments = bytearray()
                 assembling = False
+                read = asyncio.ensure_future(frame_read(reader))
                 while True:
-                    final, opcode, body = await asyncio.wait_for(frame_read(reader), 120)
+                    waker = asyncio.ensure_future(session.wake.wait())
+                    done, _ = await asyncio.wait({read, waker}, timeout=120, return_when=asyncio.FIRST_COMPLETED)
+                    waker.cancel()
+                    if not done:
+                        raise TimeoutError
+                    if session.wake.is_set():
+                        session.wake.clear()
+                        for notification in session.drain():
+                            await frame_write(writer, notification)
+                    if read not in done:
+                        continue
+                    final, opcode, body = read.result()
+                    read = asyncio.ensure_future(frame_read(reader))
                     if opcode == 8:
                         await frame_write(writer, b"", 8)
                         break
@@ -396,6 +436,8 @@ class Server:
             known = {"station_scheme", "station_fields", "station_port", "station_count", "nex_bounds", "nex_string", "nex_trailing", "lite_connect", "lite_data_before_connect", "lite_syn", "lite_fragment_order", "rmc_request", "rmc_size", "ticket_integrity"}
             event("connection_ended", category=type(error).__name__, reason=reason if reason in known else "unspecified")
         finally:
+            if read is not None:
+                read.cancel()
             self.clients -= 1
             if session:
                 try:
@@ -421,6 +463,7 @@ async def run(args):
     nat = NatGroup(event)
     if args.nat:
         await nat.start()
+        instance.authority.nat = nat
     async with server:
         event("ready", port=server.sockets[0].getsockname()[1], native_online_play=False)
         async def leases():

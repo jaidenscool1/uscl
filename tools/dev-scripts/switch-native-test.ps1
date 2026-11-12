@@ -14,7 +14,7 @@ param(
     [switch]$Setup,
     [string]$Keys
 )
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'  # PS 5.1 makes native stderr fatal under Stop; exit codes are checked instead
 $repo = (Resolve-Path "$PSScriptRoot\..\..").Path
 $core = "$repo\build\switch-core\bin"
 $work = "$repo\build\switch-native"
@@ -45,6 +45,13 @@ if ($Setup) {
 if (-not $Game) { throw 'Pass -Game <path to MK8 Deluxe .nsp/.xci>, or -Setup first.' }
 foreach ($n in 1, 2) {
     if (-not (Test-Path "$work\p$n\user\keys\prod.keys")) { throw 'Run -Setup first.' }
+    Player $n | Out-Null  # pick up a rebuilt eden.exe
+    # Eden saves absolute nand/sdmc/... paths; player 2's copied config would point at player 1's folders.
+    $config = "$work\p$n\user\config\qt-config.ini"
+    if (Test-Path $config) {
+        $text = [IO.File]::ReadAllText($config)
+        [IO.File]::WriteAllText($config, ($text -replace 'switch-native/p\d/', "switch-native/p$n/"))
+    }
 }
 
 $python = (Get-Command python).Source
@@ -81,6 +88,7 @@ try {
     $eden = foreach ($n in 1, 2) {
         $env:USCL_MK8_NATIVE_CREDENTIAL_FILE = "$work\p$n.identity"
         Start-Process "$work\p$n\eden.exe" -ArgumentList '-g', "`"$Game`"" -PassThru
+        Start-Sleep -Seconds 8  # two Eden instances loading their pipeline caches at once crashed (0xc0000005)
     }
     Write-Host "Both players running. Adapter events: $work\adapter.log. Close both games to stop."
     $eden | Wait-Process

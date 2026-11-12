@@ -112,7 +112,7 @@ real TLS with a verified local certificate, including request-value redaction.
 The [`native/`](native/README.md) adapter now terminates TLS/WebSocket, accepts
 the observed short nonce, and implements PRUDP Lite framing, RMC dispatch, a
 private ticket authority, NEX matchmaking objects backed by the JSON room
-service, and loopback-only NAT checks. Its thirteen unit tests pass.
+service, and loopback-only NAT checks. Its fourteen unit tests pass.
 
 ## Native login — validated 2026-11-10
 
@@ -160,21 +160,55 @@ title. Do not treat the JSON room test as native compatibility. No native
 client has created/joined a private room or raced through this service.
 Windows/macOS and independent review remain required before merge.
 
-## Native room join — implemented, not yet game-validated (2026-11-11)
+## Native room join — server side validated on Windows (2026-11-11)
 
-The adapter now answers `JoinMatchmakeSessionWithParam` (protocol 109,
-method 39) and `MatchMaking::GetSessionURLs` (protocol 21, method 41), whose
-IDs and `JoinMatchmakeSessionParam` layout come from the public NEX method
-tables. A join adds the player to the private backend room, returns the
-room's `MatchmakeSession`, gives the joiner the host's loopback station URL,
-and queues a participation notification (3001) for every member. Other
-players' notifications reach a client on its next DATA or PING packet.
+Two patched Eden instances on one Windows 10 PC (MSVC build, MK8 Deluxe 4.0.1,
+firmware 22.5.0), one adapter, two private identities
+(`tools/dev-scripts/switch-native-test.ps1`). Observed in order:
 
-Methods 68 (room code) and 69 (code to gathering) are above the public
-tables; their layouts come only from the earlier runs. The method 69 reply
-(a bare gathering ID) is unverified. The next real-game run should use two
-isolated Eden instances with separate identity files against one adapter:
-host creates a room, the second enters the code. Check the adapter log for
-`native_room_code_resolved`, `native_room_joined` and `native_session_urls`
-in that order. Any `rmc_request` without a following success names the next
-method to implement.
+1. Host: login, `CreateMatchmakeSessionWithParam` (109/38), relay key (3/6),
+   NAT checks, NAT report (3/5), progress (109/34), room ID (109/68); the
+   lobby shows the 5-character ID.
+2. Joiner: types the ID; 109/69 resolves it to the gathering,
+   `FindMatchmakeSessionBySingleGatheringId` (109/49) returns the room,
+   `JoinMatchmakeSessionWithParam` (109/39) joins it, `GetSessionURLs` (21/41)
+   returns the host's station, then 3/6 and 3/5.
+3. The joiner then shows **2618-0502** ("other consoles are not responding").
+
+Fixes found on the way:
+- Eden patch 0009: Windows reports an ICMP port-unreachable as WSAECONNRESET
+  on the next UDP receive, and the host dropped its server connection right
+  after the NAT checks. `SIO_UDP_CONNRESET` is now off for guest UDP sockets.
+- The lobby shows the 109/68 value and Search by Room ID takes 5 characters
+  (`ABCDEFGHIJKLMNPQRSTUVWXYZ23456789`); the MatchmakeSession codeword stays
+  12 digits. Keeping both, separately, works.
+- The game registers
+  `prudp:/address=127.0.0.1;port=1;Pl=3;Tpt=2;natf=0;natm=0;pmp=0;sid=30;upnp=0`.
+  Port 1 is a placeholder. The game's Pia socket sends the NAT checks, so the
+  adapter records that source port and the reported natm/natf and hands them
+  out in 21/41. `Pl` and `Tpt` are kept.
+- Other players' 3001 notifications are pushed immediately instead of waiting
+  for the target's next packet.
+
+### Remaining boundary: ports 33334/33335 on the NAT-check host
+
+Neither game ever sends to the other's station. Both send, from their Pia
+socket, to the NAT-check host (127.0.0.1 under the diagnostic route):
+- port 33334: five 16-byte all-zero packets, before the 10025 checks;
+- port 33335: Pia packets (magic `32ab9864`). Type 1, 76 bytes, contains
+  `NATTestId_Dummy` and repeats without a reply. After a join the host sends
+  84-byte type-2 (encrypted) packets there.
+
+These ports are not in Eden's source, and the public NAT-check and Pia pages
+do not document them. An experiment that echoed 33334 and forwarded 33335
+packets between the two games delivered packets both ways, but the joiner
+still failed with 2618-0502. 33335 is probably a Nintendo relay or
+connection-test service whose replies the game checks. Its protocol, and
+whether the Pia session key comes from the MatchmakeSession key the adapter
+generates, must be worked out before native races can work. The experiment
+is not committed.
+
+Windows notes: two Eden instances loading pipeline caches at once crashed one
+with 0xc0000005, so the launcher starts them 8 s apart. Each instance needs its
+own portable `user` folder, and its saved absolute paths are rewritten per
+player.

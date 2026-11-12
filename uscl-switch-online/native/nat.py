@@ -35,7 +35,9 @@ class NatEndpoint(asyncio.DatagramProtocol):
         if target:
             response = struct.pack(">IIII", kind, address[1], int(ipaddress.ip_address(address[0])), int(ipaddress.ip_address(host)))
             target.transport.sendto(response, address)
-            self.group.report("nat_check", message_type=kind, alternate_address=kind == 2, alternate_port=kind in (2, 3, 102))
+            # The game's peer-to-peer socket sends these checks; its port is what other players must dial.
+            self.group.observed_port = address[1]
+            self.group.report("nat_check", message_type=kind, alternate_address=kind == 2, alternate_port=kind in (2, 3, 102), source_port=address[1])
 
 
 class NatGroup:
@@ -43,6 +45,7 @@ class NatGroup:
         self.report = report
         self.hosts, self.ports = hosts, ports
         self.endpoints = {}
+        self.observed_port = None
         self.tokens, self.last = 128.0, time.monotonic()
 
     def admit(self):

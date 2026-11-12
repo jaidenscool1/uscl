@@ -49,6 +49,10 @@ class RoomTests(unittest.TestCase):
         self.assertNotEqual(match.gid, 0)
         code = rooms.rooms[match.gid].code
         self.assertEqual(rooms.resolve_code(456, string(code)), struct.pack("<I", match.gid))
+        room_id = rooms.rooms[match.gid].room_id
+        self.assertEqual(len(room_id), 5)
+        self.assertEqual(rooms.resolve_code(456, string(room_id.lower())), struct.pack("<I", match.gid))
+        self.assertIn(room_id.encode(), rooms.get_code(123, struct.pack("<I", match.gid)))
         self.assertEqual(rooms.resolve_code(456, string("000000000000")), struct.pack("<I", 0))
         self.assertEqual((match.owner, match.host, match.count), (123, 123, 1))
         self.assertEqual(len(match.key), 32)
@@ -81,11 +85,18 @@ class RoomTests(unittest.TestCase):
 
         with self.assertRaises(PermissionError):
             rooms.session_urls(456, struct.pack("<I", gid))  # not a member yet
+        found = MatchSession.read(Reader(rooms.find(456, struct.pack("<I", gid))))
+        self.assertEqual((found.gid, found.owner, found.count), (gid, 123, 1))
+        with self.assertRaises(PermissionError):
+            rooms.find(456, struct.pack("<I", gid + 1))
         joined = MatchSession.read(Reader(rooms.join(456, join_request(gid))))
         self.assertEqual((joined.gid, joined.owner, joined.count), (gid, 123, 2))
         self.assertEqual(rooms.session_urls(456, struct.pack("<I", gid)),
                          struct.pack("<I", 1) + string("prudp:/address=127.0.0.1;port=123;PID=123"))
         self.assertIn(456, authority.playing_sessions)
+        authority.p2p_ports[123] = 61234
+        self.assertEqual(rooms.session_urls(456, struct.pack("<I", gid)),
+                         struct.pack("<I", 1) + string("prudp:/address=127.0.0.1;port=61234;PID=123"))
         backend = control.call(op="room", token=control.credentials[456])
         self.assertEqual(len(backend["members"]), 2)
         with self.assertRaises(PermissionError):

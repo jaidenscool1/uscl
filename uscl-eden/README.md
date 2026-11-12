@@ -15,6 +15,7 @@ Apply the `git format-patch` files in order with `git am patches/*.patch` from a
 - 0006 supplies a private local identity and loopback address under the same opt-in: the account service parses `USCL_MK8_NATIVE_CREDENTIAL_FILE` (`USCL_NATIVE_ID_V1` id plus 64-hex token) and returns that id/token where the game requests account identity, and NIFM reports 127.0.0.1 so the game dials the local adapter. It does not implement authentication or matchmaking itself.
 - 0007 lets the UDP controller poll interval be overridden with `USCL_UDP_POLL_MS` (1–3000 ms; default 3000). The stock 3-second poll is too coarse to navigate the game's menus through an injected controller, so the native diagnostic route sets a finer interval.
 - 0008 implements `ISslConnection::Peek` (OpenSSL backend), which MK8 Deluxe calls during the online room flow and which previously triggered an unimplemented-function assertion.
+- 0009 turns off `SIO_UDP_CONNRESET` on Windows guest UDP sockets. Windows otherwise reports an ICMP port-unreachable from an earlier send as `WSAECONNRESET` on the next receive, which consoles and Linux ignore; MK8 Deluxe dropped its server connection on it.
 
 ## Linux development build
 

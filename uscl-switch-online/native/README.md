@@ -69,7 +69,7 @@ cd uscl-switch-online/native
 python3 -m unittest discover -v
 ```
 
-Thirteen tests cover the connection/RPC codec, ticket authority and integrity,
+Fourteen tests cover the connection/RPC codec, ticket authority and integrity,
 NAT-check round trips, and native room creation backed by a real Rust control
 plane. They do not establish game compatibility.
 

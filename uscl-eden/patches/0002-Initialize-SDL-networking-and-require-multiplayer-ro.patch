@@ -1,7 +1,7 @@
 From 634a65f24f36a3b69ce999b1467f8600d6bfad1e Mon Sep 17 00:00:00 2001
 From: Codex <codex@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 03:32:04 -0700
-Subject: [PATCH 2/8] Initialize SDL networking and require multiplayer room
+Subject: [PATCH 2/9] Initialize SDL networking and require multiplayer room
  join before boot
 
 ---

@@ -2,12 +2,14 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
+import re
 import secrets
 import socket
 import struct
 
 from auth import Reader, buffer, string, structure
 
+ROOM_ID_ALPHABET = "ABCDEFGHIJKLMNPQRSTUVWXYZ23456789"  # Search by Room ID keyboard, 5 characters
 GAME = {"title_id": "0100152000022000", "update": "4.0.1", "dlc": [], "adapter": 1}
 
 
@@ -142,7 +144,8 @@ class Room:
     backend_id: str
     invite: str
     members: set = field(default_factory=set)
-    code: str = ""
+    code: str = ""  # 12-digit codeword inside the MatchmakeSession
+    room_id: str = ""  # 5-character ID shown in the lobby (109/68) and typed by joiners (109/69)
 
 
 class NativeRooms:
@@ -179,7 +182,10 @@ class NativeRooms:
             gid = secrets.randbelow(0xfffffffe) + 1
         session.gid, session.owner, session.host = gid, pid, pid
         session.count, session.key = participation, secrets.token_bytes(32)
-        room = Room(session, result["room"], result["invite"], {pid}, code)
+        room_id = "".join(secrets.choice(ROOM_ID_ALPHABET) for _ in range(5))
+        while any(other.room_id == room_id for other in self.rooms.values()):
+            room_id = "".join(secrets.choice(ROOM_ID_ALPHABET) for _ in range(5))
+        room = Room(session, result["room"], result["invite"], {pid}, code, room_id)
         self.rooms[gid] = room
         self.authority.playing_sessions[pid] = structure(struct.pack("<QIII", pid, gid, session.mode, session.attributes[0] if session.attributes else 0))
         return session.encode()
@@ -233,15 +239,25 @@ class NativeRooms:
         expiry = datetime.now(timezone.utc) + timedelta(hours=6)
         stamp = (expiry.year << 26 | expiry.month << 22 | expiry.day << 17 |
                  expiry.hour << 12 | expiry.minute << 6 | expiry.second)
-        return structure(string(room.code) + struct.pack("<Q", stamp))
+        return structure(string(room.room_id) + struct.pack("<Q", stamp))
 
     def resolve_code(self, pid, data):
         # The request wraps the code in a structure whose exact padding varies;
         # find the private code digits wherever they appear in the payload.
         for gid, room in self.rooms.items():
-            if room.code.lower().encode() in data.lower():
+            if room.room_id.lower().encode() in data.lower() or room.code.encode() in data:
                 return struct.pack("<I", gid)
         return struct.pack("<I", 0)
+
+    def find(self, pid, data):
+        """FindMatchmakeSessionBySingleGatheringId (109/49): the room a joiner resolved by room ID."""
+        reader = Reader(data)
+        gid = reader.number(4)
+        reader.finish()
+        room = self.rooms.get(gid)
+        if room is None:
+            raise PermissionError("room_not_found")
+        return room.session.encode()
 
     def join(self, pid, data):
         """JoinMatchmakeSessionWithParam (109/39); layout from the public NEX JoinMatchmakeSessionParam."""
@@ -284,8 +300,18 @@ class NativeRooms:
         room = self.rooms.get(gid)
         if room is None or pid not in room.members:
             raise PermissionError("room_member_required")
-        registration = self.authority.registrations.get(room.session.host)
+        host = room.session.host
+        registration = self.authority.registrations.get(host)
         urls = [registration[1]] if registration else []
+        if urls:
+            # Switch clients register placeholders; fill in what their NAT checks and report showed.
+            fields = {}
+            if host in self.authority.p2p_ports:
+                fields["port"] = self.authority.p2p_ports[host]
+            if host in self.authority.nat_properties:
+                fields["natm"], fields["natf"] = self.authority.nat_properties[host][:2]
+            for name, value in fields.items():
+                urls = [re.sub(rf"(?<=[:;]){name}=\d+", f"{name}={value}", urls[0], count=1)]
         return struct.pack("<I", len(urls)) + b"".join(string(url) for url in urls)
 
     def end_participation(self, pid, data):
