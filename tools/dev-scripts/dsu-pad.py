@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Local cemuhook/DSU pad server for Eden's UDP controller injection.
 
-Serves the DSU protocol on 127.0.0.1:26760 and exposes a Unix socket for
-driving it. This is a development/diagnostic tool for the native MK8D Online
+Serves the DSU protocol on 127.0.0.1:26760 (or the port given second) and
+exposes a control socket for driving it: a Unix socket path, or on Windows a
+TCP port number on 127.0.0.1. This is a development/diagnostic tool for the native MK8D Online
 Play route; it supplies input only, never game state or credentials.
 
 Control socket commands (one per connection):
@@ -85,10 +86,14 @@ def handle_request(data):
 
 
 def control_loop(sock_path):
-    if os.path.exists(sock_path):
-        os.unlink(sock_path)
-    srv = socket.socket(socket.AF_UNIX)
-    srv.bind(sock_path)
+    if sock_path.isdigit():  # Windows Python has no AF_UNIX
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", int(sock_path)))
+    else:
+        if os.path.exists(sock_path):
+            os.unlink(sock_path)
+        srv = socket.socket(socket.AF_UNIX)
+        srv.bind(sock_path)
     srv.listen(4)
     while True:
         conn, _ = srv.accept()
@@ -143,8 +148,9 @@ def main():
     sock_path = sys.argv[1]
     threading.Thread(target=control_loop, args=(sock_path,), daemon=True).start()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("127.0.0.1", 26760))
-    print("DSU pad server on 127.0.0.1:26760", flush=True)
+    port = int(sys.argv[2]) if len(sys.argv) > 2 else 26760
+    sock.bind(("127.0.0.1", port))
+    print(f"DSU pad server on 127.0.0.1:{port}", flush=True)
     while True:
         data, addr = sock.recvfrom(100)
         response = handle_request(data)

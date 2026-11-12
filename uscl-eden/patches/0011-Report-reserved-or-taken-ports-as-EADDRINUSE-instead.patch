@@ -1,0 +1,95 @@
+From b1e9d6b678cfea6f9745bde912bd6b8b605ca19e Mon Sep 17 00:00:00 2001
+From: tyler <tyler.chambers99@outlook.com>
+Date: Wed, 11 Nov 2026 19:22:01 -0700
+Subject: [PATCH 11/11] Report reserved or taken ports as EADDRINUSE instead of
+ success
+
+Eden had no translation for EADDRINUSE, and unknown errors reach the guest as
+success. Windows also refuses binds to ports it reserves for Hyper-V/WSL with
+WSAEACCES. MK8 Deluxe's Pia picks a random UDP port; when that port was
+reserved, the bind failed silently and the game advertised a port it never
+owned. Map EADDRINUSE (and WSAEACCES from bind) to the guest's EADDRINUSE.
+---
+ src/core/hle/service/sockets/sockets.h             |  1 +
+ src/core/hle/service/sockets/sockets_translate.cpp |  2 ++
+ src/core/internal_network/network.cpp              | 12 ++++++++++++
+ src/core/internal_network/network.h                |  1 +
+ 4 files changed, 16 insertions(+)
+
+diff --git a/src/core/hle/service/sockets/sockets.h b/src/core/hle/service/sockets/sockets.h
+index 2837ce7..3ecbda9 100644
+--- a/src/core/hle/service/sockets/sockets.h
++++ b/src/core/hle/service/sockets/sockets.h
+@@ -30,6 +30,7 @@ enum class Errno : u32 {
+     CONNREFUSED = 111,
+     INPROGRESS = 115,
+     ISCONN = 106,
++    ADDRINUSE = 98,
+ };
+ 
+ enum class GetAddrInfoError : s32 {
+diff --git a/src/core/hle/service/sockets/sockets_translate.cpp b/src/core/hle/service/sockets/sockets_translate.cpp
+index 46ef0a8..350a21b 100644
+--- a/src/core/hle/service/sockets/sockets_translate.cpp
++++ b/src/core/hle/service/sockets/sockets_translate.cpp
+@@ -43,6 +43,8 @@ Errno Translate(Network::Errno value) {
+         return Errno::INPROGRESS;
+     case Network::Errno::ISCONN:
+         return Errno::ISCONN;
++    case Network::Errno::ADDRINUSE:
++        return Errno::ADDRINUSE;
+     default:
+         UNIMPLEMENTED_MSG("Unimplemented errno={}", value);
+         return Errno::SUCCESS;
+diff --git a/src/core/internal_network/network.cpp b/src/core/internal_network/network.cpp
+index c154072..724ca47 100644
+--- a/src/core/internal_network/network.cpp
++++ b/src/core/internal_network/network.cpp
+@@ -167,6 +167,8 @@ Errno TranslateNativeError(int e, CallType call_type = CallType::Other) {
+         return Errno::INPROGRESS;
+     case WSAEISCONN:
+         return Errno::ISCONN;
++    case WSAEADDRINUSE:
++        return Errno::ADDRINUSE;
+     default:
+         UNIMPLEMENTED_MSG("Unimplemented errno={}", e);
+         return Errno::OTHER;
+@@ -308,6 +310,8 @@ Errno TranslateNativeError(int e, CallType call_type = CallType::Other) {
+         return Errno::INPROGRESS;
+     case EISCONN:
+         return Errno::ISCONN;
++    case EADDRINUSE:
++        return Errno::ADDRINUSE;
+     default:
+         UNIMPLEMENTED_MSG("Unimplemented errno={} ({})", e, strerror(e));
+         return Errno::OTHER;
+@@ -976,6 +980,14 @@ Errno Socket::Bind(SockAddrIn addr) {
+     if (bind(fd, &addr_in, sizeof(addr_in)) != SOCKET_ERROR) {
+         return Errno::SUCCESS;
+     }
++#ifdef _WIN32
++    if (WSAGetLastError() == WSAEACCES) {
++        // Windows reserves port ranges (Hyper-V/WSL) and refuses them with WSAEACCES. Report the port as
++        // taken so the guest picks another, as it would on a console.
++        LOG_WARNING(Network, "bind to reserved port {} refused; reporting EADDRINUSE", addr.portno);
++        return Errno::ADDRINUSE;
++    }
++#endif
+ 
+     return GetAndLogLastError();
+ }
+diff --git a/src/core/internal_network/network.h b/src/core/internal_network/network.h
+index ce259c0..ef76066 100644
+--- a/src/core/internal_network/network.h
++++ b/src/core/internal_network/network.h
+@@ -49,6 +49,7 @@ enum class Errno {
+     MSGSIZE,
+     INPROGRESS,
+     ISCONN,
++    ADDRINUSE,
+     OTHER,
+ };
+ 
+-- 
+2.53.0.windows.1
+

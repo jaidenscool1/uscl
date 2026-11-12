@@ -81,7 +81,7 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(result.number(4), 0x10001)
         self.assertEqual(result.number(4), 1)
         url = result.string()
-        self.assertIn("address=127.0.0.1", url)
+        self.assertRegex(url, r"address=127.0.0.(1[0-9]|[2-9][0-9]|1[0-9]{2}|2[0-4][0-9]);")
         self.assertIn("PID=123", url)
         self.assertNotIn("example.invalid", url)
         self.assertNotIn("PID=999", url)

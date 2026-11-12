@@ -136,24 +136,30 @@ class Connection:
 
 
 class Session:
-    def __init__(self, authority=None):
+    def __init__(self, authority=None, peer="127.0.0.1"):
+        self.peer = peer
         self.connections = {}
         self.authority = authority or Authority()
         self.notifications = []
         self.notification_call = 1
         self.wake = None  # asyncio.Event set by the server; notify() pushes without waiting for a packet
 
-    def notify(self, pid, source, gid, participant, count):
-        """Queue a NotificationEvent (protocol 14, method 1) for pid's own secure connection."""
+    def request(self, pid, protocol, method, params):
+        """Queue a server-to-client RMC request for pid's own secure connection and wake its writer."""
         target = self.authority.sessions.get(pid)
         if target is None:
-            return
-        notification = structure(struct.pack("<QIQQ", source, 3001, gid, participant) + string("") + struct.pack("<Q", count))
-        request = b"\x8e" + struct.pack("<II", target.notification_call, 1) + notification
-        target.notifications.append(struct.pack("<I", len(request)) + request)
+            return False
+        body = bytes([0x80 | protocol]) + struct.pack("<II", target.notification_call, method) + params
+        target.notifications.append(struct.pack("<I", len(body)) + body)
         target.notification_call += 1
         if target.wake is not None:
             target.wake.set()
+        return True
+
+    def notify(self, pid, source, gid, participant, count):
+        """NotificationEvent (protocol 14, method 1), type 3001: a participant joined."""
+        notification = structure(struct.pack("<QIQQ", source, 3001, gid, participant) + string("") + struct.pack("<Q", count))
+        self.request(pid, 14, 1, notification)
 
     def drain(self):
         """Pending notifications as DATA packets on this client's secure connection."""
@@ -269,6 +275,10 @@ class Session:
         return replies
 
     def rpc(self, data, state, destination):
+        if len(data) >= 5 and int.from_bytes(data[:4], "little") == len(data) - 4 and not data[4] & 0x80:
+            # A client's answer to one of our requests (e.g. InitiateProbe); nothing to send back.
+            event("rmc_response", protocol=data[4] & 127)
+            return b""
         if len(data) < 13 or int.from_bytes(data[:4], "little") != len(data) - 4 or not data[4] & 0x80:
             raise ValueError("rmc_request")
         protocol = data[4] & 127
@@ -293,7 +303,7 @@ class Session:
                 return rmc_error(protocol, call)
         if destination == 2 and state.pid is not None and protocol == 11:
             if method == 1:
-                result = self.authority.register(state.pid, data[offset + 8:])
+                result = self.authority.register(state.pid, data[offset + 8:], self.peer)
                 state.registration = int.from_bytes(result[4:8], "little")
                 station = self.authority.registrations[state.pid][1]
                 event("private_station_registered", port=int(station.split("port=")[1].split(";")[0]))
@@ -351,6 +361,32 @@ class Session:
                 return rmc_success(protocol, call, method, result)
             if rooms and protocol == 50 and method == 1:
                 return rmc_success(protocol, call, method, rooms.end_participation(state.pid, data[offset + 8:]))
+            if protocol == 11 and method == 7:
+                port = self.authority.replace_url(state.pid, data[offset + 8:])
+                event("private_station_replaced", port=port)
+                return rmc_success(protocol, call, method, b"")
+            if protocol == 3 and method == 3:
+                # RequestProbeInitiationExt(targets, station to probe): ask each target to probe the caller.
+                reader = Reader(data[offset + 8:])
+                count = reader.number(4)
+                if count > 16:
+                    raise ValueError("nex_bounds")
+                targets = [reader.string() for _ in range(count)]
+                probe = reader.string()
+                reader.finish()
+                for target in targets:
+                    owner = self.authority.station_owner(target)
+                    sent = owner is not None and self.request(owner, 3, 2, string(probe))
+                    event("nat_probe_initiation", delivered=bool(sent))
+                return rmc_success(protocol, call, method, b"")
+            if protocol == 3 and method in (4, 7):
+                # ReportNATTraversalResult(Detail): cid, result, [detail, rtt]. Nothing to store.
+                reader = Reader(data[offset + 8:])
+                reader.number(4)
+                result = reader.number(1)
+                detail = reader.number(4) if method == 7 else None
+                event("nat_traversal_result", ok=bool(result), detail=detail)
+                return rmc_success(protocol, call, method, b"")
             if protocol == 3 and method == 5:
                 result = self.authority.report_nat(state.pid, data[offset + 8:])
                 event("p2p_port", port=self.authority.p2p_ports.get(state.pid))
@@ -393,7 +429,7 @@ class Server:
         try:
             async with asyncio.timeout(None):
                 await asyncio.wait_for(websocket_upgrade(reader, writer), 10)
-                session = Session(self.authority)
+                session = Session(self.authority, writer.get_extra_info("peername")[0])
                 session.wake = asyncio.Event()
                 fragments = bytearray()
                 assembling = False

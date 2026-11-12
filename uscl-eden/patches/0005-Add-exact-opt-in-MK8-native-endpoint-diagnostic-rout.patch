@@ -1,13 +1,13 @@
-From d9f027b899b1767803507519a8ee430f73312122 Mon Sep 17 00:00:00 2001
+From c4230d2a4d5975bf9fda15841df34dd815302ce9 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 08:04:44 -0700
-Subject: [PATCH 5/9] Add exact opt-in MK8 native endpoint diagnostic route
+Subject: [PATCH 05/11] Add exact opt-in MK8 native endpoint diagnostic route
 
 ---
  src/core/hle/service/sockets/nsd.cpp          | 26 +++++++++++----
  src/core/hle/service/sockets/sfdnsres.cpp     | 32 ++++++++++++++-----
- .../hle/service/sockets/uscl_native_route.h   | 25 +++++++++++++++
- 3 files changed, 69 insertions(+), 14 deletions(-)
+ .../hle/service/sockets/uscl_native_route.h   | 27 ++++++++++++++++
+ 3 files changed, 71 insertions(+), 14 deletions(-)
  create mode 100644 src/core/hle/service/sockets/uscl_native_route.h
 
 diff --git a/src/core/hle/service/sockets/nsd.cpp b/src/core/hle/service/sockets/nsd.cpp
@@ -185,10 +185,10 @@ index fa92179..8103014 100644
          u32 data_size;
 diff --git a/src/core/hle/service/sockets/uscl_native_route.h b/src/core/hle/service/sockets/uscl_native_route.h
 new file mode 100644
-index 0000000..b64fcd3
+index 0000000..3740bcf
 --- /dev/null
 +++ b/src/core/hle/service/sockets/uscl_native_route.h
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,27 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#pragma once
 +
@@ -202,7 +202,9 @@ index 0000000..b64fcd3
 +constexpr std::string_view UsclNativeDiagnosticRoute(std::string_view host,
 +                                                    std::uint64_t program_id, bool enabled) {
 +    if (enabled && program_id == 0x0100152000022000ULL) {
++        // .p. is the Pia relay host; a joiner resolves it before connecting and aborts if it fails.
 +        if (host == "g2b309e01-%.s.n.srv.nintendo.net" ||
++            host == "g2b309e01-%.p.srv.nintendo.net" ||
 +            host == "nncs1-%.n.n.srv.nintendo.net") {
 +            return "127.0.0.1";
 +        }

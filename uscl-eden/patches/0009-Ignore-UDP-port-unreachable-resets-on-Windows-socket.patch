@@ -1,7 +1,7 @@
-From 4a62368e6ec74aff88929ca9807b40949dfd4613 Mon Sep 17 00:00:00 2001
+From 2c297311415e67d9e0335abb2856ffba246ab678 Mon Sep 17 00:00:00 2001
 From: tyler <tyler.chambers99@outlook.com>
 Date: Wed, 11 Nov 2026 17:08:17 -0700
-Subject: [PATCH 9/9] Ignore UDP port-unreachable resets on Windows sockets
+Subject: [PATCH 09/11] Ignore UDP port-unreachable resets on Windows sockets
 
 Windows turns an ICMP port-unreachable caused by an earlier UDP send into
 WSAECONNRESET on the next receive. A console, and Linux for unconnected UDP,

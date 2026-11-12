@@ -8,11 +8,14 @@
 #        Player 2 then gets a copy of that user folder.
 #   3. switch-native-test.ps1 -Game <your MK8 Deluxe .nsp/.xci>
 #        Host: Online Play > Friends > Create Room. Player 2: enter the room code.
+#      Add -Pad to drive both games by script: player n gets a DSU pad on UDP 2675(9+n), commanded over
+#      TCP 127.0.0.1:2677n with dsu-pad.py's commands (tap CIRCLE 150, dpad DOWN 150, ...).
 # Everything lives under build\switch-native (ignored by git). Logs: build\switch-native\*.log
 param(
     [string]$Game,
     [switch]$Setup,
-    [string]$Keys
+    [string]$Keys,
+    [switch]$Pad
 )
 $ErrorActionPreference = 'Continue'  # PS 5.1 makes native stderr fatal under Stop; exit codes are checked instead
 $repo = (Resolve-Path "$PSScriptRoot\..\..").Path
@@ -52,6 +55,10 @@ foreach ($n in 1, 2) {
         $text = [IO.File]::ReadAllText($config)
         [IO.File]::WriteAllText($config, ($text -replace 'switch-native/p\d/', "switch-native/p$n/"))
     }
+    if ($Pad) {
+        & python "$PSScriptRoot\eden-dsu-config.py" $config (26759 + $n)
+        if ($LASTEXITCODE) { throw 'pad binding failed' }
+    }
 }
 
 $python = (Get-Command python).Source
@@ -81,12 +88,20 @@ try {
         -ArgumentList '-u', 'adapter.py', '--cert', "`"$work\localhost.pem`"", '--key', "`"$work\localhost.key`"",
             '--account', "`"$work\p1.identity`"", '--account', "`"$work\p2.identity`"", '--control-port', '24873', '--nat' `
         -RedirectStandardOutput "$work\adapter.log" -RedirectStandardError "$work\adapter.err.log"
+    if ($Pad) {
+        foreach ($n in 1, 2) {
+            $procs += Start-Process $python -PassThru -NoNewWindow -ArgumentList '-u', "`"$PSScriptRoot\dsu-pad.py`"", (26770 + $n), (26759 + $n) `
+                -RedirectStandardOutput "$work\pad$n.log" -RedirectStandardError "$work\pad$n.err.log"
+        }
+        $env:USCL_UDP_POLL_MS = '10'  # Eden patch 0007: poll the pad often enough for menu taps
+    }
     Start-Sleep -Seconds 2
     if ($procs | Where-Object HasExited) { throw "a service exited; see $work\*.log" }
 
     $env:USCL_MK8_NATIVE_DIAGNOSTIC = '1'
     $eden = foreach ($n in 1, 2) {
         $env:USCL_MK8_NATIVE_CREDENTIAL_FILE = "$work\p$n.identity"
+        $env:USCL_MK8_NATIVE_LOCAL_ADDRESS = "127.0.0.$(10 + $n)"  # own address per console (Eden patch 0010)
         Start-Process "$work\p$n\eden.exe" -ArgumentList '-g', "`"$Game`"" -PassThru
         Start-Sleep -Seconds 8  # two Eden instances loading their pipeline caches at once crashed (0xc0000005)
     }
@@ -94,7 +109,7 @@ try {
     $eden | Wait-Process
 }
 finally {
-    Remove-Item Env:USCL_MK8_NATIVE_DIAGNOSTIC, Env:USCL_MK8_NATIVE_CREDENTIAL_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:USCL_MK8_NATIVE_DIAGNOSTIC, Env:USCL_MK8_NATIVE_CREDENTIAL_FILE, Env:USCL_MK8_NATIVE_LOCAL_ADDRESS, Env:USCL_UDP_POLL_MS -ErrorAction SilentlyContinue
     $procs | Where-Object { -not $_.HasExited } | Stop-Process -Force
     Write-Host 'Join events:'
     Select-String -Path "$work\adapter.log" -Pattern 'native_room_code_resolved|native_room_joined|native_session_urls|native_room_join_denied' |

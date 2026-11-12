@@ -1,14 +1,14 @@
-From 02186e042b6c106b18e0406eca1eca13646640a8 Mon Sep 17 00:00:00 2001
+From 128967a8f16b616d675c7a26075ece483873ba7c Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 10:24:24 -0700
-Subject: [PATCH 6/9] Supply private local identity and loopback address to the
- MK8 native adapter
+Subject: [PATCH 06/11] Supply private local identity and loopback address to
+ the MK8 native adapter
 
 ---
  src/core/hle/service/acc/acc.cpp              | 34 +++++++++
  .../hle/service/acc/uscl_native_identity.h    | 74 +++++++++++++++++++
- src/core/hle/service/nifm/nifm.cpp            |  7 ++
- 3 files changed, 115 insertions(+)
+ src/core/hle/service/nifm/nifm.cpp            | 19 +++++
+ 3 files changed, 127 insertions(+)
  create mode 100644 src/core/hle/service/acc/uscl_native_identity.h
 
 diff --git a/src/core/hle/service/acc/acc.cpp b/src/core/hle/service/acc/acc.cpp
@@ -165,10 +165,16 @@ index 0000000..44dd2dc
 +
 +} // namespace Service::Account
 diff --git a/src/core/hle/service/nifm/nifm.cpp b/src/core/hle/service/nifm/nifm.cpp
-index a0302a5..21f7db8 100644
+index a0302a5..45e50a6 100644
 --- a/src/core/hle/service/nifm/nifm.cpp
 +++ b/src/core/hle/service/nifm/nifm.cpp
-@@ -9,6 +9,7 @@
+@@ -6,9 +6,13 @@
+ 
+ #include <filesystem>
+ #include <fstream>
++#include <cstdio>
++#include <cstdlib>
++
  #include "core/core.h"
  #include "core/hle/kernel/k_event.h"
  #include "core/hle/service/ipc_helpers.h"
@@ -176,14 +182,23 @@ index a0302a5..21f7db8 100644
  #include "core/hle/service/kernel_helpers.h"
  #include "core/hle/service/nifm/nifm.h"
  #include "core/hle/service/server_manager.h"
-@@ -844,6 +845,12 @@ void IGeneralService::GetScanDataV3(HLERequestContext& ctx) {
+@@ -844,6 +848,21 @@ void IGeneralService::GetScanDataV3(HLERequestContext& ctx) {
  }
  
  void IGeneralService::GetCurrentIpAddress(HLERequestContext& ctx) {
 +    if (Account::UsclNativeIdentityEnabled(system.GetApplicationProcessProgramID())) {
 +        IPC::ResponseBuilder rb{ctx, 3};
 +        rb.Push(ResultSuccess);
-+        rb.PushRaw(Network::IPv4Address{127, 0, 0, 1});
++        // A per-console loopback address (USCL_MK8_NATIVE_LOCAL_ADDRESS, e.g. 127.0.0.12) lets two local
++        // players look like separate machines; the socket layer binds to the same address.
++        Network::IPv4Address address{127, 0, 0, 1};
++        if (const char* value = std::getenv("USCL_MK8_NATIVE_LOCAL_ADDRESS")) {
++            unsigned a, b, c, d;
++            if (std::sscanf(value, "%u.%u.%u.%u", &a, &b, &c, &d) == 4 && a == 127 && b < 256 && c < 256 && d < 256) {
++                address = {127, static_cast<u8>(b), static_cast<u8>(c), static_cast<u8>(d)};
++            }
++        }
++        rb.PushRaw(address);
 +        return;
 +    }
      LOG_WARNING(Service_NIFM, "(STUBBED) called");

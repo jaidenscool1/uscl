@@ -212,3 +212,18 @@ Windows notes: two Eden instances loading pipeline caches at once crashed one
 with 0xc0000005, so the launcher starts them 8 s apart. Each instance needs its
 own portable `user` folder, and its saved absolute paths are rewritten per
 player.
+
+### Progress 2026-11-11 (later): NAT traversal succeeds, connection request fails
+
+Driven end to end by script (`switch-native-test.ps1 -Pad`, DSU pads per player). Fixes that got here:
+the Pia relay host `g2b309e01-%.p.srv.nintendo.net` routed to loopback (0005); each console gets its own
+loopback address, `USCL_MK8_NATIVE_LOCAL_ADDRESS=127.0.0.1x` (0006 NIFM, 0010 socket binding), and the
+adapter advertises the client's real source address, so Pia no longer treats both players as behind one NAT;
+reserved Windows port ranges now reach the game as EADDRINUSE (0011) instead of a silent success; the
+adapter answers `ReplaceURL` (11/7), relays `RequestProbeInitiationExt` (3/3) as `InitiateProbe` (3/2) to
+the host, and accepts traversal reports (3/4, 3/7).
+
+Result: the joiner reports `ReportNATTraversalResult` ok, resolves and tries the host address, then fails
+immediately in `ConnectStationJob::SendConnectionRequest` (main `0x9a27a4`): either the virtual check at
+vtable+0x40 or the send helper `0x9a2908` (station lookup `0x9b2dfc`, packet build `0x9b170c`/`0x9b1954`)
+returns failure. That is the next thing to trace.

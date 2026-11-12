@@ -129,6 +129,7 @@ class Authority:
         self.playing_sessions = {}
         self.nat_properties = {}
         self.sessions = {}
+        self.addresses = {}  # pid -> source address of its secure connection
         self.nat = None  # NatGroup, when the adapter serves NAT checks
         self.p2p_ports = {}  # pid -> game peer-to-peer port seen by the NAT responder  # pid -> adapter Session, for notifications to other players
 
@@ -176,7 +177,40 @@ class Authority:
         request.finish()
         return pid, connection, buffer(struct.pack("<I", (check + 1) & 0xffffffff))
 
-    def register(self, pid, data):
+    @staticmethod
+    def parse_station(url):
+        scheme, separator, content = url.partition(":/")
+        if scheme not in ("prudp", "prudps") or not separator or len(url) > 1024:
+            raise ValueError("station_scheme")
+        fields = {}
+        for part in content.split(";"):
+            key, separator, value = part.partition("=")
+            if not separator or key in fields:
+                raise ValueError("station_fields")
+            fields[key] = value
+        port = fields.get("port", "")
+        if not port.isascii() or not port.isdigit() or not 0 < int(port) <= 65535:
+            raise ValueError("station_port")
+        numeric = {}
+        for name in ("port", "stream", "sid", "CID", "natf", "natm", "upnp", "pmp", "Pl", "Tpt"):
+            if name in fields:
+                value = fields[name]
+                if not value.isascii() or not value.isdigit() or int(value) >= 2 ** 64:
+                    raise ValueError("station_fields")
+                numeric[name] = int(value)
+        return scheme, numeric
+
+    def public_station(self, pid, connection, scheme, numeric):
+        address = self.addresses.get(pid, "127.0.0.1")
+        # Local-only development route: never advertise a peer-supplied address. Each player gets its own
+        # loopback "public" address: Pia treats two stations with one public IP as behind the same router and
+        # then needs private addresses, which local players don't have. Games bind 0.0.0.0, so all still arrive.
+        if address == "127.0.0.1":  # client didn't get its own loopback address (USCL_MK8_NATIVE_LOCAL_ADDRESS)
+            address = f"127.0.0.{10 + connection % 240}"
+        fields = {"address": address, **numeric, "type": 2, "PID": pid, "RVCID": connection}
+        return scheme + ":/" + ";".join(f"{name}={value}" for name, value in fields.items())
+
+    def register(self, pid, data, peer="127.0.0.1"):
         if pid not in self.accounts:
             raise PermissionError("private_identity_required")
         reader = Reader(data)
@@ -185,35 +219,37 @@ class Authority:
             raise ValueError("station_count")
         urls = [reader.string() for _ in range(count)]
         reader.finish()
-        parsed = []
-        for url in urls:
-            scheme, separator, content = url.partition(":/")
-            if scheme not in ("prudp", "prudps") or not separator or len(url) > 1024:
-                raise ValueError("station_scheme")
-            fields = {}
-            for part in content.split(";"):
-                key, separator, value = part.partition("=")
-                if not separator or key in fields:
-                    raise ValueError("station_fields")
-                fields[key] = value
-            port = fields.get("port", "")
-            if not port.isascii() or not port.isdigit() or not 0 < int(port) <= 65535:
-                raise ValueError("station_port")
-            numeric = {}
-            for name in ("port", "stream", "sid", "CID", "natf", "natm", "upnp", "pmp", "Pl", "Tpt"):
-                if name in fields:
-                    value = fields[name]
-                    if not value.isascii() or not value.isdigit() or int(value) >= 2 ** 64:
-                        raise ValueError("station_fields")
-                    numeric[name] = int(value)
-            parsed.append((scheme, numeric))
+        parsed = [self.parse_station(url) for url in urls]
+        # A real server advertises the address it sees; here that is the client's loopback source address.
+        if not peer.startswith("127."):
+            raise PermissionError("loopback_only")
+        self.addresses[pid] = peer
         connection = self.next_connection
         self.next_connection += 1
-        # Local-only development route: never advertise a peer-supplied address.
-        fields = {"address": "127.0.0.1", **parsed[0][1], "type": 2, "PID": pid, "RVCID": connection}
-        public = parsed[0][0] + ":/" + ";".join(f"{name}={value}" for name, value in fields.items())
+        public = self.public_station(pid, connection, *parsed[0])
         self.registrations[pid] = (connection, public)
         return struct.pack("<II", 0x10001, connection) + string(public)
+
+    def replace_url(self, pid, data):
+        """SecureConnection::ReplaceURL (11/7): the client's station changed (e.g. its real game port)."""
+        reader = Reader(data)
+        reader.string()  # old URL; the registration is ours either way
+        scheme, numeric = self.parse_station(reader.string())
+        reader.finish()
+        if pid not in self.registrations:
+            raise PermissionError("private_station_required")
+        connection = self.registrations[pid][0]
+        self.registrations[pid] = (connection, self.public_station(pid, connection, scheme, numeric))
+        return numeric.get("port")
+
+    def station_owner(self, url):
+        """pid whose registration has the RVCID named in url, or None."""
+        fields = dict(part.partition("=")[::2] for part in url.partition(":/")[2].split(";"))
+        rvcid = fields.get("RVCID", "")
+        for pid, (connection, _) in self.registrations.items():
+            if rvcid.isdigit() and int(rvcid) == connection:
+                return pid
+        return None
 
     def upload_common(self, pid, data):
         reader = Reader(data)
