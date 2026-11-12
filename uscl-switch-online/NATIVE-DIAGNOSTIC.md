@@ -227,3 +227,26 @@ Result: the joiner reports `ReportNATTraversalResult` ok, resolves and tries the
 immediately in `ConnectStationJob::SendConnectionRequest` (main `0x9a27a4`): either the virtual check at
 vtable+0x40 or the send helper `0x9a2908` (station lookup `0x9b2dfc`, packet build `0x9b170c`/`0x9b1954`)
 returns failure. That is the next thing to trace.
+
+### Native join works on Windows (2026-11-12)
+
+Two local Eden instances create, join, leave and rejoin a native Online Play private room. Three adapter
+fixes got there:
+
+- **Join notifications for existing members.** The failing check before `SendConnectionRequest` is
+  InetConnectStationJob vtable+0x40 (main `0x92c250`). It asks the Pia network object (vtable+0x60, main
+  `0x94511c`) whether a participation notification (3001) arrived for this gathering with the host's PID as
+  participant. That table is filled only by the NEX notification handler (main `0x945db4`), keyed by
+  gathering ID and participant PID. The adapter only announced the newcomer, so the joiner never learned
+  the host and failed without sending anything. A joiner now also gets one 3001 per existing member,
+  owner first.
+- **NAT-check server survives closed game ports.** On Windows a UDP reply to a closed port resets the
+  socket and asyncio's proactor stops reading it, so every room after the first failed its NAT check.
+  `nat.py` turns `SIO_UDP_CONNRESET` off (through `WSAIoctl`; Python's `socket.ioctl` rejects that code),
+  like patch 0009 does for Eden.
+- **Station port follows the latest NAT check.** Each session opens a new game socket and NAT-checks
+  again, but may skip `ReportNATProperties` (3/5), so station URLs kept the first session's port and
+  later traversals failed. The adapter now uses the latest NAT-check source port from the console's own
+  loopback address.
+
+Races still end when a player idles: Mario Kart kicks AFK players quickly.

@@ -304,14 +304,7 @@ class NativeRooms:
         registration = self.authority.registrations.get(host)
         urls = [registration[1]] if registration else []
         if urls:
-            # Switch clients register placeholders; fill in what their NAT checks and report showed.
-            fields = {}
-            if host in self.authority.p2p_ports:
-                fields["port"] = self.authority.p2p_ports[host]
-            if host in self.authority.nat_properties:
-                fields["natm"], fields["natf"] = self.authority.nat_properties[host][:2]
-            for name, value in fields.items():
-                urls = [re.sub(rf"(?<=[:;]){name}=\d+", f"{name}={value}", urls[0], count=1)]
+            urls = [self.authority.observed_station(host, urls[0])]
         return struct.pack("<I", len(urls)) + b"".join(string(url) for url in urls)
 
     def end_participation(self, pid, data):

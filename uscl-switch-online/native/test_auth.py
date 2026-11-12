@@ -74,6 +74,16 @@ class AuthTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             authority.competition_info(query + b"trailing")
 
+    def test_station_port_follows_latest_nat_check_from_that_console(self):
+        from nat import NatGroup
+        authority = Authority()
+        authority.nat = NatGroup(lambda *a, **k: None)
+        authority.addresses[7] = "127.0.0.11"
+        authority.p2p_ports[7] = 60102  # first session
+        authority.nat.ports_by_address.update({"127.0.0.11": 57283, "127.0.0.12": 52945})
+        url = authority.observed_station(7, "prudp:/address=127.0.0.1;port=1;PID=7;natm=0")
+        self.assertIn("address=127.0.0.11;port=57283;", url)
+
     def test_registration_uses_authenticated_identity_and_loopback(self):
         authority = Authority([(123, "a" * 64)])
         request = struct.pack("<I", 1) + string("prudps:/address=example.invalid;port=30001;PID=999;CID=999")

@@ -342,6 +342,10 @@ class Session:
                 room = rooms.rooms[gid]
                 for member in room.members:
                     self.notify(member, state.pid, gid, state.pid, room.session.count)
+                # Pia only connects to stations it has a 3001 for (key: gid + participant PID), so tell
+                # the joiner about everyone already in the room, owner first.
+                for member in sorted(room.members - {state.pid}, key=lambda pid: pid != room.session.owner):
+                    self.notify(state.pid, member, gid, member, room.session.count)
                 event("native_room_joined", members=len(room.members))
                 return rmc_success(protocol, call, method, result)
             if rooms and protocol == 21 and method == 41:
@@ -372,12 +376,13 @@ class Session:
                 if count > 16:
                     raise ValueError("nex_bounds")
                 targets = [reader.string() for _ in range(count)]
-                probe = reader.string()
+                probe = self.authority.observed_station(state.pid, reader.string())
                 reader.finish()
                 for target in targets:
                     owner = self.authority.station_owner(target)
                     sent = owner is not None and self.request(owner, 3, 2, string(probe))
-                    event("nat_probe_initiation", delivered=bool(sent))
+                    # Local test addresses only (loopback); no credentials in station URLs.
+                    event("nat_probe_initiation", delivered=bool(sent), target=target, probe=probe)
                 return rmc_success(protocol, call, method, b"")
             if protocol == 3 and method in (4, 7):
                 # ReportNATTraversalResult(Detail): cid, result, [detail, rtt]. Nothing to store.
@@ -392,9 +397,15 @@ class Session:
                 event("p2p_port", port=self.authority.p2p_ports.get(state.pid))
                 return rmc_success(protocol, call, method, result)
             if protocol == 3 and method == 6 and len(data) == offset + 8:
-                # GetRelaySignatureKey: advertise no relay so the game proceeds on its
-                # direct mesh. Layout follows the NEX reference server.
-                event("private_relay_signature_key")
+                # GetRelaySignatureKey. The room owner needs a successful "no relay" answer or its NAT
+                # traversal never answers InitiateProbe. A joiner given that answer builds a relay object
+                # whose check then rejects the direct connection, so joiners get an error and skip relay.
+                rooms = getattr(self.authority, "rooms", None)
+                joining = rooms is not None and any(state.pid in room.members and room.session.owner != state.pid
+                                                    for room in rooms.rooms.values())
+                event("private_relay_signature_key", relay=False, joining=joining)
+                if joining:
+                    return rmc_error(protocol, call)
                 result = (struct.pack("<I", 0) + struct.pack("<Q", datetime_wire()) + string("") +
                           struct.pack("<H", 0) + struct.pack("<I", 0) + struct.pack("<I", 0))
                 return rmc_success(protocol, call, method, result)

@@ -6,6 +6,7 @@ NEX-Common-Types and Kerberos-Authentication). Credentials belong to USCL only.
 from datetime import datetime, timezone
 import hashlib
 import hmac
+import re
 import secrets
 import struct
 import time
@@ -241,6 +242,25 @@ class Authority:
         connection = self.registrations[pid][0]
         self.registrations[pid] = (connection, self.public_station(pid, connection, scheme, numeric))
         return numeric.get("port")
+
+    def observed_station(self, pid, url):
+        """Switch clients advertise placeholders (port=1); fill in what the server saw for pid:
+        source address, NAT-check source port and reported NAT mapping/filtering."""
+        fields = {}
+        if pid in self.addresses and self.addresses[pid] != "127.0.0.1":
+            fields["address"] = self.addresses[pid]
+        if pid in self.p2p_ports:
+            fields["port"] = self.p2p_ports[pid]
+        # A new session opens a new game socket and NAT-checks again but may skip ReportNATProperties,
+        # so the latest NAT check from this console's own address wins.
+        latest = self.nat.ports_by_address.get(self.addresses.get(pid)) if self.nat is not None else None
+        if latest and self.addresses.get(pid) != "127.0.0.1":
+            fields["port"] = latest
+        if pid in self.nat_properties:
+            fields["natm"], fields["natf"] = self.nat_properties[pid][:2]
+        for name, value in fields.items():
+            url = re.sub(rf"(?<=[:/;]){name}=[^;]*", f"{name}={value}", url, count=1)
+        return url
 
     def station_owner(self, url):
         """pid whose registration has the RVCID named in url, or None."""

@@ -5,8 +5,24 @@ Replies use the actual source address/port observed on our local test network.
 """
 import asyncio
 import ipaddress
+import socket
 import struct
+import sys
 import time
+
+
+def udp_connreset_off(sock):
+    """Windows: a reply to a closed game port resets the UDP socket and asyncio stops reading it."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    ws2 = ctypes.WinDLL("ws2_32")
+    ws2.WSAIoctl.argtypes = [ctypes.c_size_t, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p,
+                             ctypes.c_ulong, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    off, returned = ctypes.c_int(0), ctypes.c_ulong()
+    # SIO_UDP_CONNRESET = _WSAIOW(IOC_VENDOR, 12); Python's socket.ioctl does not accept it.
+    if ws2.WSAIoctl(sock.fileno(), 0x9800000C, ctypes.byref(off), 4, None, 0, ctypes.byref(returned), None, None):
+        raise OSError(ws2.WSAGetLastError(), "SIO_UDP_CONNRESET")
 
 
 class NatEndpoint(asyncio.DatagramProtocol):
@@ -37,6 +53,7 @@ class NatEndpoint(asyncio.DatagramProtocol):
             target.transport.sendto(response, address)
             # The game's peer-to-peer socket sends these checks; its port is what other players must dial.
             self.group.observed_port = address[1]
+            self.group.ports_by_address[address[0]] = address[1]
             self.group.report("nat_check", message_type=kind, alternate_address=kind == 2, alternate_port=kind in (2, 3, 102), source_port=address[1])
 
 
@@ -46,6 +63,7 @@ class NatGroup:
         self.hosts, self.ports = hosts, ports
         self.endpoints = {}
         self.observed_port = None
+        self.ports_by_address = {}  # console loopback address -> latest NAT-check source port
         self.tokens, self.last = 128.0, time.monotonic()
 
     def admit(self):
@@ -63,7 +81,10 @@ class NatGroup:
             selected_ports = []
             for index, host in enumerate(self.hosts):
                 for port in self.ports:
-                    _, endpoint = await loop.create_datagram_endpoint(lambda h=host, p=port: NatEndpoint(self, h, p), local_addr=(host, port))
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    udp_connreset_off(sock)
+                    sock.bind((host, port))
+                    _, endpoint = await loop.create_datagram_endpoint(lambda h=host, p=port: NatEndpoint(self, h, p), sock=sock)
                     actual_port = endpoint.transport.get_extra_info("sockname")[1]
                     endpoint.port = actual_port
                     self.endpoints[(host, actual_port)] = endpoint
