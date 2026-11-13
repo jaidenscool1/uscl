@@ -26,7 +26,7 @@ namespace PadConfig
 	QString cemuProfile(const Pad& pad, bool gamepad); // gamepad: Wii U GamePad, else Pro Controller
 	QString azaharButton(int button, bool nintendo);   // 3DS button index (Settings::NativeButton) -> param
 
-	bool writeDolphin(const QList<Pad>& pads);
+	bool writeDolphin(const QList<Pad>& pads, const QString& configDir); // the Dolphin's Config folder
 	bool writeAzahar(const QList<Pad>& pads);
 	bool writeCemu(const QList<Pad>& pads);
 }

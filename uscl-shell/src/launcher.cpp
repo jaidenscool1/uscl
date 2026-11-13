@@ -128,14 +128,51 @@ bool Launcher::start(const QStringList& args, const QString& title, bool online,
 // Wii and 3DS games don't run in RPCS3 -- they launch in Dolphin / Azahar (flatpaks). A crash or quit comes back
 // here the same way an RPCS3 game does. 3DS: the frontend needs software GL on this NVIDIA/Wayland setup
 // (LIBGL_ALWAYS_SOFTWARE=1); the game still renders on Vulkan. See uscl-3ds/ and uscl-dolphin/.
-bool Launcher::startEmu(const QString& path, const QString& title, const QString& console)
+// Our Dolphin (uscl-dolphin patches: NetPlay host/join without its dialogs), else the Flathub app (offline only)
+QString Launcher::ownDolphin()
+{
+	const QString path = qEnvironmentVariableIsSet("USCL_DOLPHIN") ? qEnvironmentVariable("USCL_DOLPHIN")
+	                                                               : QCoreApplication::applicationDirPath() + "/dolphin-emu";
+	return QFileInfo(path).isExecutable() ? path : QString();
+}
+
+// Where the Dolphin that runs keeps its settings: our own build gets a USCL profile (-u), the Flathub app its own
+QString Launcher::dolphinConfigDir()
+{
+	return ownDolphin().isEmpty() ? QDir::homePath() + "/.var/app/org.DolphinEmu.dolphin-emu/config/dolphin-emu/"
+	                              : GameModel::rpcs3ConfigDir() + "uscl/dolphin/Config/";
+}
+
+bool Launcher::startEmu(const QString& path, const QString& title, const QString& console, const QString& netplay,
+                        const QString& nickname, int players)
 {
 	if (running())
 		return false;
 	QString program = "flatpak";
 	QStringList args;
 	QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-	if (console == "Wii")
+	if (console == "Wii" && !ownDolphin().isEmpty())
+	{
+		program = ownDolphin();
+		args = {"-u", QDir(dolphinConfigDir()).absoluteFilePath("..")};
+		if (netplay.isEmpty())
+			args << "-b" << "-e" << path;
+		else
+		{
+			// NetPlay over the Steam tunnel: the host's server on 2626, a member's bridge serves 127.0.0.1:2626
+			// (uscl-bridge preset "dolphin"). The game is found through the game list, so its folder goes there.
+			for (const QString& c : {"Dolphin.NetPlay.TraversalChoice=direct", "Dolphin.NetPlay.HostPort=2626",
+			                         "Dolphin.NetPlay.Address=127.0.0.1", "Dolphin.NetPlay.ConnectPort=2626",
+			                         "Dolphin.NetPlay.UseUPNP=False", "Dolphin.General.ISOPaths=1"})
+				args << "-C" << c;
+			args << "-C" << "Dolphin.NetPlay.Nickname=" + nickname << "-C" << "Dolphin.General.ISOPath0=" + QFileInfo(path).absolutePath();
+			env.insert("USCL_NETPLAY", netplay);
+			env.insert("USCL_NETPLAY_GAME", path);
+			// shortcut: the host starts once this many are in (2 at least); a later joiner waits for the next game
+			env.insert("USCL_NETPLAY_PLAYERS", QString::number(std::max(2, players)));
+		}
+	}
+	else if (console == "Wii")
 		args = {"run", "org.DolphinEmu.dolphin-emu", "-b", "-e", path};
 	else if (console == "3DS")
 		args = {"run", "--env=LIBGL_ALWAYS_SOFTWARE=1", "org.azahar_emu.Azahar", path};
@@ -315,7 +352,7 @@ bool Launcher::prepareInput(const QStringList& pads, const QString& console)
 	if (console == "Switch")
 		return m_auto_pads = true; // Eden maps them itself, with its own per-controller layouts
 	if (console == "Wii" || console == "GameCube")
-		return PadConfig::writeDolphin(PadConfig::connected());
+		return PadConfig::writeDolphin(PadConfig::connected(), dolphinConfigDir());
 	if (console == "3DS")
 		return PadConfig::writeAzahar(PadConfig::connected());
 	if (console == "WiiU")
