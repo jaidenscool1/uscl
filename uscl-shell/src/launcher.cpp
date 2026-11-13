@@ -110,6 +110,47 @@ bool Launcher::start(const QStringList& args, const QString& title, bool online,
 	return true;
 }
 
+// Wii and 3DS games don't run in RPCS3 -- they launch in Dolphin / Azahar (flatpaks). A crash or quit comes back
+// here the same way an RPCS3 game does. 3DS: the frontend needs software GL on this NVIDIA/Wayland setup
+// (LIBGL_ALWAYS_SOFTWARE=1); the game still renders on Vulkan. See uscl-3ds/ and uscl-dolphin/.
+bool Launcher::startEmu(const QString& path, const QString& title, const QString& console)
+{
+	if (running())
+		return false;
+	QString program = "flatpak";
+	QStringList args;
+	QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+	if (console == "Wii")
+		args = {"run", "org.DolphinEmu.dolphin-emu", "-b", "-e", path};
+	else if (console == "3DS")
+		args = {"run", "--env=LIBGL_ALWAYS_SOFTWARE=1", "org.azahar_emu.Azahar", path};
+	else if (console == "WiiU")
+		args = {"run", "info.cemu.Cemu", "-f", "-g", path};   // Cemu: fullscreen, load game
+	else if (console == "Xbox360")
+	{
+		// Xenia is a Windows build (no flatpak); run it under Wine. Experimental on Linux.
+		const QString xenia = qEnvironmentVariableIsSet("USCL_XENIA")
+			? qEnvironmentVariable("USCL_XENIA")
+			: QDir::homePath() + "/.local/share/uscl/xenia/xenia.exe";
+		program = "wine";
+		args = {xenia, "--fullscreen", path};
+	}
+	else
+		return false;
+	env.remove("USCL_ONLINE");
+	env.insert("USCL_SHELL", "1");
+	m_process.setWorkingDirectory({});
+	m_process.setProcessEnvironment(env);
+	m_tail.clear();
+	m_title = title;
+	m_stopping = false;
+	m_shown = true;
+	m_process.start(program, args);
+	emit runningChanged();
+	emit gameShownChanged();
+	return true;
+}
+
 bool Launcher::startGame(const QString& path, const QString& title, bool online)
 {
 	if (QFileInfo::exists(path + "/sce_sys/param.sfo"))

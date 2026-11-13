@@ -7,6 +7,9 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QStandardPaths>
 #include <QStorageInfo>
 #include <QThread>
@@ -304,11 +307,39 @@ void GameModel::reload()
 			m_games.push_back(g);
 	}
 
+	loadEmuGames();
+
 	std::sort(m_games.begin(), m_games.end(), [](const Game& a, const Game& b) {
 		return QString::localeAwareCompare(a.title, b.title) < 0;
 	});
 	endResetModel();
 	emit countChanged();
+}
+
+// Wii/3DS games aren't in RPCS3's games.yml; USCL keeps them in emu_games.json next to games.yml
+// (written by the folder scan or by hand): [{title, console:"Wii"|"3DS", path, serial, version?, icon?}].
+// Purely additive -- if the file is missing or malformed, nothing changes.
+void GameModel::loadEmuGames()
+{
+	QFile f(rpcs3ConfigDir() + "emu_games.json");
+	if (!f.open(QIODevice::ReadOnly))
+		return;
+	const QJsonArray arr = QJsonDocument::fromJson(f.readAll()).array();
+	for (const QJsonValue& v : arr)
+	{
+		const QJsonObject o = v.toObject();
+		Game g;
+		g.title = o.value("title").toString();
+		g.console = o.value("console").toString();
+		g.path = o.value("path").toString();
+		g.serial = o.value("serial").toString();
+		g.icon = o.value("icon").toString();   // usually empty -> the home screen uses its default game icon
+		g.version = o.value("version").toString();
+		if (!g.title.isEmpty() && !g.path.isEmpty()
+		    && (g.console == "Wii" || g.console == "WiiU" || g.console == "3DS" || g.console == "Xbox360")
+		    && QFileInfo::exists(g.path))
+			m_games.push_back(g);
+	}
 }
 
 int GameModel::rowCount(const QModelIndex& parent) const

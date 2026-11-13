@@ -1,0 +1,331 @@
+From 3e1a2dbbd336b949fc5cced89bc6b75dbc447775 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 10:31:39 -0700
+Subject: [PATCH 08/14] blaze: decode heat2 requests (Madden/NHL), not just
+ encode
+
+Blaze 3.x clients send heat2-encoded requests, but only the heat2 writer
+existed -- every Madden request fell back to an empty model, so e.g.
+fetchClientConfig's CFID always arrived blank (logs: "heat2 request not
+parsed ... using default model", CFID= -> 0 fields, x8).
+
+Heat2Reader is the exact structural inverse of Heat2Writer (little-endian
+varint, [3-byte tag][1-byte type], struct 0x00 terminator, type codes
+0=int/1=string/2=blob/3=struct/4=list/5=map/6=union). CreateModelFromRequest
+picks the codec from the connection's heat2 flag; heat1 clients (NBA Jam,
+Skate 3) are unchanged.
+
+Tests/Heat2Test: 22 round-trip checks -- varints across every byte-length
+boundary, all seven value types, and reflection model binding incl.
+bool-from-int. All pass.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ Skate Custom Server/Blaze/Tdf/BlazeMessage.cs |  16 ++-
+ Skate Custom Server/Blaze/Tdf/Heat2Reader.cs  | 126 ++++++++++++++++++
+ Tests/Heat2Test/Heat2Test.csproj              |  12 ++
+ Tests/Heat2Test/Program.cs                    | 108 +++++++++++++++
+ 4 files changed, 255 insertions(+), 7 deletions(-)
+ create mode 100644 Skate Custom Server/Blaze/Tdf/Heat2Reader.cs
+ create mode 100644 Tests/Heat2Test/Heat2Test.csproj
+ create mode 100644 Tests/Heat2Test/Program.cs
+
+diff --git a/Skate Custom Server/Blaze/Tdf/BlazeMessage.cs b/Skate Custom Server/Blaze/Tdf/BlazeMessage.cs
+index 81367c4..1d8b400 100644
+--- a/Skate Custom Server/Blaze/Tdf/BlazeMessage.cs	
++++ b/Skate Custom Server/Blaze/Tdf/BlazeMessage.cs	
+@@ -440,18 +440,20 @@ namespace Blaze
+         {
+             try
+             {
+-                var message = new BlazeMessage(packetBytes);
++                // Blaze 3.x clients (Madden/NHL) send heat2-encoded requests; heat2 connections are flagged on the
++                // dispatch AsyncLocal. Decode with the matching codec so request fields (e.g. fetchClientConfig CFID)
++                // actually arrive. Heat1 clients (NBA Jam/Skate 3) keep the original parser.
+                 var temp = new TdfStruct();
+-                temp.Fields.AddRange(message.Fields);
++                temp.Fields.AddRange(Blaze.Tdf.Heat2Writer.Mode.Value
++                    ? Blaze.Tdf.Heat2Reader.ReadFields(packetBytes)
++                    : new BlazeMessage(packetBytes).Fields);
+                 return (T)TdfReflection.TdfStructToModel(temp, typeof(T));
+             }
+             catch (Exception e)
+             {
+-                // USCL: Blaze 3.x clients (Madden/NHL) send heat2-encoded requests the 2.x (heat1) parser can't read.
+-                // Rather than throw (which drops the connection and hangs the game mid-handshake), degrade to a default
+-                // model so the handler still sends its response; the client tolerates our heat1 responses for the early
+-                // handshake commands. Heat1 clients (NBA Jam/Skate 3) parse cleanly and never hit this.
+-                Servers.ServerLogger.Log($"[Blaze] heat2 request not parsed as {typeof(T).Name} ({e.GetType().Name}); using default model");
++                // Last-resort: a request we still can't read degrades to a default model rather than throwing (which
++                // would drop the connection and hang the game mid-handshake); the handler then sends an empty response.
++                Servers.ServerLogger.Log($"[Blaze] request not parsed as {typeof(T).Name} ({e.GetType().Name}); using default model");
+                 return new T();
+             }
+         }
+diff --git a/Skate Custom Server/Blaze/Tdf/Heat2Reader.cs b/Skate Custom Server/Blaze/Tdf/Heat2Reader.cs
+new file mode 100644
+index 0000000..045861d
+--- /dev/null
++++ b/Skate Custom Server/Blaze/Tdf/Heat2Reader.cs	
+@@ -0,0 +1,126 @@
++using System;
++using System.Collections.Generic;
++using System.Text;
++using Blaze.Tdf.Types;
++
++namespace Blaze.Tdf
++{
++    // Inverse of Heat2Writer: decode a Blaze 3.x "heat2" request body into the same TdfField model the heat1
++    // parser (BlazeMessage) produces, so TdfReflection.TdfStructToModel maps it to a request model unchanged.
++    // Before this existed, heat2 clients (Madden 25 = BlazeSDK 13.3, NHL 15) fell back to empty models, so e.g.
++    // fetchClientConfig's CFID always arrived blank. heat2 type codes: 0=int,1=string,2=blob,3=struct,4=list,5=map,6=union.
++    public static class Heat2Reader
++    {
++        // packet is the full framed message: 12-byte header then the heat2 body of length u16-BE at offset 0.
++        public static List<TdfField> ReadFields(byte[] packet)
++        {
++            int bodyLen = (packet[0] << 8) | packet[1];
++            int i = 0x0C, end = Math.Min(0x0C + bodyLen, packet.Length);
++            var fields = new List<TdfField>();
++            while (i < end && packet[i] != 0x00)   // top level has no terminator; a stray 0 just ends the body
++                fields.Add(ReadField(packet, ref i));
++            return fields;
++        }
++
++        static TdfField ReadField(byte[] p, ref int i)
++        {
++            string tag = TdfUtils.DecodeTdfTag(new[] { p[i], p[i + 1], p[i + 2] });
++            i += 3;
++            byte type = p[i++];
++            var (tdfType, value) = ReadValue(p, ref i, type);
++            return new TdfField(tag, tdfType, value);
++        }
++
++        static (TdfType, object) ReadValue(byte[] p, ref int i, byte type) => type switch
++        {
++            Heat2Writer.INT => (TdfType.Int64, (object)(long)VarInt(p, ref i)),
++            Heat2Writer.STRING => (TdfType.String, ReadString(p, ref i)),
++            Heat2Writer.BLOB => (TdfType.Blob, ReadBlob(p, ref i)),
++            Heat2Writer.STRUCT => (TdfType.Struct, ReadStruct(p, ref i)),
++            Heat2Writer.LIST => (TdfType.Array, ReadList(p, ref i)),
++            Heat2Writer.MAP => (TdfType.Map, ReadMap(p, ref i)),
++            Heat2Writer.UNION => (TdfType.Union, ReadUnion(p, ref i)),
++            _ => throw new NotSupportedException($"heat2 type {type}"),
++        };
++
++        // little-endian varint, exact inverse of Heat2Writer.VarInt (first byte carries 6 value bits, rest carry 7)
++        public static ulong VarInt(byte[] p, ref int i)
++        {
++            byte b = p[i++];
++            if ((b & 0x80) == 0) return b;
++            ulong v = (ulong)(b & 0x3F);
++            int shift = 6;
++            do { b = p[i++]; v |= (ulong)(b & 0x7F) << shift; shift += 7; } while ((b & 0x80) != 0);
++            return v;
++        }
++
++        static string ReadString(byte[] p, ref int i)
++        {
++            int len = (int)VarInt(p, ref i);   // length includes the NUL terminator
++            string s = Encoding.Latin1.GetString(p, i, Math.Max(0, len - 1));
++            i += len;
++            return s;
++        }
++
++        static byte[] ReadBlob(byte[] p, ref int i)
++        {
++            int len = (int)VarInt(p, ref i);
++            var b = new byte[len];
++            Buffer.BlockCopy(p, i, b, 0, len);
++            i += len;
++            return b;
++        }
++
++        static TdfStruct ReadStruct(byte[] p, ref int i)
++        {
++            var s = new TdfStruct();
++            while (p[i] != 0x00) s.Fields.Add(ReadField(p, ref i));
++            i++; // struct terminator
++            return s;
++        }
++
++        static TdfArray ReadList(byte[] p, ref int i)
++        {
++            byte elemType = p[i++];
++            int count = (int)VarInt(p, ref i);
++            var a = new TdfArray { ArrayType = Heat2ToTdf(elemType) };
++            for (int n = 0; n < count; n++)
++                a.Items.Add(ReadValue(p, ref i, elemType).Item2);
++            return a;
++        }
++
++        static TdfDictionary ReadMap(byte[] p, ref int i)
++        {
++            byte kt = p[i++], vt = p[i++];
++            int count = (int)VarInt(p, ref i);
++            var d = new TdfDictionary(Heat2ToTdf(kt), Heat2ToTdf(vt)) { Map = new Dictionary<object, object>() };
++            for (int n = 0; n < count; n++)
++            {
++                object k = ReadValue(p, ref i, kt).Item2;
++                object v = ReadValue(p, ref i, vt).Item2;
++                d.Map[k] = v;
++            }
++            return d;
++        }
++
++        static TdfUnion ReadUnion(byte[] p, ref int i)
++        {
++            byte selector = p[i++];
++            var u = new TdfUnion { SelectedUnionValue = selector };
++            if (selector != 0x7F)
++                u.Field = ReadField(p, ref i);   // active member, tagged VALU
++            return u;
++        }
++
++        static TdfType Heat2ToTdf(byte t) => t switch
++        {
++            Heat2Writer.STRING => TdfType.String,
++            Heat2Writer.BLOB => TdfType.Blob,
++            Heat2Writer.STRUCT => TdfType.Struct,
++            Heat2Writer.LIST => TdfType.Array,
++            Heat2Writer.MAP => TdfType.Map,
++            Heat2Writer.UNION => TdfType.Union,
++            _ => TdfType.Int64,
++        };
++    }
++}
+diff --git a/Tests/Heat2Test/Heat2Test.csproj b/Tests/Heat2Test/Heat2Test.csproj
+new file mode 100644
+index 0000000..4bdc295
+--- /dev/null
++++ b/Tests/Heat2Test/Heat2Test.csproj
+@@ -0,0 +1,12 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup>
++    <OutputType>Exe</OutputType>
++    <TargetFramework>net8.0</TargetFramework>
++    <Nullable>disable</Nullable>
++    <ImplicitUsings>enable</ImplicitUsings>
++    <NoWarn>$(NoWarn);CS8632;MSB3277;CS0649</NoWarn>
++  </PropertyGroup>
++  <ItemGroup>
++    <ProjectReference Include="../../Skate Custom Server/Skate Custom Server.csproj" />
++  </ItemGroup>
++</Project>
+diff --git a/Tests/Heat2Test/Program.cs b/Tests/Heat2Test/Program.cs
+new file mode 100644
+index 0000000..23dacf4
+--- /dev/null
++++ b/Tests/Heat2Test/Program.cs
+@@ -0,0 +1,108 @@
++// Round-trip self-check for the heat2 request codec: encode a TdfField model with Heat2Writer, frame it like a real
++// Blaze packet, decode it with Heat2Reader, and confirm every field survives. This is the inverse pairing that lets
++// Blaze 3.x clients (Madden 25, NHL 15) have their requests actually read instead of falling back to empty models.
++using Blaze;
++using Blaze.Tdf;
++using Blaze.Tdf.Types;
++
++static class T
++{
++    static int pass, fail;
++    static void Check(bool ok, string name)
++    {
++        Console.WriteLine((ok ? "  PASS " : "  FAIL ") + name);
++        if (ok) pass++; else fail++;
++    }
++
++    // frame fields into a full heat2 packet (12-byte header + body), as the wire carries them
++    static byte[] Frame(List<TdfField> fields)
++    {
++        byte[] body = Heat2Writer.SerializeFields(fields);
++        var pkt = new byte[0x0C + body.Length];
++        pkt[0] = (byte)(body.Length >> 8); pkt[1] = (byte)body.Length;  // u16-BE body length
++        Buffer.BlockCopy(body, 0, pkt, 0x0C, body.Length);
++        return pkt;
++    }
++
++    static int Main()
++    {
++        // --- varint: exact inverse across the byte-length boundaries ---
++        foreach (ulong v in new ulong[] { 0, 1, 0x3F, 0x40, 300, 0x7F, 0x80, 16383, 16384, 1u << 20, uint.MaxValue, ulong.MaxValue })
++        {
++            var o = new List<byte>(); Heat2Writer.VarInt(o, v);
++            int i = 0; ulong got = Heat2Reader.VarInt(o.ToArray(), ref i);
++            Check(got == v && i == o.Count, $"varint {v}");
++        }
++
++        // --- a flat struct of a string + int, exactly fetchClientConfig's shape (CFID) ---
++        {
++            var fields = new List<TdfField> { new("CFID", TdfType.String, "OSDK_CORE") };
++            var back = Heat2Reader.ReadFields(Frame(fields));
++            Check(back.Count == 1 && (string)back[0].Value == "OSDK_CORE" && back[0].Tag == "CFID", "fetchClientConfig CFID string");
++        }
++
++        // --- all reader branches in one message: int, string, blob, nested struct, list, map, union ---
++        {
++            var inner = new TdfStruct();
++            inner.Add("IVAL", TdfType.Int64, 42L);
++            inner.Add("ISTR", TdfType.String, "nested");
++
++            var list = new TdfArray(TdfType.Int64);
++            list.Items.Add(1L); list.Items.Add(2L); list.Items.Add(1000000L);
++
++            var map = new TdfDictionary(TdfType.String, TdfType.Int64);
++            map.Map["a"] = 10L; map.Map["bb"] = 20000L;
++
++            var union = new TdfUnion { SelectedUnionValue = 0x00, Field = new TdfField("VALU", TdfType.String, "u") };
++
++            var fields = new List<TdfField>
++            {
++                new("BINT", TdfType.Int64, 123456L),
++                new("BSTR", TdfType.String, "hello"),
++                new("BLOB", TdfType.Blob, new byte[] { 1, 2, 3, 4, 5 }),
++                new("STRC", TdfType.Struct, inner),
++                new("LIST", TdfType.Array, list),
++                new("AMAP", TdfType.Map, map),
++                new("UNIO", TdfType.Union, union),
++            };
++            var back = Heat2Reader.ReadFields(Frame(fields));
++
++            Check(back.Count == 7, "field count");
++            Check((long)back[0].Value == 123456L, "int");
++            Check((string)back[1].Value == "hello", "string");
++            Check(((byte[])back[2].Value).Length == 5 && ((byte[])back[2].Value)[4] == 5, "blob");
++            var st = (TdfStruct)back[3].Value;
++            Check(st.Fields.Count == 2 && (long)st.Fields[0].Value == 42L && (string)st.Fields[1].Value == "nested", "nested struct");
++            var li = (TdfArray)back[4].Value;
++            Check(li.Items.Count == 3 && (long)li.Items[2] == 1000000L, "list");
++            var mp = (TdfDictionary)back[5].Value;
++            Check(mp.Map.Count == 2 && (long)mp.Map["bb"] == 20000L, "map");
++            var un = (TdfUnion)back[6].Value;
++            Check(un.SelectedUnionValue == 0x00 && (string)un.Field.Value == "u", "union");
++        }
++
++        // --- model binding: the decoded fields map onto a real request struct via reflection, bool from int ---
++        {
++            var fields = new List<TdfField>
++            {
++                new("BVAL", TdfType.Int64, 1L),
++                new("NUM", TdfType.Int64, 7L),
++                new("TXT", TdfType.String, "configname"),
++            };
++            var temp = new TdfStruct();
++            temp.Fields.AddRange(Heat2Reader.ReadFields(Frame(fields)));
++            var m = (Sample)TdfReflection.TdfStructToModel(temp, typeof(Sample));
++            Check(m.Flag && m.Num == 7 && m.Txt == "configname", "reflection model bind (bool/int/string)");
++        }
++
++        Console.WriteLine($"\nheat2 round-trip: {pass} passed, {fail} failed");
++        return fail == 0 ? 0 : 1;
++    }
++
++    class Sample
++    {
++        [Blaze.Tdf.Attributes.TdfMember("BVAL")] public bool Flag;
++        [Blaze.Tdf.Attributes.TdfMember("NUM")] public int Num;
++        [Blaze.Tdf.Attributes.TdfMember("TXT")] public string Txt;
++    }
++}
+-- 
+2.56.0
+

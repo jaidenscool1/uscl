@@ -22,6 +22,7 @@ public:
 	bool gameShown() const { return running() && m_shown; }
 
 	Q_INVOKABLE bool startGame(const QString& path, const QString& title, bool online);
+	Q_INVOKABLE bool startEmu(const QString& path, const QString& title, const QString& console); // Wii->Dolphin, 3DS->Azahar
 	Q_INVOKABLE bool openClassic();
 	Q_INVOKABLE void stop();
 	// PS button in a game (uscl-rpcs3 0008): the game keeps running, its window steps aside for the home screen

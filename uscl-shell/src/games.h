@@ -64,6 +64,7 @@ signals:
 
 private:
 	bool describe(const QString& path, Game& game) const;
+	void loadEmuGames(); // append Wii/3DS games from uscl/emu_games.json (run via Dolphin/Azahar, not RPCS3)
 
 	QVector<Game> m_games;
 	bool m_scanning = false;

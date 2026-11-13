@@ -214,6 +214,29 @@ int main(int argc, char* argv[])
 	if (app.arguments().contains("--self-test"))
 		return selfTest();
 
+	// uscl --list-games: load the real library (games.yml + emu_games.json) and print it grouped by console.
+	// A headless way to check what the home screen's console columns will show.
+	if (app.arguments().contains("--list-games"))
+	{
+		GameModel games;
+		games.reload();
+		QMap<QString, QStringList> byConsole;
+		for (int i = 0; i < games.rowCount(); i++)
+		{
+			const QVariantMap g = games.get(i);
+			byConsole[g.value("console").toString()] << g.value("title").toString();
+		}
+		for (const QString& c : {QStringLiteral("PS3"), QStringLiteral("PS4"), QStringLiteral("Wii"),
+		                         QStringLiteral("WiiU"), QStringLiteral("3DS"), QStringLiteral("Xbox360")})
+			if (byConsole.contains(c))
+			{
+				std::printf("== %s (%d) ==\n", qPrintable(c), int(byConsole[c].size()));
+				for (const QString& t : byConsole[c])
+					std::printf("   %s\n", qPrintable(t));
+			}
+		return 0;
+	}
+
 	if (app.arguments().contains("--hardware"))
 	{
 		// what Automatic resolution scale sees on this PC

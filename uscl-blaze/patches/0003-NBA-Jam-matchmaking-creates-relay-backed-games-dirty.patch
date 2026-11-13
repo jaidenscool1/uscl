@@ -1,0 +1,202 @@
+From 68102ab7e2d70a5cb07aca11d7a3f0615d0ee4fb Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 16:42:23 -0700
+Subject: [PATCH 03/14] NBA Jam: matchmaking creates relay-backed games
+ (dirtycast), atomic pick-or-create
+
+Game traffic goes through the server's UDP relay like Skate 3, so two players (incl. two
+instances on one PC) connect via 127.0.0.1 instead of failing direct peer-to-peer.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ .../Gamemanager/GameManagerUtils.cs           |   5 +-
+ .../Handlers/StartMatchmakingHandler.cs       | 136 +++++++++++-------
+ 2 files changed, 83 insertions(+), 58 deletions(-)
+
+diff --git a/Skate Custom Server/Blaze/Components/Gamemanager/GameManagerUtils.cs b/Skate Custom Server/Blaze/Components/Gamemanager/GameManagerUtils.cs
+index 5b0c393..b64eb16 100644
+--- a/Skate Custom Server/Blaze/Components/Gamemanager/GameManagerUtils.cs	
++++ b/Skate Custom Server/Blaze/Components/Gamemanager/GameManagerUtils.cs	
+@@ -193,10 +193,7 @@ namespace Blaze.Components.Gamemanager
+                 NetworkQosData = user.ExtendedData.QosData,
+                 PlayerAttributes = new Dictionary<string, string> { { "dlc_mask", "499" } },
+                 PlayerId = user.Session.BlazeId, // Generate random Blaze Id in games for name spoofs to show (not load from cache after lookupUsers request)
+-                // Empty NetworkAddress union to force relay server connection; USCL: peer-to-peer games (NBA Jam)
+-                // connect the players directly, so they get the address the player sent
+-                PlayerNetwork = game.GameData.NetworkTopology == (int)GameNetworkTopology.PEER_TO_PEER_FULL_MESH
+-                    ? user.ExtendedData.NetworkAddress : new NetworkAddress { },
++                PlayerNetwork = new NetworkAddress { }, // Empty NetworkAddress union to force relay server connection
+                 SlotId = slotId,
+                 // The slot type the client asked for. Invite joins ask for a private slot; seating them in a public
+                 // one leaves the joiner unable to find itself in the roster: it never loads (black, no loading screen).
+diff --git a/Skate Custom Server/Blaze/Components/Gamemanager/Handlers/StartMatchmakingHandler.cs b/Skate Custom Server/Blaze/Components/Gamemanager/Handlers/StartMatchmakingHandler.cs
+index 731a0e5..1a531ca 100644
+--- a/Skate Custom Server/Blaze/Components/Gamemanager/Handlers/StartMatchmakingHandler.cs	
++++ b/Skate Custom Server/Blaze/Components/Gamemanager/Handlers/StartMatchmakingHandler.cs	
+@@ -45,7 +45,7 @@ namespace Blaze.Components.Gamemanager.Handlers
+             // USCL: NBA Jam's 2.11 request has no ATTR map (its criteria sit in other tags)
+             if (request.MatchmakingAttributes == null)
+             {
+-                await PeerToPeerMatchmaking(matchmaker, request);
++                await ServerMatchmaking(matchmaker, request);
+                 return;
+             }
+             var wantedAttributes = request.MatchmakingAttributes;
+@@ -103,73 +103,101 @@ namespace Blaze.Components.Gamemanager.Handlers
+                 (ushort)GameManagerNotifications.NotifyMatchmakingFinished);
+         }
+ 
+-        // USCL: BlazeSDK 2.x peer-to-peer matchmaking (NBA Jam). The server makes the game: the first player to
+-        // search hosts it, the next one with the same size joins it. Game traffic goes player to player
+-        // (NTOP 130, full mesh) at the addresses the players sent, so no relay server.
+-        private static async Task PeerToPeerMatchmaking(User matchmaker, StartMatchmakingRequest request)
++        // USCL: BlazeSDK 2.x matchmaking (NBA Jam), which sends no ATTR map. The server makes the game: the first
++        // player to search hosts it, the next with the same size joins. Game traffic goes through the server's
++        // UDP relay (dirtycast failover topology, same as Skate 3), so it works between players behind NAT and
++        // between two instances on one PC, where direct peer-to-peer can't connect.
++        // Only one search at a time may pick-or-create, so two players searching together don't both create a game
++        // (then each waits alone). Held only around the synchronous decision, never across an await.
++        private static readonly object _matchLock = new object();
++
++        private static async Task ServerMatchmaking(User matchmaker, StartMatchmakingRequest request)
+         {
+             matchmaker.ExtendedData.NetworkAddress = request.PlayerNetwork;
+             ushort capacity = request.Criteria.Size.PlayerCapacity is > 0 and <= 8 ? request.Criteria.Size.PlayerCapacity : (ushort)2;
+ 
+-            foreach (var kv in ServerGlobals.Games)
++            // Pick an open game, or build a fully-formed new one, atomically: two simultaneous searches never each
++            // create a game (then each waits alone), and a searcher never joins a half-built one.
++            Game? existing = null;
++            Game? game2 = null;
++            ReplicatedGamePlayer? hostData = null;
++            uint gameId = 0;
++            lock (_matchLock)
+             {
+-                Game game = kv.Value;
+-                bool fits;
+-                lock (game.Lock)
++                foreach (var kv in ServerGlobals.Games)
+                 {
+-                    fits = game.GameData.NetworkTopology == (int)GameNetworkTopology.PEER_TO_PEER_FULL_MESH &&
+-                           game.GameData.GameState == (int)GameState.PRE_GAME &&
+-                           game.GameData.MaxPlayerCapacities == capacity &&
+-                           game.GameData.GameProtocolVersionString == request.GameProtocolVersionString &&
+-                           game.Players.Count < capacity;
++                    Game game = kv.Value;
++                    lock (game.Lock)
++                    {
++                        // our server-made matchmaking games (not Skate 3 challenges), still filling: match a game that
++                        // is INITIALIZING too, since the host takes a moment to advance it to PRE_GAME
++                        if (game.GameData.GameAttributes.Count == 0 && game.Players.Count > 0 &&
++                            (game.GameData.GameState == (int)GameState.PRE_GAME || game.GameData.GameState == (int)GameState.INITIALIZING) &&
++                            game.GameData.MaxPlayerCapacities == capacity &&
++                            game.GameData.GameProtocolVersionString == request.GameProtocolVersionString &&
++                            game.Players.Count < capacity)
++                        {
++                            existing = game;
++                            break;
++                        }
++                    }
+                 }
+-                if (!fits)
+-                    continue;
+ 
+-                ServerLogger.Log($"[Lobby] {matchmaker.UserIdentification.Name} matched into p2p game {game.GameData.GameId}");
+-                matchmaker.IsMatchmaking = true;
+-                await GameManagerUtils.UserJoinGame(matchmaker, game, true);
+-                return;
+-            }
++                if (existing == null)
++                {
++                    gameId = ServerGlobals.GetNextGameId();
++                    ushort relayPort = Convert.ToUInt16(17000 + gameId);
++                    int attempts = 0;
++                    while (ServerGlobals.LobbyRelayServers.Any(x => x.Value.Port == relayPort) || ServerGlobals.Games.ContainsKey(gameId))
++                    {
++                        gameId = ServerGlobals.GetNextGameId();
++                        relayPort = Convert.ToUInt16(17000 + gameId);
++                        if (++attempts > 500) break;
++                    }
+ 
+-            uint gameId = ServerGlobals.GetNextGameId();
+-            while (ServerGlobals.Games.ContainsKey(gameId))
+-                gameId = ServerGlobals.GetNextGameId();
++                    game2 = new Game();
++                    NetworkAddress relayServer = ServerUtils.ReserveLobbyRelayServer(game2, relayPort);
++                    game2.GameData = new ReplicatedGameData
++                    {
++                        AdminPlayerList = new List<uint> { 123, matchmaker.Session.BlazeId },
++                        GameAttributes = new Dictionary<string, string>(),
++                        SlotCapacities = new List<ushort> { capacity, 0 },
++                        GameId = gameId,
++                        GameName = matchmaker.UserIdentification.Name,
++                        GameSettings = request.GameSettings,
++                        GameState = (int)GameState.INITIALIZING,
++                        HostConnections = new List<NetworkAddress> { relayServer },
++                        TopologyHostSessionId = Convert.ToUInt32(matchmaker.Session.UserId),
++                        MaxPlayerCapacities = capacity,
++                        NetworkQosData = matchmaker.ExtendedData.QosData,
++                        NetworkTopology = (int)GameNetworkTopology.PEER_TO_PEER_DIRTYCAST_FAILOVER,
++                        TopologyHost = new HostInfo { PlayerId = 123, SlotId = 0 },
++                        PlatformHost = new HostInfo { PlayerId = matchmaker.Session.BlazeId, SlotId = 1 },
++                        VoipTopology = (int)VoipTopology.VOIP_PEER_TO_PEER,
++                        GameProtocolVersionString = request.GameProtocolVersionString
++                    };
++                    var hd = GameManagerUtils.CreateReplicatedGamePlayer(matchmaker, game2, true);
++                    hostData = hd;
++                    game2.Players.Add(new Player { PlayerData = hd, UserData = matchmaker });
++                    game2.HostId = matchmaker.UserIdentification.BlazeId;
++                    matchmaker.CurrentGame = game2;
++                    matchmaker.GamePlayer = game2.Players[0];
++                    ServerGlobals.Games[gameId] = game2; // fully formed before any other searcher can see it
++                    ServerLogger.Log($"[Lobby] {matchmaker.UserIdentification.Name} created game {gameId} for {capacity} (relay :{relayPort})");
++                }
++            }
+ 
+-            var host = new HostInfo { PlayerId = matchmaker.Session.BlazeId, SlotId = 0 };
+-            var game2 = new Game();
+-            game2.GameData = new ReplicatedGameData
++            if (existing != null)
+             {
+-                AdminPlayerList = new List<uint> { matchmaker.Session.BlazeId },
+-                GameAttributes = new Dictionary<string, string>(),
+-                SlotCapacities = new List<ushort> { capacity, 0 },
+-                GameId = gameId,
+-                GameName = matchmaker.UserIdentification.Name,
+-                GameSettings = request.GameSettings,
+-                GameState = (int)GameState.INITIALIZING,
+-                HostConnections = new List<NetworkAddress> { request.PlayerNetwork },
+-                TopologyHostSessionId = Convert.ToUInt32(matchmaker.Session.UserId),
+-                MaxPlayerCapacities = capacity,
+-                NetworkQosData = matchmaker.ExtendedData.QosData,
+-                NetworkTopology = (int)GameNetworkTopology.PEER_TO_PEER_FULL_MESH,
+-                TopologyHost = host,
+-                PlatformHost = host,
+-                VoipTopology = (int)VoipTopology.VOIP_PEER_TO_PEER,
+-                GameProtocolVersionString = request.GameProtocolVersionString
+-            };
+-
+-            ReplicatedGamePlayer playerData = GameManagerUtils.CreateReplicatedGamePlayer(matchmaker, game2, true);
+-            var player = new Player { PlayerData = playerData, UserData = matchmaker };
+-            game2.Players.Add(player);
+-            game2.HostId = matchmaker.UserIdentification.BlazeId;
+-            ServerGlobals.Games[gameId] = game2;
+-            matchmaker.CurrentGame = game2;
+-            matchmaker.GamePlayer = player;
+-            ServerLogger.Log($"[Lobby] {matchmaker.UserIdentification.Name} created p2p game {gameId} for {capacity}");
++                ServerLogger.Log($"[Lobby] {matchmaker.UserIdentification.Name} matched into game {existing.GameData.GameId}");
++                matchmaker.IsMatchmaking = true;
++                await GameManagerUtils.UserJoinGame(matchmaker, existing, true);
++                return;
++            }
+ 
+             await ServerUtils.SendNotificationToUser(
+                 matchmaker,
+-                new NotifyJoinGame { Error = 0, GameData = game2.GameData, Players = new List<ReplicatedGamePlayer> { playerData }, MatchmakingId = 123 },
++                new NotifyJoinGame { Error = 0, GameData = game2!.GameData, Players = new List<ReplicatedGamePlayer> { hostData!.Value }, MatchmakingId = 123 },
+                 BlazeComponent.Gamemanager,
+                 (ushort)GameManagerNotifications.NotifyJoinGame);
+ 
+-- 
+2.56.0
+

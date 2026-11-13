@@ -1,8 +1,8 @@
-From 1b96935a51f567ee48e0f6978aec4edd410ed2f6 Mon Sep 17 00:00:00 2001
+From 4492db72f3ddb7e8c61b3570672d5038d106641c Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sun, 25 Oct 2026 10:44:05 -0700
-Subject: [PATCH 7/8] USCL: no 'experimental build' warning, no official RPCS3
- update offers
+Subject: [PATCH 07/11] USCL: no 'experimental build' warning, no official
+ RPCS3 update offers
 
 USCL's builds aren't RPCS3's release builds, so every start asked players whether to run it anyway. And RPCS3's
 updater would replace USCL's patched RPCS3 with the official one (no online play); the USCL app updates itself.
@@ -14,10 +14,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 8 insertions(+), 1 deletion(-)
 
 diff --git a/rpcs3/rpcs3qt/gui_application.cpp b/rpcs3/rpcs3qt/gui_application.cpp
-index 0093c53..997ab15 100644
+index bbd25e3..03ce0da 100644
 --- a/rpcs3/rpcs3qt/gui_application.cpp
 +++ b/rpcs3/rpcs3qt/gui_application.cpp
-@@ -112,7 +112,8 @@ int gui_application::exec()
+@@ -107,7 +107,8 @@ int gui_application::exec()
  		func();
  	};
  

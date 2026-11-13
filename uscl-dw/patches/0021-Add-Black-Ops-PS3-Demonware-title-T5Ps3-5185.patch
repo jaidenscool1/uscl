@@ -1,0 +1,29 @@
+From a755d8dbcd8e2f9ac7e7fddf8027081bbf4e6b4b Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 18:30:37 -0700
+Subject: [PATCH] Add Black Ops PS3 Demonware title T5Ps3 = 5185
+
+Captured 2026-11-07: Black Ops (BLUS30591) connects to our Demonware and the LSG
+rejects it with "The title id is unknown (value=5185)". 5185 sits in the Treyarch/IW
+PS3 title range (MW2 PS3 Iw4Ps3 = 5280), so it's Black Ops's PS3 title. Registering it
+clears the unknown-title rejection; the T5 auth/lobby handling (bdLobby era, like MW2)
+is the follow-up. Live re-test pending a dw-server restart.
+---
+ libbitdemon/src/domain/title.rs | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/libbitdemon/src/domain/title.rs b/libbitdemon/src/domain/title.rs
+index fa759ce..bac9879 100644
+--- a/libbitdemon/src/domain/title.rs
++++ b/libbitdemon/src/domain/title.rs
+@@ -2,6 +2,7 @@
+ #[repr(u32)]
+ pub enum Title {
+     Iw4Ps3 = 5280, // Modern Warfare 2 (PS3)
++    T5Ps3 = 5185,  // Call of Duty: Black Ops (PS3, BLUS30591) -- Treyarch T5, bdLobby era like MW2
+     Iw5 = 18409,
+     T5 = 18301,
+     T6Xenon = 18395,
+-- 
+2.56.0
+
