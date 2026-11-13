@@ -22,7 +22,14 @@ public:
 	bool gameShown() const { return running() && m_shown; }
 
 	Q_INVOKABLE bool startGame(const QString& path, const QString& title, bool online, const QString& console = "PS3", const QString& nickname = "USCLPlayer");
-	Q_INVOKABLE bool startEmu(const QString& path, const QString& title, const QString& console); // Wii->Dolphin, 3DS->Azahar
+	// Wii->Dolphin, 3DS->Azahar, ... netplay "host"/"join" (Wii, our Dolphin): a NetPlay session over the Steam tunnel
+	Q_INVOKABLE bool startEmu(const QString& path, const QString& title, const QString& console, const QString& netplay = {},
+	                          const QString& nickname = {}, int players = 0);
+	Q_INVOKABLE static bool ownDolphinFound() { return !ownDolphin().isEmpty(); }
+	static QString ownDolphin();
+	static QString dolphinConfigDir();
+	static QString ownAzahar(const QString& name = "azahar"); // or "azahar-room"
+	static QString azaharConfigFile();
 	Q_INVOKABLE bool openSwitchSettings();
 	Q_INVOKABLE static QString switchStatus(const QString& path = {});
 	Q_INVOKABLE static QString importSwitchKeys(const QString& path);

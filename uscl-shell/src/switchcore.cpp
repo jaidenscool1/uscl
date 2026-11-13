@@ -12,7 +12,6 @@
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QSettings>
-#include <QTemporaryFile>
 #include <QtEndian>
 #include <SDL3/SDL.h>
 
@@ -243,11 +242,12 @@ QString SwitchCore::prepareLaunchConfig()
 	// With no GUI configuration, let the SDL frontend create its own defaults.
 	if (!QFileInfo::exists(source)) return {};
 	QSettings gui(source, QSettings::IniFormat);
-	QTemporaryFile temporary(configDir() + "sdl-launch-XXXXXX.ini");
-	if (!temporary.open())
+	// written straight to its place: QSettings saves atomically by itself, and on Windows a QTemporaryFile
+	// round trip (QSettings replacing a file the temporary still owns) failed
+	const QString target = configDir() + "sdl2-config.ini";
+	if (QFile::exists(target) && !QFile::remove(target))
 		return QCoreApplication::translate("SwitchCore", "Couldn't prepare Switch controls.");
-	temporary.close();
-	QSettings sdl(temporary.fileName(), QSettings::IniFormat);
+	QSettings sdl(target, QSettings::IniFormat);
 	for (const QString& key : gui.allKeys())
 	{
 		const QVariant value = gui.value(key);
@@ -257,7 +257,7 @@ QString SwitchCore::prepareLaunchConfig()
 		if (key.startsWith("Controls/") && gui.value(key).toString().contains("engine:"))
 			sdl.setValue(key + "/default", false);
 	sdl.sync();
-	if (gui.status() != QSettings::NoError || sdl.status() != QSettings::NoError || !copyFile(temporary.fileName(), configDir() + "sdl2-config.ini"))
+	if (gui.status() != QSettings::NoError || sdl.status() != QSettings::NoError)
 		return QCoreApplication::translate("SwitchCore", "Couldn't save Switch launch settings.");
 	return {};
 }

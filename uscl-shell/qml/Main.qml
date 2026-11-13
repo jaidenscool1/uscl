@@ -80,7 +80,7 @@ Window {
         if (g.console === "Switch") {
             var problem = launcher.switchStatus(g.path)
             if (problem) { dialog.show(qsTr("Switch Emulation"), problem); return }
-        } else if (ps4 ? !launcher.ps4CoreFound() : !launcher.coreFound()) { coreMissing(); return }
+        } else if (["PS3", "PS4"].indexOf(g.console || "PS3") >= 0 && (ps4 ? !launcher.ps4CoreFound() : !launcher.coreFound())) { coreMissing(); return }
         if (launcher.running) {
             if (runningGame && runningGame.serial === g.serial) { resumeGame(); return }
             dialog.show(qsTr("Start %1").arg(g.title), qsTr("%1 is still running. Close it and start %2?").arg(launcher.title).arg(g.title),
@@ -129,7 +129,9 @@ Window {
     function launchGame(g) {
         if (prefs.autoControllers) launcher.prepareInput(gamepad.names, g.console)   // every console: pads -> players 1, 2...
         if (g.console === "Wii" || g.console === "WiiU" || g.console === "3DS" || g.console === "Xbox360") {   // Wii -> Dolphin, 3DS -> Azahar
-            if (launcher.startEmu(g.path, g.title, g.console)) runningGame = g
+            // in a session: our Dolphin hosts or joins NetPlay (Wii), our Azahar joins the room (3DS), over the tunnel
+            var netplay = g.console !== "Wii" && g.console !== "3DS" ? "" : online.state === "hosting" ? "host" : online.state === "joined" ? "join" : ""
+            if (launcher.startEmu(g.path, g.title, g.console, netplay, system.onlineName || online.steamName, online.players.length)) runningGame = g
             return
         }
         if (!games.isPs4Serial(g.serial) && g.console !== "Switch") {
@@ -733,6 +735,7 @@ Window {
                                 ? { title: qsTr("Controllers, Updates and DLC"), action: launcher.openSwitchSettings }
                                 : gameUpdates.available[g.serial]
                                 ? { title: qsTr("Update Game"), action: function() { installUpdates([g.serial]) } }
+                                : (g.console || "PS3") !== "PS3" ? null   // updates come from Sony's PS3 update server
                                 : { title: qsTr("Check for Update"), action: function() {
                                       gameUpdates.check([{ serial: g.serial, version: g.version }])
                                       notice.show(qsTr("Checking for updates..."), ic("it_update"))

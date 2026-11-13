@@ -254,11 +254,11 @@ QString PadConfig::azaharButton(int button, bool nintendo)
 	return azahar_any + QString("button:%1").arg(b);
 }
 
-bool PadConfig::writeDolphin(const QList<Pad>& pads)
+bool PadConfig::writeDolphin(const QList<Pad>& pads, const QString& configDir)
 {
 	if (pads.isEmpty())
 		return true; // keyboard players keep whatever is set
-	const QString dir = flatpakConfig("org.DolphinEmu.dolphin-emu") + "dolphin-emu/";
+	const QString dir = configDir.endsWith('/') ? configDir : configDir + '/';
 	QString core = readText(dir + "Dolphin.ini");
 	for (int i = 0; i < pads.size() && i < 4; i++)
 		core = setIniValue(core, "Core", QString("SIDevice%1").arg(i), "6"); // GameCube: standard controller
@@ -267,11 +267,12 @@ bool PadConfig::writeDolphin(const QList<Pad>& pads)
 		&& writeText(dir + "Dolphin.ini", core);
 }
 
-bool PadConfig::writeAzahar(const QList<Pad>& pads)
+bool PadConfig::writeAzahar(const QList<Pad>& pads, const QString& iniPath)
 {
 	if (pads.isEmpty())
 		return true;
-	QSettings ini(flatpakConfig("org.azahar_emu.Azahar") + "azahar-emu/qt-config.ini", QSettings::IniFormat);
+	QDir().mkpath(QFileInfo(iniPath).absolutePath());
+	QSettings ini(iniPath, QSettings::IniFormat);
 	const QString p = QString("Controls/profiles/%1/").arg(ini.value("Controls/profile", 0).toInt() + 1);
 	auto set = [&](const QString& key, const QString& value) {
 		ini.setValue(p + key, value);
