@@ -1,4 +1,5 @@
 #include "launcher.h"
+#include "padconfig.h"
 #include "games.h"
 #include "online.h"
 #include "switchcore.h"
@@ -9,6 +10,8 @@
 #include <QFileInfo>
 #include <QMap>
 #include <QTimer>
+
+#include <utility>
 #include <QSettings>
 #include <QUrl>
 
@@ -86,6 +89,8 @@ bool Launcher::start(const QStringList& args, const QString& title, bool online,
 	else
 		env.remove("USCL_ONLINE");
 	// a game's PS button comes to us (uscl-rpcs3 0008); the classic window keeps RPCS3's own home menu
+	if (std::exchange(m_auto_pads, false) && !core.isEmpty())
+		env.insert("USCL_AUTO_PADS", "1");
 	if (game && core.isEmpty())
 		env.insert("USCL_SHELL", "1");
 	else
@@ -305,8 +310,18 @@ QString Launcher::inputYml(const QString& current, const QStringList& pads)
 	return out;
 }
 
-bool Launcher::prepareInput(const QStringList& pads)
+bool Launcher::prepareInput(const QStringList& pads, const QString& console)
 {
+	if (console == "Switch")
+		return m_auto_pads = true; // Eden maps them itself, with its own per-controller layouts
+	if (console == "Wii" || console == "GameCube")
+		return PadConfig::writeDolphin(PadConfig::connected());
+	if (console == "3DS")
+		return PadConfig::writeAzahar(PadConfig::connected());
+	if (console == "WiiU")
+		return PadConfig::writeCemu(PadConfig::connected());
+	if (console != "PS3")
+		return true; // PS4: shadPS4 gives players 1-4 the controllers in order; Xbox 360: Wine's XInput does
 	if (pads.isEmpty())
 		return true; // keyboard players keep whatever is set
 #ifdef _WIN32

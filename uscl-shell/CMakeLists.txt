@@ -21,6 +21,7 @@ qt_add_executable(uscl
     src/discordparty.cpp src/discordparty.h
     src/gamepad.cpp src/gamepad.h
     src/launcher.cpp src/launcher.h
+    src/padconfig.cpp src/padconfig.h
     src/system.cpp src/system.h
     src/online.cpp src/online.h
     src/updater.cpp src/updater.h

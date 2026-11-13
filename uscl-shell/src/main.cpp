@@ -4,6 +4,7 @@
 #include "games.h"
 #include "gameupdates.h"
 #include "launcher.h"
+#include "padconfig.h"
 #include "online.h"
 #include "system.h"
 #include "updater.h"
@@ -136,6 +137,26 @@ namespace
 			const QString custom = QString(first).replace("Cross: South", "Cross: North");
 			const QString next = Launcher::inputYml(custom, {"Pad B"});
 			check(next.contains("Device: \"Pad B 1\"") && next.contains("Cross: North") && next.contains("Device: \"Pad A 2\""), "input config keeps mapping");
+		}
+		{
+			// other emulators: pads in order become players 1, 2; motion pads drive the Wii Remote's sensors
+			PadConfig::Pad ds{"PS5 Controller", "050000004c050000e60c000000810000", 0, 0, false, true};
+			PadConfig::Pad xb{"Xbox Series X Controller", "030000005e040000130b000011050000", 0, 0, false, false};
+			const QString wii = PadConfig::dolphinIni("[Wiimote1]\nDevice = Old\nSource = 1\n[Wiimote2]\nSource = 1\n[BalanceBoard]\nSource = 0\n", "Wiimote", {ds, xb});
+			check(wii.count("[Wiimote1]") == 1 && wii.contains("[Wiimote1]\nDevice = SDL/0/PS5 Controller\nSource = 1\n") &&
+			      wii.contains("[Wiimote2]\nDevice = SDL/0/Xbox Series X Controller\nSource = 1\n") && wii.contains("[Wiimote3]\nSource = 0\n") &&
+			      wii.contains("[BalanceBoard]\nSource = 0") && !wii.contains("Old") &&
+			      wii.section("[Wiimote2]", 0, 0).contains("IMUGyroscope/Pitch Up = `Gyro Pitch Up`") &&
+			      !wii.section("[Wiimote2]", 1).contains("IMUGyroscope") && wii.section("[Wiimote2]", 1).contains("IR/Up = `Right Y-`"), "Dolphin Wii Remotes");
+			const QString gc = PadConfig::dolphinIni("[GCPad2]\nDevice = Keep\n", "GCPad", {ds});
+			check(gc.contains("[GCPad1]\nDevice = SDL/0/PS5 Controller\n") && gc.contains("[GCPad2]\nDevice = Keep") && !gc.contains("[GCPad3]"), "Dolphin GameCube pads");
+			const QString cemu = PadConfig::cemuProfile(ds, true);
+			check(cemu.contains("<uuid>0_050000004c050000e60c000000810000</uuid>") && cemu.contains("<type>Wii U GamePad</type>") &&
+			      cemu.contains("<mapping>1</mapping>\n\t\t\t\t<button>1</button>") && cemu.contains("<motion>true</motion>") &&
+			      PadConfig::cemuProfile(xb, false).contains("<mapping>11</mapping>\n\t\t\t\t<button>5</button>"), "Cemu profiles");
+			check(PadConfig::azaharButton(0, false).endsWith("button:1") && PadConfig::azaharButton(0, true).endsWith("button:0") &&
+			      PadConfig::azaharButton(14, false).contains("axis:4") && PadConfig::azaharButton(12, false).isEmpty() &&
+			      PadConfig::azaharButton(0, false).contains("maptype:all"), "Azahar buttons");
 		}
 
 		check(Updater::compareVersions("v0.4.0", "0.3.9") > 0 && Updater::compareVersions("0.3.0", "0.3.0-test") > 0 &&

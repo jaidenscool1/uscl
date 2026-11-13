@@ -38,6 +38,10 @@ these works — whatever a player emits as the emulated Wii Remote is what NetPl
   expect to tune sensitivity/calibration for the right feel. A Switch Pro/Joy-Con IMU works the same way.
 - **Real Wii Remote over Bluetooth passthrough** — the most accurate; Dolphin drives the PC Bluetooth adapter as the
   Wii's and MotionPlus is detected. (Dolphin → Controllers → Wii Remotes → *Passthrough*.)
+- **Any controller (what USCL sets up):** with Automatic Controller Setup on, each connected pad (USB or Bluetooth) becomes
+  Wii Remote 1, 2, ... (with Nunchuk) and GameCube pad 1, 2, ... in connection order (`uscl-shell/src/padconfig.cpp`).
+  A pad with motion sensors (DualSense, DualShock 4, Switch Pro) is the Wii Remote's accelerometer and gyro: swing, tilt
+  and point by moving it, R3 recenters the pointer. Other pads point with the right stick and shake with R1.
 - **Real Wii Remote as a plain Bluetooth controller** ("Real Wii Remote" source, continuous scan, press sync).
 - **Phone gyro via DSU/cemuhook** — the fallback for a player with none of the above.
 

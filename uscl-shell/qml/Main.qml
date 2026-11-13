@@ -127,12 +127,12 @@ Window {
         launchGame(g)
     }
     function launchGame(g) {
+        if (prefs.autoControllers) launcher.prepareInput(gamepad.names, g.console)   // every console: pads -> players 1, 2...
         if (g.console === "Wii" || g.console === "WiiU" || g.console === "3DS" || g.console === "Xbox360") {   // Wii -> Dolphin, 3DS -> Azahar
             if (launcher.startEmu(g.path, g.title, g.console)) runningGame = g
             return
         }
         if (!games.isPs4Serial(g.serial) && g.console !== "Switch") {
-            if (prefs.autoControllers) launcher.prepareInput(gamepad.names)
             if (prefs.autoScale) system.setRpcs3Value("Video", "Resolution Scale", String(autoScaleValue))
         }
         // shortcut: a game started before the session runs as it started (patches on); restart it to play online

@@ -36,7 +36,8 @@ public:
 	Q_INVOKABLE void resume();
 	// Gives RPCS3 a player per connected controller (SDL names, same library as ours). A player that already
 	// uses a controller only gets its device updated, so custom button mappings stay.
-	Q_INVOKABLE static bool prepareInput(const QStringList& pads);
+	// Automatic Controller Setup: every connected controller becomes a player of the game about to start
+	Q_INVOKABLE bool prepareInput(const QStringList& pads, const QString& console = "PS3");
 	static QString inputYml(const QString& current, const QStringList& pads);
 	Q_INVOKABLE static bool coreFound();
 	Q_INVOKABLE static bool ps4CoreFound();
@@ -60,4 +61,5 @@ private:
 	QStringList m_tail;
 	bool m_stopping = false;
 	bool m_shown = true;
+	bool m_auto_pads = false; // the next Switch launch maps the controllers (uscl-eden 0012)
 };
