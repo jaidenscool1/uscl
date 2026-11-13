@@ -246,6 +246,11 @@ namespace
 			QBuffer b(&pkg);
 			b.open(QIODevice::ReadOnly);
 			check(GameUpdates::packageSha1(b, pkg.size()) == QCryptographicHash::hash("package body", QCryptographicHash::Sha1).toHex(), "game update hash");
+			// online only on the newest update
+			GameUpdates::setLatest("TEST00001", "01.03");
+			check(GameUpdates::requiredVersion("TEST00001", "01.00") == "01.03" && GameUpdates::requiredVersion("TEST00001", "01.03").isEmpty() &&
+			      GameUpdates::requiredVersion("TEST00002", "01.00").isEmpty(), "online needs the newest game update");
+			QSettings().remove("latest_update/TEST00001");
 		}
 
 		{

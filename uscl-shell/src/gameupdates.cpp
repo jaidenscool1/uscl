@@ -6,6 +6,7 @@
 #include <QCryptographicHash>
 #include <QDir>
 #include <QNetworkReply>
+#include <QSettings>
 #include <QSslError>
 #include <QStandardPaths>
 #include <QXmlStreamReader>
@@ -79,6 +80,17 @@ QString GameUpdates::installedVersion(const QString& serial)
 	return f.open(QIODevice::ReadOnly) ? GameModel::readSfo(f.readAll()).value("APP_VER") : QString();
 }
 
+void GameUpdates::setLatest(const QString& serial, const QString& version)
+{
+	QSettings().setValue("latest_update/" + serial, version);
+}
+
+QString GameUpdates::requiredVersion(const QString& serial, const QString& installed)
+{
+	const QString latest = QSettings().value("latest_update/" + serial).toString();
+	return newer(latest, installed) ? latest : QString();
+}
+
 void GameUpdates::check(const QVariantList& games)
 {
 	const bool idle = m_to_check.isEmpty();
@@ -113,7 +125,10 @@ void GameUpdates::checkNext()
 		// no list (no updates, or unreachable) leaves the game as it is
 		if (reply->error() == QNetworkReply::NoError)
 		{
-			for (const Package& p : parseList(reply->readAll()))
+			const QList<Package> list = parseList(reply->readAll());
+			if (!list.isEmpty())
+				setLatest(serial, list.last().version);
+			for (const Package& p : list)
 			{
 				if (newer(p.version, version))
 					pending << p;
