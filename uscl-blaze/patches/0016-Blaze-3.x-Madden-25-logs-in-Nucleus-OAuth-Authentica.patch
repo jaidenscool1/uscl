@@ -1,0 +1,326 @@
+From e9eeb0721369866dd521e9359a3af7ebcc53b0fd Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 15:53:13 -0700
+Subject: [PATCH] Blaze 3.x: Madden 25 logs in (Nucleus OAuth +
+ Authentication2) and reaches its main menu
+
+- heat2 maps go out sorted by key (strings case-insensitively): Blaze 3.x clients binary-search
+  them, so Madden couldn't find preAuth CONF keys we sent and crashed formatting a null string
+  (PPU 0x961554). Test: "map keys sorted".
+- preAuth CONF gives heat2 clients nucleusConnect (our HTTP server), blazeServerClientId and
+  identityRedirectUri. Madden GETs <nucleusConnect>/connect/auth with its PSN ticket; the HTTP
+  server swaps the ticket for a one-time code (NucleusAuth) and redirects; Authentication2 (35)
+  login (10) with that code runs the PS3 login (Ps3LoginHandler.Login, split out of ps3Login).
+- OSDKSettings group SG_MATCHUP with Madden's match-type views (QM_STD ... CS_MUTDT); a missing
+  view crashed at 0x14fa760.
+
+Madden now passes login, the online bootstrap and a tuning-data notice to its main menu. NHL 15 is
+unchanged (still reaches its online menus). docs/EA-Sports-Blaze3-heat2.md section 6b.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Handlers/Authentication2LoginHandler.cs   | 48 +++++++++++++++++++
+ .../Handlers/Ps3LoginHandler.cs               | 14 +++---
+ .../Components/OSDKSettings/OSDKSettings.cs   | 12 +++--
+ .../Util/Handlers/PreAuthHandler.cs           | 14 +++++-
+ Skate Custom Server/Blaze/Tdf/Heat2Writer.cs  | 10 +++-
+ .../Servers/Blaze/BlazeServer.cs              |  7 ++-
+ .../Servers/HTTP/HttpServer.cs                | 18 +++++++
+ Tests/Heat2Test/Program.cs                    |  6 +++
+ docs/EA-Sports-Blaze3-heat2.md                | 35 +++++++++++++-
+ 9 files changed, 149 insertions(+), 15 deletions(-)
+ create mode 100644 Skate Custom Server/Blaze/Components/Authentication/Handlers/Authentication2LoginHandler.cs
+
+diff --git a/Skate Custom Server/Blaze/Components/Authentication/Handlers/Authentication2LoginHandler.cs b/Skate Custom Server/Blaze/Components/Authentication/Handlers/Authentication2LoginHandler.cs
+new file mode 100644
+index 0000000..2f87cd3
+--- /dev/null
++++ b/Skate Custom Server/Blaze/Components/Authentication/Handlers/Authentication2LoginHandler.cs	
+@@ -0,0 +1,48 @@
++using System.Collections.Concurrent;
++using System.Security.Cryptography;
++using Blaze.Tdf.Attributes;
++using Servers;
++using Servers.Blaze.Models;
++
++namespace Blaze.Components.Authentication
++{
++    // Madden 25 (BlazeSDK 13.3) logs in through EA's Nucleus OAuth: HTTP GET <nucleusConnect>/connect/auth with the PSN
++    // ticket in a psn_ticket header, answered with a 302 to redirect_uri?code=<code>; then Authentication2 (35) login
++    // (10) {AUTH = code, EXTB, EXTI}. The code stands in for the ticket; the login itself is the PS3 one.
++    public static class NucleusAuth
++    {
++        static readonly ConcurrentDictionary<string, byte[]> Codes = new();
++
++        // shortcut: unused codes never expire, the store is cleared past 1000; add a TTL if many players share a server
++        public static string IssueCode(byte[] ticket)
++        {
++            if (Codes.Count > 1000) Codes.Clear();
++            string code = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
++            Codes[code] = ticket;
++            return code;
++        }
++
++        public static byte[]? TakeTicket(string? code) => code != null && Codes.TryRemove(code, out var t) ? t : null;
++    }
++
++    public struct Authentication2LoginRequest
++    {
++        [TdfMember("AUTH")] public string AuthCode;
++    }
++
++    public static class Authentication2LoginHandler
++    {
++        public static async Task HandleRequest(User user, byte[] packetBytes)
++        {
++            var request = BlazeMessage.CreateModelFromRequest<Authentication2LoginRequest>(packetBytes);
++            byte[]? ticket = NucleusAuth.TakeTicket(request.AuthCode);
++            if (ticket == null)
++            {
++                ServerLogger.Log("[Blaze] Authentication2 login: unknown auth code");
++                await ServerUtils.SendError(user, packetBytes, ServerUtils.ErrorCode.AUTH_ERR_INVALID_PS3_TICKET);
++                return;
++            }
++            await Ps3LoginHandler.Login(user, packetBytes, ticket);
++        }
++    }
++}
+diff --git a/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs b/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs
+index bf4de07..7f5be5b 100644
+--- a/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs	
++++ b/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs	
+@@ -89,20 +89,22 @@ namespace Blaze.Components.Authentication
+             }
+         }
+ 
+-        public static async Task HandleRequest(User user, byte[] packetBytes)
+-        {
+-            var loginRequest = BlazeMessage.CreateModelFromRequest<Ps3LoginRequest>(packetBytes);
++        public static async Task HandleRequest(User user, byte[] packetBytes) =>
++            await Login(user, packetBytes, BlazeMessage.CreateModelFromRequest<Ps3LoginRequest>(packetBytes).ps3Ticket);
+ 
+-            Ticket ps3Ticket = Ticket.ReadFromBytes(loginRequest.ps3Ticket);
++        // The PS3 login proper. Madden 25's Authentication2 login reaches it with the ticket its Nucleus step sent.
++        public static async Task Login(User user, byte[] packetBytes, byte[] ticketBytes)
++        {
++            Ticket ps3Ticket = Ticket.ReadFromBytes(ticketBytes);
+ 
+             // USCL diag: pinpoint heat2 ticket extraction vs signature failure for NHL/Madden (Blaze 3.x)
+-            ServerLogger.Log($"[Blaze] ps3Login diag: heat2={user.IsHeat2} ticket={loginRequest.ps3Ticket?.Length ?? -1}B " +
++            ServerLogger.Log($"[Blaze] ps3Login diag: heat2={user.IsHeat2} ticket={ticketBytes?.Length ?? -1}B " +
+                 $"user={ps3Ticket.Username} issuer={ps3Ticket.IssuerId} expiry={ps3Ticket.ExpiryDate:o} serviceId={ps3Ticket.ServiceId}");
+ 
+             if (UserBanned(ps3Ticket.Username))
+                 return;
+ 
+-            if (!IsTicketValid(ps3Ticket, loginRequest.ps3Ticket, user))
++            if (!IsTicketValid(ps3Ticket, ticketBytes, user))
+             {
+                 await ServerUtils.SendError(user, packetBytes, ServerUtils.ErrorCode.AUTH_ERR_INVALID_PS3_TICKET);
+                 return;
+diff --git a/Skate Custom Server/Blaze/Components/OSDKSettings/OSDKSettings.cs b/Skate Custom Server/Blaze/Components/OSDKSettings/OSDKSettings.cs
+index 3f9a412..9f3b10f 100644
+--- a/Skate Custom Server/Blaze/Components/OSDKSettings/OSDKSettings.cs	
++++ b/Skate Custom Server/Blaze/Components/OSDKSettings/OSDKSettings.cs	
+@@ -51,14 +51,20 @@ namespace Blaze.Components.OSDKSettings
+         // O_MIN, ... via 0x812920 from 0x82926c); serving those, or O_FWD_EMAIL/O_EGstat, corrupts the settings
+         // manager's listener list (PPU 0x828b88).
+         static readonly string[] UserSettings = { "O_SPAMEA", "O_SPAMPART" };
+-        // The five groups NHL 15 names in its EBOOT (O_SG_*)
+-        static readonly string[] Groups = { "O_SG_NRAD", "O_SG_QMSG", "O_SG_SYSS", "O_SG_TCKR", "O_SG_USER" };
++        // Madden 25's match types: on login it opens group SG_MATCHUP and looks up one view per type (name table at
++        // 0x2335440, read by 0x14fa5dc; a missing view crashes at PPU 0x14fa760).
++        static readonly string[] MatchupViews = { "QM_STD", "QM_SCR", "QM_OTP", "QM_MUT", "QM_MUT_SHORT", "CLQMV", "CLH2H",
++            "SPEVR", "SPEVUR", "SEASONS_H2H_QMV", "SEA_H2H_TRN_QMV", "CM_STD", "CM_SCR", "CM_OTP", "ARENA_H2H_CM", "CS_STD",
++            "CS_SCR", "CS_OTP", "CS_UCM", "CS_MUT", "ARENA_H2H_CS", "CS_MUTDT" };
++        // The groups NHL 15 and Madden 25 name in their EBOOTs; each game ignores the ones it doesn't use
++        static readonly string[] Groups = { "O_SG_NRAD", "O_SG_QMSG", "O_SG_SYSS", "O_SG_TCKR", "O_SG_USER", "SG_MATCHUP" };
+ 
+         static SettingGroup Group(string id) => new()
+         {
+             Id = id,
+             SettingList = id switch { "O_SG_TCKR" => TickerSettings.ToList(), "O_SG_USER" => UserSettings.ToList(), _ => new() },
+-            ViewList = id == "O_SG_USER" ? UserViews.Select(v => new SettingView { Id = v }).ToList() : new()
++            ViewList = (id switch { "O_SG_USER" => UserViews, "SG_MATCHUP" => MatchupViews, _ => Array.Empty<string>() })
++                .Select(v => new SettingView { Id = v }).ToList()
+         };
+ 
+         public static async Task Handle(User user, byte[] packetBytes, ushort command)
+diff --git a/Skate Custom Server/Blaze/Components/Util/Handlers/PreAuthHandler.cs b/Skate Custom Server/Blaze/Components/Util/Handlers/PreAuthHandler.cs
+index c02ae28..311affd 100644
+--- a/Skate Custom Server/Blaze/Components/Util/Handlers/PreAuthHandler.cs	
++++ b/Skate Custom Server/Blaze/Components/Util/Handlers/PreAuthHandler.cs	
+@@ -15,13 +15,23 @@ namespace Blaze.Components.Util.Handlers
+             _cachedBytes = BuildMessage(new byte[] { 0, 0, 0, 9, 0, 7, 0, 0, 0, 0, 0, 0 }).Serialize();
+         }
+ 
+-        private static BlazeMessage BuildMessage(byte[] packetBytes)
++        private static BlazeMessage BuildMessage(byte[] packetBytes, bool heat2 = false)
+         {
+             var config = new Dictionary<string, string>
+             {
+                 { "pingPeriodInMs", (ServerGlobals.PingPeriodSecs * 1000).ToString() },
+                 { "voipHeadsetUpdateRate", "1000" }
+             };
++            if (heat2)
++            {
++                // Madden 25 (BlazeSDK 13.3) logs in through Nucleus OAuth: it builds
++                // <nucleusConnect>/connect/auth?response_type=code&client_id=<blazeServerClientId>&redirect_uri=<identityRedirectUri>
++                // (a null value crashes it, PPU 0x961554), sends its PSN ticket there and logs in with the code it gets
++                // back. Our HTTP server answers /connect/auth (see NucleusAuth), on the address the game reached us at.
++                config["nucleusConnect"] = $"http://{ServerGlobals.ServerIP}:{ServerGlobals.HttpServerPort}";
++                config["blazeServerClientId"] = "USCL";
++                config["identityRedirectUri"] = "http://127.0.0.1/success";
++            }
+             return BlazeMessage.CreateResponseFromModel(
+                 packetBytes,
+                 new PreAuthResponse
+@@ -59,7 +69,7 @@ namespace Blaze.Components.Util.Handlers
+             byte[] response;
+             if (user.IsHeat2)
+             {
+-                response = BuildMessage(packetBytes).Serialize(); // heat2 via Mode
++                response = BuildMessage(packetBytes, heat2: true).Serialize(); // heat2 via Mode
+             }
+             else
+             {
+diff --git a/Skate Custom Server/Blaze/Tdf/Heat2Writer.cs b/Skate Custom Server/Blaze/Tdf/Heat2Writer.cs
+index 44194b4..90b7773 100644
+--- a/Skate Custom Server/Blaze/Tdf/Heat2Writer.cs	
++++ b/Skate Custom Server/Blaze/Tdf/Heat2Writer.cs	
+@@ -143,7 +143,15 @@ namespace Blaze.Tdf
+             int count = d?.Map?.Count ?? 0;
+             VarInt(o, (ulong)count);
+             if (count == 0) return;
+-            foreach (var kv in d.Map)
++            // Blaze 3.x clients decode maps into sorted vector maps and look keys up by binary search, so entries must
++            // go out in key order (string keys case-insensitively): unsorted, Madden 25 couldn't find nucleusConnect in
++            // the preAuth CONF and formatted a null string (PPU 0x9614a4).
++            IEnumerable<KeyValuePair<object, object>> entries = d.Map;
++            if (d.Map.Keys.All(k => k is string))
++                entries = d.Map.OrderBy(kv => (string)kv.Key, StringComparer.OrdinalIgnoreCase);
++            else if (d.Map.Keys.All(k => k is sbyte or byte or short or ushort or int or uint or long or ulong))
++                entries = d.Map.OrderBy(kv => Convert.ToDecimal(kv.Key));
++            foreach (var kv in entries)
+             {
+                 WriteValue(o, d.KeyType, kv.Key);
+                 WriteValue(o, d.ValueType, kv.Value);
+diff --git a/Skate Custom Server/Servers/Blaze/BlazeServer.cs b/Skate Custom Server/Servers/Blaze/BlazeServer.cs
+index a0ba629..c2092e7 100644
+--- a/Skate Custom Server/Servers/Blaze/BlazeServer.cs	
++++ b/Skate Custom Server/Servers/Blaze/BlazeServer.cs	
+@@ -161,13 +161,18 @@ namespace Servers.Blaze
+             if (!user.IsAuthenticated &&
+                 component != BlazeComponent.Util &&
+                 component != BlazeComponent.Authentication &&
+-                component != BlazeComponent.Redirector)
++                component != BlazeComponent.Redirector &&
++                !(user.IsHeat2 && (ushort)component == 35))
+             {
+                 return;
+             }
+ 
+             switch (component)
+             {
++                case (BlazeComponent)35 when user.IsHeat2 && command == 10:
++                    // Authentication2 login (Madden 25): the code from the Nucleus step at /connect/auth
++                    await global::Blaze.Components.Authentication.Authentication2LoginHandler.HandleRequest(user, packetBytes);
++                    break;
+                 case BlazeComponent.Redirector:
+                     await GetServerInstanceHandler.HandleRequest(user, packetBytes);
+                     break;
+diff --git a/Skate Custom Server/Servers/HTTP/HttpServer.cs b/Skate Custom Server/Servers/HTTP/HttpServer.cs
+index 698a509..9b26b28 100644
+--- a/Skate Custom Server/Servers/HTTP/HttpServer.cs	
++++ b/Skate Custom Server/Servers/HTTP/HttpServer.cs	
+@@ -176,6 +176,24 @@ namespace Servers.HTTP
+                                 break;
+                         }
+ 
++                        // Madden 25's Nucleus OAuth step: the PSN ticket in, a one-time login code out (see NucleusAuth)
++                        if (path == "/connect/auth")
++                        {
++                            string? redirect = req.QueryString["redirect_uri"];
++                            byte[]? ticket = null;
++                            try { ticket = Convert.FromBase64String(req.Headers["psn_ticket"] ?? ""); } catch (FormatException) { }
++                            if (redirect == null || ticket == null || ticket.Length == 0)
++                                res.StatusCode = 400;
++                            else
++                            {
++                                res.StatusCode = 302;
++                                res.RedirectLocation = redirect + (redirect.Contains('?') ? "&" : "?") + "code=" +
++                                    global::Blaze.Components.Authentication.NucleusAuth.IssueCode(ticket);
++                            }
++                            res.Close();
++                            return;
++                        }
++
+                         // In-game team pages (Create Team, Team Finder, My Online Team, Invites)
+                         if (TeamPages.IsTeamRequest(path))
+                         {
+diff --git a/Tests/Heat2Test/Program.cs b/Tests/Heat2Test/Program.cs
+index 8bd09fc..9b63a30 100644
+--- a/Tests/Heat2Test/Program.cs
++++ b/Tests/Heat2Test/Program.cs
+@@ -82,6 +82,12 @@ static class T
+             Check(li.Items.Count == 3 && (long)li.Items[2] == 1000000L, "list");
+             var mp = (TdfDictionary)back[5].Value;
+             Check(mp.Map.Count == 2 && (long)mp.Map["bb"] == 20000L, "map");
++
++            // clients binary-search maps, so keys go out sorted (case-insensitively), whatever order they were added in
++            var unsorted = new TdfDictionary(TdfType.String, TdfType.String);
++            unsorted.Map["pingPeriod"] = "1"; unsorted.Map["Zeta"] = "2"; unsorted.Map["alpha"] = "3";
++            var sorted = (TdfDictionary)Heat2Reader.ReadFields(Frame(new List<TdfField> { new("CONF", TdfType.Map, unsorted) }))[0].Value;
++            Check(string.Join(",", sorted.Map.Keys) == "alpha,pingPeriod,Zeta", "map keys sorted");
+             var un = (TdfUnion)back[6].Value;
+             Check(un.SelectedUnionValue == 0x00 && (string)un.Field.Value == "u", "union");
+         }
+diff --git a/docs/EA-Sports-Blaze3-heat2.md b/docs/EA-Sports-Blaze3-heat2.md
+index 5fc5e8f..5a2b9ed 100644
+--- a/docs/EA-Sports-Blaze3-heat2.md
++++ b/docs/EA-Sports-Blaze3-heat2.md
+@@ -228,8 +228,39 @@ config (we send it empty) names the keys for the roster check: `ROSTER_URL` (def
+ `ROSTER_VER` (default `"CRC"`), `ROSTER_CSUM` (read at `0x89221c`); their values go to the roster
+ checker (`*0x2276708` → vtable `0x10`). The CRC NHL compares against is not known yet.
+ 
+-**Madden 25** hits the same *class* of crash earlier (FGGameSim PPU null-deref ~52s) — likely the
+-same "missing data" problem; it shares this OSDK, so the OSDKSettings work carries over.
++## 6b. Madden NFL 25 — Nucleus login, sorted maps, SG_MATCHUP (reaches its main menu, 2026-11-13)
++
++The "FGGameSim crash ~52 s" was never an emulator bug: it is the same thread crashing (PC `0x961554`)
++0.5 s after the Blaze session starts, and the time only looked fixed because Madden used to connect then.
++Madden's BlazeSDK 13.3 differs from NHL's 3.19 in three ways the server now handles (uscl-blaze 0016):
++
++1. **Sorted maps (all heat2 clients).** Blaze 3.x decodes TDF maps into sorted vector maps and looks keys
++   up by **binary search** (`0xa37b74`), so map entries must go out in key order (case-insensitive for
++   strings). Our encoder sent dictionary order, so Madden's preAuth `CONF` lookups failed for keys we *did*
++   send. `Heat2Writer.WriteMap` sorts now (test: "map keys sorted").
++2. **Nucleus OAuth login.** After preAuth Madden builds
++   `<nucleusConnect>/connect/auth?response_type=code&client_id=<blazeServerClientId>&redirect_uri=<identityRedirectUri>`
++   from the preAuth `CONF` (a missing key → null string → crash `0x961554`/`0x9614a4`), GETs it over plain
++   HTTP with its PSN ticket in a `psn_ticket` header (base64), follows the 302 to `redirect_uri?code=…` and
++   logs in with **Authentication2 (35) login (10)** `{AUTH = code, EXTB = online id, EXTI}`. The server
++   points `nucleusConnect` at its own HTTP server (`http://<server IP>:80`, already tunneled by the bridge's
++   `skate3` preset), `/connect/auth` swaps the ticket for a one-time code (`NucleusAuth`), and the
++   Authentication2 login runs the PS3 login with that ticket (`Ps3LoginHandler.Login`). Unanswered, 35/10
++   times out after 11 s and Madden logs out (Authentication 70 = logout) with "EA servers not available".
++3. **OSDKSettings group `SG_MATCHUP`.** Madden opens it right after login and looks up one view per match
++   type (`QM_STD … CS_MUTDT`, name table `0x2335440`, read by `0x14fa5dc`); a missing view crashes at
++   `0x14fa760`. Served with those views and no settings. It uses NHL's `O_SG_*` groups too.
++
++Then: "Tuning Data Update — an error has occurred" (the tuning download `DP_TUNING_URL` isn't served;
++answer No to retrying) → **Madden's main menu online** (HOME/PLAY/SHARE/CUSTOMIZE, Online Head to Head
++tile). Its Madden-specific settings (`OSDK_MADSET` config: `DP_*_URL`, `TILE_*`, `MM_*`, ...) are still
++served empty.
++
++How this was found: `USCL_LOGPOINTS` (interpreter, offline): `*cfgLookup@r4` on the config lookup printed
++every key Madden asked for; a logpoint on the preAuth callback (`0xa39b3c`) showed `r5 = 0` (success) —
++together they pointed at the map order. Madden's EBOOT: `xorriso -extract /PS3_GAME/USRDIR/EBOOT.BIN`,
++`rpcs3 --decrypt`; code and data both map at file offset + 0x10000. Its TDF reflection is laid out
++`vtable, "<Name>_CLONE_\0<Name>\0Blaze::…::<Name>"`; the member table getter is the word before `_CLONE_`.
+ 
+ ### Disassembly toolchain (reusable for any PS3 game)
+ 
+-- 
+2.56.0
+

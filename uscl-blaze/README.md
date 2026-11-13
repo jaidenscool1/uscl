@@ -5,7 +5,7 @@
 | **Console** | PlayStation 3 |
 | **Upstream** | [skate6743/Skate3BlazeServer](https://github.com/skate6743/Skate3BlazeServer) (C#, no license, so USCL doesn't vendor it) |
 | **Pinned base** | `f248282` + the 14 Skate 3 teams/invite patches USCL carries |
-| **Our changes** | `patches/0001`–`0015`, applied with `git am`; `tls/` (TLS terminator for Blaze 3.x games) |
+| **Our changes** | `patches/0001`–`0016`, applied with `git am`; `tls/` (TLS terminator for Blaze 3.x games) |
 | **Runs on** | the host's PC; players reach it through [uscl-bridge](../uscl-bridge/) (`skate3` preset) |
 
 The stand-in for **EA's Blaze** online service: what [uscl-dw](../uscl-dw/) is for Activision's Demonware. It is
@@ -44,6 +44,8 @@ The game reaches it through RPCS3's IP swap list (every `gosredirector.*.ea.com`
 - **0014**: the full write-up, `docs/EA-Sports-Blaze3-heat2.md` (it lands in the built server tree).
 - **0015**: **OSDKSettings** (component 2249): the settings groups, ticker settings, user views and account settings
   NHL 15 looks up (it also needs uscl-rpcs3 patch 0012 for its dynamic-message rotation).
+- **0016**: **Madden 25 login**: heat2 maps sorted by key (clients binary-search them), the Nucleus OAuth step on the
+  HTTP server (`/connect/auth`) + Authentication2 login, and the `SG_MATCHUP` settings group.
 
 ## Status
 | Game | Blaze | Where it is |
@@ -51,7 +53,7 @@ The game reaches it through RPCS3's IP swap list (every `gosredirector.*.ea.com`
 | Skate 3 (`BLUS30464`) | 2.x | the upstream server, unmodified ([notes](../games/BLUS30464.md)) |
 | NBA Jam (`BLUS30696`) | 2.11 (heat1) | two players sign in, matchmake into one lobby and reach team select; the relay carries game traffic both ways (two copies on one PC, 2026-11-07) ([notes](../games/BLUS30696.md)) |
 | NHL 15 (`BLUS31436`) | 3.19 (heat2) | **reaches the main menu and the Online Versus Play hub** (patch 0015 + uscl-rpcs3 0012); next is the roster check ([notes](../games/BLUS31436.md)) |
-| Madden NFL 25 (`BLUS31178`) | 13.3 (heat2) | shares NHL's login; hits an RPCS3 FGGameSim crash (~52 s) first ([notes](../games/BLUS31178.md)) |
+| Madden NFL 25 (`BLUS31178`) | 13.3 (heat2) | **logs in and reaches the main menu online** (patch 0016); next is its `OSDK_MADSET` config and matchmaking ([notes](../games/BLUS31178.md)) |
 
 ## Blaze 3.x "heat2" (NHL 15, Madden 25)
 Full details, the handshake, the live test harness and the disassembly toolchain are in
