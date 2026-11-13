@@ -5,7 +5,7 @@
 #include <QStringList>
 
 // Starts the emulator core as its own process, so a game crash brings the player back home instead of
-// taking the home screen down with it. Today that's our RPCS3 build, next to this executable.
+// taking the home screen down with it. PS3 uses RPCS3; Switch uses an external Eden frontend.
 class Launcher : public QObject
 {
 	Q_OBJECT
@@ -21,7 +21,14 @@ public:
 	QString title() const { return m_title; }
 	bool gameShown() const { return running() && m_shown; }
 
-	Q_INVOKABLE bool startGame(const QString& path, const QString& title, bool online);
+	Q_INVOKABLE bool startGame(const QString& path, const QString& title, bool online, const QString& console = "PS3", const QString& nickname = "USCLPlayer");
+	Q_INVOKABLE bool startEmu(const QString& path, const QString& title, const QString& console); // Wii->Dolphin, 3DS->Azahar
+	Q_INVOKABLE bool openSwitchSettings();
+	Q_INVOKABLE static QString switchStatus(const QString& path = {});
+	Q_INVOKABLE static QString importSwitchKeys(const QString& path);
+	Q_INVOKABLE static QString importSwitchFirmware(const QString& path);
+	Q_INVOKABLE static QString switchProfile();
+	Q_INVOKABLE static QString configureSwitchTool(const QString& kind, const QString& path);
 	Q_INVOKABLE bool openClassic();
 	Q_INVOKABLE void stop();
 	// PS button in a game (uscl-rpcs3 0008): the game keeps running, its window steps aside for the home screen
@@ -29,7 +36,8 @@ public:
 	Q_INVOKABLE void resume();
 	// Gives RPCS3 a player per connected controller (SDL names, same library as ours). A player that already
 	// uses a controller only gets its device updated, so custom button mappings stay.
-	Q_INVOKABLE static bool prepareInput(const QStringList& pads);
+	// Automatic Controller Setup: every connected controller becomes a player of the game about to start
+	Q_INVOKABLE bool prepareInput(const QStringList& pads, const QString& console = "PS3");
 	static QString inputYml(const QString& current, const QStringList& pads);
 	Q_INVOKABLE static bool coreFound();
 	Q_INVOKABLE static bool ps4CoreFound();
@@ -45,7 +53,7 @@ signals:
 	void finished(bool crashed, const QString& details);
 
 private:
-	bool start(const QStringList& args, const QString& title, bool online, bool game, bool ps4 = false);
+	bool start(const QStringList& args, const QString& title, bool online, bool game, bool ps4 = false, const QString& core = {});
 	void command(const char* line, bool shown);
 
 	QProcess m_process;
@@ -53,4 +61,5 @@ private:
 	QStringList m_tail;
 	bool m_stopping = false;
 	bool m_shown = true;
+	bool m_auto_pads = false; // the next Switch launch maps the controllers (uscl-eden 0012)
 };

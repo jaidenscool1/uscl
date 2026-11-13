@@ -18,7 +18,7 @@ jobs:
     runs-on: windows-2025-vs2026
     env:
       # from RPCS3's .github/workflows/rpcs3.yml at the commit our patches are made against
-      RPCS3_COMMIT: 'e53ac18'
+      RPCS3_COMMIT: 'eee3f0f'
       RPCN_COMMIT: '7a3c3c4'
       DW_COMMIT: '39391e7'  # quoted: unquoted YAML reads 39391e7 as a number
       COMPILER: msvc

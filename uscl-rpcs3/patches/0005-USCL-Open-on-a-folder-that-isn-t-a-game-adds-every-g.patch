@@ -1,8 +1,8 @@
-From 6b86ed7722430bbd90d1600f5c821e593493f9fd Mon Sep 17 00:00:00 2001
+From 84c16f4eae51ce9090b43bf6067d6068103c8887 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 10:34:38 -0700
-Subject: [PATCH 5/8] USCL: Open on a folder that isn't a game adds every game
- inside it (all subfolders)
+Subject: [PATCH 05/11] USCL: Open on a folder that isn't a game adds every
+ game inside it (all subfolders)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
@@ -10,7 +10,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 16 insertions(+)
 
 diff --git a/rpcs3/rpcs3qt/main_window.cpp b/rpcs3/rpcs3qt/main_window.cpp
-index bd3dd90..c98b303 100644
+index 3722cd0..38805eb 100644
 --- a/rpcs3/rpcs3qt/main_window.cpp
 +++ b/rpcs3/rpcs3qt/main_window.cpp
 @@ -700,6 +700,22 @@ void main_window::BootGame()

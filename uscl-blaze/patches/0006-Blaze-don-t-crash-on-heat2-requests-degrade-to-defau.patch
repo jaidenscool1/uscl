@@ -1,0 +1,53 @@
+From 5fb725c81c3727de2dd740840b6e080559d11dbb Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 18:18:07 -0700
+Subject: [PATCH 06/14] Blaze: don't crash on heat2 requests (degrade to
+ default model)
+
+CreateModelFromRequest now catches the heat1 parser's exceptions on Blaze 3.x
+(heat2) requests and returns a default model instead of throwing, so the handler
+still sends a response rather than dropping the connection. Madden now gets answers
+to all 8 fetchClientConfig OSDK_* requests (each once, no retry loop) after preAuth.
+
+Remaining for full Madden login: the server still *encodes* responses in heat1, which
+the heat2 client can act on only partially, so it stalls after fetchClientConfig. Next
+is a heat2 response encoder (serialize the TdfField model in heat2 for heat2 clients)
+plus a per-connection heat2 flag set from the preAuth BSDK version.
+---
+ Skate Custom Server/Blaze/Tdf/BlazeMessage.cs | 20 +++++++++++++++----
+ 1 file changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/Skate Custom Server/Blaze/Tdf/BlazeMessage.cs b/Skate Custom Server/Blaze/Tdf/BlazeMessage.cs
+index a52cad2..c1c9e4b 100644
+--- a/Skate Custom Server/Blaze/Tdf/BlazeMessage.cs	
++++ b/Skate Custom Server/Blaze/Tdf/BlazeMessage.cs	
+@@ -438,10 +438,22 @@ namespace Blaze
+ 
+         public static T CreateModelFromRequest<T>(byte[] packetBytes) where T : new()
+         {
+-            var message = new BlazeMessage(packetBytes);
+-            var temp = new TdfStruct();
+-            temp.Fields.AddRange(message.Fields);
+-            return (T)TdfReflection.TdfStructToModel(temp, typeof(T));
++            try
++            {
++                var message = new BlazeMessage(packetBytes);
++                var temp = new TdfStruct();
++                temp.Fields.AddRange(message.Fields);
++                return (T)TdfReflection.TdfStructToModel(temp, typeof(T));
++            }
++            catch (Exception e)
++            {
++                // USCL: Blaze 3.x clients (Madden/NHL) send heat2-encoded requests the 2.x (heat1) parser can't read.
++                // Rather than throw (which drops the connection and hangs the game mid-handshake), degrade to a default
++                // model so the handler still sends its response; the client tolerates our heat1 responses for the early
++                // handshake commands. Heat1 clients (NBA Jam/Skate 3) parse cleanly and never hit this.
++                Servers.ServerLogger.Log($"[Blaze] heat2 request not parsed as {typeof(T).Name} ({e.GetType().Name}); using default model");
++                return new T();
++            }
+         }
+ 
+         public static BlazeMessage CreateNotificationMessageBase(BlazeComponent component, ushort command)
+-- 
+2.56.0
+

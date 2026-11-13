@@ -1,0 +1,121 @@
+From 4b63bc13f5aeeed9afcb5fe18b4ecd7bced18ca3 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 10:13:31 -0700
+Subject: [PATCH 04/14] Blaze: secure redirector (SECU=1 + TLS port) for Blaze
+ 3.x clients like Madden 25
+
+Madden 25 (Blaze 13.3) runs the whole Blaze session over ProtoSSL TLS, not just the
+redirector. getServerInstance now reads the BSDK version by a raw scan (Madden's 3.x
+TDF encoding isn't parseable by the 2.x decoder) and, for major>=3, returns the
+secure redirector port with SECU=1. SecureRedirectPort comes from settings.json.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ .../Handlers/GetServerInstanceHandler.cs      | 36 +++++++++++++++++--
+ Skate Custom Server/Program.cs                |  1 +
+ .../Servers/Models/ServerSettings.cs          |  3 ++
+ Skate Custom Server/Servers/ServerGlobals.cs  |  2 ++
+ 4 files changed, 39 insertions(+), 3 deletions(-)
+
+diff --git a/Skate Custom Server/Blaze/Components/Redirector/Handlers/GetServerInstanceHandler.cs b/Skate Custom Server/Blaze/Components/Redirector/Handlers/GetServerInstanceHandler.cs
+index 771f1cb..1d10016 100644
+--- a/Skate Custom Server/Blaze/Components/Redirector/Handlers/GetServerInstanceHandler.cs	
++++ b/Skate Custom Server/Blaze/Components/Redirector/Handlers/GetServerInstanceHandler.cs	
+@@ -15,6 +15,18 @@ namespace Blaze.Components.Redirector.Handlers
+             serverIPBytes = serverIPBytes.Reverse().ToArray();
+             uint serverIP = BitConverter.ToUInt32(serverIPBytes, 0);
+ 
++            // USCL: Blaze 3.x+ clients (Madden 25 = 13.3) run the main Blaze connection over TLS (ProtoSSL) too, not
++            // just the redirector. Send them the secure redirector port (fronted by the TLS proxy) with SECU=1.
++            // Blaze 2.x (Skate 3, NBA Jam) uses the plain Blaze port, SECU=0.
++            // The BSDK version is read by a raw scan, not the TDF model: Madden's request uses the Blaze 3.x TDF
++            // encoding, which the 2.x decoder here can't parse (it would throw on a newer type).
++            string bsdk = ReadBsdkVersion(packetBytes);
++            int major = 0;
++            if (bsdk.Length > 0) int.TryParse(bsdk.Split('.')[0], out major);
++            bool secure = major >= 3 && ServerGlobals.SecureRedirectPort != 0;
++            ushort port = secure ? ServerGlobals.SecureRedirectPort : ServerGlobals.ServerPort;
++            ServerLogger.Log($"[Blaze] getServerInstance BSDK={bsdk} -> {ServerGlobals.ServerIP}:{port} secure={secure}");
++
+             BlazeMessage responseMsg = BlazeMessage.CreateResponseFromModel(
+                 packetBytes,
+                 new ServerInstanceInfo
+@@ -24,15 +36,33 @@ namespace Blaze.Components.Redirector.Handlers
+                         IpAddress = new IpAddress
+                         {
+                             IP = serverIP,
+-                            Port = ServerGlobals.ServerPort
++                            Port = port
+                         }
+                     },
+-                    Secure = false, // No SSLV3 support implemented yet
++                    Secure = secure,
+                     DefaultDnsAddress = 0
+                 });
+ 
+             await user.Stream.WriteAsync(responseMsg.Serialize());
+-            
++
++        }
++
++        // USCL: pull the BSDK version string out of the raw packet without the TDF model (Madden's Blaze 3.x
++        // encoding isn't parseable by the 2.x decoder). BSDK tag = 8B 39 2B, followed by a type/length byte and
++        // the ASCII version; we just read the run of digits and dots after the tag.
++        private static readonly byte[] BsdkTag = { 0x8B, 0x39, 0x2B };
++        private static string ReadBsdkVersion(byte[] p)
++        {
++            for (int i = 0; i + 3 < p.Length; i++)
++            {
++                if (p[i] != BsdkTag[0] || p[i + 1] != BsdkTag[1] || p[i + 2] != BsdkTag[2]) continue;
++                int j = i + 3;
++                while (j < p.Length && !(p[j] >= '0' && p[j] <= '9')) j++; // skip type/length header bytes
++                int start = j;
++                while (j < p.Length && ((p[j] >= '0' && p[j] <= '9') || p[j] == '.')) j++;
++                return System.Text.Encoding.ASCII.GetString(p, start, j - start);
++            }
++            return "";
+         }
+     }
+ }
+diff --git a/Skate Custom Server/Program.cs b/Skate Custom Server/Program.cs
+index 659397c..4b4199e 100644
+--- a/Skate Custom Server/Program.cs	
++++ b/Skate Custom Server/Program.cs	
+@@ -31,6 +31,7 @@ else
+     ServerGlobals.ServerIP = await new HttpClient().GetStringAsync("https://api.ipify.org");
+ 
+ ServerGlobals.HostTicketKey = serverSettings.HostTicketKey;
++ServerGlobals.SecureRedirectPort = serverSettings.SecureRedirectPort;
+ 
+ // Teams (Blaze Clubs)
+ ServerGlobals.ClubMaxMembers = Math.Clamp(serverSettings.TeamMaxMembers, 1, 1000);
+diff --git a/Skate Custom Server/Servers/Models/ServerSettings.cs b/Skate Custom Server/Servers/Models/ServerSettings.cs
+index e67f865..b064a99 100644
+--- a/Skate Custom Server/Servers/Models/ServerSettings.cs	
++++ b/Skate Custom Server/Servers/Models/ServerSettings.cs	
+@@ -9,6 +9,9 @@
+         // tickets with ticket_private.pem. Tickets signed with it are accepted like official RPCN ones.
+         public string HostTicketKey = "";
+ 
++        // USCL: port of the TLS proxy in front of Blaze for ProtoSSL clients (Madden 25 = Blaze 13.3). 0 = disabled.
++        public ushort SecureRedirectPort = 0;
++
+         // Teams (Blaze Clubs)
+         public int TeamMaxMembers = 50;
+         public int TeamMaxLeaders = 10;
+diff --git a/Skate Custom Server/Servers/ServerGlobals.cs b/Skate Custom Server/Servers/ServerGlobals.cs
+index a919b0c..1d166fd 100644
+--- a/Skate Custom Server/Servers/ServerGlobals.cs	
++++ b/Skate Custom Server/Servers/ServerGlobals.cs	
+@@ -11,6 +11,8 @@ namespace Servers
+         public static ushort ServerPort = 42100;
+         public static ushort HttpServerPort = 80;
+         public static string HostTicketKey = "";
++        // USCL: TLS proxy port for Blaze 3.x+ clients (Madden); 0 = none (reply plaintext to all). From settings.json.
++        public static ushort SecureRedirectPort = 0;
+         public static uint PingPeriodSecs = 20;
+         public static int ContentUploadCap = 100;
+         public static uint UploadSizeCap = 10_000_000;
+-- 
+2.56.0
+

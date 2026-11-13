@@ -1,16 +1,41 @@
-# uscl-rpcs3
+# uscl-rpcs3: PlayStation 3 (RPCS3)
 
-USCL's RPCS3 build: [RPCS3/rpcs3](https://github.com/RPCS3/rpcs3) (GPL-2.0) plus the patches in `patches/`.
-Only changes the server side can't make go here: game-specific sceNp fixes, an NP call trace for working out
-each game, and turning Steam invites into in-game invites. Rooms, friends, presence and P2P stay in uscl-rpcn.
+| | |
+|---|---|
+| **Console** | PlayStation 3 |
+| **Upstream** | [RPCS3/rpcs3](https://github.com/RPCS3/rpcs3) (GPL-2.0) |
+| **Pinned base** | `eee3f0f` (upstream 2026-11-05) |
+| **Our changes** | `patches/0001`–`0011`, applied with `git am` |
+| **Ships in** | Windows installer and Linux AppImage (`packaging/`) |
+| **Online services it talks to** | [uscl-rpcn](../uscl-rpcn/) (PSN), [uscl-dw](../uscl-dw/) (Call of Duty), [uscl-blaze](../uscl-blaze/) (EA) |
+
+USCL's PS3 emulator. Only changes the servers can't make go here: the USCL app itself (name, settings folder,
+home-screen integration), game-specific sceNp fixes, built-in game patches (BO2 crossplay), and tools for working
+out what a game does (logpoints, a GDB server that survives disconnects). Rooms, friends, presence and P2P stay in
+uscl-rpcn.
 
 ## Build
 ```
 git clone --recursive https://github.com/RPCS3/rpcs3.git && cd rpcs3
-git checkout e53ac18            # the commit these patches were made against
+git checkout eee3f0f
 git am ../patches/*.patch
 ```
-Then build as in RPCS3's `BUILDING.md`.
+Then build as in RPCS3's `BUILDING.md`. Things that bite:
+
+- **LTO** (`USE_LTO` defaults to ON, keep it: it's a free speedup). With clang, link with lld and archive with
+  llvm-ar, or the link fails (`CMAKE_CXX_COMPILER_AR-NOTFOUND`, then `file format not recognized` from GNU ld):
+  `-DCMAKE_LINKER_TYPE=LLD -DCMAKE_CXX_COMPILER_AR=<llvm>/bin/llvm-ar -DCMAKE_C_COMPILER_AR=<llvm>/bin/llvm-ar
+  -DCMAKE_CXX_COMPILER_RANLIB=<llvm>/bin/llvm-ranlib -DCMAKE_C_COMPILER_RANLIB=<llvm>/bin/llvm-ranlib`, on a fresh
+  build folder (the compiler's archiver is detected once and cached).
+- **Builds for other people** (AppImage): configure with `-DUSE_NATIVE_INSTRUCTIONS=OFF`. ON tunes the binary to
+  the build PC's CPU, and it can crash on older ones.
+- **Windows:** `.github/workflows/windows-installer.yml` builds it with RPCS3's own CI steps (pinned by `RPCS3_COMMIT`
+  there).
+- **Interpreter-only debug build** (Arch, 2026-10: the bundled LLVM didn't compile with GCC 16's libstdc++):
+  The bundled LLVM doesn't compile with GCC 16's libstdc++ and `llvm-ar` isn't installed, so the debugging build is
+  interpreter-only: `cmake -S . -B build-nollvm -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang
+  -DCMAKE_CXX_COMPILER=clang++ -DWITH_LLVM=OFF -DUSE_LTO=OFF -DUSE_SYSTEM_FFMPEG=ON && ninja -C build-nollvm`.
+  Set `SPU Decoder: Recompiler (ASMJIT)` for games run with it.
 
 ## Patches
 - 0001: send `CELL_SYSUTIL_NP_INVITATION_SELECTED` after `sceNpBasicRecvMessageCustom` picks an invite. Skate 3 waits for it
@@ -19,7 +44,6 @@ Then build as in RPCS3's `BUILDING.md`.
   (the hash is the log's `PPU executable hash`). Needs `PPU Decoder: Interpreter (static)`. The first call logs name,
   LR and r3–r5 and the game carries on; a name starting with `*` logs every call; ending in `@rN` also logs the string
   rN points to. Unlike breakpoints it never pauses, so games with a hang watchdog keep running.
-
 - 0003: the GDB server survives a client leaving (a closed connection or `D` used to be a fatal error that froze
   emulation; now the session ends and the game resumes). Reading/writing memory with `gdb` works with any decoder;
   breakpoints need the interpreter. A logpoint named `!...` writes all mapped game memory to `$USCL_MEMDUMP_DIR`
@@ -49,9 +73,3 @@ Then build as in RPCS3's `BUILDING.md`.
 - 0011: built-in patches are also read from `uscl_patches.yml` next to the RPCS3 executable (generated, too big for
   the source; packaging ships it): BO2 "PS4 netfield order", the 22 network field tables in the PS4 build's order so
   game state encodes alike (crossplay).
-
-## Building (Arch, 2026-10)
-The bundled LLVM doesn't compile with GCC 16's libstdc++ and `llvm-ar` isn't installed, so the debugging build is
-interpreter-only: `cmake -S . -B build-nollvm -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang
--DCMAKE_CXX_COMPILER=clang++ -DWITH_LLVM=OFF -DUSE_LTO=OFF -DUSE_SYSTEM_FFMPEG=ON && ninja -C build-nollvm`.
-Set `SPU Decoder: Recompiler (ASMJIT)` for games run with it.

@@ -1,7 +1,7 @@
-From eb89636d5f89f483ec8786b793286404b2c0cec9 Mon Sep 17 00:00:00 2001
+From f9cb5ece07fc8a9fd538229b94beb289a43aabf8 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:28:28 -0700
-Subject: [PATCH 2/8] USCL logpoints: log game functions without pausing
+Subject: [PATCH 02/11] USCL logpoints: log game functions without pausing
  (interpreter)
 
 USCL_LOGPOINTS=<file>, lines "PPU-<hash> <hex address> <name>". The first
@@ -12,11 +12,11 @@ doesn't pause, for games with a hang watchdog (Black Ops II).
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  rpcs3/Emu/Cell/PPUModule.cpp |  3 ++
- rpcs3/Emu/Cell/PPUThread.cpp | 88 ++++++++++++++++++++++++++++++++++++
- 2 files changed, 91 insertions(+)
+ rpcs3/Emu/Cell/PPUThread.cpp | 87 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 90 insertions(+)
 
 diff --git a/rpcs3/Emu/Cell/PPUModule.cpp b/rpcs3/Emu/Cell/PPUModule.cpp
-index 22e8ff9..60d76e3 100644
+index 1ff5784..8b8ddea 100644
 --- a/rpcs3/Emu/Cell/PPUModule.cpp
 +++ b/rpcs3/Emu/Cell/PPUModule.cpp
 @@ -2505,6 +2505,9 @@ bool ppu_load_exec(const ppu_exec_object& elf, bool virtual_load, const std::str
@@ -30,10 +30,10 @@ index 22e8ff9..60d76e3 100644
  	{
  		ppu_loader.warning("PPU executable hash: %s", hash);
 diff --git a/rpcs3/Emu/Cell/PPUThread.cpp b/rpcs3/Emu/Cell/PPUThread.cpp
-index 76793a3..4d61f99 100644
+index 7186ad8..30113e2 100644
 --- a/rpcs3/Emu/Cell/PPUThread.cpp
 +++ b/rpcs3/Emu/Cell/PPUThread.cpp
-@@ -1228,6 +1228,92 @@ static void ppu_break(ppu_thread& ppu, ppu_opcode_t, be_t<u32>* this_op, ppu_int
+@@ -1242,6 +1242,92 @@ static void ppu_break(ppu_thread& ppu, ppu_opcode_t, be_t<u32>* this_op, ppu_int
  	return ppu_cache(ppu.cia)(ppu, {*this_op}, this_op, ppu.state ? &ppu_ret : next_fn);
  }
  
@@ -126,11 +126,10 @@ index 76793a3..4d61f99 100644
  // Set or remove breakpoint
  extern bool ppu_breakpoint(u32 addr, bool is_adding)
  {
-@@ -4886,6 +4972,8 @@ extern void ppu_initialize()
- 
- 		ppu_initialize(*ptr);
+@@ -5090,6 +5176,7 @@ extern void ppu_initialize()
  	}
-+
+ 
+ 	ppu_initialize_patch_helpers();
 +	ppu_install_logpoints();
  }
  

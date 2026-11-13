@@ -7,6 +7,8 @@ scratch folder: adjust before use. See `tools/autotest/README.md` for the virtua
 | script | what |
 |---|---|
 | `release.sh <run id> <tag>` | waits for the Windows installer build, signs it with the local update key (`packaging/sign-release.sh`), publishes, verifies the signature |
+| `build-switch-core.sh` | builds the pinned USCL Eden patches for the local Switch preview |
+| `switch-preview.sh [--build-only]` | builds/tests or launches USCL with a separate Switch profile |
 | `services.sh` | starts RPCN, our Demonware (dw-server) and the bridge for local tests |
 | `mw2launch.sh <a\|b>`, `mw2nav.sh` | start Modern Warfare 2 in test profile a/b and place the window; leave lobby / Find Game -> TDM |
 | `p.sh <a\|b> <cmd>` | virtual pad command plus a short pause |
@@ -19,3 +21,5 @@ scratch folder: adjust before use. See `tools/autotest/README.md` for the virtua
 
 `tools/ghidra/toc_str.py` / `abs_str.py`: find code that uses a string in a PS3 ELF (TOC slot or lis/addi loads),
 for strings Ghidra's references miss.
+
+`test-switch-online.py --eden <patched-eden>` exercises the independent Switch service and Eden’s headless probe against real and malformed local peers. Build the backend with the commands in [its README](../../uscl-switch-online/README.md) first. This does not test Mario Kart’s native Online Play menu.

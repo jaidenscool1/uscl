@@ -1,0 +1,546 @@
+From aac83c32e2a578d9a7e59ec7de2b679fadfe0806 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 11:03:14 -0700
+Subject: [PATCH 14/14] docs: full write-up of EA Sports (Blaze 3.x heat2)
+ online + resume guide
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Document everything discovered bringing NHL 15 / Madden 25 online:
+
+- docs/EA-Sports-Blaze3-heat2.md: the complete protocol write-up — heat1 vs
+  heat2, the SOLVED login handshake (TLS SSLv3/RC4, RPCN HostTicketKey,
+  ConsoleLoginResponse/DSNM persona, the UserAuthenticated(8) login-completion
+  notification and the 8->2->5 post-login set), the implemented components
+  (Stats/getKeyScopesMap, UserSessions notifications, updateNetworkInfo), the
+  USCL_BLAZE_LISTEN tap switch, the full live test harness (ports, commands,
+  rebuild/deploy, vpad), and the one remaining NHL crash — fully diagnosed
+  (O_SG_TCKR ticker-group null-deref at PC 0x008b1aec), proven server-fixable
+  (PPU interpreter crashes identically, so not an emulator bug), with the
+  PS3-EBOOT disassembly toolchain and the two next-step options.
+- tools/ea-sports/: tap.py (plaintext MITM capture), decode_heat2.py (heat2
+  request decoder), ppc_analyze.py (capstone PPC64 disasm/xref), + README.
+- README.md: USCL fork section pointing to the write-up.
+- docs/Project Structure.md: the heat2/EA Sports code additions.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ README.md                       |  17 +++
+ docs/EA-Sports-Blaze3-heat2.md  | 231 ++++++++++++++++++++++++++++++++
+ docs/Project Structure.md       |  22 +++
+ tools/ea-sports/README.md       |  22 +++
+ tools/ea-sports/decode_heat2.py |  79 +++++++++++
+ tools/ea-sports/ppc_analyze.py  |  42 ++++++
+ tools/ea-sports/tap.py          |  39 ++++++
+ 7 files changed, 452 insertions(+)
+ create mode 100644 docs/EA-Sports-Blaze3-heat2.md
+ create mode 100644 tools/ea-sports/README.md
+ create mode 100644 tools/ea-sports/decode_heat2.py
+ create mode 100644 tools/ea-sports/ppc_analyze.py
+ create mode 100644 tools/ea-sports/tap.py
+
+diff --git a/README.md b/README.md
+index f88c8ad..5990b93 100644
+--- a/README.md
++++ b/README.md
+@@ -5,6 +5,23 @@ Skate 3 Custom Blaze server for RPCS3/PS3 with working matchmaking and content s
+ * Relay servers for each lobby (no Peer to Peer connections between players)
+ * Park uploading/downloading from the Skate.Park menu ingame
+ 
++# USCL fork — EA Sports online (Blaze 3.x "heat2")
++This fork extends the server beyond Skate 3 to revive **EA Sports** online play on RPCS3.
++Skate 3 and NBA Jam speak Blaze 2.x ("heat1"); the EA Sports titles (NHL 15, Madden 25,
++and the FIFA/Madden/NHL family) speak Blaze 3.x ("heat2"), with a different TDF encoding
++and login handshake.
++
++**Status:** NHL 15 now **logs in and connects to the EA servers** (the online ticker plays
++and it reaches "Retrieving data from server"), using a fully reverse-engineered heat2 login
++flow — TLS (SSLv3/RC4), RPCN ticket validation, the real `ConsoleLoginResponse`, and the
++`UserAuthenticated` notification that completes login. One remaining client-side crash during
++data retrieval is fully diagnosed and server-fixable.
++
++**→ See [`docs/EA-Sports-Blaze3-heat2.md`](docs/EA-Sports-Blaze3-heat2.md)** for the complete
++protocol write-up, the login handshake, the components, the live test harness, the PS3-EBOOT
++disassembly toolchain, and exactly how to pick the remaining work back up.
++Tooling: [`tools/ea-sports/`](tools/ea-sports/).
++
+ # Joining Our Public Server
+ ### Automated setup (Recommended for Windows):
+ [VIDEO GUIDE](https://www.youtube.com/watch?v=i5fHEhsqzA4)
+diff --git a/docs/EA-Sports-Blaze3-heat2.md b/docs/EA-Sports-Blaze3-heat2.md
+new file mode 100644
+index 0000000..ccf2070
+--- /dev/null
++++ b/docs/EA-Sports-Blaze3-heat2.md
+@@ -0,0 +1,231 @@
++# EA Sports online (Blaze 3.x "heat2") — NHL 15 / Madden 25
++
++This fork extends the Skate 3 Blaze server to revive EA Sports online play on RPCS3.
++Skate 3 and NBA Jam speak **Blaze 2.x ("heat1")**; the EA Sports titles (NHL 15,
++Madden 25, and the whole FIFA/Madden/NHL family) speak **Blaze 3.x ("heat2")**, a
++different wire encoding and a different login handshake.
++
++**Status (2026-11-09):** NHL 15 **logs in and connects to the EA servers** — the online
++music ticker plays and it reaches *"Retrieving data from server"*. It then hits one
++remaining **client-side crash** during data retrieval, which is **fully diagnosed and
++server-fixable** (not an emulator bug — see §6). Everything needed to finish it is below.
++
++Branch: `uscl-nbajam-work`. Key commits: `f06b66a` (heat2 encoder), `3e1a2db` (heat2
++decoder), `bb3ea81` (handshake tests), `a2ff48c`/`53c4767` (login response),
++`4e51434` (UserAuthenticated — login completes), `afab422` (Stats component).
++
++---
++
++## 1. heat1 vs heat2
++
++| | Blaze 2.x "heat1" | Blaze 3.x "heat2" |
++|---|---|---|
++| Games | Skate 3, NBA Jam | NHL 15 (BlazeSDK 3.19), Madden 25 (13.3), FIFA, etc. |
++| TDF wire | high-nibble length typing | `[3-byte tag][1-byte type][value]`, little-endian varints |
++| Login | `login` / postAuth | `ps3Login` (cmd 200) + `UserAuthenticated` notification |
++
++**heat2 TDF** (see `Blaze/Tdf/Heat2Writer.cs` + `Heat2Reader.cs`): each field is
++`[3-byte tag][1-byte type][value]`. Types: `0=int` (LE varint), `1=string`, `2=blob`,
++`3=struct` (0x00 terminator), `4=list`, `5=map`, `6=union`. A connection is flagged
++heat2 in `PreAuthHandler` by scanning the preAuth payload for the BlazeSDK tag
++`8B 39 2B` followed by an ASCII major version `>= 3`. `BlazeMessage.CreateModelFromRequest`
++picks the codec from that flag.
++
++> **Known encoder bug:** `TdfUtils.EncodeTdfTag` mis-encodes **digit-leading tags**
++> (`(0x20 | (c & 0x1F))` yields `'Q'` for `'1'`; the correct Blaze code is `c - 0x20`).
++> All-letter tags are fine. Avoid digit tags (e.g. `1CON`) or fix the encoder first.
++
++---
++
++## 2. The login handshake (SOLVED)
++
++Full flow, all working:
++
++```
++Client → gosredirector (TLS)  getServerInstance   → returns Blaze host:port (heat2 reply)
++Client → Blaze (TLS)          preAuth (Util/7)    → flags heat2
++                              fetchClientConfig (Util/1) × N  (OSDK_* sections)
++                              ps3Login (Auth/200)  → ConsoleLoginResponse
++Server →                      UserAuthenticated (UserSessions/8)   ← THE login-completion gate
++                              UserAdded (UserSessions/2)
++                              UserUpdated (UserSessions/5)
++Client →                      postAuth (Util/8), updateNetworkInfo (UserSessions/20), …
++```
++
++Four things had to be right:
++
++1. **TLS.** NHL's ProtoSSL only speaks **SSLv3 + RC4**, which OpenSSL 3.x removed. The
++   stock proxy silently broke. Fix: `tlsproxy_legacy.py` terminates TLS with
++   **tlslite-ng** (pure-Python, keeps SSLv3/RC4) and monkeypatches tlslite's OID table
++   to accept the forged EA cert's `rsaEncryption` sig-alg. Run on port 42127 with
++   `PYTHONPATH=<pylib>`. See §5.
++
++2. **Ticket validation.** Our self-hosted rpcn signs NPTickets with its **own** key, but
++   the Blaze server hard-codes the official RPCN public key. Fix: set **`HostTicketKey`**
++   in `settings.json` to our rpcn's uncompressed public point (114 hex, `04`+X+Y, derived
++   from rpcn's `ticket_private.pem`). `Ps3LoginHandler` accepts a ticket signed by the
++   official key **or** `HostTicketKey`. Expiry hard-reject was also relaxed (our tickets
++   have ~20-min TTL; idling at the menu expires them).
++
++3. **ps3Login response = the real `ConsoleLoginResponse`.** The response type for
++   `ps3Login` (200) is `ConsoleLoginResponse` (confirmed in ZamboniDevelopment/BlazeSDK).
++   Shape: `AGUP, SPAM, LDHT, NTOS, PRIV, SESS, TSUI, THST, TURI`, where
++   `SESS = SessionInfo{BUID, MAIL, FRST, LLOG, PDTL, KEY, UID}` and
++   **`PDTL = PersonaDetails{DSNM, XREF, XTYP, LAST, PID, STAS}`**. The earlier DS2-derived
++   guess used `PNAM/DPTS/EXID` — **the SDK couldn't read its own persona and logged
++   straight back out.** The persona-name tag is **`DSNM`**. See `Blaze3LoginResponse.cs`.
++
++4. **`UserAuthenticated` (UserSessions notification 8) — THE gate.** After `ps3Login`
++   the real SDK blocks until the server pushes the **local** user's session as
++   `UserSessions NotifyUserAuthenticated` (Id **8**). Without it the client shows
++   *"connecting to the EA servers…"*, pings a couple of times, then sends `logout` (70).
++   `NotifyUserAdded` (2) is for **foreign** personas only, **not** the local login.
++   Send order after the login reply: **UserAuthenticated(8) → UserAdded(2) → UserUpdated(5)**.
++   Payload of UserAuthenticated = `UserSessionLoginInfo` (see `UserAuthenticated.cs`):
++   `ALOC, BUID, DSNM, FRST, KEY, LAST, LLOG, MAIL, NASP="ps3", PID, PLAT=2 (PS3), UID,
++   USTP, XREF` (`1CON` omitted — digit-tag encoder bug, defaults to 0 anyway).
++
++Shapes 3 and 4 were reverse-engineered from the **FIFA 17 PS3 server**
++(`ceinydO/fifa17-ps3-online`) — the single most useful Blaze-3.x-PS3 reference (§7).
++
++---
++
++## 3. Components implemented for heat2
++
++| Component (wire id) | Command | Handler | Notes |
++|---|---|---|---|
++| Authentication (1) | ps3Login (200) | `Ps3LoginHandler` | ConsoleLoginResponse + 3 notifications |
++| UserSessions (30722) | updateNetworkInfo (20) | `UpdateNetworkInfoHandler` | → `NotifyExtendedDataUpdated` (clears the connecting spinner) |
++| UserSessions (30722) | notifications 2/5/8 | `NotifyUserAdded`, `UserUpdated`, `UserAuthenticated` | post-login set |
++| **Stats (7)** | **getKeyScopesMap (15)** | **`GetKeyScopesMap`** | typed `KeyScopes{KSIT: map<string,KeyScopeItem>}`; the client derefs KSIT unconditionally, so the field must exist even empty. **Shared across all EA Sports.** |
++| Util (9) | preAuth(7), fetchClientConfig(1), postAuth(8), getTelemetryServer(5) | existing | config from `clientconfig/<CFID>.txt` |
++| Clubs (11) | getClubsComponentSettings (2600) | existing | |
++
++Everything else the game calls (Messaging/2, AssociationLists/6, and the game-specific
++components **2249=OsdkTicker2, 2250/2251=OSDKSeasonalPlay/OSDKTournaments**, plus 21/10,
++10/1) currently gets an **empty success** from the generic dispatcher fallback in
++`Servers/Blaze/BlazeServer.cs`. The game proceeds past all of them.
++
++`clientconfig/OSDK_TICKER.txt` was populated (`OSDK_TICKER_COUNT`, `OSDK_TICKER_POLLING_DELAY`,
++`OSDK_TICKER_NEWS_HEADER`) during debugging — harmless, left in place, but **did not** fix
++the crash (§6).
++
++---
++
++## 4. Program.cs diagnostic switch
++
++`USCL_BLAZE_LISTEN=<port>` makes the Blaze server listen on an internal port (e.g. 42101)
++so a plaintext tap can sit on the advertised `ServerPort` (42100, what `getServerInstance`
++returns) and dump the session both ways. Omit it for normal operation.
++
++---
++
++## 5. Live test harness
++
++The harness lives outside this repo; paths below are the current machine's. Ports:
++rpcn `127.0.0.3:31513`, TLS terminator `42127`, plaintext tap `42100`, Blaze server
++`42101` (internal). Chain: **NHL → TLS(42127) → tap(42100) → Blaze(42101)**, with rpcn
++minting tickets.
++
++```sh
++# 1. Blaze server (deploy dir = publish output; config/logs live here)
++cd ~/.local/share/uscl/skate3-server/server/out/linux-x64
++USCL_BLAZE_LISTEN=42101 ./"Skate Custom Server"      # listens 42101
++
++# 2. plaintext tap 42100 -> 42101 (dumps both directions)
++python3 tools/ea-sports/tap.py 42100 127.0.0.1 42101 session.bin
++
++# 3. legacy TLS terminator 42127 -> tap(42100)   (needs tlslite-ng on PYTHONPATH)
++PYTHONPATH=~/.local/share/uscl/pylib \
++  python3 <ps3-steam-np>/uscl-blaze/tls/tlsproxy_legacy.py \
++  42127 ~/.local/share/uscl/blaze-cert 127.0.0.1 42100
++
++# 4. rpcn (run FROM its working dir — needs cert.pem/rpcn.cfg/ticket_private.pem there)
++cd ~/.local/share/uscl/rpcn-probe && <rpcn-build>/target/release/rpcn
++
++# 5. NHL 15 in RPCS3 (ea-probe config, online mode)
++XDG_CONFIG_HOME=~/.local/share/uscl/rpcs3-ea-probe/config \
++XDG_CACHE_HOME=~/.local/share/uscl/rpcs3-ea-probe/cache  USCL_ONLINE=1 \
++  <rpcs3> --no-gui "<path>/NHL 15 (USA) (En,Fr).dec.iso"
++```
++
++**Deploy/rebuild the server:**
++`dotnet publish -c Release -r linux-x64 --self-contained true -o <deploy dir>`, then
++restart the server exe from the deploy dir (kill the old one first — port conflicts else).
++`ServerGlobals.BaseDirectory` = the deploy dir, so `clientconfig/` and `logs.txt` are there.
++
++**Virtual pad** (menu automation): `vpad.py <sock> x360` exposes a uinput Xbox-360 pad
++(SDL name "Xbox 360 Controller"); RPCS3 input config binds Player 1 to it. Drive it over the
++unix socket: `printf 'press A 120' | socat - UNIX-CONNECT:<sock>` (buttons A/B/X/Y/START/…,
++`dpad UP|DOWN|…`). Screenshots: `grim -o DP-1 shot.png` (NHL renders on monitor DP-1).
++
++**Decode a capture:** `tools/ea-sports/decode_heat2.py session.bin` decodes framed
++`--- C>S N bytes ---` hex blocks into component/command + TDF fields.
++
++---
++
++## 6. The remaining crash (fully diagnosed, server-fixable)
++
++After the full online bootstrap, NHL's **main PPU thread null-derefs** at a **"Retrieving
++data from server"** screen: `VM: Access violation reading location 0x0` at PC
++**`0x008b1aec`**, deterministic (~0:01:29 every boot). **The Blaze session stays healthy**
++(keeps ping/ponging) — it's the *game* crashing, not a disconnect.
++
++**Root cause (from disassembly):** the function at `0x8b1aa0` is "update the ticker
++subsystem" (one of 16 subsystems updated in a loop at caller `0x82b720`). It does
++`stgm_manager->lookup("O_SG_TCKR")` → returns **null** → dereferences it. `"stgm"`
++(immediate `0x7374676d`) is a central settings/registry manager (97 refs, so it *is*
++initialized); only the **ticker settings group `O_SG_TCKR`** is missing. The five groups
++are `O_SG_NRAD/QMSG/SYSS/TCKR/USER`. The group is keyed by its string in the manager's
++internal map (static string-ptr slot `0x2276164`, 4 refs, all reads).
++
++**Ruled out (each an empirical live test, crash byte-identical):**
++- Stats `getKeyScopesMap` response content.
++- `OSDK_TICKER` fetchClientConfig content (served 3 real fields — group still not created).
++- **RPCS3 recompiler bug**: tested `PPU Decoder = Interpreter (static)` — crashes
++  **identically**. So it is **real game logic**, not emulation. **Server-fixable.**
++
++**Next steps (pick up here):**
++1. **Cheapest — make the game skip the ticker.** Return an error (e.g.
++   `OSDKTICKER2_ERR_NOT_REGISTERED`) for the `OsdkTicker2` component (2249) instead of
++   empty success, so the game disables the ticker instead of asserting the group exists.
++   EA games routinely degrade gracefully when a component is unavailable. One code change
++   + one reboot. "Ticker disabled, online menu reachable" is a fine outcome.
++2. **Proper — create the group.** RE the `OsdkTicker2` `RegisterResponse` (the game calls
++   2249/1 + 2249/2 right before the crash; we return empty) and return it populated so the
++   game creates `O_SG_TCKR`. Deeper: the create-vs-skip decision forks through the ticker
++   init fn `0x8b0d54` (registers via `vtable[8]` with `"O_SG_TCKR"`) and two lookup sites
++   (`0x8b1694`, crash `0x8b1ad4`). Same depth as FIFA17's unsolved `0x08C9`.
++
++**Madden 25** hits the same *class* of crash earlier (FGGameSim PPU null-deref ~52s) — very
++likely the same "real missing data" problem, now that the shared login path works.
++
++### Disassembly toolchain (reusable for any PS3 game)
++
++```sh
++# extract EBOOT.BIN from a (decrypted) ISO
++xorriso -osirrox on -indev <iso> -extract /PS3_GAME/USRDIR/EBOOT.BIN ./EBOOT.BIN
++# decrypt the SELF with RPCS3 itself (no scetool needed) -> EBOOT.elf (PowerPC64)
++<rpcs3> --decrypt ./EBOOT.BIN
++# system objdump has NO PPC support; use capstone (CS_ARCH_PPC | CS_MODE_64 | CS_MODE_BIG_ENDIAN)
++python3 tools/ea-sports/ppc_analyze.py EBOOT.elf disas <vaddr> <count>
++python3 tools/ea-sports/ppc_analyze.py EBOOT.elf xref  <const>          # find lis/ori sites
++```
++
++Segment map: the code LOAD segment is `vaddr 0x10000 → file 0x0`, so **file offset =
++vaddr − 0x10000**. `ppc_analyze.py` hard-codes this; update it for a different binary.
++
++---
++
++## 7. Reference material
++
++- **`ceinydO/fifa17-ps3-online`** — FIFA 17 on RPCS3, same era/SDK. The best Blaze-3.x-PS3
++  reference: exact shapes for `UserAuthenticated` (UserSessionLoginInfo), `NotifyUserAdded`,
++  `UserUpdated`, `KeyScopes`, `UpdateHardwareFlags`, and extensive Ghidra notes on the
++  game-specific `0x08C9` component. Clone it and read `fifa17srv/blaze.py`.
++- **`ZamboniDevelopment/BlazeSDK`** — decompiled real BlazeSDK (Blaze2SDK + Blaze3SDK) with
++  JSON component/command definitions and the authoritative TDF structs. Use it to confirm
++  response types (`ps3Login → ConsoleLoginResponse`, etc.) and member tags.
++- **`lowlevelmetal/open-ds2-server`** — Dead Space 2 PS3 Blaze server. Useful but a looser
++  homebrew reimplementation (its persona tags were the wrong `PNAM/DPTS` lead — trust the
++  decompiled SDK over it).
+diff --git a/docs/Project Structure.md b/docs/Project Structure.md
+index d2c075a..5d12a04 100644
+--- a/docs/Project Structure.md	
++++ b/docs/Project Structure.md	
+@@ -26,3 +26,25 @@ You can find all command packet structures and their Handlers in the "Blaze/Comp
+ 
+ 
+ Further explanations for authentication and matchmaking flows, etc. coming soon!
++
++## EA Sports (Blaze 3.x "heat2") additions
++
++This fork supports Blaze 3.x clients (NHL 15, Madden 25) alongside the Skate 3 / NBA Jam
++Blaze 2.x path. The relevant pieces:
++
++* **`Blaze/Tdf/Heat2Writer.cs` + `Heat2Reader.cs`** — the Blaze 3.x TDF codec
++  (`[3-byte tag][1-byte type][value]`, LE varints). `BlazeMessage.CreateModelFromRequest`
++  selects heat1 vs heat2 from a per-connection flag set in `PreAuthHandler`.
++* **`Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs`** — `ps3Login` (200) for
++  heat2: validates the RPCN ticket (official key **or** `HostTicketKey`), returns the real
++  `ConsoleLoginResponse` (`Blaze3LoginResponse.cs`), then pushes the post-login notifications
++  `UserAuthenticated(8) → UserAdded(2) → UserUpdated(5)` that complete the SDK's login.
++* **`Blaze/Components/UserSessions/Notifications/`** — `UserAuthenticated.cs` (the
++  login-completion signal), `NotifyUserAdded.cs`, `UserUpdated.cs`, `NotifyExtendedDataUpdated.cs`.
++* **`Blaze/Components/Stats/`** + **`Blaze/Routers/StatsRouter.cs`** — wire component 7
++  (Stats), `getKeyScopesMap` (15) → typed `KeyScopes` reply. Shared across EA Sports titles.
++* **`clientconfig/<CFID>.txt`** — key=value config served by `fetchClientConfig` (next to the
++  server exe, i.e. `ServerGlobals.BaseDirectory`).
++
++The full protocol write-up, login handshake, test harness, and the one remaining (diagnosed,
++server-fixable) NHL crash are documented in **[`EA-Sports-Blaze3-heat2.md`](EA-Sports-Blaze3-heat2.md)**.
+diff --git a/tools/ea-sports/README.md b/tools/ea-sports/README.md
+new file mode 100644
+index 0000000..7004ce9
+--- /dev/null
++++ b/tools/ea-sports/README.md
+@@ -0,0 +1,22 @@
++# EA Sports (Blaze 3.x heat2) tooling
++
++Helper scripts for bringing up and debugging EA Sports online. See
++[`../../docs/EA-Sports-Blaze3-heat2.md`](../../docs/EA-Sports-Blaze3-heat2.md) for the
++full picture.
++
++- **`tap.py LPORT BHOST BPORT [OUTFILE]`** — a plaintext man-in-the-middle tap. Listens on
++  `LPORT`, forwards to `BHOST:BPORT`, and dumps every Blaze frame both ways to `OUTFILE` as
++  `--- C>S N bytes ---` / `--- S>C N bytes ---` hex blocks. Sit it between the TLS terminator
++  and the real Blaze port to read the whole session in the clear.
++
++- **`decode_heat2.py capture.bin [...]`** — decodes the `C>S` request frames in a `tap.py`
++  capture into `component/command` + the top-level TDF field names (heat2 encoding). Handy
++  for seeing what the client asked for and in what order.
++
++- **`ppc_analyze.py EBOOT.elf disas|xref <arg> [count]`** — targeted PowerPC64 (big-endian)
++  analysis of a **decrypted** PS3 `EBOOT.elf` (decrypt the SELF with `rpcs3 --decrypt`).
++  `disas <vaddr> <count>` disassembles; `xref <const>` finds `lis`/`ori` sites that build a
++  32-bit constant (e.g. a 4-char tag). Needs [capstone](https://pypi.org/project/capstone/)
++  (`pip install capstone`, ideally in a venv). The code segment maps `vaddr 0x10000 → file 0x0`
++  (file offset = vaddr − 0x10000); edit the constants at the top of the file for a different
++  binary.
+diff --git a/tools/ea-sports/decode_heat2.py b/tools/ea-sports/decode_heat2.py
+new file mode 100644
+index 0000000..e5d1ad1
+--- /dev/null
++++ b/tools/ea-sports/decode_heat2.py
+@@ -0,0 +1,79 @@
++#!/usr/bin/env python3
++# Decode captured Blaze heat2 packets (C>S blocks of hex) to confirm the real request flow + CFIDs Madden sends.
++import sys, re
++
++def tag_decode(b):  # inverse of Blaze EncodeTdfTag: 3 bytes -> 4-char tag
++    v = (b[0] << 16) | (b[1] << 8) | b[2]
++    out = []
++    for shift in (18, 12, 6, 0):
++        c = (v >> shift) & 0x3F
++        out.append(chr(c + 0x20) if c else ' ')
++    return ''.join(out).rstrip()
++
++def varint(p, i):
++    b = p[i]; i += 1
++    if not (b & 0x80): return b, i
++    v = b & 0x3F; shift = 6
++    while True:
++        b = p[i]; i += 1
++        v |= (b & 0x7F) << shift; shift += 7
++        if not (b & 0x80): break
++    return v, i
++
++def read_value(p, i, t):
++    if t == 0:  # int
++        v, i = varint(p, i); return v, i
++    if t == 1:  # string
++        n, i = varint(p, i); s = p[i:i+max(0,n-1)].decode('latin1'); return s, i+n
++    if t == 2:  # blob
++        n, i = varint(p, i); return p[i:i+n].hex(), i+n
++    if t == 3:  # struct
++        d = {}
++        while p[i] != 0:
++            tag, val, i = read_field(p, i); d[tag] = val
++        return d, i+1
++    if t == 4:  # list
++        et = p[i]; i += 1; n, i = varint(p, i); items=[]
++        for _ in range(n):
++            v, i = read_value(p, i, et); items.append(v)
++        return items, i
++    if t == 5:  # map
++        kt = p[i]; vt = p[i+1]; i += 2; n, i = varint(p, i); m={}
++        for _ in range(n):
++            k, i = read_value(p, i, kt); v, i = read_value(p, i, vt); m[k]=v
++        return m, i
++    if t == 6:  # union
++        sel = p[i]; i += 1
++        if sel == 0x7F: return None, i
++        tag, val, i = read_field(p, i); return {'sel':sel, tag:val}, i
++    raise ValueError(f"type {t}")
++
++def read_field(p, i):
++    tag = tag_decode(p[i:i+3]); i += 3
++    t = p[i]; i += 1
++    val, i = read_value(p, i, t)
++    return tag, val, i
++
++def read_fields(p):
++    i = 0x0C; end = 0x0C + ((p[0]<<8)|p[1]); out={}
++    while i < end and p[i] != 0:
++        tag, val, i = read_field(p, i); out[tag]=val
++    return out
++
++COMP={5:'Redirector',9:'Util',1:'Auth',30:'UserSessions',7:'AssocLists',4:'GameManager',25:'GameReporting',11:'Clubs'}
++for path in sys.argv[1:]:
++    print(f"\n===== {path} =====")
++    txt = open(path).read()
++    blocks = re.split(r'---\s*C>S\s+\d+\s+bytes\s*---', txt)
++    for blk in blocks:
++        hx = ''.join(blk.split())
++        if len(hx) < 24: continue
++        try: p = bytes.fromhex(hx)
++        except ValueError: continue
++        comp = (p[2]<<8)|p[3]; cmd=(p[4]<<8)|p[5]
++        try: fields = read_fields(p)
++        except Exception as e: fields = f"<decode err: {e}>"
++        label = f"{COMP.get(comp,comp)}/{cmd}"
++        extra = ""
++        if comp==9 and cmd==1 and isinstance(fields,dict): extra = f"  CFID={fields.get('CFID')!r}"
++        print(f"  [{label}] fields={list(fields.keys()) if isinstance(fields,dict) else fields}{extra}")
+diff --git a/tools/ea-sports/ppc_analyze.py b/tools/ea-sports/ppc_analyze.py
+new file mode 100644
+index 0000000..505cd7a
+--- /dev/null
++++ b/tools/ea-sports/ppc_analyze.py
+@@ -0,0 +1,42 @@
++#!/usr/bin/env python3
++# Targeted PPC64 (big-endian) analysis of a decrypted PS3 EBOOT.elf.
++import sys, struct
++from capstone import Cs, CS_ARCH_PPC, CS_MODE_64, CS_MODE_BIG_ENDIAN
++
++elf = sys.argv[1]
++data = open(elf, 'rb').read()
++
++SEG_VADDR, SEG_FOFF, SEG_SIZE = 0x10000, 0x0, 0x21144e8
++def v2f(v): return v - SEG_VADDR + SEG_FOFF
++def f2v(f): return f - SEG_FOFF + SEG_VADDR
++code = data[SEG_FOFF:SEG_FOFF+SEG_SIZE]
++
++md = Cs(CS_ARCH_PPC, CS_MODE_64 | CS_MODE_BIG_ENDIAN)
++
++def disas(vaddr, count):
++    off = v2f(vaddr)
++    for ins in md.disasm(code[off:off+count*4], vaddr):
++        print(f"  0x{ins.address:08x}: {ins.mnemonic:8} {ins.op_str}")
++
++def find_lis_ori(hi, lo):
++    hits = []
++    for i in range(0, len(code)-8, 4):
++        w0 = struct.unpack('>I', code[i:i+4])[0]
++        if (w0 >> 26) == 15 and (w0 & 0xFFFF) == hi:
++            for j in range(i+4, min(i+28, len(code)-4), 4):
++                w1 = struct.unpack('>I', code[j:j+4])[0]
++                if (w1 >> 26) == 24 and (w1 & 0xFFFF) == lo:
++                    hits.append(f2v(i)); break
++    return hits
++
++mode = sys.argv[2]
++if mode == 'disas':
++    disas(int(sys.argv[3], 16), int(sys.argv[4]))
++elif mode == 'xref':
++    val = int(sys.argv[3], 16)
++    hi, lo = (val >> 16) & 0xFFFF, val & 0xFFFF
++    hits = find_lis_ori(hi, lo)
++    tag = bytes([(val>>24)&0xff,(val>>16)&0xff,(val>>8)&0xff,val&0xff])
++    print(f"xrefs building 0x{val:08x} ({tag!r}): {len(hits)}")
++    for h in hits[:30]:
++        print(f"-- site 0x{h:08x} --"); disas(h, 12)
+diff --git a/tools/ea-sports/tap.py b/tools/ea-sports/tap.py
+new file mode 100644
+index 0000000..f014fa2
+--- /dev/null
++++ b/tools/ea-sports/tap.py
+@@ -0,0 +1,39 @@
++#!/usr/bin/env python3
++# Plaintext tap: listen on LPORT, forward to BPORT, dump both directions as framed Blaze packets.
++import socket, sys, threading
++LPORT, BHOST, BPORT = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
++OUT = open(sys.argv[4], 'ab', buffering=0) if len(sys.argv) > 4 else None
++
++def dump(tag, data):
++    line = f"\n--- {tag} {len(data)} bytes ---\n{data.hex()}\n".encode()
++    if OUT: OUT.write(line)
++
++def pump(src, dst, tag):
++    try:
++        buf = b''
++        while True:
++            d = src.recv(4096)
++            if not d: break
++            dst.sendall(d)
++            buf += d
++            # frame by Blaze 12-byte header (u16 bodylen BE at offset 0)
++            while len(buf) >= 12:
++                blen = (buf[0]<<8)|buf[1]
++                if len(buf) < 12+blen: break
++                dump(tag, buf[:12+blen]); buf = buf[12+blen:]
++    except OSError: pass
++    finally:
++        try: dst.shutdown(socket.SHUT_WR)
++        except OSError: pass
++
++def handle(c):
++    try: b = socket.create_connection((BHOST, BPORT))
++    except OSError: c.close(); return
++    threading.Thread(target=pump, args=(c, b, 'C>S'), daemon=True).start()
++    pump(b, c, 'S>C'); c.close(); b.close()
++
++srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
++srv.bind(('0.0.0.0', LPORT)); srv.listen(8)
++print(f"tap on 0.0.0.0:{LPORT} -> {BHOST}:{BPORT}", flush=True)
++while True:
++    c,_ = srv.accept(); threading.Thread(target=handle, args=(c,), daemon=True).start()
+-- 
+2.56.0
+

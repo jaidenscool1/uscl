@@ -1,8 +1,8 @@
-From 3e3d01d2f30ff4371e998022c638869f9d89ee99 Mon Sep 17 00:00:00 2001
+From be82a9abf54a2684e7c3202224da75dff06e7b08 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Thu, 29 Oct 2026 06:41:05 -0700
-Subject: [PATCH] USCL: built-in BO2 patch: network messages little-endian like
- the PS4 build (crossplay)
+Subject: [PATCH 10/11] USCL: built-in BO2 patch: network messages
+ little-endian like the PS4 build (crossplay)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
@@ -10,10 +10,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 21 insertions(+)
 
 diff --git a/Utilities/bin_patch.cpp b/Utilities/bin_patch.cpp
-index 4f9a6a0..24ce9bd 100644
+index 72f48d4..2b330f4 100644
 --- a/Utilities/bin_patch.cpp
 +++ b/Utilities/bin_patch.cpp
-@@ -1483,6 +1483,27 @@ PPU-d26243d3556a8d446a97da71df8c12da4b7867a1:
+@@ -1496,6 +1496,27 @@ PPU-d26243d3556a8d446a97da71df8c12da4b7867a1:
        - [ be32, 0x007fcd4c, 0x60000000 ] # receive: bne after the MAC memcmp -> nop (MAC not checked)
        - [ be32, 0x007fcd88, 0x60000000 ] # receive: xor r5,r5,r6 -> nop
        - [ be32, 0x007fcda8, 0x7ca32b78 ] # receive: xor r3,r5,r3 -> mr r3,r5
