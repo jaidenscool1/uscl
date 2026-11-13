@@ -23,7 +23,11 @@ echo "== servers"
 
 echo "== home screen (uscl-shell)"
 DSDK=${USCL_DISCORD_SDK:-$HOME/src/discord-social-sdk/sdk/discord_social_sdk}; [ -d "$DSDK" ] || DSDK=""
-cmake -S "$REPO/uscl-shell" -B "$REPO/uscl-shell/build-release" -G Ninja -DCMAKE_BUILD_TYPE=Release -DUSCL_DISCORD_SDK="$DSDK" >/dev/null
+# the version the updater compares, like the Windows workflow: the release tag at HEAD without its "v"
+VERSION=${USCL_VERSION:-$(git -C "$REPO" describe --tags --exact-match 2>/dev/null | sed 's/^v//')}
+cmake -S "$REPO/uscl-shell" -B "$REPO/uscl-shell/build-release" -G Ninja -DCMAKE_BUILD_TYPE=Release -DUSCL_DISCORD_SDK="$DSDK" \
+  -DUSCL_VERSION="${VERSION:-0.0.0-dev}" >/dev/null
+echo "version ${VERSION:-0.0.0-dev}"
 ninja -C "$REPO/uscl-shell/build-release"
 "$REPO/uscl-shell/build-release/uscl" --self-test
 
@@ -74,6 +78,7 @@ export NO_STRIP=1 PATH=$TOOLS:$PATH APPIMAGE_EXTRACT_AND_RUN=1 OUTPUT=$OUT/USCL-
 REAL_QMAKE=${QMAKE:-$(command -v qmake6 || command -v qmake)}
 QT_PLUGINS=$("$REAL_QMAKE" -query QT_INSTALL_PLUGINS)
 rm -rf "$OUT/qt-plugins"; cp -rs "$QT_PLUGINS" "$OUT/qt-plugins"; rm -f "$OUT"/qt-plugins/imageformats/kimg_*
+find "$OUT/qt-plugins/sqldrivers" -name "*.so" ! -name "libqsqlite.so" -delete 2>/dev/null || true   # other SQL drivers need client libraries (Firebird, MySQL, ...) a player won't have
 printf '#!/bin/sh\n"%s" "$@" | sed "s|^QT_INSTALL_PLUGINS:.*|QT_INSTALL_PLUGINS:%s|"\n' "$REAL_QMAKE" "$OUT/qt-plugins" > "$OUT/qmake"
 chmod +x "$OUT/qmake"; export QMAKE=$OUT/qmake
 export EXTRA_PLATFORM_PLUGINS="libqwayland.so"
