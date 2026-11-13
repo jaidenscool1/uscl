@@ -1,0 +1,209 @@
+From 128967a8f16b616d675c7a26075ece483873ba7c Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 10:24:24 -0700
+Subject: [PATCH 06/11] Supply private local identity and loopback address to
+ the MK8 native adapter
+
+---
+ src/core/hle/service/acc/acc.cpp              | 34 +++++++++
+ .../hle/service/acc/uscl_native_identity.h    | 74 +++++++++++++++++++
+ src/core/hle/service/nifm/nifm.cpp            | 19 +++++
+ 3 files changed, 127 insertions(+)
+ create mode 100644 src/core/hle/service/acc/uscl_native_identity.h
+
+diff --git a/src/core/hle/service/acc/acc.cpp b/src/core/hle/service/acc/acc.cpp
+index c33b765..3611686 100644
+--- a/src/core/hle/service/acc/acc.cpp
++++ b/src/core/hle/service/acc/acc.cpp
+@@ -28,6 +28,7 @@
+ #include "core/hle/service/acc/async_context.h"
+ #include "core/hle/service/acc/errors.h"
+ #include "core/hle/service/acc/profile_manager.h"
++#include "core/hle/service/acc/uscl_native_identity.h"
+ #include "core/hle/service/cmif_serialization.h"
+ #include "core/hle/service/glue/glue_manager.h"
+ #include "core/hle/service/server_manager.h"
+@@ -530,6 +531,12 @@ protected:
+         }
+ 
+         IPC::ResponseBuilder rb{ctx, 4};
++        if (UsclNativeIdentityEnabled(system.GetApplicationProcessProgramID())) {
++            const auto identity = ReadUsclNativeIdentity(system.GetApplicationProcessProgramID());
++            rb.Push(identity ? ResultSuccess : ResultAccountUpdateFailed);
++            rb.PushRaw<u64>(identity ? identity->id : 0);
++            return;
++        }
+         rb.Push(ResultSuccess);
+         rb.PushRaw<u64>(profile_manager.GetLastOpenedUser().Hash());
+     }
+@@ -665,6 +672,22 @@ public:
+     ~EnsureTokenIdCacheAsyncInterface() = default;
+ 
+     void LoadIdTokenCache(HLERequestContext& ctx) {
++        if (UsclNativeIdentityEnabled(system.GetApplicationProcessProgramID())) {
++            const auto identity = ReadUsclNativeIdentity(system.GetApplicationProcessProgramID());
++            if (!identity || ctx.GetWriteBufferSize() < identity->token.size() + 1) {
++                IPC::ResponseBuilder rb{ctx, 3};
++                rb.Push(ResultAccountUpdateFailed);
++                rb.Push<u32>(0);
++                return;
++            }
++            std::vector<u8> token(identity->token.begin(), identity->token.end());
++            token.push_back(0);
++            ctx.WriteBuffer(token);
++            IPC::ResponseBuilder rb{ctx, 3};
++            rb.Push(ResultSuccess);
++            rb.Push(static_cast<u32>(identity->token.size()));
++            return;
++        }
+         LOG_WARNING(Service_ACC, "(STUBBED) called");
+ 
+         IPC::ResponseBuilder rb{ctx, 3};
+@@ -719,6 +742,13 @@ private:
+     void GetAccountId(HLERequestContext& ctx) {
+         LOG_DEBUG(Service_ACC, "called");
+ 
++        if (UsclNativeIdentityEnabled(system.GetApplicationProcessProgramID())) {
++            const auto identity = ReadUsclNativeIdentity(system.GetApplicationProcessProgramID());
++            IPC::ResponseBuilder rb{ctx, 4};
++            rb.Push(identity ? ResultSuccess : ResultAccountUpdateFailed);
++            rb.PushRaw<u64>(identity ? identity->id : 0);
++            return;
++        }
+         IPC::ResponseBuilder rb{ctx, 4};
+         rb.Push(ResultSuccess);
+         rb.PushRaw<u64>(profile_manager->GetLastOpenedUser().Hash());
+@@ -739,6 +769,10 @@ private:
+     }
+ 
+     void LoadIdTokenCache(HLERequestContext& ctx) {
++        if (UsclNativeIdentityEnabled(system.GetApplicationProcessProgramID())) {
++            ensure_token_id->LoadIdTokenCache(ctx);
++            return;
++        }
+         LOG_WARNING(Service_ACC, "(STUBBED) called");
+ 
+         std::vector<u8> token_data(0x100);
+diff --git a/src/core/hle/service/acc/uscl_native_identity.h b/src/core/hle/service/acc/uscl_native_identity.h
+new file mode 100644
+index 0000000..44dd2dc
+--- /dev/null
++++ b/src/core/hle/service/acc/uscl_native_identity.h
+@@ -0,0 +1,74 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#pragma once
++
++#include <array>
++#include <charconv>
++#include <cstdint>
++#include <cstdlib>
++#include <fstream>
++#include <optional>
++#include <string>
++#include <string_view>
++
++namespace Service::Account {
++
++struct UsclNativeIdentity {
++    std::uint64_t id;
++    std::string token;
++};
++
++inline bool UsclNativeIdentityEnabled(std::uint64_t program_id) {
++    const char* enabled = std::getenv("USCL_MK8_NATIVE_DIAGNOSTIC");
++    return program_id == 0x0100152000022000ULL && enabled && std::string_view{enabled} == "1";
++}
++
++inline std::optional<UsclNativeIdentity> ParseUsclNativeIdentity(std::string_view data) {
++    constexpr std::string_view prefix = "USCL_NATIVE_ID_V1\n";
++    if (!data.starts_with(prefix) || data.size() > 128) {
++        return std::nullopt;
++    }
++    data.remove_prefix(prefix.size());
++    const auto end_id = data.find('\n');
++    if (end_id == std::string_view::npos || end_id == 0 || end_id > 20) {
++        return std::nullopt;
++    }
++    std::uint64_t id{};
++    const auto parsed = std::from_chars(data.data(), data.data() + end_id, id);
++    if (parsed.ec != std::errc{} || parsed.ptr != data.data() + end_id || id == 0) {
++        return std::nullopt;
++    }
++    data.remove_prefix(end_id + 1);
++    if (data.size() != 65 || data.back() != '\n') {
++        return std::nullopt;
++    }
++    data.remove_suffix(1);
++    for (const auto ch : data) {
++        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) {
++            return std::nullopt;
++        }
++    }
++    return UsclNativeIdentity{id, std::string{data}};
++}
++
++inline std::optional<UsclNativeIdentity> ReadUsclNativeIdentity(std::uint64_t program_id) {
++    if (!UsclNativeIdentityEnabled(program_id)) {
++        return std::nullopt;
++    }
++    const char* path = std::getenv("USCL_MK8_NATIVE_CREDENTIAL_FILE");
++    if (!path || !*path) {
++        return std::nullopt;
++    }
++    std::ifstream file(path, std::ios::binary);
++    if (!file) {
++        return std::nullopt;
++    }
++    std::array<char, 129> bytes{};
++    file.read(bytes.data(), bytes.size());
++    const auto size = static_cast<std::size_t>(file.gcount());
++    if (file.bad() || size > 128) {
++        return std::nullopt;
++    }
++    return ParseUsclNativeIdentity(std::string_view{bytes.data(), size});
++}
++
++} // namespace Service::Account
+diff --git a/src/core/hle/service/nifm/nifm.cpp b/src/core/hle/service/nifm/nifm.cpp
+index a0302a5..45e50a6 100644
+--- a/src/core/hle/service/nifm/nifm.cpp
++++ b/src/core/hle/service/nifm/nifm.cpp
+@@ -6,9 +6,13 @@
+ 
+ #include <filesystem>
+ #include <fstream>
++#include <cstdio>
++#include <cstdlib>
++
+ #include "core/core.h"
+ #include "core/hle/kernel/k_event.h"
+ #include "core/hle/service/ipc_helpers.h"
++#include "core/hle/service/acc/uscl_native_identity.h"
+ #include "core/hle/service/kernel_helpers.h"
+ #include "core/hle/service/nifm/nifm.h"
+ #include "core/hle/service/server_manager.h"
+@@ -844,6 +848,21 @@ void IGeneralService::GetScanDataV3(HLERequestContext& ctx) {
+ }
+ 
+ void IGeneralService::GetCurrentIpAddress(HLERequestContext& ctx) {
++    if (Account::UsclNativeIdentityEnabled(system.GetApplicationProcessProgramID())) {
++        IPC::ResponseBuilder rb{ctx, 3};
++        rb.Push(ResultSuccess);
++        // A per-console loopback address (USCL_MK8_NATIVE_LOCAL_ADDRESS, e.g. 127.0.0.12) lets two local
++        // players look like separate machines; the socket layer binds to the same address.
++        Network::IPv4Address address{127, 0, 0, 1};
++        if (const char* value = std::getenv("USCL_MK8_NATIVE_LOCAL_ADDRESS")) {
++            unsigned a, b, c, d;
++            if (std::sscanf(value, "%u.%u.%u.%u", &a, &b, &c, &d) == 4 && a == 127 && b < 256 && c < 256 && d < 256) {
++                address = {127, static_cast<u8>(b), static_cast<u8>(c), static_cast<u8>(d)};
++            }
++        }
++        rb.PushRaw(address);
++        return;
++    }
+     LOG_WARNING(Service_NIFM, "(STUBBED) called");
+ 
+     auto ipv4 = Network::GetHostIPv4Address();
+-- 
+2.53.0.windows.1
+

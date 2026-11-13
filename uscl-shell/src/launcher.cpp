@@ -1,0 +1,407 @@
+#include "launcher.h"
+#include "padconfig.h"
+#include "games.h"
+#include "online.h"
+#include "switchcore.h"
+
+#include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QMap>
+#include <QTimer>
+
+#include <utility>
+#include <QSettings>
+#include <QUrl>
+
+Launcher::Launcher(QObject* parent)
+	: QObject(parent)
+{
+	m_process.setProcessChannelMode(QProcess::MergedChannels);
+	connect(&m_process, &QProcess::readyRead, this, [this] {
+		for (const QByteArray& line : m_process.readAll().split('\n'))
+		{
+			if (line.trimmed() == "USCL:home")
+				emit homeRequested();
+			else if (!line.trimmed().isEmpty())
+				m_tail << QString::fromUtf8(line.trimmed());
+		}
+		while (m_tail.size() > 30)
+			m_tail.removeFirst();
+	});
+	connect(&m_process, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status) {
+		const bool crashed = !m_stopping && (status == QProcess::CrashExit || code != 0);
+		m_stopping = false;
+		emit runningChanged();
+		emit gameShownChanged();
+		emit finished(crashed, m_tail.join('\n'));
+	});
+	connect(&m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+		if (error == QProcess::FailedToStart)
+		{
+			emit runningChanged();
+			emit finished(true, tr("Could not start %1").arg(m_process.program()));
+		}
+	});
+}
+
+QString Launcher::corePath()
+{
+	if (qEnvironmentVariableIsSet("USCL_RPCS3"))
+		return qEnvironmentVariable("USCL_RPCS3");
+#ifdef _WIN32
+	return QCoreApplication::applicationDirPath() + "/rpcs3.exe";
+#else
+	return QCoreApplication::applicationDirPath() + "/rpcs3";
+#endif
+}
+
+QString Launcher::ps4CorePath()
+{
+	if (qEnvironmentVariableIsSet("USCL_SHADPS4"))
+		return qEnvironmentVariable("USCL_SHADPS4");
+#ifdef _WIN32
+	return QCoreApplication::applicationDirPath() + "/shadps4.exe";
+#else
+	return QCoreApplication::applicationDirPath() + "/shadps4";
+#endif
+}
+
+bool Launcher::coreFound()
+{
+	return QFileInfo(corePath()).isExecutable();
+}
+
+bool Launcher::ps4CoreFound()
+{
+	return QFileInfo(ps4CorePath()).isExecutable();
+}
+
+bool Launcher::start(const QStringList& args, const QString& title, bool online, bool game, bool ps4, const QString& core)
+{
+	if (running())
+		return false;
+	// in an online session RPCS3 runs the game unmodified: no game patches, debugger or logpoints (uscl-rpcs3 0006)
+	QProcessEnvironment env = core.isEmpty() ? QProcessEnvironment::systemEnvironment() : SwitchCore::environment();
+	if (online)
+		env.insert("USCL_ONLINE", "1");
+	else
+		env.remove("USCL_ONLINE");
+	// a game's PS button comes to us (uscl-rpcs3 0008); the classic window keeps RPCS3's own home menu
+	if (std::exchange(m_auto_pads, false) && !core.isEmpty())
+		env.insert("USCL_AUTO_PADS", "1");
+	if (game && core.isEmpty())
+		env.insert("USCL_SHELL", "1");
+	else
+		env.remove("USCL_SHELL");
+	if (ps4)
+	{
+		// Demonware names go to our server (or the bridge to the host's); the game binds 127.0.0.2 so the bridge
+		// can own 127.0.0.1:3074/3077/3078
+		env.insert("USCL_HOSTS", "*.demonware.net=127.0.0.1");
+		env.insert("USCL_BIND_ADDR", "127.0.0.2");
+		m_process.setWorkingDirectory(Online::preparePs4());
+	}
+	else
+	{
+		m_process.setWorkingDirectory({});
+	}
+	m_process.setProcessEnvironment(env);
+	if (!core.isEmpty())
+	{
+		QDir().mkpath(SwitchCore::profileDir());
+		m_process.setWorkingDirectory(SwitchCore::profileDir());
+	}
+	else if (!ps4)
+		m_process.setWorkingDirectory(QCoreApplication::applicationDirPath());
+	m_tail.clear();
+	m_title = title;
+	m_stopping = false;
+	m_shown = true;
+	m_process.start(core.isEmpty() ? (ps4 ? ps4CorePath() : corePath()) : core, args);
+	emit runningChanged();
+	emit gameShownChanged();
+	return true;
+}
+
+// Wii and 3DS games don't run in RPCS3 -- they launch in Dolphin / Azahar (flatpaks). A crash or quit comes back
+// here the same way an RPCS3 game does. 3DS: the frontend needs software GL on this NVIDIA/Wayland setup
+// (LIBGL_ALWAYS_SOFTWARE=1); the game still renders on Vulkan. See uscl-3ds/ and uscl-dolphin/.
+// Our Dolphin (uscl-dolphin patches: NetPlay host/join without its dialogs), else the Flathub app (offline only)
+QString Launcher::ownDolphin()
+{
+	const QString path = qEnvironmentVariableIsSet("USCL_DOLPHIN") ? qEnvironmentVariable("USCL_DOLPHIN")
+	                                                               : QCoreApplication::applicationDirPath() + "/dolphin-emu";
+	return QFileInfo(path).isExecutable() ? path : QString();
+}
+
+// Where the Dolphin that runs keeps its settings: our own build gets a USCL profile (-u), the Flathub app its own
+QString Launcher::dolphinConfigDir()
+{
+	return ownDolphin().isEmpty() ? QDir::homePath() + "/.var/app/org.DolphinEmu.dolphin-emu/config/dolphin-emu/"
+	                              : GameModel::rpcs3ConfigDir() + "uscl/dolphin/Config/";
+}
+
+// Our Azahar (uscl-3ds patches: joins a room by itself) and its room server, else the Flathub app (offline only)
+QString Launcher::ownAzahar(const QString& name)
+{
+	const QString var = name == "azahar-room" ? "USCL_AZAHAR_ROOM" : "USCL_AZAHAR";
+	const QString path = qEnvironmentVariableIsSet(var.toLatin1().constData()) ? qEnvironmentVariable(var.toLatin1().constData())
+	                                                                            : QCoreApplication::applicationDirPath() + "/" + name;
+	return QFileInfo(path).isExecutable() ? path : QString();
+}
+
+// Azahar's settings: our build gets a USCL profile (XDG dirs under uscl/azahar), the Flathub app its own
+QString Launcher::azaharConfigFile()
+{
+	return ownAzahar().isEmpty() ? QDir::homePath() + "/.var/app/org.azahar_emu.Azahar/config/azahar-emu/qt-config.ini"
+	                             : GameModel::rpcs3ConfigDir() + "uscl/azahar/config/azahar-emu/qt-config.ini";
+}
+
+bool Launcher::startEmu(const QString& path, const QString& title, const QString& console, const QString& netplay,
+                        const QString& nickname, int players)
+{
+	if (running())
+		return false;
+	QString program = "flatpak";
+	QStringList args;
+	QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+	if (console == "Wii" && !ownDolphin().isEmpty())
+	{
+		program = ownDolphin();
+		args = {"-u", QDir(dolphinConfigDir()).absoluteFilePath(".."), "-C", "Dolphin.Analytics.PermissionAsked=True"};
+		if (netplay.isEmpty())
+			args << "-b" << "-e" << path;
+		else
+		{
+			// NetPlay over the Steam tunnel: the host's server on 2626, a member's bridge serves 127.0.0.1:2626
+			// (uscl-bridge preset "dolphin"). The game is found through the game list, so its folder goes there.
+			for (const QString& c : {"Dolphin.NetPlay.TraversalChoice=direct", "Dolphin.NetPlay.HostPort=2626",
+			                         "Dolphin.NetPlay.Address=127.0.0.1", "Dolphin.NetPlay.ConnectPort=2626",
+			                         "Dolphin.NetPlay.UseUPNP=False", "Dolphin.General.ISOPaths=1"})
+				args << "-C" << c;
+			args << "-C" << "Dolphin.NetPlay.Nickname=" + nickname << "-C" << "Dolphin.General.ISOPath0=" + QFileInfo(path).absolutePath();
+			env.insert("USCL_NETPLAY", netplay);
+			env.insert("USCL_NETPLAY_GAME", path);
+			// shortcut: the host starts once this many are in (2 at least); a later joiner waits for the next game
+			env.insert("USCL_NETPLAY_PLAYERS", QString::number(std::max(2, players)));
+		}
+	}
+	else if (console == "Wii")
+		args = {"run", "org.DolphinEmu.dolphin-emu", "-b", "-e", path};
+	else if (console == "3DS" && !ownAzahar().isEmpty())
+	{
+		program = ownAzahar();
+		args = {path};
+		const QString profile = GameModel::rpcs3ConfigDir() + "uscl/azahar/";
+		env.insert("XDG_CONFIG_HOME", profile + "config");
+		env.insert("XDG_DATA_HOME", profile + "data");
+		// in a session: the room on the host's PC (UDP 24872), reached through the tunnel (uscl-bridge preset "3ds")
+		if (!netplay.isEmpty())
+			env.insert("USCL_ROOM", nickname + "@127.0.0.1:24872");
+	}
+	else if (console == "3DS")
+		args = {"run", "--env=LIBGL_ALWAYS_SOFTWARE=1", "org.azahar_emu.Azahar", path};
+	else if (console == "WiiU")
+		args = {"run", "info.cemu.Cemu", "-f", "-g", path};   // Cemu: fullscreen, load game
+	else if (console == "Xbox360")
+	{
+		// Xenia is a Windows build (no flatpak); run it under Wine. Experimental on Linux.
+		const QString xenia = qEnvironmentVariableIsSet("USCL_XENIA")
+			? qEnvironmentVariable("USCL_XENIA")
+			: QDir::homePath() + "/.local/share/uscl/xenia/xenia.exe";
+		program = "wine";
+		args = {xenia, "--fullscreen", path};
+	}
+	else
+		return false;
+	env.remove("USCL_ONLINE");
+	env.insert("USCL_SHELL", "1");
+	m_process.setWorkingDirectory({});
+	m_process.setProcessEnvironment(env);
+	m_tail.clear();
+	m_title = title;
+	m_stopping = false;
+	m_shown = true;
+	m_process.start(program, args);
+	emit runningChanged();
+	emit gameShownChanged();
+	return true;
+}
+
+bool Launcher::startGame(const QString& path, const QString& title, bool online, const QString& console, const QString& nickname)
+{
+	if (console == "Switch")
+	{
+		QString problem = SwitchCore::prerequisiteError(path);
+		if (problem.isEmpty()) problem = SwitchCore::prepareLaunchConfig();
+		if (!problem.isEmpty())
+		{
+			emit finished(true, problem);
+			return false;
+		}
+		return start(SwitchCore::arguments(path, online, nickname), title, false, true, false, SwitchCore::executable());
+	}
+	if (QFileInfo::exists(path + "/sce_sys/param.sfo"))
+	{
+		// Black Ops II's eboot only picks the mode; codmp.elf is multiplayer, the online part
+		const QString elf = QFileInfo::exists(path + "/codmp.elf") ? "/codmp.elf" : "/eboot.bin";
+		return start({"--game", path + elf, "--override-root", path, "--fullscreen", "true"}, title, online, true, true);
+	}
+	return start({"--no-gui", "--fullscreen", path}, title, online, true);
+}
+
+bool Launcher::openSwitchSettings()
+{
+	if (!QFileInfo(SwitchCore::executable(true)).isExecutable())
+	{
+		emit finished(true, tr("The Switch settings application (eden) is missing. Set USCL_SWITCH_GUI to its executable path."));
+		return false;
+	}
+	return start({}, tr("Switch Settings"), false, false, false, SwitchCore::executable(true));
+}
+
+QString Launcher::switchStatus(const QString& path) { return SwitchCore::prerequisiteError(path); }
+QString Launcher::switchProfile() { return SwitchCore::dataDir(); }
+QString Launcher::importSwitchKeys(const QString& path) { return SwitchCore::importKeys(QUrl(path).isLocalFile() ? QUrl(path).toLocalFile() : path); }
+QString Launcher::importSwitchFirmware(const QString& path) { return SwitchCore::importFirmware(QUrl(path).isLocalFile() ? QUrl(path).toLocalFile() : path); }
+
+QString Launcher::configureSwitchTool(const QString& kind, const QString& path)
+{
+	if (kind != "CORE" && kind != "QT" && kind != "GUI" && kind != "ROOM")
+		return tr("Unknown Switch component.");
+	const QString local = QUrl(path).isLocalFile() ? QUrl(path).toLocalFile() : path;
+	if (!QFileInfo(local).isExecutable())
+		return tr("Choose an executable file.");
+	QSettings settings;
+	settings.setValue("switch/USCL_SWITCH_" + (kind == "QT" ? QString("CORE") : kind), QFileInfo(local).absoluteFilePath());
+	if (kind == "QT" || kind == "CORE") settings.setValue("switch/frontend", kind == "QT" ? "qt" : "sdl");
+	if (kind == "QT") settings.setValue("switch/USCL_SWITCH_GUI", QFileInfo(local).absoluteFilePath());
+	settings.sync();
+	return settings.status() == QSettings::NoError ? QString() : tr("Couldn't save the emulator location.");
+}
+
+bool Launcher::openClassic()
+{
+	return start({}, tr("All Settings"), false, false);
+}
+
+void Launcher::command(const char* line, bool shown)
+{
+	if (!running() || m_shown == shown)
+		return;
+	m_process.write(line);
+	m_shown = shown;
+	emit gameShownChanged();
+}
+
+void Launcher::showHome()
+{
+	command("hide\n", false);
+}
+
+void Launcher::resume()
+{
+	command("show\n", true);
+}
+
+void Launcher::stop()
+{
+	if (!running())
+		return;
+	m_stopping = true;
+	m_process.terminate();
+	QTimer::singleShot(5000, this, [this] {
+		if (running())
+			m_process.kill();
+	});
+}
+
+namespace
+{
+	QString resource(const QString& name)
+	{
+		QFile f(":/qt/qml/Uscl/input/" + name);
+		return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
+	}
+}
+
+QString Launcher::inputYml(const QString& current, const QStringList& pads)
+{
+	// split into "Player N Input:" blocks
+	QMap<int, QString> blocks;
+	int player = 0;
+	for (const QString& line : current.split('\n'))
+	{
+		if (line.startsWith("Player ") && line.endsWith(" Input:"))
+			player = line.section(' ', 1, 1).toInt();
+		if (player > 0 && !line.isEmpty())
+			blocks[player] += line + '\n';
+	}
+
+	const QString sdl = resource("sdl_player.yml"), none = resource("null_player.yml");
+	QMap<QString, int> seen;
+	for (int i = 1; i <= 7; i++)
+	{
+		const QString head = QString("Player %1 Input:\n").arg(i);
+		if (i <= pads.size())
+		{
+			// RPCS3's SDL handler numbers controllers that share a name: "Name 1", "Name 2"
+			const QString device = pads[i - 1] + " " + QString::number(++seen[pads[i - 1]]);
+			const QString dev_line = "  Device: \"" + QString(device).replace("\"", "\\\"") + "\"";
+			QStringList lines = blocks.value(i).split('\n');
+			if (lines.size() > 2 && lines[1] == "  Handler: SDL" && lines[2].startsWith("  Device:"))
+			{
+				lines[2] = dev_line;
+				blocks[i] = lines.join('\n');
+			}
+			else
+			{
+				blocks[i] = head + "  Handler: SDL\n" + dev_line + "\n" + sdl;
+			}
+		}
+		else if (!blocks.contains(i))
+		{
+			blocks[i] = head + "  Handler: \"Null\"\n  Device: \"Null\"\n" + none;
+		}
+		if (!blocks[i].endsWith('\n'))
+			blocks[i] += '\n';
+	}
+	QString out;
+	for (int i = 1; i <= 7; i++)
+		out += blocks[i];
+	return out;
+}
+
+bool Launcher::prepareInput(const QStringList& pads, const QString& console)
+{
+	if (console == "Switch")
+		return m_auto_pads = true; // Eden maps them itself, with its own per-controller layouts
+	if (console == "Wii" || console == "GameCube")
+		return PadConfig::writeDolphin(PadConfig::connected(), dolphinConfigDir());
+	if (console == "3DS")
+		return PadConfig::writeAzahar(PadConfig::connected(), azaharConfigFile());
+	if (console == "WiiU")
+		return PadConfig::writeCemu(PadConfig::connected());
+	if (console != "PS3")
+		return true; // PS4: shadPS4 gives players 1-4 the controllers in order; Xbox 360: Wine's XInput does
+	if (pads.isEmpty())
+		return true; // keyboard players keep whatever is set
+#ifdef _WIN32
+	const QString dir = GameModel::rpcs3ConfigDir() + "config/input_configs/";
+#else
+	const QString dir = GameModel::rpcs3ConfigDir() + "input_configs/";
+#endif
+	QDir().mkpath(dir + "global");
+	QFile active(dir + "active_input_configurations.yml");
+	if (!active.exists() && active.open(QIODevice::WriteOnly))
+		active.write("Active Configurations:\n  global: Default\n");
+	QFile f(dir + "global/Default.yml");
+	const QString current = f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
+	f.close();
+	const QString next = inputYml(current, pads);
+	if (next == current)
+		return true;
+	return f.open(QIODevice::WriteOnly | QIODevice::Truncate) && f.write(next.toUtf8()) >= 0;
+}

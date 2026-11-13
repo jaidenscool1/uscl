@@ -1,0 +1,16 @@
+{
+  "version": 7,
+  "menus": [
+    {
+      "ref": "emblems",
+      "name": { "ref": "MENU_EMBLEMS_CAPS" },
+      "type": "folder",
+      "content": [
+        { "name": { "ref": "MENU_NEW_EMBLEM" }, "type": "custombutton", "action": "newemblem" },
+        { "name": { "noloc": "My Emblems" }, "type": "dwfolder", "filters": ["user", "self", "emblems"] },
+        { "name": { "ref": "MENU_TRENDING" }, "type": "dwfolder", "filters": ["trending", "emblems"] },
+        { "name": { "ref": "MENU_FILEMANAGER" }, "type": "custombutton", "action": "filemanager" }
+      ]
+    }
+  ]
+}

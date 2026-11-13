@@ -1,0 +1,39 @@
+name: shell-windows
+# The home screen on Windows: build + self-test in a few minutes, so a Windows-only failure shows up on the pull
+# request instead of at the end of the hour-long installer build (windows-installer.yml).
+on:
+  pull_request:
+    paths: ['uscl-shell/**', '.github/workflows/shell-windows.yml']
+  push:
+    branches: [main]
+    paths: ['uscl-shell/**']
+  workflow_dispatch:
+
+jobs:
+  uscl-shell:
+    runs-on: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          modules: 'qtmultimedia'
+          cache: true
+      # Qt's QVulkan headers include vulkan/vulkan.h (the installer has RPCS3's Vulkan SDK; this is just headers + loader)
+      - uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: 1.4.341.0
+          vulkan-components: Vulkan-Headers, Vulkan-Loader
+          vulkan-use-cache: true
+      - name: Build and self-test
+        shell: pwsh
+        run: |
+          curl.exe -fsSLo sdl3.zip https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-devel-3.4.18-VC.zip
+          Expand-Archive sdl3.zip -DestinationPath sdl3
+          $sdl = (Get-ChildItem sdl3 -Directory | Select-Object -First 1).FullName
+          cmake -S uscl-shell -B shell-build -A x64 "-DSDL3_DIR=$sdl/cmake"
+          cmake --build shell-build --config Release
+          Copy-Item "$sdl/lib/x64/SDL3.dll" shell-build/Release/
+          $t = Start-Process shell-build/Release/uscl.exe -ArgumentList "--self-test" -Wait -PassThru -NoNewWindow -RedirectStandardError selftest.txt
+          Get-Content selftest.txt
+          if ($t.ExitCode -ne 0) { Write-Error "uscl self-test failed"; exit 1 }

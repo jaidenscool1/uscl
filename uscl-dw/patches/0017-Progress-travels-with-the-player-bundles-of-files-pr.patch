@@ -1,0 +1,763 @@
+From 764656d0b0c383f263253252e423f6a56acd13a0 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 14:39:06 -0700
+Subject: [PATCH 17/19] Progress travels with the player: bundles of files,
+ profiles and file-share streams; --export/--import; local admin port for the
+ host's bridge (Steam-bound)
+
+---
+ dw-server/src/lobby/content_streaming/mod.rs  |   2 +-
+ .../src/lobby/content_streaming/user_file.rs  |   4 +
+ dw-server/src/lobby/mod.rs                    |   3 +-
+ dw-server/src/lobby/player_id.rs              |  97 ++++-
+ dw-server/src/lobby/profile/mod.rs            |   2 +-
+ dw-server/src/lobby/profile/service.rs        |   5 +
+ dw-server/src/lobby/progress.rs               | 400 ++++++++++++++++++
+ dw-server/src/lobby/storage/mod.rs            |   4 +-
+ dw-server/src/lobby/storage/user_file.rs      |   8 +
+ dw-server/src/main.rs                         |   6 +
+ 10 files changed, 523 insertions(+), 8 deletions(-)
+ create mode 100644 dw-server/src/lobby/progress.rs
+
+diff --git a/dw-server/src/lobby/content_streaming/mod.rs b/dw-server/src/lobby/content_streaming/mod.rs
+index 69a180d..a358674 100644
+--- a/dw-server/src/lobby/content_streaming/mod.rs
++++ b/dw-server/src/lobby/content_streaming/mod.rs
+@@ -7,7 +7,7 @@ use bitdemon::lobby::LobbyServiceId;
+ use bitdemon::lobby::content_streaming::ContentStreamingHandler;
+ use std::sync::Arc;
+ 
+-mod db;
++pub(crate) mod db;
+ mod http;
+ mod publisher_file;
+ mod user_file;
+diff --git a/dw-server/src/lobby/content_streaming/user_file.rs b/dw-server/src/lobby/content_streaming/user_file.rs
+index 0dc0f54..54a2988 100644
+--- a/dw-server/src/lobby/content_streaming/user_file.rs
++++ b/dw-server/src/lobby/content_streaming/user_file.rs
+@@ -1,5 +1,6 @@
+ use crate::config::DwServerConfig;
+ use crate::lobby::player_id;
++use crate::lobby::progress;
+ use crate::lobby::content_streaming::db::{
+     PersistedStreamInfo, create_empty_stream, delete_db_stream, get_slot_count_for_upload,
+     get_stream_data, get_stream_id_for_slot, get_streams_by_ids, get_streams_by_owners,
+@@ -62,6 +63,7 @@ impl UserContentStreamingService for DwUserContentStreamingService {
+         file_ids: &[u64],
+     ) -> Result<Vec<StreamInfo>, ContentStreamingServiceError> {
+         info!("Requesting stream file_ids={file_ids:?}");
++        progress::seen(session);
+ 
+         let authentication = session
+             .authentication()
+@@ -89,6 +91,7 @@ impl UserContentStreamingService for DwUserContentStreamingService {
+         item_count: usize,
+     ) -> Result<ResultSlice<StreamInfo>, ContentStreamingServiceError> {
+         info!("Listing streams of users={owner_ids:?}");
++        progress::seen(session);
+ 
+         let authentication = session
+             .authentication()
+@@ -126,6 +129,7 @@ impl UserContentStreamingService for DwUserContentStreamingService {
+         request_data: StreamCreationRequest,
+     ) -> Result<StreamUrl, ContentStreamingServiceError> {
+         info!("Requesting stream upload request={request_data:?}");
++        progress::seen(session);
+ 
+         if request_data.file_size as usize > MAX_USER_FILE_SIZE {
+             return Err(ContentStreamingServiceError::StorageSpaceExceeded);
+diff --git a/dw-server/src/lobby/mod.rs b/dw-server/src/lobby/mod.rs
+index c978d3c..f0e6262 100644
+--- a/dw-server/src/lobby/mod.rs
++++ b/dw-server/src/lobby/mod.rs
+@@ -1,7 +1,8 @@
+ mod content_streaming;
+ mod counter;
+ mod group;
+-mod player_id;
++pub(crate) mod player_id;
++pub(crate) mod progress;
+ mod profile;
+ mod rich_presence;
+ mod storage;
+diff --git a/dw-server/src/lobby/player_id.rs b/dw-server/src/lobby/player_id.rs
+index cad29f5..ac55956 100644
+--- a/dw-server/src/lobby/player_id.rs
++++ b/dw-server/src/lobby/player_id.rs
+@@ -15,14 +15,105 @@ thread_local! {
+ fn initialized_db() -> Connection {
+     create_dir_all("db").expect("to be able to create dir");
+     let conn = Connection::open("db/player_id.db").expect("expected db connection to be able to open");
+-    conn.execute(
+-        "CREATE TABLE IF NOT EXISTS game_id (game_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL UNIQUE)",
+-        (),
++    conn.execute_batch(
++        "CREATE TABLE IF NOT EXISTS game_id (game_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL UNIQUE);
++         -- progress that travels with the player (progress.rs): who is who on this server, bound to a Steam id
++         CREATE TABLE IF NOT EXISTS player (online_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, steam_id INTEGER);
++         CREATE TABLE IF NOT EXISTS pending (online_id TEXT PRIMARY KEY, bundle TEXT NOT NULL);",
+     )
+     .expect("Initialization to succeed");
+     conn
+ }
+ 
++/// Home copies of players who never logged in here get a user id below the game ids and far above RPCN's account
++/// numbers; their first login moves the rows to their real one (progress::seen).
++const PLACEHOLDER_BASE: u64 = 0xFFF0_0000;
++
++pub fn user_of(online_id: &str) -> Option<u64> {
++    PLAYER_ID_DB
++        // -1: bound to a Steam account before their user id here was known
++        .with_borrow(|db| db.query_row("SELECT user_id FROM player WHERE online_id = ?1 AND user_id >= 0", [online_id], |r| r.get::<_, i64>(0)))
++        .ok()
++        .map(|id| id as u64)
++}
++
++pub fn set_user(online_id: &str, user_id: u64) {
++    PLAYER_ID_DB.with_borrow(|db| {
++        db.execute(
++            "INSERT INTO player (online_id, user_id) VALUES (?1, ?2) ON CONFLICT(online_id) DO UPDATE SET user_id = ?2",
++            (online_id, user_id as i64),
++        )
++        .expect("player to be recorded");
++    });
++}
++
++/// `online_id`'s user id here, or a placeholder for a player who never logged in to this server.
++pub fn user_or_placeholder(online_id: &str) -> u64 {
++    user_of(online_id).unwrap_or_else(|| {
++        let n: i64 = PLAYER_ID_DB
++            .with_borrow(|db| db.query_row("SELECT count(*) FROM player WHERE user_id >= ?1", [PLACEHOLDER_BASE as i64], |r| r.get(0)))
++            .unwrap_or(0);
++        let id = PLACEHOLDER_BASE + n as u64;
++        set_user(online_id, id);
++        id
++    })
++}
++
++/// A Steam account carries one online id: the first bundle binds them, a bundle for it from another account is refused.
++pub fn bind_steam(online_id: &str, steam_id: u64) -> Result<(), String> {
++    PLAYER_ID_DB.with_borrow(|db| {
++        let bound: Option<i64> = db
++            .query_row("SELECT steam_id FROM player WHERE online_id = ?1", [online_id], |r| r.get(0))
++            .ok()
++            .flatten();
++        match bound {
++            Some(s) if s as u64 != steam_id => Err(format!("{online_id} belongs to another Steam account")),
++            _ => {
++                db.execute(
++                    "INSERT INTO player (online_id, user_id, steam_id) VALUES (?1, -1, ?2)
++                     ON CONFLICT(online_id) DO UPDATE SET steam_id = ?2",
++                    (online_id, steam_id as i64),
++                )
++                .map(|_| ())
++                .map_err(|e| e.to_string())
++            }
++        }
++    })
++}
++
++pub fn game_id_of(user_id: u64) -> Option<u64> {
++    PLAYER_ID_DB
++        .with_borrow(|db| db.query_row("SELECT game_id FROM game_id WHERE user_id = ?1", [user_id as i64], |r| r.get::<_, i64>(0)))
++        .ok()
++        .map(|id| id as u64)
++}
++
++/// `game_id` is `user_id`'s (from a bundle, or a player's user id changed).
++pub fn set_game_id(game_id: u64, user_id: u64) {
++    PLAYER_ID_DB.with_borrow(|db| {
++        db.execute("DELETE FROM game_id WHERE game_id = ?1 OR user_id = ?2", (game_id as i64, user_id as i64))
++            .and_then(|_| db.execute("INSERT INTO game_id (game_id, user_id) VALUES (?1, ?2)", (game_id as i64, user_id as i64)))
++            .expect("game id to be recorded");
++    });
++}
++
++pub fn set_pending(online_id: &str, bundle: &str) {
++    PLAYER_ID_DB.with_borrow(|db| {
++        db.execute("INSERT OR REPLACE INTO pending (online_id, bundle) VALUES (?1, ?2)", (online_id, bundle))
++            .expect("pending bundle to be stored");
++    });
++}
++
++pub fn take_pending(online_id: &str) -> Option<String> {
++    PLAYER_ID_DB.with_borrow(|db| {
++        let bundle = db.query_row("SELECT bundle FROM pending WHERE online_id = ?1", [online_id], |r| r.get(0)).ok();
++        if bundle.is_some() {
++            let _ = db.execute("DELETE FROM pending WHERE online_id = ?1", [online_id]);
++        }
++        bundle
++    })
++}
++
+ /// Ticket user ids (RPCN account numbers) are small; game ids use all 64 bits (SQLite keeps them as i64).
+ fn is_game_id(id: u64) -> bool {
+     id > u64::from(u32::MAX)
+diff --git a/dw-server/src/lobby/profile/mod.rs b/dw-server/src/lobby/profile/mod.rs
+index b6d1981..371b740 100644
+--- a/dw-server/src/lobby/profile/mod.rs
++++ b/dw-server/src/lobby/profile/mod.rs
+@@ -1,4 +1,4 @@
+-mod db;
++pub(crate) mod db;
+ mod service;
+ 
+ use crate::lobby::profile::service::DwProfileService;
+diff --git a/dw-server/src/lobby/profile/service.rs b/dw-server/src/lobby/profile/service.rs
+index c36011a..afadece 100644
+--- a/dw-server/src/lobby/profile/service.rs
++++ b/dw-server/src/lobby/profile/service.rs
+@@ -1,4 +1,5 @@
+ use crate::lobby::player_id;
++use crate::lobby::progress;
+ use crate::lobby::profile::db::{PROFILE_DB, ProfileType};
+ use bitdemon::auth::authentication::SessionAuthentication;
+ use bitdemon::lobby::profile::{ProfileInfo, ProfileService, ProfileServiceError};
+@@ -17,6 +18,7 @@ impl ProfileService for DwProfileService {
+         user_ids: Vec<u64>,
+     ) -> Result<Vec<ProfileInfo>, ProfileServiceError> {
+         info!("Requesting public profiles for {} users", user_ids.len());
++        progress::seen(session);
+ 
+         let authentication = session.authentication().expect("user to be authenticated");
+         let title_num = authentication.title.to_u32().expect("title to be u32");
+@@ -54,6 +56,7 @@ impl ProfileService for DwProfileService {
+ 
+     fn get_private_profile(&self, session: &BdSession) -> Result<ProfileInfo, ProfileServiceError> {
+         info!("Requesting own private profile");
++        progress::seen(session);
+ 
+         let authentication = session.authentication().expect("user to be authenticated");
+         let title_num = authentication.title.to_u32().expect("title to be u32");
+@@ -81,6 +84,7 @@ impl ProfileService for DwProfileService {
+         public_profile_data: Vec<u8>,
+     ) -> Result<(), ProfileServiceError> {
+         info!("Setting own public profile");
++        progress::seen(session);
+ 
+         let authentication = session.authentication().expect("user to be authenticated");
+ 
+@@ -95,6 +99,7 @@ impl ProfileService for DwProfileService {
+         private_profile_data: Vec<u8>,
+     ) -> Result<(), ProfileServiceError> {
+         info!("Setting own private profile");
++        progress::seen(session);
+ 
+         let authentication = session.authentication().expect("user to be authenticated");
+ 
+diff --git a/dw-server/src/lobby/progress.rs b/dw-server/src/lobby/progress.rs
+new file mode 100644
+index 0000000..25a35ba
+--- /dev/null
++++ b/dw-server/src/lobby/progress.rs
+@@ -0,0 +1,400 @@
++//! A player's progress as one bundle, so it travels with them (USCL PLAN.md "Progress travels with the player"):
++//! their own PC's uscl-dw is home, the host's gets the bundle when they join and gives it back. Files (stats,
++//! classes, backups), profiles and file-share streams (emblems), keyed by online id: the user id is an RPCN account
++//! number and differs on every host.
++use crate::lobby::content_streaming::db::CONTENT_STREAMING_DB;
++use crate::lobby::player_id;
++use crate::lobby::profile::db::PROFILE_DB;
++use crate::lobby::storage::db::STORAGE_DB;
++use crate::lobby::storage::stats_check;
++use bitdemon::networking::bd_session::BdSession;
++use log::{info, warn};
++use serde::{Deserialize, Serialize};
++use std::cell::RefCell;
++use std::collections::HashSet;
++
++#[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
++pub struct Bundle {
++    pub online_id: String,
++    pub game_id: Option<u64>,
++    pub files: Vec<File>,
++    pub profiles: Vec<Profile>,
++    pub streams: Vec<Stream>,
++}
++
++#[derive(Serialize, Deserialize, Debug, PartialEq)]
++pub struct File {
++    pub title: u32,
++    pub filename: String,
++    pub visibility: u8,
++    pub created: i64,
++    pub modified: i64,
++    pub data: String, // hex
++}
++
++#[derive(Serialize, Deserialize, Debug, PartialEq)]
++pub struct Profile {
++    pub title: u32,
++    pub profile_type: u8,
++    pub created: i64,
++    pub modified: i64,
++    pub data: String,
++}
++
++#[derive(Serialize, Deserialize, Debug, PartialEq)]
++pub struct Stream {
++    pub title: u32,
++    pub filename: String,
++    pub created: i64,
++    pub modified: i64,
++    pub category: i64,
++    pub slot: i64,
++    pub metadata: Option<String>,
++    pub data: Option<String>,
++    pub tags: Vec<(i64, i64)>,
++}
++
++fn hex(data: &[u8]) -> String {
++    data.iter().map(|b| format!("{b:02x}")).collect()
++}
++
++fn unhex(text: &str) -> Result<Vec<u8>, String> {
++    if text.len() % 2 != 0 {
++        return Err("odd hex length".into());
++    }
++    (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).map_err(|e| e.to_string())).collect()
++}
++
++/// Everything of `user_id`'s on this server.
++pub fn export(online_id: &str, user_id: u64) -> Bundle {
++    let owner = user_id as i64;
++    let files = STORAGE_DB.with_borrow(|db| {
++        let mut stmt = db
++            .prepare("SELECT title, filename, visibility, created_at, modified_at, data FROM user_file WHERE owner_id = ?1")
++            .expect("query to prepare");
++        stmt.query_map([owner], |r| {
++            Ok(File { title: r.get(0)?, filename: r.get(1)?, visibility: r.get(2)?, created: r.get(3)?, modified: r.get(4)?, data: hex(&r.get::<_, Vec<u8>>(5)?) })
++        })
++        .and_then(|rows| rows.collect())
++        .unwrap_or_default()
++    });
++    let profiles = PROFILE_DB.with_borrow(|db| {
++        let mut stmt = db
++            .prepare("SELECT title, profile_type, created_at, modified_at, data FROM user_profile WHERE owner_id = ?1")
++            .expect("query to prepare");
++        stmt.query_map([owner], |r| {
++            Ok(Profile { title: r.get(0)?, profile_type: r.get(1)?, created: r.get(2)?, modified: r.get(3)?, data: hex(&r.get::<_, Vec<u8>>(4)?) })
++        })
++        .and_then(|rows| rows.collect())
++        .unwrap_or_default()
++    });
++    let streams = CONTENT_STREAMING_DB.with_borrow(|db| {
++        let mut stmt = db
++            .prepare("SELECT id, title, filename, created_at, modified_at, category, slot, metadata, data FROM user_stream WHERE owner_id = ?1")
++            .expect("query to prepare");
++        let rows: Vec<(i64, Stream)> = stmt
++            .query_map([owner], |r| {
++                Ok((
++                    r.get(0)?,
++                    Stream {
++                        title: r.get(1)?,
++                        filename: r.get(2)?,
++                        created: r.get(3)?,
++                        modified: r.get(4)?,
++                        category: r.get(5)?,
++                        slot: r.get(6)?,
++                        metadata: r.get::<_, Option<Vec<u8>>>(7)?.map(|m| hex(&m)),
++                        data: r.get::<_, Option<Vec<u8>>>(8)?.map(|d| hex(&d)),
++                        tags: Vec::new(),
++                    },
++                ))
++            })
++            .and_then(|rows| rows.collect())
++            .unwrap_or_default();
++        let mut tag_stmt = db
++            .prepare("SELECT primary_tag, secondary_tag FROM user_stream_tag WHERE stream_id = ?1")
++            .expect("query to prepare");
++        rows.into_iter()
++            .map(|(id, mut s)| {
++                s.tags = tag_stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?))).and_then(|t| t.collect()).unwrap_or_default();
++                s
++            })
++            .collect()
++    });
++    Bundle { online_id: online_id.to_string(), game_id: player_id::game_id_of(user_id), files, profiles, streams }
++}
++
++/// Takes `bundle` as `user_id`'s: per item the newer copy wins, and a stats file must pass the stats check's bounds.
++/// Returns how many items were taken.
++pub fn import(bundle: &Bundle, user_id: u64) -> Result<usize, String> {
++    let owner = user_id as i64;
++    let mut taken = 0;
++    for f in &bundle.files {
++        let data = unhex(&f.data)?;
++        let ours: Option<(i64, i64, Vec<u8>)> = STORAGE_DB.with_borrow(|db| {
++            db.query_row(
++                "SELECT id, modified_at, data FROM user_file WHERE owner_id = ?1 AND title = ?2 AND filename = ?3",
++                (owner, f.title, f.filename.as_str()),
++                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
++            )
++            .ok()
++        });
++        if ours.as_ref().is_some_and(|o| o.1 >= f.modified) {
++            continue;
++        }
++        // bounds only (no impossible rank, prestige or XP): a carried copy may be many matches ahead of ours (played
++        // on other hosts), so the one-match jump check of uploads doesn't apply
++        if f.filename == stats_check::MP_STATS_FILE {
++            if let Err(reason) = stats_check::check(None, &data) {
++                warn!("anticheat: {}'s carried stats refused ({reason}); the copy here stays", bundle.online_id);
++                continue;
++            }
++        }
++        STORAGE_DB.with_borrow(|db| match &ours {
++            Some(o) => db.execute(
++                "UPDATE user_file SET modified_at = ?2, visibility = ?3, data = ?4 WHERE id = ?1",
++                (o.0, f.modified, f.visibility, data),
++            ),
++            None => db.execute(
++                "INSERT INTO user_file (filename, title, created_at, modified_at, visibility, owner_id, data)
++                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
++                (f.filename.as_str(), f.title, f.created, f.modified, f.visibility, owner, data),
++            ),
++        })
++        .map_err(|e| e.to_string())?;
++        taken += 1;
++    }
++    for p in &bundle.profiles {
++        let data = unhex(&p.data)?;
++        let ours: Option<(i64, i64)> = PROFILE_DB.with_borrow(|db| {
++            db.query_row(
++                "SELECT id, modified_at FROM user_profile WHERE owner_id = ?1 AND title = ?2 AND profile_type = ?3",
++                (owner, p.title, p.profile_type),
++                |r| Ok((r.get(0)?, r.get(1)?)),
++            )
++            .ok()
++        });
++        if ours.is_some_and(|o| o.1 >= p.modified) {
++            continue;
++        }
++        PROFILE_DB.with_borrow(|db| match ours {
++            Some(o) => db.execute("UPDATE user_profile SET modified_at = ?2, data = ?3 WHERE id = ?1", (o.0, p.modified, data)),
++            None => db.execute(
++                "INSERT INTO user_profile (title, owner_id, profile_type, created_at, modified_at, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
++                (p.title, owner, p.profile_type, p.created, p.modified, data),
++            ),
++        })
++        .map_err(|e| e.to_string())?;
++        taken += 1;
++    }
++    for s in &bundle.streams {
++        let metadata = s.metadata.as_deref().map(unhex).transpose()?;
++        let data = s.data.as_deref().map(unhex).transpose()?;
++        let taken_stream = CONTENT_STREAMING_DB.with_borrow(|db| -> Result<bool, String> {
++            let ours: Option<(i64, i64)> = db
++                .query_row(
++                    "SELECT id, modified_at FROM user_stream WHERE owner_id = ?1 AND title = ?2 AND slot = ?3",
++                    (owner, s.title, s.slot),
++                    |r| Ok((r.get(0)?, r.get(1)?)),
++                )
++                .ok();
++            if ours.is_some_and(|o| o.1 >= s.modified) {
++                return Ok(false);
++            }
++            if let Some(o) = ours {
++                db.execute("DELETE FROM user_stream_tag WHERE stream_id = ?1", [o.0]).map_err(|e| e.to_string())?;
++                db.execute("DELETE FROM user_stream WHERE id = ?1", [o.0]).map_err(|e| e.to_string())?;
++            }
++            db.execute(
++                "INSERT INTO user_stream (filename, title, created_at, modified_at, owner_id, metadata, category, slot, data)
++                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
++                (s.filename.as_str(), s.title, s.created, s.modified, owner, metadata, s.category, s.slot, data),
++            )
++            .map_err(|e| e.to_string())?;
++            let id = db.last_insert_rowid();
++            for (primary, secondary) in &s.tags {
++                db.execute(
++                    "INSERT INTO user_stream_tag (stream_id, primary_tag, secondary_tag) VALUES (?1, ?2, ?3)",
++                    (id, primary, secondary),
++                )
++                .map_err(|e| e.to_string())?;
++            }
++            Ok(true)
++        })?;
++        taken += usize::from(taken_stream);
++    }
++    if let Some(game_id) = bundle.game_id {
++        player_id::set_game_id(game_id, user_id);
++    }
++    Ok(taken)
++}
++
++/// A player's rows move to a new user id (their RPCN account number here changed, or a home placeholder got a
++/// real one).
++fn move_rows(from: u64, to: u64) {
++    let (from, to) = (from as i64, to as i64);
++    STORAGE_DB.with_borrow(|db| db.execute("UPDATE user_file SET owner_id = ?2 WHERE owner_id = ?1", (from, to))).ok();
++    PROFILE_DB.with_borrow(|db| db.execute("UPDATE user_profile SET owner_id = ?2 WHERE owner_id = ?1", (from, to))).ok();
++    CONTENT_STREAMING_DB.with_borrow(|db| db.execute("UPDATE user_stream SET owner_id = ?2 WHERE owner_id = ?1", (from, to))).ok();
++    if let Some(game_id) = player_id::game_id_of(from as u64) {
++        player_id::set_game_id(game_id, to as u64);
++    }
++}
++
++/// A bundle arrived from the host's bridge (the player is joining): taken now if we know the player's user id
++/// here, else kept until their first login (`seen`).
++pub fn receive(bundle_json: &str, steam_id: u64) -> Result<&'static str, String> {
++    let bundle: Bundle = serde_json::from_str(bundle_json).map_err(|e| e.to_string())?;
++    player_id::bind_steam(&bundle.online_id, steam_id)?;
++    match player_id::user_of(&bundle.online_id) {
++        Some(user_id) => {
++            let taken = import(&bundle, user_id)?;
++            info!("progress: took {taken} items of {}'s carried progress", bundle.online_id);
++            Ok("applied")
++        }
++        None => {
++            player_id::set_pending(&bundle.online_id, bundle_json);
++            info!("progress: {}'s carried progress waits for their login", bundle.online_id);
++            Ok("pending")
++        }
++    }
++}
++
++/// `dw-server --export <online id>` prints this server's copy of a player's progress (empty if it has none);
++/// `dw-server --import` takes a bundle from stdin into it (the player's own PC, after a session elsewhere). `None`:
++/// neither, start the servers.
++pub fn cli(args: &[String]) -> Option<i32> {
++    match args.get(1).map(String::as_str) {
++        Some("--export") => {
++            let Some(online_id) = args.get(2) else {
++                eprintln!("usage: dw-server --export <online id>");
++                return Some(2);
++            };
++            let bundle = match player_id::user_of(online_id) {
++                Some(user_id) => export(online_id, user_id),
++                None => Bundle { online_id: online_id.clone(), ..Default::default() },
++            };
++            println!("{}", serde_json::to_string(&bundle).expect("bundle to serialize"));
++            Some(0)
++        }
++        Some("--import") => {
++            let mut json = String::new();
++            let result = std::io::Read::read_to_string(&mut std::io::stdin(), &mut json)
++                .map_err(|e| e.to_string())
++                .and_then(|_| serde_json::from_str::<Bundle>(&json).map_err(|e| e.to_string()))
++                .and_then(|bundle| import(&bundle, player_id::user_or_placeholder(&bundle.online_id)).map(|n| (bundle.online_id, n)));
++            match result {
++                Ok((online_id, taken)) => {
++                    eprintln!("took {taken} items of {online_id}'s progress");
++                    Some(0)
++                }
++                Err(e) => {
++                    eprintln!("import failed: {e}");
++                    Some(1)
++                }
++            }
++        }
++        _ => None,
++    }
++}
++
++/// The host's bridge hands in members' bundles here, with the Steam id the Steam session authenticated
++/// (`POST /progress`, header `x-uscl-steam-id`), and fetches their updated copies (`GET /progress/<online id>`).
++/// Local only (DW_ADMIN_ADDR, default 127.0.0.1:3180): bridges don't forward this port, so a member can't hand in
++/// someone else's progress.
++pub async fn serve_admin() {
++    use axum::Router;
++    use axum::routing::{get, post};
++    let addr = std::env::var("DW_ADMIN_ADDR").unwrap_or_else(|_| "127.0.0.1:3180".into());
++    let app = Router::new().route("/progress", post(post_progress)).route("/progress/{online_id}", get(get_progress));
++    match tokio::net::TcpListener::bind(&addr).await {
++        Ok(listener) => {
++            info!("progress: admin on {addr}");
++            if let Err(e) = axum::serve(listener, app).await {
++                warn!("progress: admin stopped: {e}");
++            }
++        }
++        Err(e) => warn!("progress: can't open admin on {addr}: {e} (carried progress is off)"),
++    }
++}
++
++async fn post_progress(headers: axum::http::HeaderMap, body: String) -> (axum::http::StatusCode, String) {
++    use axum::http::StatusCode;
++    let Some(steam_id) = headers.get("x-uscl-steam-id").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()) else {
++        return (StatusCode::BAD_REQUEST, "x-uscl-steam-id missing".into());
++    };
++    match tokio::task::spawn_blocking(move || receive(&body, steam_id)).await {
++        Ok(Ok(state)) => (StatusCode::OK, state.into()),
++        Ok(Err(e)) => {
++            warn!("progress: bundle refused: {e}");
++            (StatusCode::FORBIDDEN, e)
++        }
++        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
++    }
++}
++
++async fn get_progress(axum::extract::Path(online_id): axum::extract::Path<String>) -> (axum::http::StatusCode, String) {
++    use axum::http::StatusCode;
++    let found = tokio::task::spawn_blocking(move || {
++        player_id::user_of(&online_id).map(|user_id| serde_json::to_string(&export(&online_id, user_id)).expect("bundle to serialize"))
++    })
++    .await;
++    match found {
++        Ok(Some(json)) => (StatusCode::OK, json),
++        Ok(None) => (StatusCode::NOT_FOUND, String::new()),
++        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
++    }
++}
++
++thread_local! {
++    static SEEN: RefCell<HashSet<(u64, String)>> = RefCell::new(HashSet::new());
++}
++
++/// Every service a login reaches first calls this: remembers who the player is here, moves their rows if their user
++/// id changed, and takes a bundle that waited for them, all before their game reads anything.
++pub fn seen(session: &BdSession) {
++    let Some(auth) = session.authentication() else { return };
++    let key = (auth.user_id, auth.username.clone());
++    if SEEN.with_borrow(|s| s.contains(&key)) {
++        return;
++    }
++    match player_id::user_of(&auth.username) {
++        Some(old) if old != auth.user_id => {
++            info!("progress: {} is user {} here now (was {old})", auth.username, auth.user_id);
++            move_rows(old, auth.user_id);
++        }
++        _ => {}
++    }
++    player_id::set_user(&auth.username, auth.user_id);
++    if let Some(json) = player_id::take_pending(&auth.username) {
++        match serde_json::from_str::<Bundle>(&json).map_err(|e| e.to_string()).and_then(|b| import(&b, auth.user_id)) {
++            Ok(taken) => info!("progress: took {taken} items of {}'s carried progress at login", auth.username),
++            Err(e) => warn!("progress: {}'s carried progress couldn't be taken: {e}", auth.username),
++        }
++    }
++    SEEN.with_borrow_mut(|s| s.insert(key));
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn hex_round_trip() {
++        assert_eq!(unhex(&hex(&[0, 1, 0xfe, 0xff])).unwrap(), vec![0, 1, 0xfe, 0xff]);
++        assert!(unhex("abc").is_err());
++        assert!(unhex("zz").is_err());
++    }
++
++    #[test]
++    fn bundle_json_round_trip() {
++        let b = Bundle {
++            online_id: "Pete_Hegseth".into(),
++            game_id: Some(15258544499090971638),
++            files: vec![File { title: 18396, filename: "mpClassSets".into(), visibility: 0, created: 1, modified: 2, data: "00ff".into() }],
++            profiles: vec![Profile { title: 18396, profile_type: 1, created: 1, modified: 2, data: "07".into() }],
++            streams: vec![Stream { title: 18396, filename: "emblem".into(), created: 1, modified: 2, category: 3, slot: 0, metadata: None, data: Some("01".into()), tags: vec![(1, 2)] }],
++        };
++        assert_eq!(serde_json::from_str::<Bundle>(&serde_json::to_string(&b).unwrap()).unwrap(), b);
++    }
++}
+diff --git a/dw-server/src/lobby/storage/mod.rs b/dw-server/src/lobby/storage/mod.rs
+index 69bb757..cbdc637 100644
+--- a/dw-server/src/lobby/storage/mod.rs
++++ b/dw-server/src/lobby/storage/mod.rs
+@@ -4,9 +4,9 @@ use bitdemon::lobby::ThreadSafeLobbyHandler;
+ use bitdemon::lobby::storage::{StorageHandler, ThreadSafePublisherStorageService, ThreadSafeUserStorageService};
+ use std::sync::Arc;
+ 
+-mod db;
++pub(crate) mod db;
+ mod publisher_file;
+-mod stats_check;
++pub(crate) mod stats_check;
+ mod user_file;
+ 
+ pub fn create_storage_handler() -> Arc<ThreadSafeLobbyHandler> {
+diff --git a/dw-server/src/lobby/storage/user_file.rs b/dw-server/src/lobby/storage/user_file.rs
+index 7c15843..edb735a 100644
+--- a/dw-server/src/lobby/storage/user_file.rs
++++ b/dw-server/src/lobby/storage/user_file.rs
+@@ -1,4 +1,5 @@
+ use crate::lobby::player_id;
++use crate::lobby::progress;
+ use crate::lobby::storage::db::{STORAGE_DB, from_file_visibility, from_title, to_file_visibility};
+ use crate::lobby::storage::stats_check;
+ use bitdemon::domain::result_slice::ResultSlice;
+@@ -34,6 +35,7 @@ impl UserStorageService for DwUserStorageService {
+         file_id: u64,
+     ) -> Result<Vec<u8>, StorageServiceError> {
+         info!("Requesting file file_id={file_id} owner_id={owner_id}");
++        progress::seen(session);
+         let owner_id = player_id::resolve(owner_id);
+ 
+         if session.authentication().unwrap().user_id != owner_id {
+@@ -59,6 +61,7 @@ impl UserStorageService for DwUserStorageService {
+         filename: String,
+     ) -> Result<Vec<u8>, StorageServiceError> {
+         info!("Requesting file filename={filename} owner_id={owner_id}",);
++        progress::seen(session);
+         let owner_id = player_id::resolve(owner_id);
+ 
+         let is_owner = session.authentication().unwrap().user_id == owner_id;
+@@ -96,6 +99,7 @@ impl UserStorageService for DwUserStorageService {
+         page_size: usize,
+     ) -> Result<ResultSlice<StorageFileInfo>, StorageServiceError> {
+         info!("Listing files owner_id={owner_id} min_date_time={min_date_time}");
++        progress::seen(session);
+         player_id::learn_own(session, owner_id);
+         query_files(
+             session,
+@@ -117,6 +121,7 @@ impl UserStorageService for DwUserStorageService {
+         filter: String,
+     ) -> Result<ResultSlice<StorageFileInfo>, StorageServiceError> {
+         info!("Filtering files owner_id={owner_id} min_date_time={min_date_time} filter={filter}");
++        progress::seen(session);
+         player_id::learn_own(session, owner_id);
+         query_files(
+             session,
+@@ -140,6 +145,7 @@ impl UserStorageService for DwUserStorageService {
+         info!(
+             "Uploading file filename={filename} owner_id={owner_id} visibility={visibility:?} len={file_size}"
+         );
++        progress::seen(session);
+         let owner_id = player_id::resolve(owner_id);
+ 
+         let user_id = session.authentication().unwrap().user_id;
+@@ -238,6 +244,7 @@ impl UserStorageService for DwUserStorageService {
+     ) -> Result<(), StorageServiceError> {
+         let file_size = file_data.len();
+         info!("Uploading file file_id={file_id} owner_id={owner_id} len={file_size}");
++        progress::seen(session);
+         let owner_id = player_id::resolve(owner_id);
+ 
+         if session.authentication().unwrap().user_id != owner_id {
+@@ -301,6 +308,7 @@ impl UserStorageService for DwUserStorageService {
+         filename: String,
+     ) -> Result<(), StorageServiceError> {
+         info!("Removing file filename={filename} owner_id={owner_id}");
++        progress::seen(session);
+         let owner_id = player_id::resolve(owner_id);
+ 
+         if session.authentication().unwrap().user_id != owner_id {
+diff --git a/dw-server/src/main.rs b/dw-server/src/main.rs
+index 2e128bc..e4e4fa4 100644
+--- a/dw-server/src/main.rs
++++ b/dw-server/src/main.rs
+@@ -28,6 +28,11 @@ fn server_addr(var: &str, default_port: u16) -> String {
+ async fn main() {
+     initialize_log();
+ 
++    // USCL: `--export <online id>` / `--import` move a player's progress in and out of this PC's copy
++    if let Some(code) = lobby::progress::cli(&std::env::args().collect::<Vec<_>>()) {
++        exit(code);
++    }
++
+     let config = read_config().await;
+     stun::start().await;
+ 
+@@ -64,6 +69,7 @@ async fn main() {
+         .await
+         .unwrap();
+     let http_promise = axum::serve(listener, lobby_router);
++    tokio::spawn(lobby::progress::serve_admin());
+ 
+     http_promise.await.unwrap();
+     for join in joins {
+-- 
+2.56.0
+

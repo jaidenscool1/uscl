@@ -1,0 +1,189 @@
+From a2ff48cfa7002c12633624bf0b8e3bc457a8fa57 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 15:46:39 -0700
+Subject: [PATCH 10/14] =?UTF-8?q?blaze:=20NHL=2015=20/=20Madden=20login=20?=
+ =?UTF-8?q?path=20(Blaze=203.x=20heat2)=20=E2=80=94=20auth=20working?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Takes Blaze 3.x PS3 clients from "can't connect" to fully authenticated:
+
+- Ps3LoginHandler: accept locally-minted RPCN tickets whose short (~20min)
+  TTL already lapsed while the player idled at the "connect to EA" menu —
+  expiry is meaningless on our own RPCN, so log it and still verify the
+  signature. (Ticket signature itself verifies via the host RPCN key set in
+  settings.json HostTicketKey — our self-hosted rpcn uses its own keypair,
+  not the official one hardcoded in RpcnSigningKey.)
+- Blaze3LoginResponse: the 3.x login response shape heat2 clients require
+  (top-level SKEY/NTOS, SESS{1CON,BUID,KEY,UID,PDTL{PLAT,STAS}}), distinct
+  from the 2.x Ps3LoginResponse NBA Jam uses; sent only for heat2 clients.
+- Push UserSessions UserAdded + ExtendedDataUpdate after login for heat2
+  (3.x clients block in login until the server sends the local session).
+
+Verified live: NHL 15 completes SSLv3 TLS -> getServerInstance -> preAuth ->
+all config sections -> ps3Login, and the server logs "User uscltest has
+signed in". Remaining: the post-login session notification needs the full
+3.x UserSessionExtendedData body (ADDR union, QDAT, USER group, ULST) before
+the client will send postAuth instead of logging out; reference structures
+captured from grid-leak/blaze + open-ds2-server.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ .../Commands/Blaze3LoginResponse.cs           | 43 +++++++++++++++
+ .../Handlers/Ps3LoginHandler.cs               | 53 ++++++++++++++++---
+ 2 files changed, 90 insertions(+), 6 deletions(-)
+ create mode 100644 Skate Custom Server/Blaze/Components/Authentication/Commands/Blaze3LoginResponse.cs
+
+diff --git a/Skate Custom Server/Blaze/Components/Authentication/Commands/Blaze3LoginResponse.cs b/Skate Custom Server/Blaze/Components/Authentication/Commands/Blaze3LoginResponse.cs
+new file mode 100644
+index 0000000..32cc7c0
+--- /dev/null
++++ b/Skate Custom Server/Blaze/Components/Authentication/Commands/Blaze3LoginResponse.cs	
+@@ -0,0 +1,43 @@
++using Blaze.Tdf.Attributes;
++
++namespace Blaze.Components.Authentication.Commands
++{
++    // Blaze 3.x login response (NHL 15, Madden 25 — BlazeSDK 3.x/heat2). Their SDK needs the 3.x shape, which is
++    // different from the 2.x Ps3LoginResponse NBA Jam/Skate use: a top-level session key (SKEY) + needs-TOS flag
++    // (NTOS), and the SESS group carries 1CON/UID with PDTL.PLAT/STAS. Without these the client treats login as
++    // incomplete and logs straight back out instead of sending postAuth. Field set mirrors a known-good 3.x server
++    // (grid-leak/blaze, Mirror's Edge Catalyst). Numeric "flag" fields are 0.
++    public struct Blaze3LoginResponse
++    {
++        [TdfMember("CNTX")] public uint Context;
++        [TdfMember("ERRC")] public uint ErrorCode;
++        [TdfMember("SKEY")] public string SessionKey;
++        [TdfMember("ANON")] public uint Anonymous;
++        [TdfMember("NTOS")] public uint NeedsTos;
++        [TdfMember("SESS")] public Blaze3SessionInfo Session;
++        [TdfMember("SPAM")] public uint IsSpammable;
++        [TdfMember("UNDR")] public uint IsUnderage;
++    }
++
++    public struct Blaze3SessionInfo
++    {
++        [TdfMember("1CON")] public uint ConnGroupId;
++        [TdfMember("BUID")] public uint BlazeId;
++        [TdfMember("FRST")] public uint IsFirstLogin;
++        [TdfMember("KEY")] public string BlazeToken;
++        [TdfMember("LLOG")] public uint LastLoginTime;
++        [TdfMember("MAIL")] public string Email;
++        [TdfMember("PDTL")] public Blaze3PersonaInfo PersonaDetails;
++        [TdfMember("UID")] public uint UserId;
++    }
++
++    public struct Blaze3PersonaInfo
++    {
++        [TdfMember("DSNM")] public string DisplayName;
++        [TdfMember("LAST")] public uint LastLoginTime;
++        [TdfMember("PID")] public uint PersonaId;
++        [TdfMember("PLAT")] public uint Platform;      // 4 = the generic value the 3.x reference uses
++        [TdfMember("STAS")] public uint Status;
++        [TdfMember("XREF")] public uint ExternalRef;
++    }
++}
+diff --git a/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs b/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs
+index 438cef6..ece94a3 100644
+--- a/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs	
++++ b/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs	
+@@ -4,6 +4,8 @@ using Blaze.Components.Clubs;
+ using Blaze.Components.Gamemanager;
+ using Blaze.Components.Gamemanager.Models;
+ using Blaze.Components.UserSessions.Models;
++using Blaze.Components.UserSessions.Notifications;
++using Blaze.MessageLists;
+ using Microsoft.EntityFrameworkCore;
+ using NPTicket;
+ using NPTicket.Verification;
+@@ -52,8 +54,13 @@ namespace Blaze.Components.Authentication
+ 
+         private static bool IsTicketValid(Ticket ps3Ticket, byte[] ticketBytes, User user)
+         {
++            // USCL: our own RPCN mints these tickets with a short (~20 min) TTL, so a player who idles at the
++            // "connect to EA" menu (or boots well before opening an online mode) arrives with an already-expired
++            // ticket and gets wrongly rejected. Expiry carries no security meaning on a local preservation server,
++            // so we log it and still validate the signature rather than hard-rejecting.
+             if (ps3Ticket.ExpiryDate < DateTimeOffset.UtcNow)
+-                return false;
++                ServerLogger.Log($"[Blaze] ps3Login: ticket expired {(DateTimeOffset.UtcNow - ps3Ticket.ExpiryDate).TotalMinutes:F0}m ago " +
++                    $"(user {ps3Ticket.Username}) — accepting anyway (local RPCN)");
+ 
+             // RPCN Ticket Verifying
+             var verifier = new TicketVerifier(ticketBytes, ps3Ticket, RpcnSigningKey.Instance);
+@@ -88,6 +95,10 @@ namespace Blaze.Components.Authentication
+ 
+             Ticket ps3Ticket = Ticket.ReadFromBytes(loginRequest.ps3Ticket);
+ 
++            // USCL diag: pinpoint heat2 ticket extraction vs signature failure for NHL/Madden (Blaze 3.x)
++            ServerLogger.Log($"[Blaze] ps3Login diag: heat2={user.IsHeat2} ticket={loginRequest.ps3Ticket?.Length ?? -1}B " +
++                $"user={ps3Ticket.Username} issuer={ps3Ticket.IssuerId} expiry={ps3Ticket.ExpiryDate:o} serviceId={ps3Ticket.ServiceId}");
++
+             if (UserBanned(ps3Ticket.Username))
+                 return;
+ 
+@@ -128,17 +139,35 @@ namespace Blaze.Components.Authentication
+ 
+ 			SessionDetails sessionDetails = AuthUtils.CreateNewSessionDetails(ps3Ticket, userData.BlazeId);
+ 
+-            BlazeMessage response = BlazeMessage.CreateResponseFromModel(
+-                packetBytes,
+-                new Ps3LoginResponse
++            object responseModel = user.IsHeat2
++                ? new Blaze3LoginResponse
++                {
++                    SessionKey = sessionDetails.BlazeToken,
++                    Session = new Blaze3SessionInfo
++                    {
++                        BlazeId = sessionDetails.BlazeId,
++                        BlazeToken = sessionDetails.BlazeToken,
++                        Email = sessionDetails.Email,
++                        UserId = (uint)sessionDetails.UserId,
++                        PersonaDetails = new Blaze3PersonaInfo
++                        {
++                            DisplayName = sessionDetails.PersonaDetails.DisplayName,
++                            PersonaId = (uint)sessionDetails.PersonaDetails.PersonaId,
++                            Platform = 4,
++                            ExternalRef = (uint)sessionDetails.PersonaDetails.ExternalRef
++                        }
++                    }
++                }
++                : new Ps3LoginResponse
+                 {
+                     IsUnderage = false,
+                     IsSpammable = false,
+                     SessionDetails = sessionDetails
+-                });
++                };
++            BlazeMessage response = BlazeMessage.CreateResponseFromModel(packetBytes, responseModel);
+ 
+             await user.Stream.WriteAsync(response.Serialize());
+-            
++
+ 
+             // Store user session details for later use
+             user.Session = sessionDetails;
+@@ -163,6 +192,18 @@ namespace Blaze.Components.Authentication
+ 
+             user.IsAuthenticated = true;
+             ServerGlobals.Users[sessionDetails.BlazeId] = user;
++
++            // Blaze 3.x (NHL/Madden): the SDK's login call doesn't complete until the server pushes the local
++            // user's own session data, so the client waits ~12s then logs out instead of sending postAuth. Push
++            // the session notifications now (heat2 only; heat1/NBA Jam drive these via postAuth instead).
++            if (user.IsHeat2)
++            {
++                await ServerUtils.SendNotificationToUser(user, user.UserIdentification,
++                    BlazeComponent.UserSessions, (ushort)UserSessionNotification.UserAdded);
++                await ServerUtils.SendNotificationToUser(user,
++                    new NotifyExtendedDataUpdated { ExtendedData = user.ExtendedData, BlazeId = user.UserIdentification.BlazeId },
++                    BlazeComponent.UserSessions, (ushort)UserSessionNotification.UserSessionExtendedDataUpdate);
++            }
+         }
+     }
+ }
+\ No newline at end of file
+-- 
+2.56.0
+

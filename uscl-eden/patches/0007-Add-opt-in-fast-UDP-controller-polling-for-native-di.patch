@@ -1,0 +1,44 @@
+From 4e3784f5bfc86d81fbd66a705b1f19785b08d898 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 11:43:12 -0700
+Subject: [PATCH 07/11] Add opt-in fast UDP controller polling for native
+ diagnostics
+
+---
+ src/input_common/drivers/udp_client.cpp | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/input_common/drivers/udp_client.cpp b/src/input_common/drivers/udp_client.cpp
+index fc216e3..8c35f30 100644
+--- a/src/input_common/drivers/udp_client.cpp
++++ b/src/input_common/drivers/udp_client.cpp
+@@ -9,6 +9,8 @@
+ #include <boost/asio.hpp>
+ #include <fmt/ranges.h>
+ 
++#include <cstdlib>
++
+ #include "common/logging.h"
+ #include "common/param_package.h"
+ #include "common/random.h"
+@@ -52,7 +54,16 @@ public:
+     }
+ 
+     void StartSend(const clock::time_point& from) {
+-        timer.expires_at(from + std::chrono::seconds(3));
++        // USCL: the stock 3-second poll is too coarse to navigate game menus through an
++        // injected UDP controller. Allow a finer interval for the native diagnostic route.
++        auto interval = std::chrono::milliseconds(3000);
++        if (const char* option = std::getenv("USCL_UDP_POLL_MS")) {
++            const int value = std::atoi(option);
++            if (value > 0 && value <= 3000) {
++                interval = std::chrono::milliseconds(value);
++            }
++        }
++        timer.expires_at(from + interval);
+         timer.async_wait([this](const boost::system::error_code& error) { HandleSend(error); });
+     }
+ 
+-- 
+2.53.0.windows.1
+

@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 12 Nov 2026 22:30:00 -0700
+Subject: [PATCH] Qt: join a room at startup (USCL_ROOM)
+
+For USCL's 3DS online play over its Steam tunnel. The Qt frontend's
+--multiplayer option is not implemented, so with USCL_ROOM=<nickname>@<host>:<port>
+the main window joins that room before it boots the game passed on the command
+line, the same Join() call Multiplayer -> Direct Connect makes.
+---
+diff --git a/src/citra_qt/citra_qt.cpp b/src/citra_qt/citra_qt.cpp
+--- a/src/citra_qt/citra_qt.cpp
++++ b/src/citra_qt/citra_qt.cpp
+@@ -3,6 +3,7 @@
+ // Refer to the license.txt file included.
+ 
+ #include <clocale>
++#include <cstdlib>
+ #include <iostream>
+ #include <memory>
+ #include <optional>
+@@ -106,6 +107,7 @@
+ #include "core/file_sys/archive_source_sd_savedata.h"
+ #include "core/frontend/applets/default_applets.h"
+ #include "core/hle/service/am/am.h"
++#include "core/hle/service/cfg/cfg.h"
+ #include "core/hle/service/fs/archive.h"
+ #include "core/hle/service/nfc/nfc.h"
+ #include "core/loader/loader.h"
+@@ -540,6 +542,24 @@
+     physical_devices = GetVulkanPhysicalDevices();
+ #endif
+ 
++    // USCL: USCL_ROOM=<nickname>@<host>:<port> joins that room before the game starts, like
++    // Multiplayer -> Direct Connect without the dialog (USCL carries rooms over its Steam tunnel).
++    // shortcut: joins on the UI thread; Join() gives up after its own connect timeout
++    if (const char* room = std::getenv("USCL_ROOM")) {
++        const QString spec = QString::fromUtf8(room);
++        const qsizetype at = spec.lastIndexOf(QLatin1Char('@'));
++        const qsizetype colon = spec.lastIndexOf(QLatin1Char(':'));
++        const auto member = Network::GetRoomMember().lock();
++        if (member && at > 0 && colon > at) {
++            member->Join(spec.left(at).toStdString(), Service::CFG::GetConsoleIdHash(system),
++                         spec.mid(at + 1, colon - at - 1).toStdString().c_str(),
++                         static_cast<u16>(spec.mid(colon + 1).toUInt()), 0,
++                         Service::CFG::GetConsoleMacAddress(system));
++            LOG_INFO(Frontend, "USCL: room {} -> {}", room,
++                     member->IsConnected() ? "joined" : "not joined");
++        }
++    }
++
+     if (!game_path.isEmpty()) {
+         BootGame(game_path);
+     }
+-- 
+2.47.0
+

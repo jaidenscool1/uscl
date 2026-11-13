@@ -1,0 +1,30 @@
+From 37aa0730740b3f0ea916b2e97ed0313cfe1d90f9 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 09:44:47 -0700
+Subject: [PATCH 14/19] NAT discovery: DW_STUN_ALT_SHOWN, the second server's
+ address as the game reaches it (behind uscl-bridge)
+
+---
+ dw-server/src/stun.rs | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/dw-server/src/stun.rs b/dw-server/src/stun.rs
+index 9edec3e..183210b 100644
+--- a/dw-server/src/stun.rs
++++ b/dw-server/src/stun.rs
+@@ -83,8 +83,11 @@ pub async fn start() {
+     }
+     let sockets = Arc::new(sockets);
+     let self_addr = std::env::var("DW_STUN_SELF_ADDR").ok().map(|a| a.parse::<SocketAddrV4>().expect("DW_STUN_SELF_ADDR must be IPv4 addr:port"));
++    // DW_STUN_ALT_SHOWN: the second server's address as the game must reach it, when a relay sits in front of us
++    // (uscl-bridge owns 127.0.0.1:3077 on every PC and forwards to our 3177)
++    let shown = std::env::var("DW_STUN_ALT_SHOWN").ok().map(|a| a.parse::<SocketAddrV4>().expect("DW_STUN_ALT_SHOWN must be IPv4 addr:port")).unwrap_or(alt_addr);
+     for index in 0..3 {
+-        tokio::spawn(serve(sockets.clone(), index, alt_addr, self_addr));
++        tokio::spawn(serve(sockets.clone(), index, shown, self_addr));
+     }
+ }
+ 
+-- 
+2.56.0
+

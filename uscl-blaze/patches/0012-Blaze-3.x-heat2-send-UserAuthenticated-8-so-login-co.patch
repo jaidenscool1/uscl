@@ -1,0 +1,154 @@
+From 4e51434ed18e3dae3b7821b25eae668eaa783a7c Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 10:02:36 -0700
+Subject: [PATCH 12/14] Blaze 3.x heat2: send UserAuthenticated(8) so login
+ completes
+
+THE login-completion gate for heat2 (NHL 15 / Madden 25). After ps3Login
+the real EA SDK blocks until the server pushes the LOCAL user's session as
+UserSessions NotifyUserAuthenticated (Id 8); NotifyUserAdded (2) is only for
+foreign personas. Without it the client showed "connecting to the EA
+servers", pinged, then logged out.
+
+Now sends the real EA post-login notification set in order: UserAuthenticated
+(8) -> UserAdded (2) -> UserUpdated (5). Shapes reverse-engineered from the
+FIFA 17 PS3 EBOOT (ceinydO/fifa17-ps3-online).
+
+Live result (NHL 15, RPCS3): login now completes -- client sends postAuth,
+updateNetworkInfo and the full online bootstrap (Messaging, AssociationLists,
+Clubs, OSDK_TICKER/ARENA config); online music ticker plays; "connecting"
+spinner replaced by "Retrieving data from server". Was: instant "EA servers
+not available".
+
+Known gap: a later PPU null-deref while retrieving data -- a game component
+(2249/2250/2251/21/10) gets our empty response where it expects populated data.
+
+1CON omitted from UserSessionLoginInfo: TdfUtils.EncodeTdfTag mis-encodes
+digit-leading tags (writes 'Q' for '1'); value defaults to 0 anyway.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ .../Handlers/Ps3LoginHandler.cs               | 27 ++++++++++++++++
+ .../Notifications/UserAuthenticated.cs        | 31 +++++++++++++++++++
+ .../UserSessions/Notifications/UserUpdated.cs | 13 ++++++++
+ .../MessageLists/UserSessionNotifications.cs  |  4 ++-
+ 4 files changed, 74 insertions(+), 1 deletion(-)
+ create mode 100644 Skate Custom Server/Blaze/Components/UserSessions/Notifications/UserAuthenticated.cs
+ create mode 100644 Skate Custom Server/Blaze/Components/UserSessions/Notifications/UserUpdated.cs
+
+diff --git a/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs b/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs
+index d367e51..bf4de07 100644
+--- a/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs	
++++ b/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs	
+@@ -199,11 +199,38 @@ namespace Blaze.Components.Authentication
+             // only; heat1/NBA Jam drive this via postAuth).
+             if (user.IsHeat2)
+             {
++                uint now = (uint)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
++
++                // Local user's login-complete signal — the gate NHL/Madden block on before advancing.
++                await ServerUtils.SendNotificationToUser(user, new UserAuthenticated
++                {
++                    AccountLocale = user.UserIdentification.AccountLocale,
++                    BlazeId = sessionDetails.BlazeId,
++                    DisplayName = sessionDetails.PersonaDetails.DisplayName,
++                    IsFirstLogin = 0,
++                    SessionKey = sessionDetails.BlazeToken,
++                    LastAuthenticated = now,
++                    LastLogin = now,
++                    Email = sessionDetails.Email,
++                    Namespace = "ps3",
++                    PersonaId = (uint)sessionDetails.PersonaDetails.PersonaId,
++                    Platform = 2, // PS3
++                    UserId = (uint)sessionDetails.UserId,
++                    UserType = 0,
++                    ExternalRef = (uint)sessionDetails.PersonaDetails.ExternalRef
++                }, BlazeComponent.UserSessions, (ushort)UserSessionNotification.UserAuthenticated);
++
+                 await ServerUtils.SendNotificationToUser(user, new NotifyUserAdded
+                 {
+                     ExtendedData = user.ExtendedData,
+                     UserInfo = user.UserIdentification
+                 }, BlazeComponent.UserSessions, (ushort)UserSessionNotification.UserAdded);
++
++                await ServerUtils.SendNotificationToUser(user, new UserUpdated
++                {
++                    StatusFlags = 1, // online
++                    BlazeId = sessionDetails.BlazeId
++                }, BlazeComponent.UserSessions, (ushort)UserSessionNotification.UserUpdated);
+             }
+         }
+     }
+diff --git a/Skate Custom Server/Blaze/Components/UserSessions/Notifications/UserAuthenticated.cs b/Skate Custom Server/Blaze/Components/UserSessions/Notifications/UserAuthenticated.cs
+new file mode 100644
+index 0000000..66858f4
+--- /dev/null
++++ b/Skate Custom Server/Blaze/Components/UserSessions/Notifications/UserAuthenticated.cs	
+@@ -0,0 +1,31 @@
++using Blaze.Tdf.Attributes;
++
++namespace Blaze.Components.UserSessions.Notifications
++{
++    // UserSessions NotifyUserAuthenticated (Id 8). This is the LOCAL user's login-complete signal for Blaze 3.x
++    // (heat2): without it NHL 15 / Madden 25 accept the login reply, show "connecting to the EA servers", ping,
++    // then log out — the SDK's login never completes so it never advances to updateNetworkInfo. NotifyUserAdded (2)
++    // is for FOREIGN personas, not the local login. Shape = UserSessionLoginInfo, reverse-engineered from the real
++    // FIFA 17 PS3 EBOOT (ceinydO/fifa17-ps3-online). CGID (an ObjectId) is omitted: absent TDF fields decode to
++    // defaults, and the connection group only matters once the user joins a game.
++    public struct UserAuthenticated
++    {
++        // shortcut: 1CON (ConnectionState) omitted — it defaults to 0 (what FIFA 17 sends) and TdfUtils.EncodeTdfTag
++        // mis-encodes digit-leading tags (writes 'Q' for '1'); add it only if the SDK proves to require it, and fix
++        // the encoder first.
++        [TdfMember("ALOC")] public uint AccountLocale;
++        [TdfMember("BUID")] public uint BlazeId;
++        [TdfMember("DSNM")] public string DisplayName;
++        [TdfMember("FRST")] public uint IsFirstLogin;
++        [TdfMember("KEY")]  public string SessionKey;
++        [TdfMember("LAST")] public uint LastAuthenticated;
++        [TdfMember("LLOG")] public uint LastLogin;
++        [TdfMember("MAIL")] public string Email;
++        [TdfMember("NASP")] public string Namespace;
++        [TdfMember("PID")]  public uint PersonaId;
++        [TdfMember("PLAT")] public uint Platform;       // 2 = PS3
++        [TdfMember("UID")]  public uint UserId;
++        [TdfMember("USTP")] public uint UserType;
++        [TdfMember("XREF")] public uint ExternalRef;
++    }
++}
+diff --git a/Skate Custom Server/Blaze/Components/UserSessions/Notifications/UserUpdated.cs b/Skate Custom Server/Blaze/Components/UserSessions/Notifications/UserUpdated.cs
+new file mode 100644
+index 0000000..46ad7d6
+--- /dev/null
++++ b/Skate Custom Server/Blaze/Components/UserSessions/Notifications/UserUpdated.cs	
+@@ -0,0 +1,13 @@
++using Blaze.Tdf.Attributes;
++
++namespace Blaze.Components.UserSessions.Notifications
++{
++    // UserSessions NotifyUserUpdated (Id 5), type UserStatus {FLGS, ID}. In the real EA SDK flow it arrives right
++    // after UserAdded and carries the user's online state flags; sent as the third post-login notification for
++    // heat2 clients (after UserAuthenticated and UserAdded).
++    public struct UserUpdated
++    {
++        [TdfMember("FLGS")] public uint StatusFlags;   // 1 = online
++        [TdfMember("ID")]   public uint BlazeId;
++    }
++}
+diff --git a/Skate Custom Server/Blaze/MessageLists/UserSessionNotifications.cs b/Skate Custom Server/Blaze/MessageLists/UserSessionNotifications.cs
+index 8484de6..8831d4b 100644
+--- a/Skate Custom Server/Blaze/MessageLists/UserSessionNotifications.cs	
++++ b/Skate Custom Server/Blaze/MessageLists/UserSessionNotifications.cs	
+@@ -4,6 +4,8 @@
+     {
+         UserSessionExtendedDataUpdate = 1,
+         UserAdded = 2,
+-        UserRemoved = 3
++        UserRemoved = 3,
++        UserUpdated = 5,
++        UserAuthenticated = 8
+     }
+ }
+-- 
+2.56.0
+

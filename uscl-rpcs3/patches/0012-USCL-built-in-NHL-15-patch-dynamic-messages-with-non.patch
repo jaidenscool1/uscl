@@ -1,0 +1,42 @@
+From f3860352c936481f59c72d814a8eb3c4df3fe92b Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 14:59:26 -0700
+Subject: [PATCH] USCL: built-in NHL 15 patch: dynamic messages with none to
+ show
+
+NHL 15's OSDK message rotation (0x7f94e4) reads the first message of its list without checking
+that the list has one. EA's servers always sent messages; a community server may send none, and
+the online main menu then crashes at 0x7f9528. Check for an empty list before the call.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Utilities/bin_patch.cpp | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/Utilities/bin_patch.cpp b/Utilities/bin_patch.cpp
+index e8627bb7f..b7f90843b 100644
+--- a/Utilities/bin_patch.cpp
++++ b/Utilities/bin_patch.cpp
+@@ -1517,6 +1517,19 @@ PPU-d26243d3556a8d446a97da71df8c12da4b7867a1:
+       - [ be32, 0x0032effc, 0x480b5c0d ] # in 0x32eeb0: long via the swapping function
+       - [ be32, 0x0032b424, 0x480b9811 ] # in 0x32b3f4: long64 via the swapping function
+       - [ be32, 0x0032b938, 0x480b92fd ] # in 0x32b8a8: long64 via the swapping function
++
++PPU-04d55e4c1fd97c0b19d80ed39f302ca67aee7d25:
++  "USCL: dynamic messages with none to show":
++    Games:
++      "NHL 15":
++        BLUS31436: [ 01.00 ]
++    Author: "USCL"
++    Notes: "Online main menu. The OSDK message rotation (0x7f94e4) reads its first message without checking the list has one; EA's servers always sent some, a community server may not. Skip the rotation when the list is empty."
++    Patch Version: 1.0
++    Patch:
++      - [ be32, 0x007f9528, 0x2c030000 ] # cmpwi r3,0 (message from 0x7f9010)
++      - [ be32, 0x007f952c, 0x41820034 ] # beq 0x7f9560 (nothing to show)
++      - [ be32, 0x007f9530, 0x4bfff381 ] # bl 0x7f88b0
+ )", true);
+ 		// generated ones too big for the source (BO2 crossplay netfield tables): uscl_patches.yml next to RPCS3
+ 		load(map, fs::get_executable_dir() + "uscl_patches.yml", "", true);
+-- 
+2.56.0
+

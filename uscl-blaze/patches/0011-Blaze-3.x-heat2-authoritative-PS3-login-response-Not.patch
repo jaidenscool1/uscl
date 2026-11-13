@@ -1,0 +1,199 @@
+From 53c47678977335d4aa38fc1fa654c8cbc2806fd9 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 09:52:03 -0700
+Subject: [PATCH 11/14] Blaze 3.x heat2: authoritative PS3 login response +
+ NotifyUserAdded
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+NHL 15 / Madden 25 (heat2) now read their own persona and reach the
+"connecting to EA servers" stage instead of failing instantly.
+
+- Blaze3LoginResponse: match the real ConsoleLoginResponse shape from
+  ZamboniDevelopment/BlazeSDK. Persona is PDTL{DSNM,XREF,XTYP,LAST,PID,
+  STAS}; the old DS2-derived PNAM/DPTS/EXID tags were unreadable by the
+  SDK, so it logged straight back out.
+- NotifyUserAdded (UserSessions/2): correct two-member shape {DATA,USER}
+  reusing the existing UserSessionExtendedData + UserIdentification
+  models; replaces the broken Blaze3SessionNotify guess.
+- Program.cs: USCL_BLAZE_LISTEN env to run on an internal port so a
+  plaintext tap can sit on the advertised 42100 (diagnostic, env-gated).
+
+Known gap: after a valid login reply + NotifyUserAdded, NHL pings then
+sends logout(70) without postAuth — SDK login not completing yet.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ .../Commands/Blaze3LoginResponse.cs           | 42 +++++++++----------
+ .../Handlers/Ps3LoginHandler.cs               | 25 +++++------
+ .../Notifications/NotifyUserAdded.cs          | 18 ++++++++
+ Skate Custom Server/Program.cs                |  6 ++-
+ 4 files changed, 56 insertions(+), 35 deletions(-)
+ create mode 100644 Skate Custom Server/Blaze/Components/UserSessions/Notifications/NotifyUserAdded.cs
+
+diff --git a/Skate Custom Server/Blaze/Components/Authentication/Commands/Blaze3LoginResponse.cs b/Skate Custom Server/Blaze/Components/Authentication/Commands/Blaze3LoginResponse.cs
+index 32cc7c0..490cb6d 100644
+--- a/Skate Custom Server/Blaze/Components/Authentication/Commands/Blaze3LoginResponse.cs	
++++ b/Skate Custom Server/Blaze/Components/Authentication/Commands/Blaze3LoginResponse.cs	
+@@ -2,42 +2,42 @@ using Blaze.Tdf.Attributes;
+ 
+ namespace Blaze.Components.Authentication.Commands
+ {
+-    // Blaze 3.x login response (NHL 15, Madden 25 — BlazeSDK 3.x/heat2). Their SDK needs the 3.x shape, which is
+-    // different from the 2.x Ps3LoginResponse NBA Jam/Skate use: a top-level session key (SKEY) + needs-TOS flag
+-    // (NTOS), and the SESS group carries 1CON/UID with PDTL.PLAT/STAS. Without these the client treats login as
+-    // incomplete and logs straight back out instead of sending postAuth. Field set mirrors a known-good 3.x server
+-    // (grid-leak/blaze, Mirror's Edge Catalyst). Numeric "flag" fields are 0.
++    // Blaze 3.x PS3 console login response (NHL 15, Madden 25 — heat2). This is the authoritative
++    // ConsoleLoginResponse shape from the real BlazeSDK (ZamboniDevelopment/BlazeSDK, Blaze3SDK): the earlier
++    // DS2-derived guess had the persona under PNAM with DPTS/EXID/GTYP tags, which the client's SDK can't read, so
++    // it logged straight back out. The real persona tag is DSNM, inside PDTL{DSNM,XREF,XTYP,LAST,PID,STAS}. Sent
++    // for heat2 clients only.
+     public struct Blaze3LoginResponse
+     {
+-        [TdfMember("CNTX")] public uint Context;
+-        [TdfMember("ERRC")] public uint ErrorCode;
+-        [TdfMember("SKEY")] public string SessionKey;
+-        [TdfMember("ANON")] public uint Anonymous;
+-        [TdfMember("NTOS")] public uint NeedsTos;
+-        [TdfMember("SESS")] public Blaze3SessionInfo Session;
++        [TdfMember("AGUP")] public uint CanAgeUp;
+         [TdfMember("SPAM")] public uint IsSpammable;
+-        [TdfMember("UNDR")] public uint IsUnderage;
++        [TdfMember("LDHT")] public string LegalDocHost;
++        [TdfMember("NTOS")] public uint NeedsLegalDoc;
++        [TdfMember("PRIV")] public string PrivacyPolicyUrl;
++        [TdfMember("SESS")] public Blaze3SessionInfo Session;
++        [TdfMember("TSUI")] public string TosUrl;
++        [TdfMember("THST")] public string TosHost;
++        [TdfMember("TURI")] public string TosHostUrl;
+     }
+ 
+     public struct Blaze3SessionInfo
+     {
+-        [TdfMember("1CON")] public uint ConnGroupId;
+         [TdfMember("BUID")] public uint BlazeId;
++        [TdfMember("MAIL")] public string Email;
+         [TdfMember("FRST")] public uint IsFirstLogin;
+-        [TdfMember("KEY")] public string BlazeToken;
+         [TdfMember("LLOG")] public uint LastLoginTime;
+-        [TdfMember("MAIL")] public string Email;
+         [TdfMember("PDTL")] public Blaze3PersonaInfo PersonaDetails;
++        [TdfMember("KEY")] public string BlazeToken;
+         [TdfMember("UID")] public uint UserId;
+     }
+ 
+     public struct Blaze3PersonaInfo
+     {
+-        [TdfMember("DSNM")] public string DisplayName;
+-        [TdfMember("LAST")] public uint LastLoginTime;
+-        [TdfMember("PID")] public uint PersonaId;
+-        [TdfMember("PLAT")] public uint Platform;      // 4 = the generic value the 3.x reference uses
+-        [TdfMember("STAS")] public uint Status;
+-        [TdfMember("XREF")] public uint ExternalRef;
++        [TdfMember("DSNM")] public string PersonaName;
++        [TdfMember("XREF")] public uint ExternalId;
++        [TdfMember("XTYP")] public uint ExternalRefType; // 2 = PS3
++        [TdfMember("LAST")] public uint LastAuthenticated;
++        [TdfMember("PID")]  public uint PersonaId;
++        [TdfMember("STAS")] public uint Status;           // 2 = ACTIVE
+     }
+ }
+diff --git a/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs b/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs
+index ece94a3..d367e51 100644
+--- a/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs	
++++ b/Skate Custom Server/Blaze/Components/Authentication/Handlers/Ps3LoginHandler.cs	
+@@ -142,7 +142,6 @@ namespace Blaze.Components.Authentication
+             object responseModel = user.IsHeat2
+                 ? new Blaze3LoginResponse
+                 {
+-                    SessionKey = sessionDetails.BlazeToken,
+                     Session = new Blaze3SessionInfo
+                     {
+                         BlazeId = sessionDetails.BlazeId,
+@@ -151,10 +150,11 @@ namespace Blaze.Components.Authentication
+                         UserId = (uint)sessionDetails.UserId,
+                         PersonaDetails = new Blaze3PersonaInfo
+                         {
+-                            DisplayName = sessionDetails.PersonaDetails.DisplayName,
++                            PersonaName = sessionDetails.PersonaDetails.DisplayName,
+                             PersonaId = (uint)sessionDetails.PersonaDetails.PersonaId,
+-                            Platform = 4,
+-                            ExternalRef = (uint)sessionDetails.PersonaDetails.ExternalRef
++                            ExternalId = (uint)sessionDetails.PersonaDetails.ExternalRef,
++                            ExternalRefType = 2, // PS3
++                            Status = 2           // ACTIVE
+                         }
+                     }
+                 }
+@@ -193,16 +193,17 @@ namespace Blaze.Components.Authentication
+             user.IsAuthenticated = true;
+             ServerGlobals.Users[sessionDetails.BlazeId] = user;
+ 
+-            // Blaze 3.x (NHL/Madden): the SDK's login call doesn't complete until the server pushes the local
+-            // user's own session data, so the client waits ~12s then logs out instead of sending postAuth. Push
+-            // the session notifications now (heat2 only; heat1/NBA Jam drive these via postAuth instead).
++            // Blaze 3.x (NHL/Madden): the SDK's login call blocks until the server pushes the local user's own
++            // session as UserSessions NotifyUserAdded (2). Without it the client sits at "connecting to the EA
++            // servers", pings, then logs out. Send it now using the session data/identity built just above (heat2
++            // only; heat1/NBA Jam drive this via postAuth).
+             if (user.IsHeat2)
+             {
+-                await ServerUtils.SendNotificationToUser(user, user.UserIdentification,
+-                    BlazeComponent.UserSessions, (ushort)UserSessionNotification.UserAdded);
+-                await ServerUtils.SendNotificationToUser(user,
+-                    new NotifyExtendedDataUpdated { ExtendedData = user.ExtendedData, BlazeId = user.UserIdentification.BlazeId },
+-                    BlazeComponent.UserSessions, (ushort)UserSessionNotification.UserSessionExtendedDataUpdate);
++                await ServerUtils.SendNotificationToUser(user, new NotifyUserAdded
++                {
++                    ExtendedData = user.ExtendedData,
++                    UserInfo = user.UserIdentification
++                }, BlazeComponent.UserSessions, (ushort)UserSessionNotification.UserAdded);
+             }
+         }
+     }
+diff --git a/Skate Custom Server/Blaze/Components/UserSessions/Notifications/NotifyUserAdded.cs b/Skate Custom Server/Blaze/Components/UserSessions/Notifications/NotifyUserAdded.cs
+new file mode 100644
+index 0000000..243b4ae
+--- /dev/null
++++ b/Skate Custom Server/Blaze/Components/UserSessions/Notifications/NotifyUserAdded.cs	
+@@ -0,0 +1,18 @@
++using Blaze.Tdf.Attributes;
++using Blaze.Components.UserSessions.Models;
++
++namespace Blaze.Components.UserSessions.Notifications
++{
++    // UserSessions NotifyUserAdded (Id 2). The real Blaze 3.x SDK's login call blocks until the server pushes the
++    // local user's own session as this notification; without it NHL 15 / Madden 25 sit at "connecting to the EA
++    // servers", ping, then log out. Shape is authoritative (ZamboniDevelopment/BlazeSDK): two top-level members,
++    // DATA (the user's extended session data) and USER (their identification) — not USER nested inside DATA.
++    public struct NotifyUserAdded
++    {
++        [TdfMember("DATA")]
++        public UserSessionExtendedData ExtendedData;
++
++        [TdfMember("USER")]
++        public UserIdentification UserInfo;
++    }
++}
+diff --git a/Skate Custom Server/Program.cs b/Skate Custom Server/Program.cs
+index 4b4199e..d4a7964 100644
+--- a/Skate Custom Server/Program.cs	
++++ b/Skate Custom Server/Program.cs	
+@@ -51,8 +51,10 @@ ServerGlobals.PingPeriodSecs = 15;
+ var httpServer = new HttpServer(ServerGlobals.HttpServerPort);
+ httpServer.Start();
+ 
+-// Main Blaze server
+-var blazeServer = new BlazeServer(ServerGlobals.ServerPort);
++// Main Blaze server. USCL diag: listen on an internal port when USCL_BLAZE_LISTEN is set, so a plaintext tap can
++// sit on the advertised ServerPort (42100, what getServerInstance returns) and dump the session both ways.
++ushort listenPort = ushort.TryParse(Environment.GetEnvironmentVariable("USCL_BLAZE_LISTEN"), out var lp) ? lp : ServerGlobals.ServerPort;
++var blazeServer = new BlazeServer(listenPort);
+ blazeServer.Start();
+ 
+ // Wait for Ctrl+C
+-- 
+2.56.0
+

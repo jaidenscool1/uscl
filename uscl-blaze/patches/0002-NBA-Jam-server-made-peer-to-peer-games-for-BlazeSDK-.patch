@@ -1,0 +1,223 @@
+From e87c8e0edae24b7d55e6e64660878ec02c59fce4 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 13:24:20 -0700
+Subject: [PATCH 02/14] NBA Jam: server-made peer-to-peer games for BlazeSDK
+ 2.x matchmaking; request dumps for unhandled commands
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Commands/StartMatchmakingRequest.cs       | 31 ++++++-
+ .../Gamemanager/GameManagerUtils.cs           |  5 +-
+ .../Handlers/StartMatchmakingHandler.cs       | 92 +++++++++++++++++++
+ .../Blaze/Routers/ClubsRouter.cs              |  2 +-
+ Skate Custom Server/Servers/ServerUtils.cs    |  2 +-
+ 5 files changed, 128 insertions(+), 4 deletions(-)
+
+diff --git a/Skate Custom Server/Blaze/Components/Gamemanager/Commands/StartMatchmakingRequest.cs b/Skate Custom Server/Blaze/Components/Gamemanager/Commands/StartMatchmakingRequest.cs
+index 2bf5aef..a9bef36 100644
+--- a/Skate Custom Server/Blaze/Components/Gamemanager/Commands/StartMatchmakingRequest.cs	
++++ b/Skate Custom Server/Blaze/Components/Gamemanager/Commands/StartMatchmakingRequest.cs	
+@@ -1,4 +1,5 @@
+-﻿using Blaze.Tdf.Attributes;
++﻿using Blaze.Components.UserSessions.Models;
++using Blaze.Tdf.Attributes;
+ 
+ namespace Blaze.Components.Gamemanager.Commands
+ {
+@@ -6,5 +7,33 @@ namespace Blaze.Components.Gamemanager.Commands
+     {
+         [TdfMember("ATTR")]
+         public Dictionary<string, string> MatchmakingAttributes;
++
++        // USCL: BlazeSDK 2.x (NBA Jam) matchmaking, which sends no ATTR
++        [TdfMember("GSET")]
++        public uint GameSettings;
++
++        [TdfMember("GVER")]
++        public string GameProtocolVersionString;
++
++        [TdfMember("NTOP")]
++        public int NetworkTopology;
++
++        [TdfMember("PNET")]
++        public NetworkAddress PlayerNetwork;
++
++        [TdfMember("CRIT")]
++        public MatchmakingCriteria Criteria;
++    }
++
++    public struct MatchmakingCriteria
++    {
++        [TdfMember("SIZE")]
++        public MatchmakingSizeRule Size;
++    }
++
++    public struct MatchmakingSizeRule
++    {
++        [TdfMember("PCAP")]
++        public ushort PlayerCapacity; // 2 for NBA Jam 1v1
+     }
+ }
+diff --git a/Skate Custom Server/Blaze/Components/Gamemanager/GameManagerUtils.cs b/Skate Custom Server/Blaze/Components/Gamemanager/GameManagerUtils.cs
+index b64eb16..5b0c393 100644
+--- a/Skate Custom Server/Blaze/Components/Gamemanager/GameManagerUtils.cs	
++++ b/Skate Custom Server/Blaze/Components/Gamemanager/GameManagerUtils.cs	
+@@ -193,7 +193,10 @@ namespace Blaze.Components.Gamemanager
+                 NetworkQosData = user.ExtendedData.QosData,
+                 PlayerAttributes = new Dictionary<string, string> { { "dlc_mask", "499" } },
+                 PlayerId = user.Session.BlazeId, // Generate random Blaze Id in games for name spoofs to show (not load from cache after lookupUsers request)
+-                PlayerNetwork = new NetworkAddress { }, // Empty NetworkAddress union to force relay server connection
++                // Empty NetworkAddress union to force relay server connection; USCL: peer-to-peer games (NBA Jam)
++                // connect the players directly, so they get the address the player sent
++                PlayerNetwork = game.GameData.NetworkTopology == (int)GameNetworkTopology.PEER_TO_PEER_FULL_MESH
++                    ? user.ExtendedData.NetworkAddress : new NetworkAddress { },
+                 SlotId = slotId,
+                 // The slot type the client asked for. Invite joins ask for a private slot; seating them in a public
+                 // one leaves the joiner unable to find itself in the roster: it never loads (black, no loading screen).
+diff --git a/Skate Custom Server/Blaze/Components/Gamemanager/Handlers/StartMatchmakingHandler.cs b/Skate Custom Server/Blaze/Components/Gamemanager/Handlers/StartMatchmakingHandler.cs
+index 17320f0..731a0e5 100644
+--- a/Skate Custom Server/Blaze/Components/Gamemanager/Handlers/StartMatchmakingHandler.cs	
++++ b/Skate Custom Server/Blaze/Components/Gamemanager/Handlers/StartMatchmakingHandler.cs	
+@@ -4,6 +4,7 @@ using Blaze.Components.Gamemanager.Models;
+ using Blaze.GamemanagerComponent;
+ using Servers.Blaze.Models;
+ using Blaze.MessageLists;
++using Blaze.Components.UserSessions.Models;
+ 
+ namespace Blaze.Components.Gamemanager.Handlers
+ {
+@@ -39,7 +40,14 @@ namespace Blaze.Components.Gamemanager.Handlers
+             await matchmaker.Stream.WriteAsync(response.Serialize());
+ 
+             var request = BlazeMessage.CreateModelFromRequest<StartMatchmakingRequest>(packetBytes);
++            ServerLogger.Log($"[Blaze] {matchmaker.UserIdentification.Name} startMatchmaking {ClubsComponentRouter.DumpRequest(packetBytes)}");
+ 
++            // USCL: NBA Jam's 2.11 request has no ATTR map (its criteria sit in other tags)
++            if (request.MatchmakingAttributes == null)
++            {
++                await PeerToPeerMatchmaking(matchmaker, request);
++                return;
++            }
+             var wantedAttributes = request.MatchmakingAttributes;
+ 
+             foreach (var kv in ServerGlobals.Games)
+@@ -94,5 +102,89 @@ namespace Blaze.Components.Gamemanager.Handlers
+                 BlazeComponent.Gamemanager,
+                 (ushort)GameManagerNotifications.NotifyMatchmakingFinished);
+         }
++
++        // USCL: BlazeSDK 2.x peer-to-peer matchmaking (NBA Jam). The server makes the game: the first player to
++        // search hosts it, the next one with the same size joins it. Game traffic goes player to player
++        // (NTOP 130, full mesh) at the addresses the players sent, so no relay server.
++        private static async Task PeerToPeerMatchmaking(User matchmaker, StartMatchmakingRequest request)
++        {
++            matchmaker.ExtendedData.NetworkAddress = request.PlayerNetwork;
++            ushort capacity = request.Criteria.Size.PlayerCapacity is > 0 and <= 8 ? request.Criteria.Size.PlayerCapacity : (ushort)2;
++
++            foreach (var kv in ServerGlobals.Games)
++            {
++                Game game = kv.Value;
++                bool fits;
++                lock (game.Lock)
++                {
++                    fits = game.GameData.NetworkTopology == (int)GameNetworkTopology.PEER_TO_PEER_FULL_MESH &&
++                           game.GameData.GameState == (int)GameState.PRE_GAME &&
++                           game.GameData.MaxPlayerCapacities == capacity &&
++                           game.GameData.GameProtocolVersionString == request.GameProtocolVersionString &&
++                           game.Players.Count < capacity;
++                }
++                if (!fits)
++                    continue;
++
++                ServerLogger.Log($"[Lobby] {matchmaker.UserIdentification.Name} matched into p2p game {game.GameData.GameId}");
++                matchmaker.IsMatchmaking = true;
++                await GameManagerUtils.UserJoinGame(matchmaker, game, true);
++                return;
++            }
++
++            uint gameId = ServerGlobals.GetNextGameId();
++            while (ServerGlobals.Games.ContainsKey(gameId))
++                gameId = ServerGlobals.GetNextGameId();
++
++            var host = new HostInfo { PlayerId = matchmaker.Session.BlazeId, SlotId = 0 };
++            var game2 = new Game();
++            game2.GameData = new ReplicatedGameData
++            {
++                AdminPlayerList = new List<uint> { matchmaker.Session.BlazeId },
++                GameAttributes = new Dictionary<string, string>(),
++                SlotCapacities = new List<ushort> { capacity, 0 },
++                GameId = gameId,
++                GameName = matchmaker.UserIdentification.Name,
++                GameSettings = request.GameSettings,
++                GameState = (int)GameState.INITIALIZING,
++                HostConnections = new List<NetworkAddress> { request.PlayerNetwork },
++                TopologyHostSessionId = Convert.ToUInt32(matchmaker.Session.UserId),
++                MaxPlayerCapacities = capacity,
++                NetworkQosData = matchmaker.ExtendedData.QosData,
++                NetworkTopology = (int)GameNetworkTopology.PEER_TO_PEER_FULL_MESH,
++                TopologyHost = host,
++                PlatformHost = host,
++                VoipTopology = (int)VoipTopology.VOIP_PEER_TO_PEER,
++                GameProtocolVersionString = request.GameProtocolVersionString
++            };
++
++            ReplicatedGamePlayer playerData = GameManagerUtils.CreateReplicatedGamePlayer(matchmaker, game2, true);
++            var player = new Player { PlayerData = playerData, UserData = matchmaker };
++            game2.Players.Add(player);
++            game2.HostId = matchmaker.UserIdentification.BlazeId;
++            ServerGlobals.Games[gameId] = game2;
++            matchmaker.CurrentGame = game2;
++            matchmaker.GamePlayer = player;
++            ServerLogger.Log($"[Lobby] {matchmaker.UserIdentification.Name} created p2p game {gameId} for {capacity}");
++
++            await ServerUtils.SendNotificationToUser(
++                matchmaker,
++                new NotifyJoinGame { Error = 0, GameData = game2.GameData, Players = new List<ReplicatedGamePlayer> { playerData }, MatchmakingId = 123 },
++                BlazeComponent.Gamemanager,
++                (ushort)GameManagerNotifications.NotifyJoinGame);
++
++            await ServerUtils.SendNotificationToUser(
++                matchmaker,
++                new NotifyMatchmakingFinished
++                {
++                    Fit = 100,
++                    MaxFit = 100,
++                    GameId = gameId,
++                    MatchmakingResult = (int)MatchmakingResult.SUCCESS_CREATED_GAME,
++                    MatchmakingSessionId = 123
++                },
++                BlazeComponent.Gamemanager,
++                (ushort)GameManagerNotifications.NotifyMatchmakingFinished);
++        }
+     }
+ }
+\ No newline at end of file
+diff --git a/Skate Custom Server/Blaze/Routers/ClubsRouter.cs b/Skate Custom Server/Blaze/Routers/ClubsRouter.cs
+index c297606..1b3d93b 100644
+--- a/Skate Custom Server/Blaze/Routers/ClubsRouter.cs	
++++ b/Skate Custom Server/Blaze/Routers/ClubsRouter.cs	
+@@ -160,7 +160,7 @@ namespace Blaze
+         }
+ 
+         // Human readable dump of a request body, written to logs.txt to help match Skate 3's exact layouts
+-        private static string DumpRequest(byte[] packetBytes)
++        internal static string DumpRequest(byte[] packetBytes)
+         {
+             try
+             {
+diff --git a/Skate Custom Server/Servers/ServerUtils.cs b/Skate Custom Server/Servers/ServerUtils.cs
+index 420716a..ea2e53f 100644
+--- a/Skate Custom Server/Servers/ServerUtils.cs	
++++ b/Skate Custom Server/Servers/ServerUtils.cs	
+@@ -69,7 +69,7 @@ namespace Servers
+         // their login on ERR_COMMAND_NOT_FOUND); logged so the ones that need real data can be found
+         public static async Task SendUnhandledEmpty(User receiver, byte[] packetBytes)
+         {
+-            ServerLogger.Log($"[Blaze] unhandled component {TdfUtils.GetComponentFromPacket(packetBytes)} command {TdfUtils.GetCommandFromPacket(packetBytes)}, sent empty response");
++            ServerLogger.Log($"[Blaze] unhandled component {TdfUtils.GetComponentFromPacket(packetBytes)} command {TdfUtils.GetCommandFromPacket(packetBytes)}, sent empty response {ClubsComponentRouter.DumpRequest(packetBytes)}");
+             await SendEmptyResponse(receiver, packetBytes);
+         }
+ 
+-- 
+2.56.0
+

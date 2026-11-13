@@ -1,0 +1,130 @@
+From 8cd3297a643a6d8b752e5f9a446ab1086ff2649c Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 11:59:35 -0700
+Subject: [PATCH 08/11] Implement SSL Peek for the native online diagnostic
+ route
+
+---
+ src/core/hle/service/ssl/ssl.cpp              | 26 ++++++++++++++++++-
+ src/core/hle/service/ssl/ssl_backend.h        |  1 +
+ .../hle/service/ssl/ssl_backend_openssl.cpp   |  5 ++++
+ .../hle/service/ssl/ssl_backend_schannel.cpp  |  6 +++++
+ .../ssl/ssl_backend_securetransport.cpp       |  6 +++++
+ 5 files changed, 43 insertions(+), 1 deletion(-)
+
+diff --git a/src/core/hle/service/ssl/ssl.cpp b/src/core/hle/service/ssl/ssl.cpp
+index b66c686..51552a4 100644
+--- a/src/core/hle/service/ssl/ssl.cpp
++++ b/src/core/hle/service/ssl/ssl.cpp
+@@ -88,7 +88,7 @@ public:
+             {10, &ISslConnection::Read, "Read"},
+             {11, &ISslConnection::Write, "Write"},
+             {12, &ISslConnection::Pending, "Pending"},
+-            {13, nullptr, "Peek"},
++            {13, &ISslConnection::Peek, "Peek"},
+             {14, nullptr, "Poll"},
+             {15, nullptr, "GetVerifyCertError"},
+             {16, nullptr, "GetNeededServerCertBufferSize"},
+@@ -268,6 +268,17 @@ private:
+         return res;
+     }
+ 
++    Result PeekImpl(std::vector<u8>* out_data) {
++        ASSERT_OR_EXECUTE(did_handshake, { return ResultInternalError; });
++        size_t actual_size{};
++        Result res = backend->Peek(&actual_size, *out_data);
++        if (res != ResultSuccess) {
++            return res;
++        }
++        out_data->resize(actual_size);
++        return res;
++    }
++
+     Result WriteImpl(size_t* out_size, std::span<const u8> data) {
+         ASSERT_OR_EXECUTE(did_handshake, { return ResultInternalError; });
+         return backend->Write(out_size, data);
+@@ -367,6 +378,19 @@ private:
+         }
+     }
+ 
++    void Peek(HLERequestContext& ctx) {
++        std::vector<u8> output_bytes(ctx.GetWriteBufferSize());
++        const Result res = PeekImpl(&output_bytes);
++        IPC::ResponseBuilder rb{ctx, 3};
++        rb.Push(res);
++        if (res == ResultSuccess) {
++            rb.Push(static_cast<u32>(output_bytes.size()));
++            ctx.WriteBuffer(output_bytes);
++        } else {
++            rb.Push(static_cast<u32>(0));
++        }
++    }
++
+     void Write(HLERequestContext& ctx) {
+         size_t write_size{0};
+         const Result res = WriteImpl(&write_size, ctx.ReadBuffer());
+diff --git a/src/core/hle/service/ssl/ssl_backend.h b/src/core/hle/service/ssl/ssl_backend.h
+index a312734..24958d6 100644
+--- a/src/core/hle/service/ssl/ssl_backend.h
++++ b/src/core/hle/service/ssl/ssl_backend.h
+@@ -40,6 +40,7 @@ public:
+     virtual void SetVerifyOption(u32 option) = 0;
+     virtual Result DoHandshake() = 0;
+     virtual Result Read(size_t* out_size, std::span<u8> data) = 0;
++    virtual Result Peek(size_t* out_size, std::span<u8> data) = 0;
+     virtual Result Write(size_t* out_size, std::span<const u8> data) = 0;
+     virtual Result GetServerCerts(std::vector<std::vector<u8>>* out_certs) = 0;
+ };
+diff --git a/src/core/hle/service/ssl/ssl_backend_openssl.cpp b/src/core/hle/service/ssl/ssl_backend_openssl.cpp
+index f0e0526..65514da 100644
+--- a/src/core/hle/service/ssl/ssl_backend_openssl.cpp
++++ b/src/core/hle/service/ssl/ssl_backend_openssl.cpp
+@@ -213,6 +213,11 @@ public:
+         return HandleReturn("SSL_read_ex", out_size, ret);
+     }
+ 
++    Result Peek(size_t* out_size, std::span<u8> data) override {
++        const int ret = SSL_peek_ex(ssl, data.data(), data.size(), out_size);
++        return HandleReturn("SSL_peek_ex", out_size, ret);
++    }
++
+     Result Write(size_t* out_size, std::span<const u8> data) override {
+         const int ret = SSL_write_ex(ssl, data.data(), data.size(), out_size);
+         return HandleReturn("SSL_write_ex", out_size, ret);
+diff --git a/src/core/hle/service/ssl/ssl_backend_schannel.cpp b/src/core/hle/service/ssl/ssl_backend_schannel.cpp
+index 2b68f29..1754419 100644
+--- a/src/core/hle/service/ssl/ssl_backend_schannel.cpp
++++ b/src/core/hle/service/ssl/ssl_backend_schannel.cpp
+@@ -400,6 +400,12 @@ public:
+         }
+     }
+ 
++    Result Peek(size_t* out_size, std::span<u8> data) override {
++        // No buffered plaintext is exposed by this backend; report none without consuming.
++        *out_size = 0;
++        return ResultSuccess;
++    }
++
+     Result Write(size_t* out_size, std::span<const u8> data) override {
+         *out_size = 0;
+ 
+diff --git a/src/core/hle/service/ssl/ssl_backend_securetransport.cpp b/src/core/hle/service/ssl/ssl_backend_securetransport.cpp
+index 65f81be..ffc8003 100644
+--- a/src/core/hle/service/ssl/ssl_backend_securetransport.cpp
++++ b/src/core/hle/service/ssl/ssl_backend_securetransport.cpp
+@@ -126,6 +126,12 @@ public:
+         return HandleReturn("SSLRead", out_size, status);
+     }
+ 
++    Result Peek(size_t* out_size, std::span<u8> data) override {
++        // No buffered plaintext is exposed by this backend; report none without consuming.
++        *out_size = 0;
++        return ResultSuccess;
++    }
++
+     Result Write(size_t* out_size, std::span<const u8> data) override {
+         OSStatus status = SSLWrite(context, data.data(), data.size(), out_size);
+         return HandleReturn("SSLWrite", out_size, status);
+-- 
+2.53.0.windows.1
+
