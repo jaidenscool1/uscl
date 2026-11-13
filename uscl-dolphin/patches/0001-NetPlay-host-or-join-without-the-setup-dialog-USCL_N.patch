@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 12 Nov 2026 21:50:00 -0700
+Subject: [PATCH] NetPlay: host or join without the setup dialog (USCL_NETPLAY)
+
+For USCL's Wii online play over its Steam tunnel. With USCL_NETPLAY=host the
+main window hosts a NetPlay session for the game at USCL_NETPLAY_GAME as soon
+as it is up; with USCL_NETPLAY=join it joins. Address, ports, traversal and the
+nickname come from the existing NetPlay settings (-C Dolphin.NetPlay.*), so the
+dialogs are only skipped, not replaced. With USCL_NETPLAY_PLAYERS=N the host's
+NetPlay window starts the game once N players are in and all have the game.
+---
+diff --git a/Source/Core/DolphinQt/MainWindow.cpp b/Source/Core/DolphinQt/MainWindow.cpp
+--- a/Source/Core/DolphinQt/MainWindow.cpp
++++ b/Source/Core/DolphinQt/MainWindow.cpp
+@@ -3,7 +3,10 @@
+ 
+ #include "DolphinQt/MainWindow.h"
+ 
++#include <cstdlib>
++
+ #include <QApplication>
++#include <QTimer>
+ #include <QCloseEvent>
+ #include <QDateTime>
+ #include <QDesktopServices>
+@@ -331,6 +334,28 @@
+     StartGame(std::move(m_pending_boot));
+     m_pending_boot.reset();
+   }
++
++  // USCL: USCL_NETPLAY=host|join starts a NetPlay session without the setup dialog (settings come from -C
++  // NetPlay.* options); a host plays the game at USCL_NETPLAY_GAME. Once the window is up, so dialogs have a parent.
++  if (const char* mode = std::getenv("USCL_NETPLAY"))
++  {
++    const std::string netplay = mode;
++    QTimer::singleShot(0, this, [this, netplay] {
++      if (netplay == "join")
++      {
++        NetPlayJoin();
++      }
++      else if (netplay == "host")
++      {
++        const char* path = std::getenv("USCL_NETPLAY_GAME");
++        const UICommon::GameFile game(path ? path : "");
++        if (game.IsValid())
++          NetPlayHost(game);
++        else
++          ModalMessageBox::critical(this, tr("Error"), tr("NetPlay: no game at %1").arg(QString::fromUtf8(path ? path : "")));
++      }
++    });
++  }
+ }
+ 
+ MainWindow::~MainWindow()
+diff --git a/Source/Core/DolphinQt/NetPlay/NetPlayDialog.cpp b/Source/Core/DolphinQt/NetPlay/NetPlayDialog.cpp
+--- a/Source/Core/DolphinQt/NetPlay/NetPlayDialog.cpp
++++ b/Source/Core/DolphinQt/NetPlay/NetPlayDialog.cpp
+@@ -3,7 +3,10 @@
+ 
+ #include "DolphinQt/NetPlay/NetPlayDialog.h"
+ 
++#include <cstdlib>
++
+ #include <QAction>
++#include <QTimer>
+ #include <QActionGroup>
+ #include <QApplication>
+ #include <QClipboard>
+@@ -616,6 +619,14 @@
+ 
+   m_player_count = static_cast<int>(players.size());
+ 
++  // USCL: the host starts the game by itself once USCL_NETPLAY_PLAYERS players are in and all have it
++  if (const char* want = std::getenv("USCL_NETPLAY_PLAYERS");
++      want && server && !m_uscl_started && m_player_count >= std::atoi(want) && client->DoAllPlayersHaveGame())
++  {
++    m_uscl_started = true;
++    QTimer::singleShot(1000, this, &NetPlayDialog::OnStart);
++  }
++
+   const int selection_pid = m_players_list->currentItem() ?
+                                 m_players_list->currentItem()->data(Qt::UserRole).toInt() :
+                                 -1;
+diff --git a/Source/Core/DolphinQt/NetPlay/NetPlayDialog.h b/Source/Core/DolphinQt/NetPlay/NetPlayDialog.h
+--- a/Source/Core/DolphinQt/NetPlay/NetPlayDialog.h
++++ b/Source/Core/DolphinQt/NetPlay/NetPlayDialog.h
+@@ -178,6 +178,7 @@
+   int m_buffer_size = 0;
+   int m_player_count = 0;
+   int m_old_player_count = 0;
++  bool m_uscl_started = false;  // USCL: the host started the game by itself (USCL_NETPLAY_PLAYERS)
+   bool m_host_input_authority = false;
+ 
+   StartGameCallback m_start_game_callback;
+-- 
+2.47.0
+

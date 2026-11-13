@@ -41,7 +41,7 @@ namespace
 			if (!ok)
 			{
 				failed++;
-				qWarning("FAIL %s", what);
+				std::fprintf(stderr, "FAIL %s\n", what); // not qWarning: a Windows GUI exe sends that to the debugger only
 			}
 		};
 
