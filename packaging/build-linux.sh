@@ -49,7 +49,7 @@ cp "$RPCN_SRC"/{servers,server_redirs,scoreboards}.cfg "$DATA/rpcn/"
 sed -e 's/^Port=.*/Port=31413/' -e 's/^Host=.*/Host=127.0.0.1/' -e 's/^HostIPv6=.*/HostIPv6=::ffff:127.0.0.1/' -e 's/^StatServerHost=.*/StatServerHost=127.0.0.1/' \
   "$RPCN_SRC/rpcn.cfg" > "$DATA/rpcn/rpcn.cfg"
 python3 "$REPO/uscl-dw/bo2-wad/mkwad.py" "$DATA/dw/storage/publisher/18396/online_tu19_mp_english.wad" \
-  "$REPO/uscl-dw/bo2-wad/leagues.info" "$REPO/uscl-dw/bo2-wad/playlists_mp.info"
+  "$REPO/uscl-dw/bo2-wad/leagues.info" "$REPO/uscl-dw/bo2-wad/playlists_mp.info" "$REPO/uscl-dw/bo2-wad/codtv-mp.json"
 cp "$REPO"/uscl-dw/mw2-files/{playlists.patch3,motd-english.txt,messageoftheday.info} "$DATA/dw/storage/publisher/5280/"
 # Black Ops II PS4 (title 2430) reads the same playlists from its own file name
 mkdir -p "$DATA/dw/storage/publisher/2430" "$DATA/shadps4/user"

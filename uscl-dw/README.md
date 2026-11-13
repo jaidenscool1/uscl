@@ -70,7 +70,9 @@ Publisher files `playlists.patch3`, `motd-english.txt` and `messageoftheday.info
 
 Black Ops II 1.19: login, lobby, stats and **Play Online** work (2026-10-23). Publisher files go in
 `storage/publisher/<title id>/`. BO2 needs `online_tu19_mp_english.wad` holding `leagues.info` and
-`playlists_mp.info`, or Play Online times out (see `games/BLUS31011.md`, part 4). Build it from `bo2-wad/`:
-`bo2-wad/mkwad.py storage/publisher/18396/online_tu19_mp_english.wad bo2-wad/leagues.info bo2-wad/playlists_mp.info`. Don't serve `largeheatmap.raw`: any file we've
+`playlists_mp.info`, or Play Online times out (see `games/BLUS31011.md`, part 4), and `codtv-mp.json` (the CoD TV
+menus; without its `emblems` root, Barracks -> Emblem Editor says "An error occured while accessing the File Manager").
+Build it from `bo2-wad/`: `bo2-wad/mkwad.py storage/publisher/18396/online_tu19_mp_english.wad bo2-wad/leagues.info
+bo2-wad/playlists_mp.info bo2-wad/codtv-mp.json`. Don't serve `largeheatmap.raw`: any file we've
 tried makes BO2 drop the lobby connection right after, every 30 s. Missing services show as
 `Tried to call unavailable service ...` in the log.
