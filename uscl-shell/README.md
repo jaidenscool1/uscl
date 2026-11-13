@@ -35,6 +35,8 @@ Online play used to live in the classic window's USCL > Online panel; the home s
 | hold PS / Guide | | quit the running game |
 
 ## Build and run
+
+Switch games are also supported through an external Eden core; setup, Steam room transport, development preview and current validation limits are in [docs/SWITCH.md](../docs/SWITCH.md).
 ```
 cmake -S uscl-shell -B uscl-shell/build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C uscl-shell/build
 USCL_RPCS3=<path to rpcs3> USCL_TOOLS=<folder with uscl-rpcn, dw-server, uscl-bridge> uscl-shell/build/uscl --windowed      # --self-test checks the PARAM.SFO/ISO/games.yml readers

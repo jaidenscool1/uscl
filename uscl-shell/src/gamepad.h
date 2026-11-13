@@ -24,6 +24,7 @@ public:
 signals:
 	// up, down, left, right, accept, back, options, info, l1, r1, home
 	void pressed(const QString& button);
+	void homeHeld();
 	void countChanged();
 
 private:
@@ -40,4 +41,6 @@ private:
 	QString m_name;
 	QStringList m_names;
 	bool m_ok = false;
+	QElapsedTimer m_home_since;
+	bool m_home_down = false;
 };

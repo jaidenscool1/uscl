@@ -24,7 +24,13 @@ own = the publisher's own servers · GameSpy (revived by OpenSpy) · ? = not pro
 | Madden NFL 25 | [BLUS31178](games/BLUS31178.md) | 1.00 | Blaze 13.3 (ProtoSSL TLS) + RPCN ticket | 🚧 shares NHL's now-solved heat2 login; blocked earlier by an unrelated RPCS3 FGGameSim PPU crash ~52s (2026-11-09) | use NHL 15 to finish the EA Sports flow first; then revisit Madden's emulation crash |
 | Grand Theft Auto V | [BLUS31156](games/BLUS31156.md) | disc 1.01 (Online needs the last update) | own (Rockstar ROS, HTTPS 443) + PSN ticket | 🚧 profiled 2026-11-06: boots, signs in to RPCN, calls `prod.ros.rockstargames.com` | install the last title update, profile again; ROS stand-in after the EA games |
 
-## Next up
+## Switch integration
+
+| Game | Title ID | Multiplayer route | Status | Next step |
+|---|---|---|---|---|
+| Mario Kart 8 Deluxe | [0100152000022000](games/0100152000022000.md) | Eden local wireless room over the Steam UDP tunnel | 🚧 two local instances: Wireless Play race and keyboard driving pass with 4.0.1 + firmware 22.5.0 | native route + identity injection + local adapter: the real Online Play menu authenticates (login ticket, secure connection, station registration); private-room create/join and race unsupported; two-PC relay and controllers unverified |
+
+## Next up (PS3)
 Ordered by how much existing work each one reuses. Serials and services marked `?` are from memory: confirm them
 with `np-profile.py` on your own dump before starting.
 

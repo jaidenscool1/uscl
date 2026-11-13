@@ -1,0 +1,96 @@
+From 3d688fe284494f7d322058a76e13d55c266f1278 Mon Sep 17 00:00:00 2001
+From: tyler <tyler.chambers99@outlook.com>
+Date: Wed, 11 Nov 2026 19:16:24 -0700
+Subject: [PATCH 10/11] Give each MK8 native diagnostic console its own
+ loopback address
+
+With USCL_MK8_NATIVE_DIAGNOSTIC=1 and USCL_MK8_NATIVE_LOCAL_ADDRESS=127.x.y.z,
+guest sockets bound to 0.0.0.0 bind to that address, and unbound sockets bind
+to it before connect/sendto. Two local players then send from different
+addresses, like separate machines; otherwise both send from 127.0.0.1 and
+Pia's peer-to-peer probes fail its source-address check.
+---
+ src/core/internal_network/network.cpp | 45 +++++++++++++++++++++++++++
+ 1 file changed, 45 insertions(+)
+
+diff --git a/src/core/internal_network/network.cpp b/src/core/internal_network/network.cpp
+index a65a399..c154072 100644
+--- a/src/core/internal_network/network.cpp
++++ b/src/core/internal_network/network.cpp
+@@ -5,6 +5,10 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <algorithm>
++#include <cstdlib>
++#include <array>
++#include <string_view>
++#include <optional>
+ #include <cstring>
+ #include <limits>
+ #include <utility>
+@@ -898,7 +902,44 @@ std::pair<SocketBase::AcceptResult, Errno> Socket::Accept() {
+     return {std::move(result), Errno::SUCCESS};
+ }
+ 
++// USCL MK8 native diagnostic: give this emulated console its own loopback address, like a separate machine.
++// Two local players otherwise both send from 127.0.0.1, and peer-to-peer probes fail the source check.
++static std::optional<std::array<u8, 4>> UsclLocalAddress() {
++    static const auto address = []() -> std::optional<std::array<u8, 4>> {
++        const char* enabled = std::getenv("USCL_MK8_NATIVE_DIAGNOSTIC");
++        const char* value = std::getenv("USCL_MK8_NATIVE_LOCAL_ADDRESS");
++        in_addr parsed{};
++        if (!enabled || std::string_view{enabled} != "1" || !value ||
++            inet_pton(AF_INET, value, &parsed) != 1) {
++            return std::nullopt;
++        }
++        std::array<u8, 4> bytes;
++        std::memcpy(bytes.data(), &parsed, 4);
++        if (bytes[0] != 127) {
++            return std::nullopt; // loopback only
++        }
++        return bytes;
++    }();
++    return address;
++}
++
++// Bind an unbound socket to the USCL local address before it sends or connects.
++static void UsclBindLocal(SOCKET fd) {
++    const auto local = UsclLocalAddress();
++    sockaddr_in current{};
++    socklen_t length = sizeof(current);
++    if (!local || (getsockname(fd, reinterpret_cast<sockaddr*>(&current), &length) == 0 &&
++                   current.sin_port != 0)) {
++        return;
++    }
++    sockaddr_in bound{};
++    bound.sin_family = AF_INET;
++    std::memcpy(&bound.sin_addr, local->data(), 4);
++    bind(fd, reinterpret_cast<const sockaddr*>(&bound), sizeof(bound));
++}
++
+ Errno Socket::Connect(SockAddrIn addr_in) {
++    UsclBindLocal(fd);
+     const sockaddr host_addr_in = TranslateFromSockAddrIn(addr_in);
+     if (connect(fd, &host_addr_in, sizeof(host_addr_in)) != SOCKET_ERROR) {
+         return Errno::SUCCESS;
+@@ -928,6 +969,9 @@ std::pair<SockAddrIn, Errno> Socket::GetSockName() {
+ }
+ 
+ Errno Socket::Bind(SockAddrIn addr) {
++    if (const auto local = UsclLocalAddress(); local && addr.ip == IPv4Address{}) {
++        addr.ip = *local;
++    }
+     const sockaddr addr_in = TranslateFromSockAddrIn(addr);
+     if (bind(fd, &addr_in, sizeof(addr_in)) != SOCKET_ERROR) {
+         return Errno::SUCCESS;
+@@ -1029,6 +1073,7 @@ std::pair<s32, Errno> Socket::SendTo(u32 flags, std::span<const u8> message,
+     if (addr) {
+         host_addr_in = TranslateFromSockAddrIn(*addr);
+         to = &host_addr_in;
++        UsclBindLocal(fd);
+     }
+ 
+     const auto result = sendto(fd, reinterpret_cast<const char*>(message.data()),
+-- 
+2.53.0.windows.1
+

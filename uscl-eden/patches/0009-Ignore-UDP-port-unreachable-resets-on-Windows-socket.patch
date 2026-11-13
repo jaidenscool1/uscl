@@ -1,0 +1,49 @@
+From 2c297311415e67d9e0335abb2856ffba246ab678 Mon Sep 17 00:00:00 2001
+From: tyler <tyler.chambers99@outlook.com>
+Date: Wed, 11 Nov 2026 17:08:17 -0700
+Subject: [PATCH 09/11] Ignore UDP port-unreachable resets on Windows sockets
+
+Windows turns an ICMP port-unreachable caused by an earlier UDP send into
+WSAECONNRESET on the next receive. A console, and Linux for unconnected UDP,
+ignores it. MK8 Deluxe's native room flow sends to loopback ports that are
+not listening, then dropped its server connection on that error. Disable
+SIO_UDP_CONNRESET on every guest UDP socket.
+---
+ src/core/internal_network/network.cpp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/src/core/internal_network/network.cpp b/src/core/internal_network/network.cpp
+index c95d7ca..a65a399 100644
+--- a/src/core/internal_network/network.cpp
++++ b/src/core/internal_network/network.cpp
+@@ -15,6 +15,10 @@
+ #ifdef _WIN32
+ #include <winsock2.h>
+ #include <ws2tcpip.h>
++#include <mstcpip.h>
++#ifndef SIO_UDP_CONNRESET
++#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12) // mstcpip.h hides it below some _WIN32_WINNT targets
++#endif
+ #else
+ #include <arpa/inet.h>
+ #include <errno.h>
+@@ -840,6 +844,16 @@ Errno Socket::SetSockOpt(SOCKET fd_so, int option, T value) {
+ Errno Socket::Initialize(Domain domain, Type type, Protocol protocol) {
+     fd = socket(TranslateDomainToNative(domain), TranslateTypeToNative(type), TranslateProtocolToNative(protocol));
+     if (fd != INVALID_SOCKET) {
++#ifdef _WIN32
++        if (type == Type::DGRAM) {
++            // Windows reports an ICMP port-unreachable from an earlier send as WSAECONNRESET on
++            // the next receive; consoles (and Linux) ignore it for unconnected UDP.
++            BOOL report = FALSE;
++            DWORD returned = 0;
++            WSAIoctl(fd, SIO_UDP_CONNRESET, &report, sizeof(report), nullptr, 0, &returned, nullptr,
++                     nullptr);
++        }
++#endif
+         return Errno::SUCCESS;
+     }
+ 
+-- 
+2.53.0.windows.1
+

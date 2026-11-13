@@ -7,10 +7,12 @@
 #include "online.h"
 #include "system.h"
 #include "updater.h"
+#include "switchcore.h"
 
 #include <QFontDatabase>
 #include <QGuiApplication>
 #include <QScreen>
+#include <QSettings>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QBuffer>
@@ -18,6 +20,11 @@
 #include <QDir>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
+#include <QEventLoop>
+#include <QTimer>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QtEndian>
 
 #include <cstdio>
@@ -199,6 +206,154 @@ namespace
 			check(GameUpdates::packageSha1(b, pkg.size()) == QCryptographicHash::hash("package body", QCryptographicHash::Sha1).toHex(), "game update hash");
 		}
 
+		{
+			QTemporaryDir root;
+			const QByteArray previous = qgetenv("XDG_CONFIG_HOME");
+			const bool was_set = qEnvironmentVariableIsSet("XDG_CONFIG_HOME");
+			const QByteArray old_profile = qgetenv("USCL_SWITCH_PROFILE");
+			const bool profile_set = qEnvironmentVariableIsSet("USCL_SWITCH_PROFILE");
+			const QByteArray old_frontend = qgetenv("USCL_SWITCH_FRONTEND");
+			const bool frontend_set = qEnvironmentVariableIsSet("USCL_SWITCH_FRONTEND");
+			qputenv("USCL_SWITCH_FRONTEND", "sdl");
+			qputenv("XDG_CONFIG_HOME", root.path().toUtf8());
+			qputenv("USCL_SWITCH_PROFILE", root.filePath("profile").toUtf8());
+			const auto write = [&](const QString& name, const QByteArray& bytes) {
+				const QString path = root.filePath("games/" + name);
+				QDir().mkpath(QFileInfo(path).absolutePath());
+				QFile f(path);
+				check(f.open(QIODevice::WriteOnly) && f.write(bytes) == bytes.size(), "Switch fixture");
+				return path;
+			};
+			QByteArray nsp(48, '\0');
+			nsp.replace(0, 4, "PFS0");
+			put32(nsp, 4, 1);
+			put32(nsp, 8, 8);
+			const QString kart = write("Mario Kart 8 Deluxe [0100152000022000][v0].nsp", nsp);
+			write("Mario Kart Update [0100152000022800].nsp", nsp);
+			write("Mario Kart DLC [0100152000023000].nsp", nsp);
+			write("broken.nsp", "PFS0");
+			write("archive.nsp.rar", nsp);
+			QByteArray nro(0x80, '\0');
+			nro.replace(0x10, 4, "NRO0");
+			const QString homebrew = write("sample.nro", nro);
+			const QString moved_homebrew = write("moved/sample.nro", nro);
+			check(SwitchCore::describe(homebrew).value("serial") == SwitchCore::describe(moved_homebrew).value("serial"), "Switch fallback identity survives relocation");
+			const auto found = GameModel::findGames(root.filePath("games"));
+			check(found.size() == 2 && found.value("0100152000022000") == kart, "Switch scan excludes archives, updates, DLC and truncated containers");
+			check(SwitchCore::describe(kart).value("console") == "Switch" && SwitchCore::describe(kart).value("title") == "Mario Kart 8 Deluxe", "Switch description");
+			check(SwitchCore::isSerial("0100152000022000") && !SwitchCore::isSerial("BLUS31426"), "console ID separation");
+			check(Online::supports("0100152000022000"), "Switch games support automatic USCL session hosting");
+			const auto args = SwitchCore::arguments(kart, true, "A@:B");
+			check(args.contains("--game") && args.last() == kart && args.contains("A__B@127.0.0.1:24872") &&
+			      !SwitchCore::arguments(kart, false, "Player").contains("--multiplayer"), "Switch launch and room arguments");
+			qputenv("USCL_SWITCH_FRONTEND", "qt");
+			const auto qt_args = SwitchCore::arguments(kart, true, "TestPlayer");
+			check(qt_args.contains("--uscl-room") && qt_args.contains("-g") && !qt_args.contains("--config") &&
+			      qt_args.last() == kart && !SwitchCore::arguments(kart, false, "Player").contains("--uscl-room"), "Switch Qt room and offline launch arguments");
+			qputenv("USCL_SWITCH_FRONTEND", "sdl");
+			{
+				const QString sdl_path = args.at(args.indexOf("--config") + 1);
+				const QString gui_path = QFileInfo(sdl_path).absolutePath() + "/qt-config.ini";
+				QDir().mkpath(QFileInfo(gui_path).absolutePath());
+				QSettings gui(gui_path, QSettings::IniFormat);
+				gui.setValue("Controls/player_0_button_a", "engine:keyboard,code:67");
+				gui.setValue("Controls/player_0_button_a/default", true);
+				gui.setValue("Controls/player_0_button_l", "engine:sdl,guid:test-device,button:4");
+				gui.setValue("Controls/player_0_lstick", "engine:analog_from_button,up:engine$0keyboard$1code$016777235,down:engine$0keyboard$1code$083,modifier:engine$0keyboard$1code$016777248");
+				gui.setValue("Renderer/use_asynchronous_gpu_emulation", true);
+				gui.sync();
+				check(SwitchCore::prepareLaunchConfig().isEmpty(), "Switch SDL configuration generated");
+				QSettings sdl(sdl_path, QSettings::IniFormat);
+				check(sdl.value("Controls/player_0_button_a").toString().contains("code:6") &&
+				      !sdl.value("Controls/player_0_button_a/default").toBool() &&
+				      sdl.value("Controls/player_0_lstick").toString().contains("code$082") &&
+				      sdl.value("Controls/player_0_lstick").toString().contains("code$022") &&
+				      sdl.value("Controls/player_0_lstick").toString().contains("code$0225"), "Switch converts Qt buttons and nested keyboard bindings to SDL scancodes");
+				check(sdl.value("Controls/player_0_button_l").toString().contains("guid:test-device") &&
+				      sdl.value("Renderer/use_asynchronous_gpu_emulation").toBool(), "Switch preserves controller identity and renderer settings");
+				check(gui.value("Controls/player_0_button_a").toString() == "engine:keyboard,code:67", "Switch preserves graphical frontend controls");
+			}
+			check(!SwitchCore::importKeys(kart).isEmpty(), "Switch rejects a game as a key file");
+			check(!SwitchCore::importFirmware(root.filePath("games")).isEmpty(), "Switch rejects firmware folder without NCAs");
+#ifndef _WIN32
+			{
+				const QByteArray old_core = qgetenv("USCL_SWITCH_CORE");
+				const bool core_set = qEnvironmentVariableIsSet("USCL_SWITCH_CORE");
+				const QString program = write("fake-core", "#!/bin/sh\nprintf '%s\\n' \"$@\"\nprintf 'DATA=%s\\n' \"$XDG_DATA_HOME\"\nprintf 'ONLINE=%s\\n' \"$USCL_ONLINE\"\n");
+				QFile::setPermissions(program, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+				qputenv("USCL_SWITCH_CORE", program.toUtf8());
+				const QString test_keys = write("test-prod.keys", "header_key = " + QByteArray(64, '0') + '\n');
+				check(SwitchCore::importKeys(test_keys).isEmpty() && SwitchCore::prerequisiteError(kart).isEmpty(),
+				      "Switch games can reach the core without a blanket firmware requirement");
+#ifdef __linux__
+				const QByteArray old_driver = qgetenv("SDL_VIDEODRIVER"), old_display = qgetenv("DISPLAY");
+				const bool driver_set = qEnvironmentVariableIsSet("SDL_VIDEODRIVER"), display_set = qEnvironmentVariableIsSet("DISPLAY");
+				qputenv("SDL_VIDEODRIVER", "wayland");
+				qputenv("DISPLAY", ":99");
+				check(SwitchCore::environment().value("SDL_VIDEODRIVER") == "x11", "Switch SDL2 uses XWayland when desktop forces Wayland");
+				qputenv("SDL_VIDEODRIVER", "dummy");
+				check(SwitchCore::environment().value("SDL_VIDEODRIVER") == "dummy", "Switch preserves other video driver choices");
+				const QByteArray old_platform = qgetenv("QT_QPA_PLATFORM");
+				const bool platform_set = qEnvironmentVariableIsSet("QT_QPA_PLATFORM");
+				qputenv("USCL_SWITCH_FRONTEND", "qt");
+				qputenv("QT_QPA_PLATFORM", "wayland;xcb");
+				check(SwitchCore::environment().value("QT_QPA_PLATFORM") == "xcb", "Switch Qt core uses XWayland on a forced Wayland desktop");
+				qputenv("QT_QPA_PLATFORM", "offscreen");
+				check(SwitchCore::environment().value("QT_QPA_PLATFORM") == "offscreen", "Switch preserves explicit non-Wayland Qt platforms");
+				qputenv("USCL_SWITCH_FRONTEND", "sdl");
+				if (platform_set) qputenv("QT_QPA_PLATFORM", old_platform); else qunsetenv("QT_QPA_PLATFORM");
+				if (driver_set) qputenv("SDL_VIDEODRIVER", old_driver); else qunsetenv("SDL_VIDEODRIVER");
+				if (display_set) qputenv("DISPLAY", old_display); else qunsetenv("DISPLAY");
+#endif
+				Launcher launcher;
+				QEventLoop loop;
+				bool completed = false;
+				QObject::connect(&launcher, &Launcher::finished, &loop, [&](bool crashed, const QString& details) {
+					completed = !crashed && details.contains("--multiplayer") && details.contains("TestPlayer@127.0.0.1:24872") &&
+					            details.contains("DATA=" + SwitchCore::profileDir() + "data") && details.contains("ONLINE=") && !details.contains("--no-gui");
+					loop.quit();
+				});
+				QTimer::singleShot(3000, &loop, &QEventLoop::quit);
+				check(launcher.startGame(homebrew, "Homebrew", true, "Switch", "TestPlayer"), "Switch core process starts");
+				loop.exec();
+				check(completed, "Switch core process receives isolated profile and room arguments");
+				if (core_set) qputenv("USCL_SWITCH_CORE", old_core); else qunsetenv("USCL_SWITCH_CORE");
+			}
+#endif
+			GameModel model;
+			const int baseline = model.rowCount();
+			int added = -1, known = -1;
+			bool scan_error = false;
+			const auto scan = [&] {
+				QEventLoop loop;
+				QTimer timeout;
+				timeout.setSingleShot(true);
+				auto done = QObject::connect(&model, &GameModel::scanFinished, &loop, [&](int a, int k, int) { added = a; known = k; loop.quit(); });
+				auto error = QObject::connect(&model, &GameModel::scanFailed, &loop, [&](const QString&) { scan_error = true; });
+				QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+				timeout.start(5000);
+				model.scanFolder(root.filePath("games"));
+				loop.exec();
+				check(!model.scanning(), "Switch asynchronous scan completes");
+				QObject::disconnect(done);
+				QObject::disconnect(error);
+			};
+			scan();
+			check(added == 2 && known == 0 && model.rowCount() == baseline + 2 && !scan_error, "Switch scan persists and reloads");
+			scan();
+			check(added == 0 && known == 2, "Switch repeat scan deduplicates");
+			model.remove(SwitchCore::describe(homebrew).value("serial").toString());
+			check(model.rowCount() == baseline + 1 && QFileInfo::exists(homebrew), "Switch removal preserves game files");
+			const QString library = SwitchCore::profileDir() + "games.json";
+			QFile::remove(library);
+			QDir().mkpath(library);
+			scan();
+			check(added == 0 && scan_error, "Switch persistence failure reports no games added");
+			if (was_set) qputenv("XDG_CONFIG_HOME", previous); else qunsetenv("XDG_CONFIG_HOME");
+			if (profile_set) qputenv("USCL_SWITCH_PROFILE", old_profile); else qunsetenv("USCL_SWITCH_PROFILE");
+			if (frontend_set) qputenv("USCL_SWITCH_FRONTEND", old_frontend); else qunsetenv("USCL_SWITCH_FRONTEND");
+		}
+
 		std::fprintf(stderr, failed ? "self-test: %d failed\n" : "self-test: ok\n", failed);
 		return failed ? 1 : 0;
 	}
@@ -213,6 +368,28 @@ int main(int argc, char* argv[])
 
 	if (app.arguments().contains("--self-test"))
 		return selfTest();
+	if (const int option = app.arguments().indexOf("--scan-games"); option >= 0)
+	{
+		if (option + 1 >= app.arguments().size() || !QFileInfo(app.arguments()[option + 1]).isDir())
+		{
+			std::fprintf(stderr, "usage: uscl --scan-games <folder>\n");
+			return 2;
+		}
+		GameModel model;
+		QEventLoop loop;
+		QString problem;
+		int added = 0, known = 0, encrypted = 0;
+		QObject::connect(&model, &GameModel::scanFinished, &loop, [&](int a, int k, int e) { added = a; known = k; encrypted = e; loop.quit(); });
+		QObject::connect(&model, &GameModel::scanFailed, &loop, [&](const QString& error) { problem = error; });
+		model.scanFolder(app.arguments()[option + 1]);
+		loop.exec();
+		QJsonArray games;
+		for (int row = 0; row < model.rowCount(); ++row)
+			games << QJsonObject::fromVariantMap(model.get(row));
+		const QByteArray result = QJsonDocument(QJsonObject{{"added", added}, {"known", known}, {"encrypted", encrypted}, {"error", problem}, {"games", games}}).toJson();
+		std::fwrite(result.constData(), 1, result.size(), stdout);
+		return problem.isEmpty() ? 0 : 1;
+	}
 
 	// uscl --list-games: load the real library (games.yml + emu_games.json) and print it grouped by console.
 	// A headless way to check what the home screen's console columns will show.
@@ -273,7 +450,11 @@ int main(int argc, char* argv[])
 	DiscordParty party;
 	engine.rootContext()->setContextProperty("party", &party);
 	engine.rootContext()->setContextProperty("windowed", app.arguments().contains("--windowed"));
+	const bool smoke_test = app.arguments().contains("--qml-smoke-test");
+	engine.rootContext()->setContextProperty("smokeTest", smoke_test);
 	QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
 	engine.loadFromModule("Uscl", "Main");
+	if (smoke_test)
+		QTimer::singleShot(1500, &app, &QCoreApplication::quit);
 	return app.exec();
 }

@@ -15,6 +15,7 @@ endif()
 qt_add_executable(uscl
     src/main.cpp
     src/games.cpp src/games.h
+    src/switchcore.cpp src/switchcore.h
     src/gameupdates.cpp src/gameupdates.h
     src/dlc.cpp src/dlc.h
     src/discordparty.cpp src/discordparty.h

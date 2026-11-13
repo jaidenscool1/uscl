@@ -243,7 +243,7 @@ fn main() {
             }
         },
         _ => {
-            eprintln!("usage: uscl-bridge host [skate3 | bo2 | dolphin | 3ds | tcp:PORT,udp:FIRST-LAST,sudp:PORT,...] | join [session id] | friends | selftest | serve | client-test");
+            eprintln!("usage: uscl-bridge host [skate3 | bo2 | switch | dolphin | 3ds | tcp:PORT,udp:FIRST-LAST,sudp:PORT,...] | join [session id] | friends | selftest | serve | client-test");
             std::process::exit(2);
         }
     }
