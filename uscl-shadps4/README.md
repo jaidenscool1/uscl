@@ -1,8 +1,18 @@
-# uscl-shadps4
+# uscl-shadps4: PlayStation 4 (shadPS4)
 
-USCL's shadPS4 build for PS4 games: [shadps4-emu/shadPS4](https://github.com/shadps4-emu/shadPS4) (GPL-2.0)
-plus `patches/`. Sign-in goes to shadNet (`uscl-shadnet`), Call of Duty traffic to our Demonware, both through
-`uscl-bridge` like the PS3 games.
+| | |
+|---|---|
+| **Console** | PlayStation 4 |
+| **Upstream** | [shadps4-emu/shadPS4](https://github.com/shadps4-emu/shadPS4) (GPL-2.0) |
+| **Pinned base** | `3eecea9` |
+| **Our changes** | `patches/0001-uscl.patch`, one diff applied with `git apply` (becomes a `git am` series later) |
+| **Ships in** | the Linux AppImage when built with it (`USCL_SHADPS4_BUILD`); not in the Windows installer yet |
+| **Online services it talks to** | [uscl-shadnet](../uscl-shadnet/) (sign-in), [uscl-dw](../uscl-dw/) (Call of Duty) |
+| **Status** | Black Ops II (`CUSA57548`) played between two PCs over Steam; PS3 ↔ PS4 crossplay in progress |
+
+USCL's PS4 emulator. Sign-in goes to shadNet, Call of Duty traffic to our Demonware, both through `uscl-bridge`
+like the PS3 games. Controllers: shadPS4 gives players 1–4 the connected pads in order (the app defines the four
+users in `users.json`).
 
 ## Build
 ```
@@ -13,7 +23,7 @@ git apply ../patches/0001-uscl.patch
 Then build as in shadPS4's docs. `0001-uscl.patch` is one diff for now (`git apply`); it becomes a
 `git format-patch` series when the fork is committed.
 
-## What the patch does
+## Patch
 - Event flags: a woken waiter leaves the queue at once (it used to match the next set again and eat bits; lost
   wakeups froze BO2's loading).
 - POSIX semaphores in the PS4's 16-byte guest layout.

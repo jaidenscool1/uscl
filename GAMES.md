@@ -24,7 +24,13 @@ own = the publisher's own servers · GameSpy (revived by OpenSpy) · ? = not pro
 | Madden NFL 25 | [BLUS31178](games/BLUS31178.md) | 1.00 | Blaze 13.3 (ProtoSSL TLS) + RPCN ticket | 🚧 shares NHL's now-solved heat2 login; blocked earlier by an unrelated RPCS3 FGGameSim PPU crash ~52s (2026-11-09) | use NHL 15 to finish the EA Sports flow first; then revisit Madden's emulation crash |
 | Grand Theft Auto V | [BLUS31156](games/BLUS31156.md) | disc 1.01 (Online needs the last update) | own (Rockstar ROS, HTTPS 443) + PSN ticket | 🚧 profiled 2026-11-06: boots, signs in to RPCN, calls `prod.ros.rockstargames.com` | install the last title update, profile again; ROS stand-in after the EA games |
 
-## Next up
+## Switch integration
+
+| Game | Title ID | Multiplayer route | Status | Next step |
+|---|---|---|---|---|
+| Mario Kart 8 Deluxe | [0100152000022000](games/0100152000022000.md) | Eden local wireless room over the Steam UDP tunnel | 🚧 two local instances: Wireless Play race and keyboard driving pass with 4.0.1 + firmware 22.5.0 | native route + identity injection + local adapter: the real Online Play menu authenticates (login ticket, secure connection, station registration); private-room create/join and race unsupported; two-PC relay and controllers unverified |
+
+## Next up (PS3)
 Ordered by how much existing work each one reuses. Serials and services marked `?` are from memory: confirm them
 with `np-profile.py` on your own dump before starting.
 
@@ -53,6 +59,34 @@ with `np-profile.py` on your own dump before starting.
 |---|---|
 | Spider-Man: Shattered Dimensions | BLUS30499 |
 | Spider-Man: Edge of Time | BLUS30760 |
+
+## Wii (Dolphin)
+A second platform, via Dolphin instead of RPCS3 (notes in `uscl-dolphin/`). Early Wii games have no online service
+to revive, so online comes from **Dolphin NetPlay** (lockstep input sync, carries Wii Remote motion) tunnelled over
+Steam with `uscl-bridge host dolphin` (`udp:2626`, ENet).
+
+| Game | ID | Online route | Status | Next step |
+|---|---|---|---|---|
+| Wii Sports + Wii Sports Resort | [SP2E01](games/SP2E01.md) | no native online → Dolphin NetPlay over the tunnel | 🧪 Dolphin 2609a boots to the game menu; bridge `dolphin` preset added (2026-11-07) | two-instance NetPlay input-sync test with motion, then two PCs over Steam |
+
+The *online*-capable "Wii Sports" are later/other platforms, not ready yet: **Wii Sports Club** (Wii U) needs a
+Nintendo-Network/Quazal-NEX stand-in (Pretendo doesn't support it online yet) — a future `uscl-cemu`; **Nintendo
+Switch Sports** runs on live Switch Online — a future `uscl-ryujinx` LDN tunnel. See `uscl-dolphin/README.md`.
+
+## Nintendo 3DS (Azahar)
+A third platform, via **Azahar** (Citra successor; notes in `uscl-3ds/`). Early-shutdown reality: Nintendo's 3DS
+online ended April 2024. Two paths: **Azahar rooms** (local/Download-Play multiplayer, `uscl-bridge host 3ds`,
+`udp:24872`, ENet) work now; **worldwide online** (MK7 global, Pokémon GTS) needs a future **Pretendo/NEX** stand-in.
+Azahar runs (GL fixed with `LIBGL_ALWAYS_SOFTWARE=1`; games are decrypted, no keys needed); booting a game is a GUI
+click the harness can't drive (see `uscl-3ds/README.md`).
+
+| Game | Multiplayer | USCL path | Status |
+|---|---|---|---|
+| Mario Kart 7 | local + worldwide | rooms (local) now; Pretendo (worldwide) | 📋 profiled 2026-11-07; Azahar GL blocker |
+| Luigi's Mansion: Dark Moon | co-op (ScareScraper) | rooms (local co-op) | 📋 profiled |
+| Pokémon X / Y / Omega Ruby / Ultra Sun / Ultra Moon | trade/battle (local) + GTS online | rooms (local); Pretendo (GTS) | 📋 profiled |
+| New Super Mario Bros. 2 | co-op (local) | rooms (local co-op) | 📋 profiled |
+| Super Mario 3D Land; Zelda OoT3D / MM3D / ALBW | single-player (ALBW StreetPass only) | runs on USCL, no online | ⬜ no MP |
 
 ## Routes (how much work a game is)
 - **PSN only:** RPCN plus the session tunnel already carry it. Test it and fix small things. No reverse engineering.

@@ -1,6 +1,8 @@
 #include "games.h"
 
+#include "gameart.h"
 #include "gameupdates.h"
+#include "switchcore.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -12,6 +14,7 @@
 #include <QJsonObject>
 #include <QStandardPaths>
 #include <QStorageInfo>
+#include <QSaveFile>
 #include <QThread>
 #include <QUrl>
 #include <QtEndian>
@@ -53,8 +56,9 @@ bool GameModel::isPs4Serial(const QString& serial)
 }
 
 GameModel::GameModel(QObject* parent)
-	: QAbstractListModel(parent)
+	: QAbstractListModel(parent), m_art(new GameArt(this))
 {
+	connect(m_art, &GameArt::updated, this, &GameModel::reload); // downloaded icons / previews show up
 	reload();
 }
 
@@ -202,9 +206,16 @@ QString GameModel::gameHash(const QString& path, const QString& serial)
 
 bool GameModel::describe(const QString& path, Game& game) const
 {
+	if (const QVariantMap entry = SwitchCore::describe(path); !entry.isEmpty())
+	{
+		game = {entry["title"].toString(), entry["serial"].toString(), entry["path"].toString(), {}, "Switch", {}};
+		return true;
+	}
 	const QFileInfo info(path);
 	QByteArray sfo, icon;
-	QString icon_file;
+	QString icon_file, pic_file;
+	const QString cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/icons/";
+	const QString cache_name = cache + QCryptographicHash::hash(path.toUtf8(), QCryptographicHash::Sha1).toHex().left(16);
 
 	bool ps4 = false;
 	if (isPs4Dir(path))
@@ -213,12 +224,22 @@ bool GameModel::describe(const QString& path, Game& game) const
 		if (f.open(QIODevice::ReadOnly))
 			sfo = f.readAll();
 		icon_file = path + "/sce_sys/icon0.png";
+		pic_file = QFileInfo::exists(path + "/sce_sys/pic1.png") ? path + "/sce_sys/pic1.png" : path + "/sce_sys/pic0.png";
 		ps4 = true;
 	}
 	else if (info.isFile() && path.endsWith(".iso", Qt::CaseInsensitive))
 	{
 		sfo = readIsoFile(path, {"PS3_GAME", "PARAM.SFO"});
 		icon = readIsoFile(path, {"PS3_GAME", "ICON0.PNG"});
+		// the background picture: read out of the ISO once, then from the cache
+		pic_file = cache_name + "-pic1.png";
+		if (!QFileInfo::exists(pic_file) && QDir().mkpath(cache))
+			if (const QByteArray pic = readIsoFile(path, {"PS3_GAME", "PIC1.PNG"}); !pic.isEmpty())
+			{
+				QFile out(pic_file);
+				if (out.open(QIODevice::WriteOnly))
+					out.write(pic);
+			}
 	}
 	else
 	{
@@ -233,6 +254,7 @@ bool GameModel::describe(const QString& path, Game& game) const
 				{
 					sfo = f.readAll();
 					icon_file = dir.filePath(sub + "ICON0.PNG");
+					pic_file = dir.filePath(sub + "PIC1.PNG");
 					break;
 				}
 			}
@@ -266,15 +288,16 @@ bool GameModel::describe(const QString& path, Game& game) const
 	if (!icon.isEmpty())
 	{
 		// ISOs: keep the icon in our cache so QML can load it as a file
-		const QString cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/icons/";
 		QDir().mkpath(cache);
-		icon_file = cache + QCryptographicHash::hash(path.toUtf8(), QCryptographicHash::Sha1).toHex().left(16) + ".png";
+		icon_file = cache_name + ".png";
 		QFile out(icon_file);
 		if (!out.exists() && out.open(QIODevice::WriteOnly))
 			out.write(icon);
 	}
 	if (!icon_file.isEmpty() && QFileInfo::exists(icon_file))
 		game.icon = QUrl::fromLocalFile(icon_file).toString();
+	if (!pic_file.isEmpty() && QFileInfo::exists(pic_file))
+		game.pic = QUrl::fromLocalFile(pic_file).toString();
 	return !game.title.isEmpty();
 }
 
@@ -282,6 +305,11 @@ void GameModel::reload()
 {
 	beginResetModel();
 	m_games.clear();
+	for (const QString& path : SwitchCore::library())
+	{
+		if (Game g; describe(path, g))
+			m_games.push_back(g);
+	}
 
 	for (const QString& list : {gamesYmlPath(), ps4YmlPath()})
 	{
@@ -309,11 +337,24 @@ void GameModel::reload()
 
 	loadEmuGames();
 
+	// games with no icon or preview of their own: art downloaded earlier, and fetch what's still missing
+	QList<GameArt::Want> missing;
+	for (Game& g : m_games)
+	{
+		if (g.icon.isEmpty())
+			g.icon = GameArt::cached(g.path, "icon");
+		if (g.pic.isEmpty())
+			g.pic = GameArt::cached(g.path, "pic");
+		if (g.icon.isEmpty() || g.pic.isEmpty())
+			missing << GameArt::Want{g.path, g.title, g.console, g.serial};
+	}
+
 	std::sort(m_games.begin(), m_games.end(), [](const Game& a, const Game& b) {
 		return QString::localeAwareCompare(a.title, b.title) < 0;
 	});
 	endResetModel();
 	emit countChanged();
+	m_art->fetch(missing);
 }
 
 // Wii/3DS games aren't in RPCS3's games.yml; USCL keeps them in emu_games.json next to games.yml
@@ -360,13 +401,14 @@ QVariant GameModel::data(const QModelIndex& index, int role) const
 	case IconRole: return g.icon;
 	case ConsoleRole: return g.console;
 	case VersionRole: return g.version;
+	case PicRole: return g.pic;
 	default: return {};
 	}
 }
 
 QHash<int, QByteArray> GameModel::roleNames() const
 {
-	return {{TitleRole, "title"}, {SerialRole, "serial"}, {PathRole, "path"}, {IconRole, "icon"}, {ConsoleRole, "console"}, {VersionRole, "version"}};
+	return {{TitleRole, "title"}, {SerialRole, "serial"}, {PathRole, "path"}, {IconRole, "icon"}, {ConsoleRole, "console"}, {VersionRole, "version"}, {PicRole, "pic"}};
 }
 
 QVariantMap GameModel::get(int row) const
@@ -374,7 +416,7 @@ QVariantMap GameModel::get(int row) const
 	if (row < 0 || row >= m_games.size())
 		return {};
 	const Game& g = m_games[row];
-	return {{"title", g.title}, {"serial", g.serial}, {"path", g.path}, {"icon", g.icon}, {"console", g.console}, {"version", g.version}};
+	return {{"title", g.title}, {"serial", g.serial}, {"path", g.path}, {"icon", g.icon}, {"console", g.console}, {"version", g.version}, {"pic", g.pic}};
 }
 
 namespace
@@ -402,6 +444,12 @@ namespace
 			}
 		}
 		const QDir d(dir);
+		for (const QFileInfo& file : d.entryInfoList(QDir::Files))
+		{
+			const auto entry = SwitchCore::describe(file.absoluteFilePath());
+			if (!entry.isEmpty())
+				out[entry["serial"].toString()] = file.absoluteFilePath();
+		}
 		for (const QFileInfo& f : d.entryInfoList({"*.iso", "*.ISO"}, QDir::Files))
 		{
 			const QByteArray sfo = GameModel::readIsoFile(f.absoluteFilePath(), {"PS3_GAME", "PARAM.SFO"});
@@ -447,6 +495,21 @@ void GameModel::scanFolder(const QString& path)
 	connect(t, &QThread::finished, this, [this, t, found, encrypted] {
 		t->deleteLater();
 		int added = 0, listed = 0;
+		QString problem;
+		auto switch_games = SwitchCore::library();
+		int switch_added = 0;
+		for (auto it = found->cbegin(); it != found->cend(); ++it)
+		{
+			if (!SwitchCore::isSerial(it.key()))
+				continue;
+			if (switch_games.contains(it.key()) && QFileInfo::exists(switch_games.value(it.key())))
+				listed++;
+			else
+			{
+				switch_games[it.key()] = it.value();
+				switch_added++;
+			}
+		}
 		for (const QString& list : {gamesYmlPath(), ps4YmlPath()})
 		{
 			QFile yml(list);
@@ -458,7 +521,7 @@ void GameModel::scanFolder(const QString& path)
 			int new_here = 0;
 			for (auto it = found->cbegin(); it != found->cend(); ++it)
 			{
-				if (ymlFor(it.key()) != list)
+				if (SwitchCore::isSerial(it.key()) || ymlFor(it.key()) != list)
 					continue;
 				if (known.contains(it.key()))
 				{
@@ -473,20 +536,29 @@ void GameModel::scanFolder(const QString& path)
 			if (new_here)
 			{
 				QDir().mkpath(QFileInfo(list).absolutePath());
-				if (yml.open(QIODevice::WriteOnly | QIODevice::Truncate))
-					yml.write(text);
-				yml.close(); // flush before reload() reads it back
+				QSaveFile output(list);
+				if (!output.open(QIODevice::WriteOnly) || output.write(text) != text.size() || !output.commit())
+				{
+					new_here = 0;
+					problem += tr(" Couldn't save the %1 game library.").arg(list == ps4YmlPath() ? "PS4" : "PS3");
+				}
 			}
 			added += new_here;
 		}
 		delete found;
 		const int scrambled = *encrypted;
 		delete encrypted;
-		if (added)
-			reload();
+		if (switch_added && !SwitchCore::saveLibrary(switch_games))
+		{
+			switch_added = 0;
+			problem += tr(" Couldn't save the Switch game library.");
+		}
+		reload();
 		m_scanning = false;
 		emit scanningChanged();
-		emit scanFinished(added, listed, scrambled);
+		emit scanFinished(added + switch_added, listed, scrambled);
+		if (!problem.isEmpty())
+			emit scanFailed(problem.trimmed());
 	});
 	t->start();
 }
@@ -519,6 +591,15 @@ QVariantList GameModel::folders(const QString& path)
 
 void GameModel::remove(const QString& serial)
 {
+	if (SwitchCore::isSerial(serial))
+	{
+		auto entries = SwitchCore::library();
+		entries.remove(serial);
+		if (!SwitchCore::saveLibrary(entries))
+			emit scanFailed(tr("Couldn't save the Switch game library."));
+		reload();
+		return;
+	}
 	QFile yml(ymlFor(serial));
 	if (!yml.open(QIODevice::ReadOnly))
 		return;

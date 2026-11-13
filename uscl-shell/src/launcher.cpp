@@ -1,6 +1,8 @@
 #include "launcher.h"
+#include "padconfig.h"
 #include "games.h"
 #include "online.h"
+#include "switchcore.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -8,6 +10,10 @@
 #include <QFileInfo>
 #include <QMap>
 #include <QTimer>
+
+#include <utility>
+#include <QSettings>
+#include <QUrl>
 
 Launcher::Launcher(QObject* parent)
 	: QObject(parent)
@@ -72,18 +78,20 @@ bool Launcher::ps4CoreFound()
 	return QFileInfo(ps4CorePath()).isExecutable();
 }
 
-bool Launcher::start(const QStringList& args, const QString& title, bool online, bool game, bool ps4)
+bool Launcher::start(const QStringList& args, const QString& title, bool online, bool game, bool ps4, const QString& core)
 {
 	if (running())
 		return false;
 	// in an online session RPCS3 runs the game unmodified: no game patches, debugger or logpoints (uscl-rpcs3 0006)
-	QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+	QProcessEnvironment env = core.isEmpty() ? QProcessEnvironment::systemEnvironment() : SwitchCore::environment();
 	if (online)
 		env.insert("USCL_ONLINE", "1");
 	else
 		env.remove("USCL_ONLINE");
 	// a game's PS button comes to us (uscl-rpcs3 0008); the classic window keeps RPCS3's own home menu
-	if (game)
+	if (std::exchange(m_auto_pads, false) && !core.isEmpty())
+		env.insert("USCL_AUTO_PADS", "1");
+	if (game && core.isEmpty())
 		env.insert("USCL_SHELL", "1");
 	else
 		env.remove("USCL_SHELL");
@@ -100,11 +108,18 @@ bool Launcher::start(const QStringList& args, const QString& title, bool online,
 		m_process.setWorkingDirectory({});
 	}
 	m_process.setProcessEnvironment(env);
+	if (!core.isEmpty())
+	{
+		QDir().mkpath(SwitchCore::profileDir());
+		m_process.setWorkingDirectory(SwitchCore::profileDir());
+	}
+	else if (!ps4)
+		m_process.setWorkingDirectory(QCoreApplication::applicationDirPath());
 	m_tail.clear();
 	m_title = title;
 	m_stopping = false;
 	m_shown = true;
-	m_process.start(ps4 ? ps4CorePath() : corePath(), args);
+	m_process.start(core.isEmpty() ? (ps4 ? ps4CorePath() : corePath()) : core, args);
 	emit runningChanged();
 	emit gameShownChanged();
 	return true;
@@ -151,8 +166,19 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 	return true;
 }
 
-bool Launcher::startGame(const QString& path, const QString& title, bool online)
+bool Launcher::startGame(const QString& path, const QString& title, bool online, const QString& console, const QString& nickname)
 {
+	if (console == "Switch")
+	{
+		QString problem = SwitchCore::prerequisiteError(path);
+		if (problem.isEmpty()) problem = SwitchCore::prepareLaunchConfig();
+		if (!problem.isEmpty())
+		{
+			emit finished(true, problem);
+			return false;
+		}
+		return start(SwitchCore::arguments(path, online, nickname), title, false, true, false, SwitchCore::executable());
+	}
 	if (QFileInfo::exists(path + "/sce_sys/param.sfo"))
 	{
 		// Black Ops II's eboot only picks the mode; codmp.elf is multiplayer, the online part
@@ -160,6 +186,36 @@ bool Launcher::startGame(const QString& path, const QString& title, bool online)
 		return start({"--game", path + elf, "--override-root", path, "--fullscreen", "true"}, title, online, true, true);
 	}
 	return start({"--no-gui", "--fullscreen", path}, title, online, true);
+}
+
+bool Launcher::openSwitchSettings()
+{
+	if (!QFileInfo(SwitchCore::executable(true)).isExecutable())
+	{
+		emit finished(true, tr("The Switch settings application (eden) is missing. Set USCL_SWITCH_GUI to its executable path."));
+		return false;
+	}
+	return start({}, tr("Switch Settings"), false, false, false, SwitchCore::executable(true));
+}
+
+QString Launcher::switchStatus(const QString& path) { return SwitchCore::prerequisiteError(path); }
+QString Launcher::switchProfile() { return SwitchCore::dataDir(); }
+QString Launcher::importSwitchKeys(const QString& path) { return SwitchCore::importKeys(QUrl(path).isLocalFile() ? QUrl(path).toLocalFile() : path); }
+QString Launcher::importSwitchFirmware(const QString& path) { return SwitchCore::importFirmware(QUrl(path).isLocalFile() ? QUrl(path).toLocalFile() : path); }
+
+QString Launcher::configureSwitchTool(const QString& kind, const QString& path)
+{
+	if (kind != "CORE" && kind != "QT" && kind != "GUI" && kind != "ROOM")
+		return tr("Unknown Switch component.");
+	const QString local = QUrl(path).isLocalFile() ? QUrl(path).toLocalFile() : path;
+	if (!QFileInfo(local).isExecutable())
+		return tr("Choose an executable file.");
+	QSettings settings;
+	settings.setValue("switch/USCL_SWITCH_" + (kind == "QT" ? QString("CORE") : kind), QFileInfo(local).absoluteFilePath());
+	if (kind == "QT" || kind == "CORE") settings.setValue("switch/frontend", kind == "QT" ? "qt" : "sdl");
+	if (kind == "QT") settings.setValue("switch/USCL_SWITCH_GUI", QFileInfo(local).absoluteFilePath());
+	settings.sync();
+	return settings.status() == QSettings::NoError ? QString() : tr("Couldn't save the emulator location.");
 }
 
 bool Launcher::openClassic()
@@ -254,8 +310,18 @@ QString Launcher::inputYml(const QString& current, const QStringList& pads)
 	return out;
 }
 
-bool Launcher::prepareInput(const QStringList& pads)
+bool Launcher::prepareInput(const QStringList& pads, const QString& console)
 {
+	if (console == "Switch")
+		return m_auto_pads = true; // Eden maps them itself, with its own per-controller layouts
+	if (console == "Wii" || console == "GameCube")
+		return PadConfig::writeDolphin(PadConfig::connected());
+	if (console == "3DS")
+		return PadConfig::writeAzahar(PadConfig::connected());
+	if (console == "WiiU")
+		return PadConfig::writeCemu(PadConfig::connected());
+	if (console != "PS3")
+		return true; // PS4: shadPS4 gives players 1-4 the controllers in order; Xbox 360: Wine's XInput does
 	if (pads.isEmpty())
 		return true; // keyboard players keep whatever is set
 #ifdef _WIN32

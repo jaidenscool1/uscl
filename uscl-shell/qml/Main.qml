@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Window
 import QtMultimedia
 import QtCore
+import QtQuick.Dialogs
 
 Window {
     id: root
@@ -76,7 +77,10 @@ Window {
     }
     function play(g) {
         var ps4 = games.isPs4Serial(g.serial) // runs in our shadPS4: no RPCS3 or PS3 system software needed
-        if (ps4 ? !launcher.ps4CoreFound() : !launcher.coreFound()) { coreMissing(); return }
+        if (g.console === "Switch") {
+            var problem = launcher.switchStatus(g.path)
+            if (problem) { dialog.show(qsTr("Switch Emulation"), problem); return }
+        } else if (ps4 ? !launcher.ps4CoreFound() : !launcher.coreFound()) { coreMissing(); return }
         if (launcher.running) {
             if (runningGame && runningGame.serial === g.serial) { resumeGame(); return }
             dialog.show(qsTr("Start %1").arg(g.title), qsTr("%1 is still running. Close it and start %2?").arg(launcher.title).arg(g.title),
@@ -86,20 +90,23 @@ Window {
             return
         }
         if (g.console === "Wii" || g.console === "WiiU" || g.console === "3DS" || g.console === "Xbox360") { launchGame(g); return }   // emulator games: no PS3 firmware / RPCN
-        if (!ps4 && !system.firmwareInstalled) {
+        if (!ps4 && g.console !== "Switch" && !system.firmwareInstalled) {
             sound("error")
             dialog.show(qsTr("System Update"), qsTr("Games need the PS3 system software. Install it now?"),
                         { buttons: [{ title: qsTr("Yes"), action: function() { openPage(systemUpdatePage, ic("it_update"), 1) } }, { title: qsTr("No") }] })
             return
         }
         // joined: the host's game files must match ours (same update, nothing changed)
-        if (online.state === "joined" && online.hostGame) {
+        if ((online.state === "joined" || online.state === "hosting") && online.hostGame) {
             var host = online.hostGame.split(" ")
             if (host[0] !== g.serial) {
+                if (g.console === "Switch" || /^[0-9A-Fa-f]{16}$|^SWITCH-/.test(host[0])) {
+                    dialog.show(qsTr("Online Session"), qsTr("This session is for %1. Leave it before starting a different game.").arg(gameTitle(host[0]))); return
+                }
                 dialog.confirm(qsTr("Online Session"), qsTr("The host is playing %1, not this game. Start it anyway?").arg(gameTitle(host[0])), function() { startGame(g) })
                 return
             }
-            if (host[1] && games.gameHash(g.path, g.serial) !== host[1]) {
+            if (g.console !== "Switch" && host[1] && games.gameHash(g.path, g.serial) !== host[1]) {
                 sound("error")
                 dialog.show(qsTr("Online Session"), qsTr("Your copy of %1 doesn't match the host's: a different update, or changed game files. Install the same update as the host to play together.").arg(g.title))
                 return
@@ -108,25 +115,28 @@ Window {
         startGame(g)
     }
     function startGame(g) {
+        if (online.state === "starting" || online.state === "waiting") {
+            dialog.show(qsTr("Online Session"), qsTr("Wait for the session to connect before starting the game.")); return
+        }
         if (online.state === "off" && online.supports(g.serial) && system.onlineName && online.steamRunning()) {
             onlineGame = g
             ownSession = true
-            online.host(g.serial, g.title, g.path) // the game starts once the session is up (onStateChanged)
+            online.host(g.serial, g.title, g.path, g.console) // the game starts once the session is up (onStateChanged)
             return
         }
         launchGame(g)
     }
     function launchGame(g) {
+        if (prefs.autoControllers) launcher.prepareInput(gamepad.names, g.console)   // every console: pads -> players 1, 2...
         if (g.console === "Wii" || g.console === "WiiU" || g.console === "3DS" || g.console === "Xbox360") {   // Wii -> Dolphin, 3DS -> Azahar
             if (launcher.startEmu(g.path, g.title, g.console)) runningGame = g
             return
         }
-        if (!games.isPs4Serial(g.serial)) {
-            if (prefs.autoControllers) launcher.prepareInput(gamepad.names)
+        if (!games.isPs4Serial(g.serial) && g.console !== "Switch") {
             if (prefs.autoScale) system.setRpcs3Value("Video", "Resolution Scale", String(autoScaleValue))
         }
         // shortcut: a game started before the session runs as it started (patches on); restart it to play online
-        if (launcher.startGame(g.path, g.title, online.state !== "off")) runningGame = g
+        if (launcher.startGame(g.path, g.title, online.state !== "off", g.console, system.onlineName || online.steamName)) runningGame = g
     }
     function gameTitle(serial) {
         for (var i = 0; i < games.count; i++)
@@ -234,7 +244,7 @@ Window {
     property var updatePick: ({})     // serial -> true: games picked on the Game Updates page
     function checkGameUpdates() {
         var list = []
-        for (var i = 0; i < games.count; i++) { var g = games.get(i); list.push({ serial: g.serial, version: g.version }) }
+        for (var i = 0; i < games.count; i++) { var g = games.get(i); if (g.console === "PS3") list.push({ serial: g.serial, version: g.version }) }
         gameUpdates.check(list)
     }
     function updateInfo(serial) {
@@ -376,8 +386,8 @@ Window {
                 dialog.confirm(qsTr("Ban"), qsTr("Remove %1 and keep them out of every session you host? Bans follow their Steam account.").arg(p.name), function() { online.ban(p.id, p.name) }) } }
         ], 0)
     }
-    function testConnection() {
-        online.testConnection()
+    function testConnection(console) {
+        online.testConnection(typeof console === "string" ? console : "PS3")
         dialog.show(qsTr("Internet Connection Test"), "", { live: function() {
             return online.tests.map(function(t) {
                 var mark = t.result === "ok" ? qsTr("Succeeded") : t.result === "fail" ? qsTr("Failed") : qsTr("Testing...")
@@ -571,6 +581,45 @@ Window {
             allSettingsRow()
         ]
     }
+    function switchResult(problem) {
+        cfgTick++
+        if (problem) dialog.show(qsTr("Switch Emulation"), problem)
+        else notice.show(qsTr("Saved"), ic("it_games"))
+    }
+    function switchSettingsPage() {
+        cfgTick;
+        return [
+            { title: qsTr("Setup Status"), help: launcher.switchStatus() || qsTr("Ready to launch. Match game updates and DLC with your friends."), disabled: true },
+            { title: qsTr("Choose Switch Emulator"), help: qsTr("Select the USCL Eden build for playing with friends"), action: function() { switchToolDialog.kind = "QT"; switchToolDialog.open() } },
+            { title: qsTr("Use Alternative CLI Emulator"), help: qsTr("Advanced: select an eden-cli build with multiplayer support"), action: function() { switchToolDialog.kind = "CORE"; switchToolDialog.open() } },
+            { title: qsTr("Choose Switch Settings App"), help: qsTr("Select eden"), action: function() { switchToolDialog.kind = "GUI"; switchToolDialog.open() } },
+            { title: qsTr("Choose Switch Room Server"), help: qsTr("Select eden-room for hosting friends"), action: function() { switchToolDialog.kind = "ROOM"; switchToolDialog.open() } },
+            { title: qsTr("Import Console Keys"), help: qsTr("Choose prod.keys dumped from your Switch"), action: switchKeysDialog.open },
+            { title: qsTr("Import System Software"), help: qsTr("Some games require firmware. Choose your extracted Switch firmware folder."), action: switchFirmwareDialog.open },
+            { title: qsTr("Controllers, Updates and DLC"), help: qsTr("Configure controllers and install game updates in Eden"), action: launcher.openSwitchSettings },
+            { title: qsTr("Test Switch Connection"), help: qsTr("Check the Switch core, console files, room port and Steam"), action: function() { testConnection("Switch") } },
+            { title: qsTr("Playing with Friends"), action: function() {
+                dialog.show(qsTr("Switch Multiplayer"), qsTr("Host this game from its options menu, then have friends join your USCL session before starting it.\n\nIn Mario Kart 8 Deluxe, choose Wireless Play. The host creates a room in the game; friends join it. Use matching emulator versions, game updates and DLC.\n\nNintendo's Online Play service is not used."))
+            } }
+        ]
+    }
+    FileDialog {
+        id: switchToolDialog
+        property string kind: "CORE"
+        title: qsTr("Choose Switch component")
+        onAccepted: switchResult(launcher.configureSwitchTool(kind, selectedFile.toString()))
+    }
+    FileDialog {
+        id: switchKeysDialog
+        title: qsTr("Choose prod.keys")
+        nameFilters: [qsTr("Console keys (*.keys)")]
+        onAccepted: switchResult(launcher.importSwitchKeys(selectedFile.toString()))
+    }
+    FolderDialog {
+        id: switchFirmwareDialog
+        title: qsTr("Choose extracted Switch firmware")
+        onAccepted: switchResult(launcher.importSwitchFirmware(selectedFolder.toString()))
+    }
     function systemUpdatePage() {
         return [
             { title: qsTr("Update via Internet"), help: qsTr("Downloads the latest PS3 system software from Sony and installs it"),
@@ -637,18 +686,21 @@ Window {
 
     // ---------------------------------------------------------------- the crossbar
 
-    // column order: Users, Settings, Online, Games, Party, Friends
-    // games are split into one XMB column per console starting at gamesCat (3); Party/Friends follow them
+    // column order: Users, Settings, Online, Games, Party, Friends. Games has one entry per console you have games
+    // for; ✕ on one opens its games, like the PS3's Game column entries open their lists
     readonly property var presentConsoles: {
         games.count
-        var order = ["PS3", "PS4", "Wii", "WiiU", "3DS", "Xbox360"], set = ({})
+        var order = ["PS3", "PS4", "Switch", "Wii", "WiiU", "3DS", "Xbox360"], set = ({})
         for (var i = 0; i < games.count; i++) set[games.get(i).console || "PS3"] = true
-        var p = order.filter(function(c) { return set[c] })
-        return p.length ? p : ["PS3"]
+        return order.filter(function(c) { return set[c] }).concat(Object.keys(set).filter(function(c) { return order.indexOf(c) < 0 }))
     }
+    readonly property var consoleMeta: ({ "PS3": [qsTr("PlayStation 3"), "cat_ps3"], "PS4": [qsTr("PlayStation 4"), "cat_ps4"],
+                                          "Switch": [qsTr("Nintendo Switch"), "cat_switch"],
+                                          "Wii": [qsTr("Wii"), "cat_wii"], "WiiU": [qsTr("Wii U"), "cat_wiiu"],
+                                          "3DS": [qsTr("Nintendo 3DS"), "cat_3ds"], "Xbox360": [qsTr("Xbox 360"), "cat_x360"] })
     readonly property int gamesCat: 3
-    readonly property int partyCat: 3 + presentConsoles.length
-    readonly property int friendsCat: 4 + presentConsoles.length
+    readonly property int partyCat: 4
+    readonly property int friendsCat: 5
     property var cats: {
         games.count; games.scanning; system.onlineName; system.firmwareInstalled; system.firmwareVersion; gamepad.count; prefs.avatar
         online.state; online.session; online.message; online.friends; online.friendsLoading; online.friendsError; online.players; online.bans; cfgTick
@@ -664,43 +716,65 @@ Window {
                  action: function() { openPage(rowsFn, ic(icon), 1) } }
     }
 
-    function buildCats() {
-        var gameItems = []
-        // the game that keeps running behind the home screen, first, like the PS3's
-        if (launcher.running && runningGame) {
-            let g = runningGame
-            gameItems.push({ title: g.title, desc: qsTr("Running"), icon: g.icon || ic("it_games"), wide: !!g.icon, badge: qsTr("Running"),
-                             console: g.console || "PS3",
-                             action: resumeGame,
-                             options: function() { return [{ title: qsTr("Resume Game"), action: resumeGame },
-                                                           { title: qsTr("Close Game"), action: closeGame }] } })
-        }
-        for (var i = 0; i < games.count; i++) {
-            let g = games.get(i)
-            gameItems.push({
-                title: g.title, desc: gameUpdates.available[g.serial] ? updateInfo(g.serial) : g.serial, icon: g.icon || ic("it_games"), wide: !!g.icon,
-                console: g.console || "PS3",
-                badge: gameUpdates.available[g.serial] ? qsTr("Update") : "",
+    // one game: an XMB item (desc, badge) or a row of its console's page (help, value)
+    function gameItem(g) {
+        // PS3/PS4/Switch serials mean something; the other consoles' are made up from the file name
+        var named = ["PS3", "PS4", "Switch"].indexOf(g.console || "PS3") < 0
+        var desc = gameUpdates.available[g.serial] ? updateInfo(g.serial) : named ? (consoleMeta[g.console] || [g.console])[0] : g.serial
+        var badge = gameUpdates.available[g.serial] ? qsTr("Update") : ""
+        return {
+                title: g.title, desc: desc, help: desc, icon: g.icon || ic("it_games"), wide: !!g.icon && wideIcon(g),
+                pic: g.pic || "", console: g.console || "PS3",
+                badge: badge, value: badge,
                 action: function() { play(g) },
                 options: function() {
                     return [{ title: qsTr("Start"), action: function() { play(g) } },
-                            gameUpdates.available[g.serial]
+                            g.console === "Switch"
+                                ? { title: qsTr("Controllers, Updates and DLC"), action: launcher.openSwitchSettings }
+                                : gameUpdates.available[g.serial]
                                 ? { title: qsTr("Update Game"), action: function() { installUpdates([g.serial]) } }
                                 : { title: qsTr("Check for Update"), action: function() {
                                       gameUpdates.check([{ serial: g.serial, version: g.version }])
                                       notice.show(qsTr("Checking for updates..."), ic("it_update"))
                                   } },
-                            { title: qsTr("Host Online Session"), action: function() { needsName(function() { online.host(g.serial, g.title, g.path) }) } },
-                            games.isPs4Serial(g.serial) ? null : { title: qsTr("Downloadable Content"), action: function() { openDlc(g) } },
+                            { title: qsTr("Host Online Session"), action: function() { needsName(function() { online.host(g.serial, g.title, g.path, g.console) }) } },
+                            g.console === "PS3" ? { title: qsTr("Downloadable Content"), action: function() { openDlc(g) } } : null,
                             { title: qsTr("Information"), action: function() { dialog.show(qsTr("Information"), gameInfo(g)) } },
                             { title: qsTr("Remove from List"), action: function() {
                                 dialog.confirm(qsTr("Remove"), qsTr("Take %1 off the list? The game's files stay where they are.").arg(g.title), function() { games.remove(g.serial) })
                             } }].filter(Boolean)
                 }
-            })
         }
+    }
+    // PS3 icons (ICON0.PNG) are 320x176; covers and the other consoles' icons keep their own shape in a square
+    function wideIcon(g) { return (g.console || "PS3") === "PS3" }
+    function consoleGamesPage(c) {
+        var rows = []
+        for (var i = 0; i < games.count; i++) { let g = games.get(i); if ((g.console || "PS3") === c) rows.push(gameItem(g)) }
+        return rows.length ? rows : [{ title: qsTr("No games"), disabled: true }]
+    }
+
+    function buildCats() {
+        var gameItems = []
+        // the game that keeps running behind the home screen, first, like the PS3's
+        if (launcher.running && runningGame) {
+            let g = runningGame
+            gameItems.push({ title: g.title, desc: qsTr("Running"), icon: g.icon || ic("it_games"), wide: !!g.icon && wideIcon(g), badge: qsTr("Running"),
+                             pic: g.pic || "",
+                             action: resumeGame,
+                             options: function() { return [{ title: qsTr("Resume Game"), action: resumeGame },
+                                                           { title: qsTr("Close Game"), action: closeGame }] } })
+        }
+        // then one entry per console: ✕ opens its games
+        presentConsoles.forEach(function(c) {
+            var meta = consoleMeta[c] || [c, "cat_game"]
+            var titles = []
+            for (var i = 0; i < games.count; i++) if ((games.get(i).console || "PS3") === c) titles.push(games.get(i).title)
+            gameItems.push({ title: meta[0], icon: ic(meta[1]), desc: titles.length === 1 ? qsTr("1 game") : qsTr("%1 games").arg(titles.length), preview: titles,
+                             action: function() { openPage(function() { return consoleGamesPage(c) }, ic(meta[1]), gamesCat) } })
+        })
         var pending = Object.keys(gameUpdates.available).length
-        // the library-wide items live at the end of the first (default) console column
+        // the library-wide items follow the consoles
         var util = [
             { title: qsTr("Add Games"), icon: ic("it_addgames"), action: addGames,
               desc: games.scanning ? qsTr("Looking for games...") : qsTr("Find the games in a folder, and every folder inside it") },
@@ -711,18 +785,6 @@ Window {
                   : gameUpdates.checking ? qsTr("Checking for updates...") : qsTr("All your games are up to date") },
             { title: qsTr("How to Play"), icon: ic("it_help"), action: guide, desc: qsTr("Controls, quitting a game, and playing online") }
         ]
-        // split the games into one XMB column per console, each with its own console icon (PS3/PS4/Wii/3DS)
-        var consoleMeta = { "PS3": [qsTr("PlayStation 3"), "cat_ps3"], "PS4": [qsTr("PlayStation 4"), "cat_ps4"],
-                            "Wii": [qsTr("Wii"), "cat_wii"], "WiiU": [qsTr("Wii U"), "cat_wiiu"],
-                            "3DS": [qsTr("Nintendo 3DS"), "cat_3ds"], "Xbox360": [qsTr("Xbox 360"), "cat_x360"] }
-        var byConsole = {}
-        gameItems.forEach(function(it) { var k = it.console || "PS3"; (byConsole[k] = byConsole[k] || []).push(it) })
-        var consoleCats = presentConsoles.map(function(c, idx) {
-            var meta = consoleMeta[c] || [c, "cat_game"]
-            var items = (byConsole[c] || []).slice()
-            if (idx === 0) items = items.concat(util)   // default column also carries Add Games / Updates / Help
-            return { name: meta[0], icon: ic(meta[1]), items: items }
-        })
 
         var active = online.state !== "off"
         var steam = online.steamRunning()
@@ -786,6 +848,7 @@ Window {
                 settingsItem(qsTr("System Update"), updater.state === "available" ? qsTr("USCL %1 is available").arg(updater.latest)
                              : system.firmwareInstalled ? qsTr("PS3 system software %1 installed").arg(system.firmwareVersion) : qsTr("Install the PS3 system software (games need it)"), "it_update", systemUpdatePage),
                 settingsItem(qsTr("Game Settings"), qsTr("How games look and run: resolution, frame rate, upscaling"), "it_games", gameSettingsPage),
+                settingsItem(qsTr("Switch Emulation"), qsTr("Emulator, console keys, firmware and controllers"), "it_games", switchSettingsPage),
                 settingsItem(qsTr("Video Settings"), qsTr("Screen shape and stretching"), "it_display", videoSettingsPage),
                 settingsItem(qsTr("Sound Settings"), qsTr("Game volume, surround sound and menu sounds"), "it_sound", soundSettingsPage),
                 settingsItem(qsTr("Theme Settings"), qsTr("Change the theme and background color"), "it_theme", themeSettingsPage),
@@ -793,11 +856,11 @@ Window {
                 settingsItem(qsTr("Accessory Settings"), qsTr("Controllers and button assignments"), "it_gamepad", accessoryPage),
                 settingsItem(qsTr("Network Settings"), qsTr("Online ID and the connection test"), "it_network", networkSettingsPage),
                 settingsItem(qsTr("System Settings"), qsTr("Language, system information and setup"), "it_system", systemSettingsPage) ] },
-            { name: qsTr("Online"), icon: ic("cat_network"), items: network }
-        ].concat(consoleCats, [
+            { name: qsTr("Online"), icon: ic("cat_network"), items: network },
+            { name: qsTr("Game"), icon: ic("cat_game"), items: gameItems.concat(util) },
             { name: qsTr("Party"), icon: ic("cat_party"), items: partyItems() },
             { name: qsTr("Friends"), icon: ic("cat_friends"), items: friends }
-        ])
+        ]
     }
 
     // ---------------------------------------------------------------- sounds
@@ -831,6 +894,7 @@ Window {
     Connections {
         target: gamepad
         function onPressed(b) { if (root.active) root.input(b) }
+        function onHomeHeld() { if (runningGame && runningGame.console === "Switch") launcher.stop() }
     }
     Connections {
         target: launcher
@@ -880,6 +944,7 @@ Window {
     }
     Connections {
         target: games
+        function onScanFailed(message) { dialog.show(qsTr("Add Games"), message) }
         function onCountChanged() { checkGameUpdates() }
         function onScanFinished(added, known, encrypted) {
             sound("notify")
@@ -890,7 +955,7 @@ Window {
             if (encrypted)
                 dialog.show(qsTr("Add Games"), qsTr("%n disc image(s) there are still encrypted, so no emulator can read them. Decrypt them first (a .dec.iso, or the extracted disc folder), then add them again.", "", encrypted))
             else if (!added && !known)
-                dialog.show(qsTr("Add Games"), qsTr("No PS3 games were found in that folder. USCL looks for disc folders (with PS3_GAME inside), installed games and decrypted .iso images."))
+                dialog.show(qsTr("Add Games"), qsTr("No games were found. Choose PS3 disc folders or ISOs, or extracted Switch .nsp, .xci or .nro files. Extract .rar and .zip archives first; Switch updates and DLC are installed through Switch Settings."))
         }
     }
     Connections {
@@ -903,6 +968,10 @@ Window {
                 var g = onlineGame
                 onlineGame = null
                 if (online.state === "off") ownSession = false
+                if (online.state === "off" && g.console === "Switch") {
+                    dialog.show(qsTr("Online Session"), online.message || qsTr("Couldn't start the Switch session. Try hosting again."))
+                    return
+                }
                 launchGame(g)
             }
             if (online.state === "hosting" || online.state === "joined") { sound("notify"); notice.show(sessionText(), ic("it_stream")) }
@@ -942,11 +1011,21 @@ Window {
                 running: !launcher.running
             }
 
+            // the focused game's picture (PIC1.PNG, or downloaded art) behind the menus, like the PS3's
+            Image {
+                anchors.fill: parent
+                source: root.topPage ? (page.cur && page.cur.pic || "") : (xmb.current && xmb.current.pic || "")
+                fillMode: Image.PreserveAspectCrop
+                asynchronous: true
+                opacity: status === Image.Ready && !boot.running && !setup.open ? 0.28 : 0 // dim: the menus stay readable on bright title screens
+                Behavior on opacity { NumberAnimation { duration: 400 } }
+            }
+
             Xmb {
                 id: xmb
                 anchors.fill: parent
                 cats: root.cats
-                cat: prefs.xmbColumn
+                cat: Math.min(prefs.xmbColumn, root.friendsCat) // an older layout had a column per console
                 // the crossbar slides out to the left while an inner screen is open
                 opacity: root.topPage || setup.open || boot.running ? 0 : 1
                 transform: Translate { x: root.topPage ? -120 : 0; Behavior on x { NumberAnimation { duration: 200; easing.type: Easing.OutSine } } }
@@ -978,6 +1057,7 @@ Window {
                 parentIcon: root.topPage ? root.topPage.parentIcon : ""
                 onSound: function(name) { root.sound(name) }
                 onBack: { if (root.topPage && root.topPage.back) root.topPage.back(); else root.popPage() }
+                onShowOptions: function(e) { options.show(e.options(), 0) }
             }
 
             ClockBox {
@@ -1043,8 +1123,10 @@ Window {
     }
 
     Component.onCompleted: {
-        online.startSteam()
-        checkGameUpdates()
+        if (!smokeTest) {
+            online.startSteam()
+            checkGameUpdates()
+        }
         if (prefs.bootScreen) boot.start()
         else { boot.quick(); sound("startup") }
     }

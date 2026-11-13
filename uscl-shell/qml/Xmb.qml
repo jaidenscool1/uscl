@@ -94,12 +94,13 @@ Item {
 
         // the pulsing halo behind the focused icon
         Image {
+            id: halo
             x: xmb.colX + 60; y: xmb.focTop + 150; width: 320; height: 320
             source: "qrc:/qt/qml/Uscl/xmb/halo.png"
             visible: xmb.items.length > 0
             SequentialAnimation on opacity {
                 loops: Animation.Infinite
-                running: Window.active // a running animation redraws the window every frame, also behind a game
+                running: halo.Window.active // a running animation redraws the window every frame, also behind a game
                 NumberAnimation { from: 0.11; to: 0.31; duration: 1700; easing.type: Easing.InOutSine }
                 NumberAnimation { to: 0.11; duration: 1700; easing.type: Easing.InOutSine }
             }

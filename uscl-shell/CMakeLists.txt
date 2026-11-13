@@ -15,11 +15,14 @@ endif()
 qt_add_executable(uscl
     src/main.cpp
     src/games.cpp src/games.h
+    src/switchcore.cpp src/switchcore.h
     src/gameupdates.cpp src/gameupdates.h
     src/dlc.cpp src/dlc.h
     src/discordparty.cpp src/discordparty.h
     src/gamepad.cpp src/gamepad.h
     src/launcher.cpp src/launcher.h
+    src/padconfig.cpp src/padconfig.h
+    src/gameart.cpp src/gameart.h
     src/system.cpp src/system.h
     src/online.cpp src/online.h
     src/updater.cpp src/updater.h

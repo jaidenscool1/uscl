@@ -1,7 +1,14 @@
-# uscl-rpcn
+# uscl-rpcn: PSN for PS3 games (RPCN)
 
-USCL's local RPCN server: [RipleyTom/rpcn](https://github.com/RipleyTom/rpcn) (AGPL-3.0) plus the patches in
-`patches/`. The patched server is AGPL-3.0 as well.
+| | |
+|---|---|
+| **Console** | PlayStation 3 |
+| **Upstream** | [RipleyTom/rpcn](https://github.com/RipleyTom/rpcn) (AGPL-3.0; the patched server is AGPL-3.0 too) |
+| **Pinned base** | `7a3c3c4` |
+| **Our changes** | `patches/0001`–`0004`, applied with `git am` |
+| **Runs on** | the host's PC only, on 127.0.0.1; players reach it through [uscl-bridge](../uscl-bridge/) |
+
+The stand-in for PSN: sign-in, rooms, friends, presence and invites. USCL starts it when you host a PS3 session.
 
 ## Build
 ```
