@@ -58,12 +58,13 @@ Item {
         transform: Translate { id: listShift }
 
         Image {
+            id: halo
             x: page.colLeft + 60; y: page.focTop - 60; width: 240; height: 240
             source: "qrc:/qt/qml/Uscl/xmb/halo.png"
             visible: page.rows.length > 0
             SequentialAnimation on opacity {
                 loops: Animation.Infinite
-                running: Window.active // see Xmb.qml: no redraws while a game has focus
+                running: halo.Window.active // see Xmb.qml: no redraws while a game has focus
                 NumberAnimation { from: 0.09; to: 0.25; duration: 1700; easing.type: Easing.InOutSine }
                 NumberAnimation { to: 0.09; duration: 1700; easing.type: Easing.InOutSine }
             }
