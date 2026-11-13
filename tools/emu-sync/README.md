@@ -1,6 +1,8 @@
 # emu-sync — keep our emulator forks current without clobbering our tweaks
 
-We fork several emulators (RPCS3, shadPS4, shadNet, rpcn, open-bitdemon). Each fork's `origin` **is** the
+We fork several emulators and servers (RPCS3, shadPS4, shadNet, rpcn, open-bitdemon). Eden (`uscl-eden`, pinned to a
+release tag) and Skate3BlazeServer (`uscl-blaze`) aren't tracked here yet; Dolphin, Azahar and Cemu are used
+unchanged (Flathub). Each fork's `origin` **is** the
 upstream project; our changes live on a work branch (`uscl`, or `master` for rpcn) and/or as uncommitted
 working-tree edits. `emu-sync.py` detects when upstream's main branch moves and tells us whether the new commits
 are safe to pull or touch something we changed and need a human.

@@ -63,7 +63,7 @@ with `np-profile.py` on your own dump before starting.
 ## Wii (Dolphin)
 A second platform, via Dolphin instead of RPCS3 (notes in `uscl-dolphin/`). Early Wii games have no online service
 to revive, so online comes from **Dolphin NetPlay** (lockstep input sync, carries Wii Remote motion) tunnelled over
-Steam with `uscl-bridge host dolphin` (`tcp:2626`).
+Steam with `uscl-bridge host dolphin` (`udp:2626`, ENet).
 
 | Game | ID | Online route | Status | Next step |
 |---|---|---|---|---|
@@ -76,7 +76,7 @@ Switch Sports** runs on live Switch Online — a future `uscl-ryujinx` LDN tunne
 ## Nintendo 3DS (Azahar)
 A third platform, via **Azahar** (Citra successor; notes in `uscl-3ds/`). Early-shutdown reality: Nintendo's 3DS
 online ended April 2024. Two paths: **Azahar rooms** (local/Download-Play multiplayer, `uscl-bridge host 3ds`,
-`tcp:24872`) work now; **worldwide online** (MK7 global, Pokémon GTS) needs a future **Pretendo/NEX** stand-in.
+`udp:24872`, ENet) work now; **worldwide online** (MK7 global, Pokémon GTS) needs a future **Pretendo/NEX** stand-in.
 Azahar runs (GL fixed with `LIBGL_ALWAYS_SOFTWARE=1`; games are decrypted, no keys needed); booting a game is a GUI
 click the harness can't drive (see `uscl-3ds/README.md`).
 

@@ -1,8 +1,15 @@
-# uscl-dw: our Demonware
+# uscl-dw: Activision Demonware (Call of Duty)
 
-A Demonware (Activision) stand-in so Call of Duty games play online without Activision's servers. It is
-[open-bitdemon-emulator](https://github.com/Laupetin/open-bitdemon-emulator) (Rust, AGPL-3.0) plus the patches
-here, kept as patches like uscl-rpcn.
+| | |
+|---|---|
+| **Consoles** | PlayStation 3, PlayStation 4 (same server, title ids tell them apart) |
+| **Upstream** | [Laupetin/open-bitdemon-emulator](https://github.com/Laupetin/open-bitdemon-emulator) (Rust, AGPL-3.0) |
+| **Pinned base** | `39391e7` |
+| **Our changes** | `patches/0001`–`0021`, applied with `git am` |
+| **Runs on** | the host's PC, on 127.0.0.1; players reach it through [uscl-bridge](../uscl-bridge/) (`bo2`, `bo2ps4` presets) |
+| **Games** | Black Ops II (PS3 + PS4), Modern Warfare 2; Black Ops registered |
+
+A Demonware stand-in so Call of Duty games play online without Activision's servers.
 
 ## Build
 ```
@@ -62,6 +69,10 @@ login uses its ticket). The older two-address setup (`DW_AUTH_ADDR` / `DW_LOBBY_
   (`/auth/`); bandwidth test answered for T6 too (shared with MW2), so hosts open public slots; user files are
   read per title (PS3 and PS4 player ids overlap); the stats check only runs for PS3. PS4 publisher file:
   `storage/publisher/2430/online_tu17_mp_english.wad` (the PS3 wad works).
+- 0020: Matchmaking for PS3 <-> PS4 crossplay: Black Ops II searchers on one build see the other build's session
+  security ID byte-swapped; session blobs are logged.
+- 0021: Black Ops (BLUS30591) PS3 title id 5185 (`T5Ps3`) registered, so its login is no longer refused as an unknown
+  title. Its own auth/lobby handling (bdLobby era, like MW2) is next.
 
 ## Status
 Modern Warfare 2 1.14: login, playlists, stats and matchmaking work; two copies played the same match (2026-10-25).

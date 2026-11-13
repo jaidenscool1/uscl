@@ -1,15 +1,26 @@
 # uscl-shell: the USCL home screen
 
 The XMB-style home screen USCL opens to, made for a controller (see `docs/CONSOLE-UI.md`). It's Qt Quick (QML)
-plus SDL3 for controllers. Games run in our RPCS3 build as a separate process (`rpcs3 --no-gui --fullscreen`),
-so a crash brings you back here. Settings → All Settings opens the classic RPCS3 window.
+plus SDL3 for controllers. Each game runs in its emulator as a separate process, so a crash brings you back here:
+
+| Console | Emulator it starts | Code |
+|---|---|---|
+| PS3 | our RPCS3 (`rpcs3 --no-gui --fullscreen`) | `launcher.cpp` `startGame` |
+| PS4 | our shadPS4 | `launcher.cpp` `startGame` |
+| Switch | our Eden core ([docs/SWITCH.md](../docs/SWITCH.md)) | `switchcore.cpp` |
+| Wii / GameCube, 3DS, Wii U | Dolphin, Azahar, Cemu (Flathub apps) | `launcher.cpp` `startEmu` |
+| Xbox 360 | Xenia under Wine (experimental) | `launcher.cpp` `startEmu` |
+
+Settings → All Settings opens the classic RPCS3 window.
 
 ## What's in it
 - **First start:** setup asks for an online name (your Steam name, read from Steam's `loginusers.vdf`, is the
   default), installs the PS3 system software (from a `PS3UPDAT.PUP` it finds, or downloaded from Sony's update
   server) and finds your games. Settings → Run Setup Again repeats it.
 - **Game:** your games; △ for Start / Host an online session / Information. Add Games walks a folder and
-  everything inside it (disc folders, ISOs, installed games) and adds what it finds to RPCS3's `games.yml`.
+  everything inside it (disc folders, ISOs, installed games, Switch `.nsp`/`.xci`) and adds what it finds: PS3
+  games to RPCS3's `games.yml`, PS4 games to `uscl/ps4_games.yml`, Switch games to the Switch library. Wii, 3DS,
+  Wii U and Xbox 360 games are listed in `emu_games.json` next to `games.yml`.
 - **Network:** host a session for a game (the right servers start by themselves: our Demonware for Black Ops II),
   join by Steam invite, leave, and Test Connection (USCL files, online settings, ports, a Steam lobby round trip).
   The host sees who's in the session and can kick (this session) or ban (every session this PC hosts, by Steam
@@ -35,8 +46,6 @@ Online play used to live in the classic window's USCL > Online panel; the home s
 | hold PS / Guide | | quit the running game |
 
 ## Build and run
-
-Switch games are also supported through an external Eden core; setup, Steam room transport, development preview and current validation limits are in [docs/SWITCH.md](../docs/SWITCH.md).
 ```
 cmake -S uscl-shell -B uscl-shell/build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C uscl-shell/build
 USCL_RPCS3=<path to rpcs3> USCL_TOOLS=<folder with uscl-rpcn, dw-server, uscl-bridge> uscl-shell/build/uscl --windowed      # --self-test checks the PARAM.SFO/ISO/games.yml readers
@@ -49,9 +58,20 @@ are read from each game's `PARAM.SFO` / `ICON0.PNG`, inside ISOs too.
 the shader.
 
 ## Automatic setup on every PC
-- **Controllers:** when a game starts, every connected controller becomes a player in RPCS3 (Settings →
-  Accessory Settings → Automatic Controller Setup). A player already on a controller only gets its device updated,
-  so custom button mappings stay.
+- **Controllers** (Settings → Accessory Settings → Automatic Controller Setup, on by default): when a game starts,
+  every connected controller, USB or Bluetooth, becomes player 1, 2, ... in connection order, in every emulator.
+  Buttons go by position (the console's confirm button is the same physical button on any pad); pads with a gyro
+  drive motion where the console had it. `Launcher::prepareInput`, per console:
+
+  | Console | What USCL does |
+  |---|---|
+  | PS3 | RPCS3 `input_configs/global/Default.yml`: players 1–7 on the SDL pads. A player already on a controller only gets its device updated, so custom button mappings stay. |
+  | PS4 | nothing to write: shadPS4 gives users 1–4 (`users.json`) the pads in order |
+  | Switch | sets `USCL_AUTO_PADS=1`; Eden maps the pads itself ([uscl-eden](../uscl-eden/) 0012) |
+  | Wii / GameCube | Dolphin `WiimoteNew.ini` / `GCPadNew.ini`, players 1–4 (`padconfig.cpp`); gyro + accelerometer → Wii Remote motion and pointer |
+  | 3DS | Azahar's active profile, any controller (one player per console) |
+  | Wii U | Cemu `controllerProfiles/controller0.xml` (GamePad) and `controller1+.xml` (Pro Controller), motion on |
+  | Xbox 360 | nothing to write: Wine gives XInput players 1–4 the pads in order |
 - **Resolution scale:** Automatic (Settings → Game Settings → Resolution Scale) picks it from the best Vulkan
   graphics card and the screen: integrated or under 3.5 GB 100%, under 6 GB 150%, under 10 GB 200%, else 300%,
   never sharper than the screen (1080p 150%, 1440p 200%, 4K 300%). `uscl --hardware` prints what it sees.

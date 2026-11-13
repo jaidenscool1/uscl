@@ -1,86 +1,65 @@
-# uscl-dolphin
+# uscl-dolphin: Wii and GameCube (Dolphin)
 
-USCL's **Wii / GameCube** platform, the Dolphin counterpart to what `uscl-rpcs3` is for PS3 and
-`uscl-shadps4` is for PS4. Unlike those, it needs **no emulator fork**: Dolphin's built-in **NetPlay** already
-does everything the online layer needs, and USCL just carries its traffic over the Steam tunnel.
+| | |
+|---|---|
+| **Consoles** | Wii, GameCube |
+| **Emulator** | [Dolphin](https://github.com/dolphin-emu/dolphin) (GPL-2.0+), used **unchanged**: the Flathub app `org.DolphinEmu.dolphin-emu` (tested 2609a) |
+| **Our changes** | none to Dolphin. USCL starts it (`uscl-shell` `Launcher::startEmu`), sets up its controllers (`uscl-shell/src/padconfig.cpp`) and carries NetPlay (`uscl-bridge` preset `dolphin`, UDP 2626) |
+| **Online** | Dolphin NetPlay over the Steam tunnel |
+| **Status** | Wii Sports (`SP2E01`) boots from USCL with two controllers; NetPlay over Steam is next |
 
-## The idea: online for games that never had it
+## How online works: NetPlay
+Most Wii games, Wii Sports included, never had online play: multiplayer meant passing Wii Remotes around one couch.
+There is no publisher server to revive, so instead of a stand-in server (Demonware, Blaze) USCL uses **Dolphin
+NetPlay**. NetPlay runs the same game in lockstep on every player's PC and exchanges their **controller input** each
+frame, so any local-multiplayer game becomes online. The input it syncs is the full Wii Remote report (buttons, IR
+pointer, accelerometer, MotionPlus), so motion works over NetPlay too: it's only input.
 
-The owner's installed title is **Wii Sports + Wii Sports Resort** (`SP2E01`, the 2010 dual-pack). Like almost every
-early Wii game, it has **no online mode at all** — multiplayer was two-to-four people passing Wii Remotes on one
-couch. There is no publisher server to revive (no Demonware/Blaze/Nintendo-Network equivalent), so the Demonware /
-Blaze stand-in approach doesn't apply here.
+USCL's part is the transport. The host's NetPlay server (ENet, **UDP 2626**) is forwarded over the Steam lobby by
+`uscl-bridge host dolphin`; the joiner connects NetPlay to `127.0.0.1:<slot>`, which the tunnel maps to the host,
+the same way as every PS3 game. NetPlay's direct-connection mode is exactly what the tunnel provides, so no
+Nintendo servers are involved. NetPlay itself requires an identical game dump, identical Dolphin version and synced
+settings on both ends. It's lockstep, so latency shows up as input delay, not rubber-banding.
 
-Instead we use **Dolphin NetPlay**. NetPlay runs the same game in lockstep on every player's PC and exchanges their
-**controller input** each frame — so *any* local-multiplayer game becomes online, Wii Sports included. The input
-stream it syncs is the **full Wii Remote report**: buttons, IR pointer, accelerometer, and **MotionPlus** gyro. So
-the motion you do on your own remote is sent to the other player's copy as input — motion "just works" over NetPlay,
-because it is only input, not a special online mode the game has to support.
+## Controllers and motion
+With Automatic Controller Setup on (the default), every connected pad, USB or Bluetooth, becomes Wii Remote 1, 2,
+... (with Nunchuk) and GameCube pad 1, 2, ... in the order it was connected. Buttons go by position.
 
-USCL's job is just the transport: Dolphin's NetPlay host listens on **TCP 2626**, and `uscl-bridge host dolphin`
-forwards that one port over the Steam lobby (preset added in `uscl-bridge/src/tunnel.rs`). The joiner connects
-Dolphin NetPlay to `127.0.0.1:<slot>`, which the tunnel maps to the host — the same mechanism as every PS3 game.
+- **Pads with motion sensors** (PS5 DualSense, PS4 DualShock 4, Switch Pro): the pad's gyro and accelerometer *are*
+  the Wii Remote's. Swing, tilt and point by moving it; R3 recenters the pointer. Dolphin reads them natively
+  through SDL (no DSU server). Wii Sports is mostly accelerometer swings, so it maps naturally; tune sensitivity in
+  Dolphin if needed.
+- **Other pads:** point with the right stick, shake with R1.
+- **Other motion sources** (set up in Dolphin yourself): a real Wii Remote by Bluetooth passthrough (most accurate,
+  MotionPlus detected) or as a "Real Wii Remote", or a phone's gyro through DSU/cemuhook.
 
-### Is Steam-tunnel online possible? Yes.
-NetPlay's **direct-connection** mode is exactly what the tunnel provides (the host looks local to the joiner), so no
-Nintendo servers and nothing to reverse. Requirements NetPlay imposes, not us: identical game dump, identical Dolphin
-version, and synced settings on both ends (NetPlay enforces most of this). It is deterministic lockstep, so latency
-shows up as input delay, not rubber-banding.
+NetPlay sends inputs, it doesn't give you a remote: each player supplies their own motion source.
 
-## Motion input (each player supplies their own)
-
-NetPlay sends inputs; it does not give you a remote. Each player needs a motion source feeding their Dolphin. Any of
-these works — whatever a player emits as the emulated Wii Remote is what NetPlay syncs:
-- **PS5 DualSense (or PS4 DualShock 4) — the easy, recommended option.** It has a 3-axis gyro + accelerometer, the
-  same sensors as a Wii Remote. Dolphin 2609a reads its IMU **natively** (USB or Bluetooth, via the SDL backend — no
-  DSU server needed): emulated Wii Remote → *Motion Input* / *Motion Simulation* bound to the pad's gyro/accel, with
-  the IR pointer on the gyro or right stick. Wii Sports (2006) is mostly accelerometer swings, so it maps naturally;
-  expect to tune sensitivity/calibration for the right feel. A Switch Pro/Joy-Con IMU works the same way.
-- **Real Wii Remote over Bluetooth passthrough** — the most accurate; Dolphin drives the PC Bluetooth adapter as the
-  Wii's and MotionPlus is detected. (Dolphin → Controllers → Wii Remotes → *Passthrough*.)
-- **Any controller (what USCL sets up):** with Automatic Controller Setup on, each connected pad (USB or Bluetooth) becomes
-  Wii Remote 1, 2, ... (with Nunchuk) and GameCube pad 1, 2, ... in connection order (`uscl-shell/src/padconfig.cpp`).
-  A pad with motion sensors (DualSense, DualShock 4, Switch Pro) is the Wii Remote's accelerometer and gyro: swing, tilt
-  and point by moving it, R3 recenters the pointer. Other pads point with the right stick and shake with R1.
-- **Real Wii Remote as a plain Bluetooth controller** ("Real Wii Remote" source, continuous scan, press sync).
-- **Phone gyro via DSU/cemuhook** — the fallback for a player with none of the above.
-
-(Note: USCL's automated test harness can't exercise this — its virtual pads are synthetic button/stick gamepads with
-no IMU — so the motion test is a real-hardware step, not something the harness drives.)
-
-## The "newer, online" Wii Sports — the alternatives, and why not yet
-
-- **Wii Sports Club** (Wii U, 2013) is the one that *did* have real online, over Nintendo Network. Reviving that
-  means a **Quazal NEX / Rendez-vous** stand-in — the same shape as our Demonware/Blaze work but for Nintendo. The
-  open **Pretendo Network** reimplements NN, but it **does not support Wii Sports Club online yet** (it appears only
-  in Pretendo's Miiverse/"Juxtaposition" list, not the online-matchmaking game-support table). So this is a real
-  future target (a `uscl-cemu` + Pretendo/NEX layer), not a ready path.
-- **Nintendo Switch Sports** (2022) runs on **live** Nintendo Switch Online, so there's nothing dead to replace.
-  Switch emulators (Ryujinx forks) don't emulate NSO; they offer **LDN "local wireless"**, which *could* be tunnelled
-  the same way as NetPlay — but that's a separate, heavier platform (Switch emulation + a `uscl-ryujinx` LDN relay)
-  and a much bigger lift than the Wii game already installed.
-
-**Recommendation:** ship **Wii Sports (Dolphin NetPlay over the Steam tunnel)** first — it's the installed game, needs
-no server work, and carries motion. Keep Wii Sports Club (Wii U / Pretendo-NEX) and Switch Sports (Ryujinx / LDN) as
-later platforms once the Dolphin path is proven across two PCs.
-
-## Status (2026-11-07)
-- Dolphin **2609a** (Flatpak `org.DolphinEmu.dolphin-emu`) **boots `SP2E01`** to the game-select menu, Vulkan, with an
-  emulated Wii Remote pointer. Platform confirmed on this machine. See `games/SP2E01.md`.
-- `uscl-bridge` gained the `dolphin` forward preset (`tcp:2626`) + a parse test. Nothing else is needed in the bridge.
+## Status (2026-11-12)
+- Dolphin 2609a boots `SP2E01` to the game-select menu (Vulkan). See [games/SP2E01.md](../games/SP2E01.md).
+- USCL starts Wii games in Dolphin and writes the controller setup: tested with a DualSense Edge + Xbox 360 pad,
+  which Dolphin binds as `SDL/0/DualSense Edge Wireless Controller` (Wii Remote 1) and `SDL/0/Xbox 360 Controller`
+  (Wii Remote 2).
+- `uscl-bridge` has the `dolphin` preset (UDP 2626).
 
 ## Next
-1. One PC, two Dolphin instances: host NetPlay on 2626, join `127.0.0.1:2626`, confirm Wii Sports Tennis/Boxing runs
-   in sync with **Wii Remote motion** exchanged (the known risk: Wii NetPlay with motion can desync — measure it).
-2. Wire it into `uscl-shell` / `uscl-bridge` so "host"/"join" starts Dolphin NetPlay like the PS3 games launch RPCS3.
-3. Two-PC test over the Steam tunnel (`host dolphin` / `join <session>`), the same bar as the PS3 titles.
+1. One PC, two Dolphin copies: host NetPlay, join `127.0.0.1:2626`, confirm Wii Sports Tennis/Boxing stays in sync
+   with Wii Remote motion exchanged (Wii NetPlay with motion can desync: measure it).
+2. Host/join NetPlay from the home screen, like the PS3 games.
+3. Two PCs over the Steam tunnel (`host dolphin` / `join <session>`).
 
 ## Run it by hand today
 ```
 # host
-dolphin-emu                                   # NetPlay → Host → game SP2E01, port 2626, Connect
-uscl-bridge host dolphin                       # forwards 2626 over the Steam lobby; prints the session id
+dolphin-emu                                   # NetPlay → Host → the game, port 2626
+uscl-bridge host dolphin                      # forwards 2626 over the Steam lobby; prints the session id
 # joiner
-uscl-bridge join <session id>                  # maps the host to 127.0.0.1:<slot>
-dolphin-emu                                    # NetPlay → Connect → 127.0.0.1:<slot>
+uscl-bridge join <session id>                 # maps the host to 127.0.0.1:<slot>
+dolphin-emu                                   # NetPlay → Connect → 127.0.0.1:<slot>
 ```
+
+## Later: the Wii Sports games that had online play
+- **Wii Sports Club** (Wii U, 2013) used Nintendo Network. Reviving it means a Quazal NEX stand-in (the same shape
+  as our Demonware/Blaze work); Pretendo Network doesn't support its online play yet. A future Cemu + NEX layer.
+- **Nintendo Switch Sports** (2022) runs on live Nintendo Switch Online, so there's nothing dead to replace. Its
+  local wireless could go through Eden rooms like Mario Kart ([uscl-eden](../uscl-eden/)).

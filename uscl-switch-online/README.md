@@ -1,4 +1,11 @@
-# USCL Switch online service — development foundation
+# uscl-switch-online: Switch online service (in development)
+
+| | |
+|---|---|
+| **Console** | Nintendo Switch |
+| **What** | USCL's own room service, plus a game-facing NEX/PRUDP adapter in [`native/`](native/README.md) |
+| **Language / license** | Rust, MIT (original code; the Eden client patch keeps Eden's GPL) |
+| **Status** | development only: not used by the app, not packaged, not forwarded over Steam. Mario Kart's native Online Play menu is **not** supported yet; Switch online play today is Eden Wireless Play rooms ([uscl-eden](../uscl-eden/)) |
 
 This is USCL's independent service, analogous in architecture to the project's private RPCN setup. It is **not yet compatible with Mario Kart's native Online Play menu**. The current playable path remains Eden Wireless Play over the existing Steam tunnel.
 

@@ -1,32 +1,17 @@
-# uscl-blaze
+# uscl-blaze: EA Blaze (Skate 3, NBA Jam, NHL, Madden)
 
-USCL's stand-in for **EA's Blaze** online service — the EA equivalent of what `uscl-dw` is for Activision's
-Demonware. It is built on the community **Skate3BlazeServer** (skate6743/Skate3BlazeServer, no license, so USCL
-doesn't vendor it, same as the Demonware base), plus the patches in `patches/` that add other EA games.
+| | |
+|---|---|
+| **Console** | PlayStation 3 |
+| **Upstream** | [skate6743/Skate3BlazeServer](https://github.com/skate6743/Skate3BlazeServer) (C#, no license, so USCL doesn't vendor it) |
+| **Pinned base** | `f248282` + the 14 Skate 3 teams/invite patches USCL carries |
+| **Our changes** | `patches/0001`–`0014`, applied with `git am`; `tls/` (TLS terminator for Blaze 3.x games) |
+| **Runs on** | the host's PC; players reach it through [uscl-bridge](../uscl-bridge/) (`skate3` preset) |
 
-First game on it: **NBA Jam** (BLUS30696, `games/BLUS30696.md`). Skate 3 (BLUS30464) uses the same server
-unmodified.
+The stand-in for **EA's Blaze** online service: what [uscl-dw](../uscl-dw/) is for Activision's Demonware. It is
+the community Skate 3 server plus patches that add other EA games, including the newer Blaze 3.x ("heat2") titles.
 
-## What the patches add (on top of Skate3BlazeServer + the Skate 3 teams/invite patches)
-- **0001** — accept tickets from the host's own RPCN. The upstream server only trusts official RPCN's public key;
-  a self-hosted RPCN signs with its own key (`ticket_private.pem`). `settings.json` gets a `HostTicketKey` (the
-  host RPCN's public key, uncompressed hex) that is trusted the same way. Also: a `fetchClientConfig` handler
-  (NBA Jam asks for OSDK_* config sections Skate 3 never requests), tolerant TDF decoding (older BlazeSDK 2.x sends
-  some fields with a different type), and an empty success (not an error) for commands the server doesn't implement
-  — NBA Jam aborts its login on `ERR_COMMAND_NOT_FOUND`, Skate 3 doesn't send those commands.
-- **0002/0003** — matchmaking for BlazeSDK 2.x, which sends no `ATTR` map (Skate 3 matchmaking is challenge-key
-  based). The server makes the game itself: the first player to search hosts it, the next with the same size joins.
-  Game traffic goes through the server's **UDP relay** (dirtycast failover topology), the same path Skate 3 uses, so
-  it works between players behind NAT and between two instances on one PC — direct peer-to-peer can't connect there.
-- **0004–0014 — Blaze 3.x "heat2" (Madden 25, NHL 15).** The EA Sports titles use a newer BlazeSDK with a different
-  TDF wire encoding and login handshake. These patches add: the secure (TLS) redirector + plaintext-session toggle
-  (0004/0005), a full heat2 **encoder and decoder** (`Heat2Writer`/`Heat2Reader`, 0006–0008) with end-to-end tests
-  (0009), and the complete **heat2 login** (0010–0012) — the real `ConsoleLoginResponse`, and the
-  `UserAuthenticated` notification that actually completes the SDK's login — plus the shared **Stats** component
-  (0013) and the full write-up in `docs/EA-Sports-Blaze3-heat2.md` (0014). See the "Blaze 3.x" section below.
-
-## Build & run
-Same as the Skate 3 server (it IS that server plus these patches):
+## Build and run
 ```
 git clone https://github.com/skate6743/Skate3BlazeServer && cd Skate3BlazeServer
 git checkout f248282
@@ -35,62 +20,69 @@ git am ../uscl-blaze/patches/*.patch         # these
 dotnet publish "Skate Custom Server/Skate Custom Server.csproj" -c Release -r linux-x64 --self-contained -o out
 ```
 `out/settings.json`: `LocalHost: true`, `LocalIPAddress` the host's IP (127.0.0.1 for local tests), and
-`HostTicketKey` the host RPCN's public key. Run `out/"Skate Custom Server"` (Blaze on TCP 42100, HTTP on 80,
-one UDP relay per lobby on 17000+gameId).
+`HostTicketKey` the host RPCN's public key. Run `out/"Skate Custom Server"` (Blaze on TCP 42100, HTTP on 80, one
+UDP relay per lobby on 17000+gameId).
 
 The game reaches it through RPCS3's IP swap list (every `gosredirector.*.ea.com` → the server), with
-`PSN status: RPCN` so the game gets a ticket. See `games/BLUS30696.md`.
+`PSN status: RPCN` so the game gets a ticket. Blaze 3.x games also need the TLS terminator (below).
 
-## Status (2026-11-07)
-NBA Jam: two players sign in, matchmake into one lobby, and reach the head-to-head team-select seeing each other;
-the relay carries game traffic both ways. Verified with two instances on one PC (RPCN accounts uscltest /
-uscltest2). Driving both automated pads through team-select to the tip-off is a two-controller test-harness issue
-(a leftover virtual pad on this PC scrambles SDL enumeration), not a game/server limitation.
+## Patches
+- **0001**: accept tickets from the host's own RPCN. Upstream only trusts official RPCN's key; `settings.json`
+  gets a `HostTicketKey` (the host RPCN's public key, uncompressed hex) trusted the same way. Also a
+  `fetchClientConfig` handler (NBA Jam asks for OSDK_* sections), tolerant TDF decoding (BlazeSDK 2.x sends some
+  fields with another type), and an empty success instead of `ERR_COMMAND_NOT_FOUND` for unimplemented commands
+  (NBA Jam aborts its login on that error).
+- **0002–0003**: matchmaking for BlazeSDK 2.x, which sends no `ATTR` map. The first player to search hosts, the next
+  with the same size joins. Game traffic goes through the server's **UDP relay** (dirtycast failover), like Skate 3,
+  so it works behind NAT and between two copies on one PC.
+- **0004–0005**: Blaze 3.x redirector: `getServerInstance` returns the secure redirector (`SECU=1`) for Blaze 3.x
+  clients (detected by a `BSDK` version byte-scan), with a heat2 encoder and a plaintext-session toggle
+  (`BLAZE3_SESSION`): the session is returned `SECU=0` and only the redirector hop is TLS.
+- **0006–0009**: the heat2 codec, `Heat2Writer` (encode) and `Heat2Reader` (decode), with end-to-end tests.
+- **0010–0012**: the heat2 login: the real `ConsoleLoginResponse` and the `UserAuthenticated` notification.
+- **0013**: the shared **Stats** component (`getKeyScopesMap`).
+- **0014**: the full write-up, `docs/EA-Sports-Blaze3-heat2.md` (it lands in the built server tree).
 
-## Blaze 3.x "heat2" — Madden 25 & NHL 15
+## Status
+| Game | Blaze | Where it is |
+|---|---|---|
+| Skate 3 (`BLUS30464`) | 2.x | the upstream server, unmodified ([notes](../games/BLUS30464.md)) |
+| NBA Jam (`BLUS30696`) | 2.11 (heat1) | two players sign in, matchmake into one lobby and reach team select; the relay carries game traffic both ways (two copies on one PC, 2026-11-07) ([notes](../games/BLUS30696.md)) |
+| NHL 15 (`BLUS31436`) | 3.19 (heat2) | **logs in and connects**, reaches "Retrieving data from server"; one diagnosed, server-fixable crash left (below) ([notes](../games/BLUS31436.md)) |
+| Madden NFL 25 (`BLUS31178`) | 13.3 (heat2) | shares NHL's login; hits an RPCS3 FGGameSim crash (~52 s) first ([notes](../games/BLUS31178.md)) |
 
-Full details, the complete handshake, the live test harness, and the disassembly toolchain are in
-**`docs/EA-Sports-Blaze3-heat2.md`** (added by patch 0014; it lands in the built server tree). Summary:
+## Blaze 3.x "heat2" (NHL 15, Madden 25)
+Full details, the handshake, the live test harness and the disassembly toolchain are in
+`docs/EA-Sports-Blaze3-heat2.md` (patch 0014).
 
 ### TLS
-These games run the Blaze session over EA's **ProtoSSL**, which only speaks **SSLv3 + RC4** — and OpenSSL 3.x
-**removed both**, which silently broke the original `tlsproxy.py`. `tls/` has:
-- `redirector.crt.pem` / `redirector.key.pem` — forged `gosredirector.ea.com` cert (CN matches, MD5-RSA signed),
-  from jacobtread/blaze-ssl-async (MIT).
-- **`tlsproxy_legacy.py`** — terminates TLS with **tlslite-ng** (pure-Python, keeps SSLv3/RC4) and monkeypatches
-  tlslite's OID table to accept the forged cert's `rsaEncryption` sig-alg. Run on 42127 with
-  `PYTHONPATH=<pylib>` (`tls/tlsproxy.py` only works where the system OpenSSL still has SSLv3).
+These games run Blaze over EA's **ProtoSSL**, which only speaks **SSLv3 + RC4**. OpenSSL 3.x removed both. `tls/`:
+- `redirector.crt.pem` / `redirector.key.pem`: the community `gosredirector.ea.com` certificate (CN matches,
+  MD5-RSA signed), from jacobtread/blaze-ssl-async (MIT).
+- **`tlsproxy_legacy.py`**: terminates TLS with **tlslite-ng** (pure Python, keeps SSLv3/RC4) and accepts the
+  certificate's `rsaEncryption` signature algorithm. Run on 42127 with `PYTHONPATH=<pylib>`. (`tls/tlsproxy.py` only
+  works where the system OpenSSL still has SSLv3.)
 
-Patch **0004** makes `getServerInstance` return the secure redirector with `SECU=1` for Blaze 3.x clients
-(detected by a raw `BSDK` version byte-scan). Patch **0005** adds the heat2 getServerInstance encoder and a
-plaintext-session toggle (`env BLAZE3_SESSION`): a bare-IP secure address makes ProtoSSL refuse TLS, so the
-session is returned `SECU=0` and the game connects **plaintext** to the Blaze port; only the redirector hop is TLS.
+### heat2 codec
+`[3-byte tag][1-byte type][value]`, little-endian varints; types 0=int, 1=string, 2=blob, 3=struct, 4=list, 5=map,
+6=union. Connections are flagged heat2 in `PreAuthHandler`. ⚠️ `TdfUtils.EncodeTdfTag` mis-encodes
+**digit-leading tags** (writes `'Q'` for `'1'`): avoid digit tags or fix it first.
 
-### heat2 codec — DONE
-`Heat2Writer.cs` (encode) + `Heat2Reader.cs` (decode), patches 0006–0008, tested end-to-end (0009).
-`[3-byte tag][1-byte type][value]`, little-endian varints; types 0=int,1=string,2=blob,3=struct,4=list,5=map,
-6=union. Connections are flagged heat2 in `PreAuthHandler`. ⚠️ `TdfUtils.EncodeTdfTag` mis-encodes **digit-leading
-tags** (writes `'Q'` for `'1'`) — avoid digit tags or fix it first.
-
-### Login — SOLVED (NHL 15 connects to the EA servers)
-Patches 0010–0012. NHL 15 now logs in and reaches **"Retrieving data from server"** with the online ticker
-playing — up from an instant "EA servers not available". Four things were needed:
-1. **TLS** (SSLv3/RC4 via `tlsproxy_legacy.py`, above).
-2. **Ticket**: `HostTicketKey` in `settings.json` = the host RPCN's uncompressed public point, so tickets our own
-   RPCN self-signs validate; expiry hard-reject relaxed.
+### Login
+Four things were needed for NHL 15 to log in (it used to fail at once with "EA servers not available"):
+1. **TLS**: SSLv3/RC4 through `tlsproxy_legacy.py`.
+2. **Ticket**: `HostTicketKey` = the host RPCN's uncompressed public point, so tickets our RPCN signs validate;
+   the expiry hard-reject is relaxed.
 3. **`ps3Login` response = the real `ConsoleLoginResponse`** (from ZamboniDevelopment/BlazeSDK), persona under
-   **`DSNM`** (the earlier DS2-derived `PNAM/DPTS` tags were unreadable — the SDK logged straight back out).
-4. **`UserAuthenticated` (UserSessions notification 8)** — the local-user login-completion signal the SDK blocks
-   on. Without it the client pings then `logout`s. Sent after login as **8 → 2 (UserAdded) → 5 (UserUpdated)**.
+   **`DSNM`**. The earlier `PNAM/DPTS` tags were unreadable and the SDK logged straight back out.
+4. **`UserAuthenticated`** (UserSessions notification 8), the login-completion signal the SDK waits for, sent after
+   login as **8 → 2 (UserAdded) → 5 (UserUpdated)**. Without it the client pings, then logs out.
 
-Shapes 3/4 were reverse-engineered from **`ceinydO/fifa17-ps3-online`** (FIFA 17 on RPCS3 — the best Blaze-3.x-PS3
-reference). The shared **Stats** component (`getKeyScopesMap`, patch 0013) was also added.
+Shapes 3 and 4 were worked out from [ceinydO/fifa17-ps3-online](https://github.com/ceinydO/fifa17-ps3-online), the
+best Blaze 3.x PS3 reference.
 
-### Remaining — one diagnosed, server-fixable NHL crash
-After the full online bootstrap NHL's PPU null-derefs at a settings-manager lookup (`"stgm" → "O_SG_TCKR"`
-returns null; PC `0x008b1aec`, deterministic). **Proven server-fixable, not an emulator bug** — the PPU
-**interpreter** crashes identically. The `O_SG_TCKR` ticker settings group is never created; it's **not** from
-config (ruled out). Next step: make the game skip the ticker (return an error for the `OsdkTicker2` component,
-2249) or RE its `RegisterResponse` so the group is created. Disassembly toolchain + the full trace are in
-`docs/EA-Sports-Blaze3-heat2.md`. **Madden 25** hits the same crash class earlier (FGGameSim ~52s) and now shares
-this login path.
+### Remaining: one NHL crash (server-fixable)
+After the online bootstrap NHL's PPU dereferences null at a settings lookup (`"stgm" → "O_SG_TCKR"`, PC
+`0x008b1aec`, every time). Not an emulator bug: the PPU interpreter crashes the same way. The ticker settings group
+`O_SG_TCKR` is never created, and it doesn't come from config. Next: answer the `OsdkTicker2` component (2249) with
+an error so the game skips the ticker, or work out its `RegisterResponse` so the group gets created.

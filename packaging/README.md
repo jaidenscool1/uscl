@@ -1,7 +1,17 @@
 # Packaging USCL
 
-One program: the XMB home screen (`uscl-shell`, what USCL opens to), our RPCS3 build (`uscl-rpcs3` patches) with the **USCL > Online** panel, plus `uscl-rpcn`,
-`dw-server` (uscl-dw) and `uscl-bridge` next to it, and the server data they start from.
+One program: the home screen (`uscl-shell`, what USCL opens to), the emulators, the online servers and
+`uscl-bridge` next to it, and the server data they start from.
+
+| | Windows installer | Linux AppImage |
+|---|---|---|
+| Home screen, `uscl-bridge` | ✅ | ✅ |
+| PS3: our RPCS3 (`uscl-rpcs3`, with the **USCL > Online** panel), `uscl-rpcn`, `dw-server` (uscl-dw) | ✅ | ✅ |
+| PS4: our shadPS4 + shadNet (`uscl-shadps4`, `uscl-shadnet`) | not yet | when built with them (`USCL_SHADPS4_BUILD` / `USCL_SHADNET_BUILD`) |
+| Switch: our Eden core (`uscl-eden`) | not yet | not yet (build it with `tools/dev-scripts/build-switch-core.sh`) |
+| Wii / GameCube, 3DS, Wii U: Dolphin, Azahar, Cemu | not yet | no: USCL starts the player's Flathub apps |
+
+No games, console keys or firmware are ever packaged.
 
 ## Linux: AppImage
 ```
