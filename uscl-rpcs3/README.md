@@ -5,7 +5,7 @@
 | **Console** | PlayStation 3 |
 | **Upstream** | [RPCS3/rpcs3](https://github.com/RPCS3/rpcs3) (GPL-2.0) |
 | **Pinned base** | `eee3f0f` (upstream 2026-11-05) |
-| **Our changes** | `patches/0001`–`0011`, applied with `git am` |
+| **Our changes** | `patches/0001`–`0012`, applied with `git am` |
 | **Ships in** | Windows installer and Linux AppImage (`packaging/`) |
 | **Online services it talks to** | [uscl-rpcn](../uscl-rpcn/) (PSN), [uscl-dw](../uscl-dw/) (Call of Duty), [uscl-blaze](../uscl-blaze/) (EA) |
 
@@ -73,3 +73,5 @@ Then build as in RPCS3's `BUILDING.md`. Things that bite:
 - 0011: built-in patches are also read from `uscl_patches.yml` next to the RPCS3 executable (generated, too big for
   the source; packaging ships it): BO2 "PS4 netfield order", the 22 network field tables in the PS4 build's order so
   game state encodes alike (crossplay).
+- 0012: built-in NHL 15 patch (`PPU-04d55e4c…`), "dynamic messages with none to show": the OSDK message rotation
+  (0x7f94e4) checks its list has a message before reading it; a community server may send none (`games/BLUS31436.md`).

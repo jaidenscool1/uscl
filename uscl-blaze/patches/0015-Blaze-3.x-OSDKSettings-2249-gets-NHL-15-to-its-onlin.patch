@@ -1,34 +1,36 @@
-From 89f48ceee8ec7da1d90699b9bff6813348a78510 Mon Sep 17 00:00:00 2001
+From 4de2a797ef0b59d0623c4bea15d56012515b495d Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Thu, 12 Nov 2026 23:43:09 -0700
-Subject: [PATCH] Blaze 3.x: serve OSDKSettings (2249) groups so NHL 15 gets
- past its ticker
+Subject: [PATCH] Blaze 3.x: OSDKSettings (2249) gets NHL 15 to its online
+ menus
 
 Component 0x08C9 is Blaze::OSDKSettings (fetchSettings = 1, fetchSettingsGroups = 2), not
-OsdkTicker2. NHL 15 builds its settings groups from fetchSettingsGroups and later looks them up
-by name with no null check: the empty reply left O_SG_TCKR missing and crashed the main PPU
-thread at 0x008b1aec.
+OsdkTicker2. NHL 15 builds its settings groups, views and settings from these replies and looks
+them up by name with no null check: the empty replies crashed it at 0x008b1aec (ticker group
+O_SG_TCKR), then 0x7a2840/0x7a2878 (account settings O_SPAMEA/O_SPAMPART in view UACCT).
 
 Serve the five groups the game names (O_SG_NRAD/QMSG/SYSS/TCKR/USER) with the TDF tags read from
-the EBOOT's member tables, the ticker's integer settings (O_TKfriend/O_TKsport/O_TKfilter) and
-O_SG_USER's views (MUPSET/INV/UGEN/UACCT). NHL now runs on to Stats 15, Util 12, Stats 3 and
-Authentication 30, then stops at 0x7a2840 on the user settings (O_SPAMEA, ...), which still need
-their per-setting types; see docs/EA-Sports-Blaze3-heat2.md section 6.
+the EBOOT's member tables, the ticker's integer settings (O_TKfriend/O_TKsport/O_TKfilter),
+O_SG_USER's views (MUPSET/INV/UGEN/UACCT) and the two account settings. The matchmaking settings
+(O_JS, O_GM, O_MIN, ...) are created by the game itself; serving them too corrupts its settings
+manager (0x828b88). With the RPCS3 built-in patch for the dynamic-message rotation (uscl-rpcs3 0012)
+NHL reaches the main menu and the online hub; next is the roster check. See
+docs/EA-Sports-Blaze3-heat2.md section 6.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- .../Components/OSDKSettings/OSDKSettings.cs   | 73 +++++++++++++++++
- .../Servers/Blaze/BlazeServer.cs              |  5 ++
- docs/EA-Sports-Blaze3-heat2.md                | 82 +++++++++++--------
- 3 files changed, 125 insertions(+), 35 deletions(-)
+ .../Components/OSDKSettings/OSDKSettings.cs   |  75 +++++++++++++
+ .../Servers/Blaze/BlazeServer.cs              |   5 +
+ docs/EA-Sports-Blaze3-heat2.md                | 101 ++++++++++++------
+ 3 files changed, 146 insertions(+), 35 deletions(-)
  create mode 100644 Skate Custom Server/Blaze/Components/OSDKSettings/OSDKSettings.cs
 
 diff --git a/Skate Custom Server/Blaze/Components/OSDKSettings/OSDKSettings.cs b/Skate Custom Server/Blaze/Components/OSDKSettings/OSDKSettings.cs
 new file mode 100644
-index 0000000..b38090b
+index 0000000..3f9a412
 --- /dev/null
 +++ b/Skate Custom Server/Blaze/Components/OSDKSettings/OSDKSettings.cs	
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,75 @@
 +using Blaze.Tdf.Attributes;
 +using Servers;
 +using Servers.Blaze.Models;
@@ -75,18 +77,20 @@ index 0000000..b38090b
 +        // NHL 15's ticker update (PPU 0x8b1aa0) reads group O_SG_TCKR, then its setting O_TKfilter; these three are
 +        // named together in the EBOOT (0x1b5d0fc..). 0 = ticker filters off.
 +        static readonly string[] TickerSettings = { "O_TKfriend", "O_TKsport", "O_TKfilter" };
-+        // Views the game opens on O_SG_USER (name table 0x227616c..0x2276178; PPU 0x7a27e0 opens UACCT).
-+        // shortcut: the user settings these views hold (O_SPAMEA, O_EGstat, O_GM, ... at 0x2276104..) are not
-+        // served yet: each has a fixed type (O_GM is an integer with 3 possible values, O_EGstat/O_JS crash the
-+        // client as integers) that still has to be read from the EBOOT; until then NHL stops at PPU 0x7a2840.
++        // Views the game opens on O_SG_USER (name table 0x227616c..0x2276178; PPU 0x7a27e0 opens UACCT -> O_SPAMEA).
 +        static readonly string[] UserViews = { "MUPSET", "INV", "UGEN", "UACCT" };
++        // The O_SG_USER settings the server defines: the EA email opt-ins the account screen reads from view UACCT
++        // (PPU 0x7a2840/0x7a2878), 0 = opted out. The game creates the matchmaking settings itself (O_JS, O_GM,
++        // O_MIN, ... via 0x812920 from 0x82926c); serving those, or O_FWD_EMAIL/O_EGstat, corrupts the settings
++        // manager's listener list (PPU 0x828b88).
++        static readonly string[] UserSettings = { "O_SPAMEA", "O_SPAMPART" };
 +        // The five groups NHL 15 names in its EBOOT (O_SG_*)
 +        static readonly string[] Groups = { "O_SG_NRAD", "O_SG_QMSG", "O_SG_SYSS", "O_SG_TCKR", "O_SG_USER" };
 +
 +        static SettingGroup Group(string id) => new()
 +        {
 +            Id = id,
-+            SettingList = id == "O_SG_TCKR" ? TickerSettings.ToList() : new(),
++            SettingList = id switch { "O_SG_TCKR" => TickerSettings.ToList(), "O_SG_USER" => UserSettings.ToList(), _ => new() },
 +            ViewList = id == "O_SG_USER" ? UserViews.Select(v => new SettingView { Id = v }).ToList() : new()
 +        };
 +
@@ -96,7 +100,7 @@ index 0000000..b38090b
 +                ? new FetchSettingsGroupsResponse { SettingGroupList = Groups.Select(Group).ToList() }
 +                : new FetchSettingsResponse
 +                {
-+                    IntegerSettingList = TickerSettings.Select(s => new SettingInteger { Id = s, Default = 0 }).ToList()
++                    IntegerSettingList = TickerSettings.Concat(UserSettings).Select(s => new SettingInteger { Id = s, Default = 0 }).ToList()
 +                };
 +            await user.Stream.WriteAsync(BlazeMessage.CreateResponseFromModel(packetBytes, response).Serialize());
 +        }
@@ -119,10 +123,10 @@ index 47fc237..a0ba629 100644
                      // USCL: components Skate 3 never uses (Rooms 21, Messaging 15, NBA Jam's 2249, ...).
                      // An empty success reads as "nothing there" to the client, where an error stops its login.
 diff --git a/docs/EA-Sports-Blaze3-heat2.md b/docs/EA-Sports-Blaze3-heat2.md
-index ccf2070..3cce542 100644
+index ccf2070..5fc5e8f 100644
 --- a/docs/EA-Sports-Blaze3-heat2.md
 +++ b/docs/EA-Sports-Blaze3-heat2.md
-@@ -164,41 +164,53 @@ unix socket: `printf 'press A 120' | socat - UNIX-CONNECT:<sock>` (buttons A/B/X
+@@ -164,41 +164,72 @@ unix socket: `printf 'press A 120' | socat - UNIX-CONNECT:<sock>` (buttons A/B/X
  
  ---
  
@@ -161,7 +165,7 @@ index ccf2070..3cce542 100644
 -
 -**Madden 25** hits the same *class* of crash earlier (FGGameSim PPU null-deref ~52s) — very
 -likely the same "real missing data" problem, now that the shared login path works.
-+## 6. OSDKSettings (component 2249) — the "ticker" crash, solved; next: the user settings
++## 6. OSDKSettings (2249) and the online menus — ticker + user settings solved; next: the roster check
 +
 +**Component `0x08C9` (2249) is `Blaze::OSDKSettings`**, not "OsdkTicker2": `fetchSettings` = 1,
 +`fetchSettingsGroups` = 2 (also found by the FIFA 17 project). The old crash at PC `0x008b1aec`
@@ -186,25 +190,44 @@ index ccf2070..3cce542 100644
 +**Served now** (`Blaze/Components/OSDKSettings/OSDKSettings.cs`): the five groups
 +`O_SG_NRAD/QMSG/SYSS/TCKR/USER`; `O_SG_TCKR` holds the integer settings `O_TKfriend`, `O_TKsport`,
 +`O_TKfilter` (the ticker update `0x8b1aa0` reads `O_TKfilter` with no null check); `O_SG_USER`
-+has the views `MUPSET`, `INV`, `UGEN`, `UACCT`. Result (2026-11-12): NHL gets past the ticker,
-+runs Stats 15, Util 12, Stats 3, Authentication 30, then stops at the next lookup.
++has the views `MUPSET`, `INV`, `UGEN`, `UACCT` and the integer settings `O_SPAMEA`, `O_SPAMPART`
++(below).
 +
 +**Ruled out:** an error for 2249 (`ERR_COMPONENT_NOT_FOUND`) — no crash, but the game logs out
 +("The EA servers are not available at this time") right after it.
 +
-+**Next crash — `0x007a2840`:** `O_SG_USER` → view `UACCT` (group vtable `0x3c`) → setting
-+`O_SPAMEA` (view vtable `0x20`) → null. The game reads the user settings from the name table at
-+`0x2276104..0x227615c`: `O_SPAMEA O_SPAMPART O_FWD_EMAIL O_EGstat O_JS O_HM O_PR O_SS O_SD O_CP
-+O_NT O_GEO O_RK O_MIN O_MAX O_DSR O_DNF O_GM O_LN O_HV O_PM O_MYPT O_OPPT`. They must be served
-+(view data alone, without settings, still returns null) **and each with its real type**:
-+- all as integers: heap corruption, the settings manager's listener list ends up holding a setting
-+  name (`0x828b88`, reads `"O_EG"+4`); with `O_EGstat` a string it moves to `O_JS` — so those are
-+  strings (or need something integers lack);
-+- all as strings: `O_GM` crashes in a string copy (`0xbe7a68`) — the game calls vtable `0x64` on it with
-+  3 values {1,2,3} + labels (`0xf3e648`), i.e. it is an **integer with possible values** (`MPVL`).
-+Per-setting types have to come from the code that uses each one (slot calls after the lookup);
-+`viewmap`-style scans pair settings with views: UACCT = O_SPAMEA/O_SPAMPART, UGEN = O_EGstat/
-+O_FWD_EMAIL, INV ⊂ MUPSET = the matchmaking ones.
++**User settings (solved 2026-11-13).** `O_SG_USER` → view `UACCT` (group vtable `0x3c`) → setting
++`O_SPAMEA` (view vtable `0x20`, PPU `0x7a2840`), then `O_SPAMPART` (`0x7a2878`), with no null check.
++The game **creates the matchmaking settings itself**: `0x82926c` calls the "integer with possible values"
++constructor wrapper `0x812920` for `O_NT O_GEO O_JS O_HM O_SS O_SD O_PR O_CP O_MYPT O_OPPT O_HV O_PM O_MIN
++O_MAX O_DSR O_RK O_GM O_LN O_DNF` (plus `O_MYT O_OPT O_DDP_FULL O_TT O_ARNA` elsewhere). The server
++defines only the account opt-ins **`O_SPAMEA` and `O_SPAMPART`** (integers, 0) in `O_SG_USER`'s `LSET`.
++Serving more (all 23, or `O_FWD_EMAIL`/`O_EGstat`) leaves a setting name in the settings manager's
++listener list and crashes at `0x828b88` (`this` = `"O_EG"`/`"O_NT"`). How to find who creates what:
++the three concrete setting classes all call the base constructor `0x805df0` (string `0x806018`,
++integer `0x8122dc`, integer-with-values `0x8126f4`); list the callers of their wrappers.
++
++After that NHL shows the EA account screen (`nobody@nobody.com`), the terms screen (empty text: we
++answer `localizeStrings`/`getTosContent` empty), and reaches the **main menu online**.
++
++**Dynamic messages — `0x7f9528` (client patch).** The menu's OSDK message rotation (`0x7f94e4`, armed
++by NHL's widget `0x107de2c`) reads message 0 of its list without checking the list has one
++(`0x7f9010` returns null when empty). Component **2250 is OsdkDynamicMessaging** (`getMessages` = 1:
++`MessageRequest {EXCL, LCAL, MODE, TITL, TOKN}` → `MessageResponse {ENUM, MSGS list<MessageItem>}`,
++`MessageItem {DATA, FMAT, HINT, IMGS, MUID, TEXT list<MessagePart{DATA, DURN}>, TITL, TYPE}`).
++Serving messages did **not** fill the list (16 messages over every TYPE/FMAT; also with the only filter
++`0x7facb0` patched to accept all), and an error reply crashes the same way — so the fix is client-side:
++RPCS3 built-in USCL patch "dynamic messages with none to show" (uscl-rpcs3 patch 0012) moves the null
++check in front of the call. A game patch probe: test config `patches/imported_patch.yml` +
++`patch_config.yml`, run **without** `USCL_ONLINE` (the fork turns game patches off online; built-in USCL
++patches still apply). `USCL_LOGPOINTS` (interpreter only, offline) is the other probe.
++
++**Now (2026-11-13):** main menu, PLAY → ONLINE (GM connected, Online Versus Play, EASHL, Arena, Team
++Play, Shootout) and the Online Versus Play hub all work. **Next blocker: "A roster update is available.
++You must update to the latest rosters to enter a match."** when searching. The `OSDK_ROSTER` client
++config (we send it empty) names the keys for the roster check: `ROSTER_URL` (default `"URL"`),
++`ROSTER_VER` (default `"CRC"`), `ROSTER_CSUM` (read at `0x89221c`); their values go to the roster
++checker (`*0x2276708` → vtable `0x10`). The CRC NHL compares against is not known yet.
 +
 +**Madden 25** hits the same *class* of crash earlier (FGGameSim PPU null-deref ~52s) — likely the
 +same "missing data" problem; it shares this OSDK, so the OSDKSettings work carries over.

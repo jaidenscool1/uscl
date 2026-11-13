@@ -42,14 +42,15 @@ The game reaches it through RPCS3's IP swap list (every `gosredirector.*.ea.com`
 - **0010–0012**: the heat2 login: the real `ConsoleLoginResponse` and the `UserAuthenticated` notification.
 - **0013**: the shared **Stats** component (`getKeyScopesMap`).
 - **0014**: the full write-up, `docs/EA-Sports-Blaze3-heat2.md` (it lands in the built server tree).
-- **0015**: **OSDKSettings** (component 2249): the settings groups, ticker settings and user views NHL 15 looks up.
+- **0015**: **OSDKSettings** (component 2249): the settings groups, ticker settings, user views and account settings
+  NHL 15 looks up (it also needs uscl-rpcs3 patch 0012 for its dynamic-message rotation).
 
 ## Status
 | Game | Blaze | Where it is |
 |---|---|---|
 | Skate 3 (`BLUS30464`) | 2.x | the upstream server, unmodified ([notes](../games/BLUS30464.md)) |
 | NBA Jam (`BLUS30696`) | 2.11 (heat1) | two players sign in, matchmake into one lobby and reach team select; the relay carries game traffic both ways (two copies on one PC, 2026-11-07) ([notes](../games/BLUS30696.md)) |
-| NHL 15 (`BLUS31436`) | 3.19 (heat2) | **logs in and connects**; past the ticker crash (patch 0015), next stop is the OSDK user settings ([notes](../games/BLUS31436.md)) |
+| NHL 15 (`BLUS31436`) | 3.19 (heat2) | **reaches the main menu and the Online Versus Play hub** (patch 0015 + uscl-rpcs3 0012); next is the roster check ([notes](../games/BLUS31436.md)) |
 | Madden NFL 25 (`BLUS31178`) | 13.3 (heat2) | shares NHL's login; hits an RPCS3 FGGameSim crash (~52 s) first ([notes](../games/BLUS31178.md)) |
 
 ## Blaze 3.x "heat2" (NHL 15, Madden 25)
