@@ -295,7 +295,7 @@ bool Online::supports(const QString& serial)
 	// RPCN alone is enough for these (GAMES.md); the rest need a preset's servers
 	static const QStringList rpcn_only = {"BLUS31426"}; // Minecraft
 	// Wii (Dolphin NetPlay): library ids are "Wii-<name>" (uscl-shell/tools/scan_emu_games.py)
-	return SwitchCore::isSerial(serial) || serial.startsWith("Wii-") || *presetFor(serial).bridge || rpcn_only.contains(serial);
+	return SwitchCore::isSerial(serial) || serial.startsWith("Wii-") || serial.startsWith("3DS-") || *presetFor(serial).bridge || rpcn_only.contains(serial);
 }
 
 bool Online::steamRunning()
@@ -519,7 +519,7 @@ bool Online::start(service s, const QString& tool, const QStringList& args, cons
 				return;
 			// one part stopped on its own: end the session so nothing is left half running
 			const QString why = m_message.isEmpty()
-				? (s == bridge ? tr("The Steam connection closed.") : s == rpcn ? tr("The online server stopped.") : s == switch_room ? tr("The Switch room stopped.") : tr("The Call of Duty server stopped."))
+				? (s == bridge ? tr("The Steam connection closed.") : s == rpcn ? tr("The online server stopped.") : s == switch_room ? tr("The room server stopped.") : tr("The Call of Duty server stopped."))
 				: m_message;
 			stop();
 			setState("off", why);
@@ -595,6 +595,33 @@ void Online::host(const QString& serial, const QString& title, const QString& pa
 		env.insert("USCL_KICKS", data + "/kicks.txt");
 		env.insert("USCL_GAME", serial);
 		start(bridge, toolPath("uscl-bridge"), {"host", "dolphin"}, QCoreApplication::applicationDirPath(), env);
+		return;
+	}
+	if (console == "3DS")
+	{
+		// Azahar room (local wireless / Download Play): our azahar-room on UDP 24872, every player's Azahar joins it
+		// (the host's directly, the others through the bridge's "3ds" preset); uscl-3ds/
+		if (Launcher::ownAzahar().isEmpty() || Launcher::ownAzahar("azahar-room").isEmpty())
+		{
+			setState("off", tr("Online 3DS games need USCL's Azahar (uscl-3ds). Set USCL_AZAHAR and USCL_AZAHAR_ROOM."));
+			return;
+		}
+		m_game = title;
+		setState("starting");
+		m_host_game = serial;
+		const QString data = dataDir();
+		QDir().mkpath(data);
+		// shortcut: azahar-room has no bind address, so it listens on every interface; the bridge is the way in
+		if (!start(switch_room, Launcher::ownAzahar("azahar-room"),
+		           {"--room-name", "USCL 3DS", "--port", "24872", "--max_members", "8", "--preferred-app", title}, data,
+		           QProcessEnvironment::systemEnvironment()))
+			return;
+		QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+		QFile::remove(data + "/kicks.txt");
+		env.insert("USCL_BANS", data + "/bans.txt");
+		env.insert("USCL_KICKS", data + "/kicks.txt");
+		env.insert("USCL_GAME", serial);
+		start(bridge, toolPath("uscl-bridge"), {"host", "3ds"}, QCoreApplication::applicationDirPath(), env);
 		return;
 	}
 	const preset p = presetFor(serial);

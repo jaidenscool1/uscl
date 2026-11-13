@@ -129,8 +129,8 @@ Window {
     function launchGame(g) {
         if (prefs.autoControllers) launcher.prepareInput(gamepad.names, g.console)   // every console: pads -> players 1, 2...
         if (g.console === "Wii" || g.console === "WiiU" || g.console === "3DS" || g.console === "Xbox360") {   // Wii -> Dolphin, 3DS -> Azahar
-            // Wii in a session: our Dolphin hosts or joins NetPlay over the tunnel (the host starts once everyone's in)
-            var netplay = g.console !== "Wii" ? "" : online.state === "hosting" ? "host" : online.state === "joined" ? "join" : ""
+            // in a session: our Dolphin hosts or joins NetPlay (Wii), our Azahar joins the room (3DS), over the tunnel
+            var netplay = g.console !== "Wii" && g.console !== "3DS" ? "" : online.state === "hosting" ? "host" : online.state === "joined" ? "join" : ""
             if (launcher.startEmu(g.path, g.title, g.console, netplay, system.onlineName || online.steamName, online.players.length)) runningGame = g
             return
         }

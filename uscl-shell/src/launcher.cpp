@@ -143,6 +143,22 @@ QString Launcher::dolphinConfigDir()
 	                              : GameModel::rpcs3ConfigDir() + "uscl/dolphin/Config/";
 }
 
+// Our Azahar (uscl-3ds patches: joins a room by itself) and its room server, else the Flathub app (offline only)
+QString Launcher::ownAzahar(const QString& name)
+{
+	const QString var = name == "azahar-room" ? "USCL_AZAHAR_ROOM" : "USCL_AZAHAR";
+	const QString path = qEnvironmentVariableIsSet(var.toLatin1().constData()) ? qEnvironmentVariable(var.toLatin1().constData())
+	                                                                            : QCoreApplication::applicationDirPath() + "/" + name;
+	return QFileInfo(path).isExecutable() ? path : QString();
+}
+
+// Azahar's settings: our build gets a USCL profile (XDG dirs under uscl/azahar), the Flathub app its own
+QString Launcher::azaharConfigFile()
+{
+	return ownAzahar().isEmpty() ? QDir::homePath() + "/.var/app/org.azahar_emu.Azahar/config/azahar-emu/qt-config.ini"
+	                             : GameModel::rpcs3ConfigDir() + "uscl/azahar/config/azahar-emu/qt-config.ini";
+}
+
 bool Launcher::startEmu(const QString& path, const QString& title, const QString& console, const QString& netplay,
                         const QString& nickname, int players)
 {
@@ -174,6 +190,17 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 	}
 	else if (console == "Wii")
 		args = {"run", "org.DolphinEmu.dolphin-emu", "-b", "-e", path};
+	else if (console == "3DS" && !ownAzahar().isEmpty())
+	{
+		program = ownAzahar();
+		args = {path};
+		const QString profile = GameModel::rpcs3ConfigDir() + "uscl/azahar/";
+		env.insert("XDG_CONFIG_HOME", profile + "config");
+		env.insert("XDG_DATA_HOME", profile + "data");
+		// in a session: the room on the host's PC (UDP 24872), reached through the tunnel (uscl-bridge preset "3ds")
+		if (!netplay.isEmpty())
+			env.insert("USCL_ROOM", nickname + "@127.0.0.1:24872");
+	}
 	else if (console == "3DS")
 		args = {"run", "--env=LIBGL_ALWAYS_SOFTWARE=1", "org.azahar_emu.Azahar", path};
 	else if (console == "WiiU")
@@ -354,7 +381,7 @@ bool Launcher::prepareInput(const QStringList& pads, const QString& console)
 	if (console == "Wii" || console == "GameCube")
 		return PadConfig::writeDolphin(PadConfig::connected(), dolphinConfigDir());
 	if (console == "3DS")
-		return PadConfig::writeAzahar(PadConfig::connected());
+		return PadConfig::writeAzahar(PadConfig::connected(), azaharConfigFile());
 	if (console == "WiiU")
 		return PadConfig::writeCemu(PadConfig::connected());
 	if (console != "PS3")

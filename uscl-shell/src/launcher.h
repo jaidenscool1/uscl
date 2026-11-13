@@ -28,6 +28,8 @@ public:
 	Q_INVOKABLE static bool ownDolphinFound() { return !ownDolphin().isEmpty(); }
 	static QString ownDolphin();
 	static QString dolphinConfigDir();
+	static QString ownAzahar(const QString& name = "azahar"); // or "azahar-room"
+	static QString azaharConfigFile();
 	Q_INVOKABLE bool openSwitchSettings();
 	Q_INVOKABLE static QString switchStatus(const QString& path = {});
 	Q_INVOKABLE static QString importSwitchKeys(const QString& path);
