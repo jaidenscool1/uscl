@@ -1,5 +1,6 @@
 #include "online.h"
 #include "games.h"
+#include "launcher.h"
 #include "switchcore.h"
 
 #include <QCoreApplication>
@@ -293,7 +294,8 @@ bool Online::supports(const QString& serial)
 {
 	// RPCN alone is enough for these (GAMES.md); the rest need a preset's servers
 	static const QStringList rpcn_only = {"BLUS31426"}; // Minecraft
-	return SwitchCore::isSerial(serial) || *presetFor(serial).bridge || rpcn_only.contains(serial);
+	// Wii (Dolphin NetPlay): library ids are "Wii-<name>" (uscl-shell/tools/scan_emu_games.py)
+	return SwitchCore::isSerial(serial) || serial.startsWith("Wii-") || *presetFor(serial).bridge || rpcn_only.contains(serial);
 }
 
 bool Online::steamRunning()
@@ -571,6 +573,28 @@ void Online::host(const QString& serial, const QString& title, const QString& pa
 		env.insert("USCL_KICKS", data + "/kicks.txt");
 		env.insert("USCL_GAME", serial);
 		start(bridge, toolPath("uscl-bridge"), {"host", "switch"}, QCoreApplication::applicationDirPath(), env);
+		return;
+	}
+	if (console == "Wii")
+	{
+		// Dolphin NetPlay: the host's Dolphin is the server (UDP 2626), started with the game once the session is up;
+		// the bridge carries it to everyone (preset "dolphin", uscl-dolphin/)
+		if (!Launcher::ownDolphinFound())
+		{
+			setState("off", tr("Online Wii games need USCL's Dolphin (uscl-dolphin). Set USCL_DOLPHIN to its dolphin-emu."));
+			return;
+		}
+		m_game = title;
+		setState("starting");
+		m_host_game = serial;
+		const QString data = dataDir();
+		QDir().mkpath(data);
+		QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+		QFile::remove(data + "/kicks.txt");
+		env.insert("USCL_BANS", data + "/bans.txt");
+		env.insert("USCL_KICKS", data + "/kicks.txt");
+		env.insert("USCL_GAME", serial);
+		start(bridge, toolPath("uscl-bridge"), {"host", "dolphin"}, QCoreApplication::applicationDirPath(), env);
 		return;
 	}
 	const preset p = presetFor(serial);

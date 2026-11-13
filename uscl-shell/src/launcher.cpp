@@ -154,7 +154,7 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 	if (console == "Wii" && !ownDolphin().isEmpty())
 	{
 		program = ownDolphin();
-		args = {"-u", QDir(dolphinConfigDir()).absoluteFilePath("..")};
+		args = {"-u", QDir(dolphinConfigDir()).absoluteFilePath(".."), "-C", "Dolphin.Analytics.PermissionAsked=True"};
 		if (netplay.isEmpty())
 			args << "-b" << "-e" << path;
 		else
