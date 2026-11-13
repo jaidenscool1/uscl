@@ -5,6 +5,7 @@
 #include "gameupdates.h"
 #include "launcher.h"
 #include "padconfig.h"
+#include "gameart.h"
 #include "online.h"
 #include "system.h"
 #include "updater.h"
@@ -157,6 +158,26 @@ namespace
 			check(PadConfig::azaharButton(0, false).endsWith("button:1") && PadConfig::azaharButton(0, true).endsWith("button:0") &&
 			      PadConfig::azaharButton(14, false).contains("axis:4") && PadConfig::azaharButton(12, false).isEmpty() &&
 			      PadConfig::azaharButton(0, false).contains("maptype:all"), "Azahar buttons");
+		}
+		{
+			// game art: libretro names match our titles and file names; ids come out of Wii / 3DS game files
+			check(GameArt::normName("Legend of Zelda, The - A Link Between Worlds (USA) (En,Fr,Es)") == GameArt::normName("Legend of Zelda: A Link Between Worlds") &&
+			      GameArt::normName("Pokémon X (USA)") == GameArt::normName("Pokemon X"), "art name matching");
+			const auto names = GameArt::parseListing("<a href=\"Mario%20Kart%207%20%28Europe%29.png\">x</a><a href=\"Mario%20Kart%207%20%28USA%29.png\">x</a><a href=\"../\">up</a>");
+			check(names.size() == 1 && names.value(GameArt::normName("Mario Kart 7")) == "Mario Kart 7 (USA)", "art listing (prefers USA)");
+			QTemporaryFile wbfs, cci;
+			if (wbfs.open() && cci.open())
+			{
+				QByteArray w(0x206, '\0');
+				w.replace(0, 4, "WBFS"); w.replace(0x200, 6, "SP2E01");
+				wbfs.write(w); wbfs.flush();
+				QByteArray c(0x600, '\0');
+				c.replace(0x100, 4, "NCSD"); c[0x120] = 1; // partition 0 at 1 * 0x200
+				c.replace(0x300, 4, "NCCH"); c.replace(0x350, 10, "CTR-P-AMKE");
+				cci.write(c); cci.flush();
+				check(GameArt::gameId(wbfs.fileName(), "Wii") == "SP2E01" && GameArt::gameId(cci.fileName(), "3DS") == "AMKE" &&
+				      GameArt::gameId(wbfs.fileName(), "3DS").isEmpty(), "Wii / 3DS game ids");
+			}
 		}
 
 		check(Updater::compareVersions("v0.4.0", "0.3.9") > 0 && Updater::compareVersions("0.3.0", "0.3.0-test") > 0 &&

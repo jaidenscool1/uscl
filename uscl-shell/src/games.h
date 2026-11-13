@@ -4,6 +4,8 @@
 #include <QMap>
 #include <QVector>
 
+class GameArt;
+
 // PS3 and PS4 games keep their existing YAML lists; Switch uses a separate JSON library.
 class GameModel : public QAbstractListModel
 {
@@ -12,12 +14,13 @@ class GameModel : public QAbstractListModel
 	Q_PROPERTY(bool scanning READ scanning NOTIFY scanningChanged)
 
 public:
-	enum Role { TitleRole = Qt::UserRole + 1, SerialRole, PathRole, IconRole, ConsoleRole, VersionRole };
+	enum Role { TitleRole = Qt::UserRole + 1, SerialRole, PathRole, IconRole, ConsoleRole, VersionRole, PicRole };
 
 	struct Game
 	{
 		QString title, serial, path, icon, console;
 		QString version; // the disc's, or the installed update's when newer: "01.19"
+		QString pic;     // preview picture behind the menus: PIC1.PNG, or downloaded art
 	};
 
 	explicit GameModel(QObject* parent = nullptr);
@@ -67,5 +70,6 @@ private:
 	void loadEmuGames(); // append Wii/3DS games from uscl/emu_games.json (run via Dolphin/Azahar, not RPCS3)
 
 	QVector<Game> m_games;
+	GameArt* m_art;
 	bool m_scanning = false;
 };

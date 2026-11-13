@@ -12,6 +12,7 @@ Item {
     property bool fromHome: true
     signal sound(string name)
     signal back()
+    signal showOptions(var entry)   // △ on a row with its own options (a game in its console's list)
 
     readonly property int colLeft: 460      // 200 + SHIFT
     readonly property int focTop: 440
@@ -25,6 +26,7 @@ Item {
         else if (b === "down" && current < rows.length - 1) { current++; sound("cursor") }
         else if (b === "l1" && current > 0) { current = Math.max(0, current - 5); sound("cursor") }
         else if (b === "r1" && current < rows.length - 1) { current = Math.min(rows.length - 1, current + 5); sound("cursor") }
+        else if (b === "options" && cur && cur.options) { sound("select"); showOptions(cur) }
         else if ((b === "accept" || b === "right" || b === "options") && cur) {
             if (cur.disabled) { if (b === "accept") sound("error"); return }
             if (b === "right" && !cur.choices) return
@@ -85,11 +87,14 @@ Item {
                 opacity: modelData.disabled ? 0.45 : 1
                 Behavior on y { NumberAnimation { duration: 180; easing.type: Easing.OutSine } }
 
+                // wide: a PS3 game icon (320x176), right-aligned to the same edge so titles line up
                 Image {
-                    x: row.sel ? 150 : 158; y: row.sel ? 32 : 21
-                    width: row.sel ? 58 : 42; height: width
+                    readonly property real h: row.sel ? 58 : 42
+                    width: row.modelData.wide ? h * 1.82 : h; height: h
+                    x: (row.sel ? 208 : 200) - width; y: row.sel ? 32 : 21
                     source: row.modelData.icon || "qrc:/qt/qml/Uscl/xmb/ui/setting_dot.png"
                     opacity: row.sel ? 1 : 0.63; mipmap: true; fillMode: Image.PreserveAspectFit
+                    asynchronous: true
                 }
                 Text {
                     x: 230; y: row.sel ? 32 : 0

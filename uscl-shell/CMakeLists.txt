@@ -22,6 +22,7 @@ qt_add_executable(uscl
     src/gamepad.cpp src/gamepad.h
     src/launcher.cpp src/launcher.h
     src/padconfig.cpp src/padconfig.h
+    src/gameart.cpp src/gameart.h
     src/system.cpp src/system.h
     src/online.cpp src/online.h
     src/updater.cpp src/updater.h

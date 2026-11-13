@@ -1,5 +1,6 @@
 #include "games.h"
 
+#include "gameart.h"
 #include "gameupdates.h"
 #include "switchcore.h"
 
@@ -55,8 +56,9 @@ bool GameModel::isPs4Serial(const QString& serial)
 }
 
 GameModel::GameModel(QObject* parent)
-	: QAbstractListModel(parent)
+	: QAbstractListModel(parent), m_art(new GameArt(this))
 {
+	connect(m_art, &GameArt::updated, this, &GameModel::reload); // downloaded icons / previews show up
 	reload();
 }
 
@@ -211,7 +213,9 @@ bool GameModel::describe(const QString& path, Game& game) const
 	}
 	const QFileInfo info(path);
 	QByteArray sfo, icon;
-	QString icon_file;
+	QString icon_file, pic_file;
+	const QString cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/icons/";
+	const QString cache_name = cache + QCryptographicHash::hash(path.toUtf8(), QCryptographicHash::Sha1).toHex().left(16);
 
 	bool ps4 = false;
 	if (isPs4Dir(path))
@@ -220,12 +224,22 @@ bool GameModel::describe(const QString& path, Game& game) const
 		if (f.open(QIODevice::ReadOnly))
 			sfo = f.readAll();
 		icon_file = path + "/sce_sys/icon0.png";
+		pic_file = QFileInfo::exists(path + "/sce_sys/pic1.png") ? path + "/sce_sys/pic1.png" : path + "/sce_sys/pic0.png";
 		ps4 = true;
 	}
 	else if (info.isFile() && path.endsWith(".iso", Qt::CaseInsensitive))
 	{
 		sfo = readIsoFile(path, {"PS3_GAME", "PARAM.SFO"});
 		icon = readIsoFile(path, {"PS3_GAME", "ICON0.PNG"});
+		// the background picture: read out of the ISO once, then from the cache
+		pic_file = cache_name + "-pic1.png";
+		if (!QFileInfo::exists(pic_file) && QDir().mkpath(cache))
+			if (const QByteArray pic = readIsoFile(path, {"PS3_GAME", "PIC1.PNG"}); !pic.isEmpty())
+			{
+				QFile out(pic_file);
+				if (out.open(QIODevice::WriteOnly))
+					out.write(pic);
+			}
 	}
 	else
 	{
@@ -240,6 +254,7 @@ bool GameModel::describe(const QString& path, Game& game) const
 				{
 					sfo = f.readAll();
 					icon_file = dir.filePath(sub + "ICON0.PNG");
+					pic_file = dir.filePath(sub + "PIC1.PNG");
 					break;
 				}
 			}
@@ -273,15 +288,16 @@ bool GameModel::describe(const QString& path, Game& game) const
 	if (!icon.isEmpty())
 	{
 		// ISOs: keep the icon in our cache so QML can load it as a file
-		const QString cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/icons/";
 		QDir().mkpath(cache);
-		icon_file = cache + QCryptographicHash::hash(path.toUtf8(), QCryptographicHash::Sha1).toHex().left(16) + ".png";
+		icon_file = cache_name + ".png";
 		QFile out(icon_file);
 		if (!out.exists() && out.open(QIODevice::WriteOnly))
 			out.write(icon);
 	}
 	if (!icon_file.isEmpty() && QFileInfo::exists(icon_file))
 		game.icon = QUrl::fromLocalFile(icon_file).toString();
+	if (!pic_file.isEmpty() && QFileInfo::exists(pic_file))
+		game.pic = QUrl::fromLocalFile(pic_file).toString();
 	return !game.title.isEmpty();
 }
 
@@ -321,11 +337,24 @@ void GameModel::reload()
 
 	loadEmuGames();
 
+	// games with no icon or preview of their own: art downloaded earlier, and fetch what's still missing
+	QList<GameArt::Want> missing;
+	for (Game& g : m_games)
+	{
+		if (g.icon.isEmpty())
+			g.icon = GameArt::cached(g.path, "icon");
+		if (g.pic.isEmpty())
+			g.pic = GameArt::cached(g.path, "pic");
+		if (g.icon.isEmpty() || g.pic.isEmpty())
+			missing << GameArt::Want{g.path, g.title, g.console, g.serial};
+	}
+
 	std::sort(m_games.begin(), m_games.end(), [](const Game& a, const Game& b) {
 		return QString::localeAwareCompare(a.title, b.title) < 0;
 	});
 	endResetModel();
 	emit countChanged();
+	m_art->fetch(missing);
 }
 
 // Wii/3DS games aren't in RPCS3's games.yml; USCL keeps them in emu_games.json next to games.yml
@@ -372,13 +401,14 @@ QVariant GameModel::data(const QModelIndex& index, int role) const
 	case IconRole: return g.icon;
 	case ConsoleRole: return g.console;
 	case VersionRole: return g.version;
+	case PicRole: return g.pic;
 	default: return {};
 	}
 }
 
 QHash<int, QByteArray> GameModel::roleNames() const
 {
-	return {{TitleRole, "title"}, {SerialRole, "serial"}, {PathRole, "path"}, {IconRole, "icon"}, {ConsoleRole, "console"}, {VersionRole, "version"}};
+	return {{TitleRole, "title"}, {SerialRole, "serial"}, {PathRole, "path"}, {IconRole, "icon"}, {ConsoleRole, "console"}, {VersionRole, "version"}, {PicRole, "pic"}};
 }
 
 QVariantMap GameModel::get(int row) const
@@ -386,7 +416,7 @@ QVariantMap GameModel::get(int row) const
 	if (row < 0 || row >= m_games.size())
 		return {};
 	const Game& g = m_games[row];
-	return {{"title", g.title}, {"serial", g.serial}, {"path", g.path}, {"icon", g.icon}, {"console", g.console}, {"version", g.version}};
+	return {{"title", g.title}, {"serial", g.serial}, {"path", g.path}, {"icon", g.icon}, {"console", g.console}, {"version", g.version}, {"pic", g.pic}};
 }
 
 namespace

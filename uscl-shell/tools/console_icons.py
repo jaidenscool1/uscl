@@ -105,10 +105,21 @@ def nds3(d, S):
     # hinge line between them
     d.line([int(S*0.20), int(S*0.49), int(S*0.80), int(S*0.49)], fill=255, width=int(t*0.8))
 
+# --- Switch: the tablet with a controller on each side (stick dot left, button dot right) ---
+def switch(d, S):
+    t = int(S * 0.05)
+    y0, y1 = int(S*0.28), int(S*0.72)
+    rrect(d, [int(S*0.26), y0, int(S*0.74), y1], int(S*0.03), outline_w=t)          # tablet
+    rrect(d, [int(S*0.06), y0, int(S*0.22), y1], int(S*0.08), outline_w=t)          # left controller
+    rrect(d, [int(S*0.78), y0, int(S*0.94), y1], int(S*0.08), outline_w=t)          # right controller
+    r = int(S*0.03)
+    d.ellipse([int(S*0.14)-r, int(S*0.42)-r, int(S*0.14)+r, int(S*0.42)+r], fill=255)  # stick
+    d.ellipse([int(S*0.86)-r, int(S*0.56)-r, int(S*0.86)+r, int(S*0.56)+r], fill=255)  # buttons
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     for name, fn in [("cat_ps3", ps3), ("cat_ps4", ps4), ("cat_wii", wii), ("cat_wiiu", wiiu),
-                     ("cat_3ds", nds3), ("cat_x360", x360)]:
+                     ("cat_3ds", nds3), ("cat_x360", x360), ("cat_switch", switch)]:
         render(fn).save(os.path.join(OUT, name + ".png"))
         print("wrote", name + ".png")
 

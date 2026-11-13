@@ -17,7 +17,11 @@ Settings → All Settings opens the classic RPCS3 window.
 - **First start:** setup asks for an online name (your Steam name, read from Steam's `loginusers.vdf`, is the
   default), installs the PS3 system software (from a `PS3UPDAT.PUP` it finds, or downloaded from Sony's update
   server) and finds your games. Settings → Run Setup Again repeats it.
-- **Game:** your games; △ for Start / Host an online session / Information. Add Games walks a folder and
+- **Game:** one entry per console you have games for (PlayStation 3, PS4, Switch, Wii, Wii U, 3DS, Xbox 360); ✕ opens
+  that console's games, △ on a game for Start / Host an online session / Information. The focused game's picture
+  (PIC1.PNG) shows behind the menus. Games with no icon or picture of their own (everything but PS3/PS4) get them
+  downloaded once into the cache (`gameart.cpp`: Switch from api.nlib.cc by title id, Wii/3DS covers from GameTDB by
+  the id in the game file, the rest and the pictures from libretro's thumbnails by name). Add Games walks a folder and
   everything inside it (disc folders, ISOs, installed games, Switch `.nsp`/`.xci`) and adds what it finds: PS3
   games to RPCS3's `games.yml`, PS4 games to `uscl/ps4_games.yml`, Switch games to the Switch library. Wii, 3DS,
   Wii U and Xbox 360 games are listed in `emu_games.json` next to `games.yml`.

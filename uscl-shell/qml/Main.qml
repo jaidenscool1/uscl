@@ -686,18 +686,21 @@ Window {
 
     // ---------------------------------------------------------------- the crossbar
 
-    // column order: Users, Settings, Online, Games, Party, Friends
-    // games are split into one XMB column per console starting at gamesCat (3); Party/Friends follow them
+    // column order: Users, Settings, Online, Games, Party, Friends. Games has one entry per console you have games
+    // for; ✕ on one opens its games, like the PS3's Game column entries open their lists
     readonly property var presentConsoles: {
         games.count
-        var order = ["PS3", "PS4", "Wii", "WiiU", "3DS", "Xbox360"], set = ({})
+        var order = ["PS3", "PS4", "Switch", "Wii", "WiiU", "3DS", "Xbox360"], set = ({})
         for (var i = 0; i < games.count; i++) set[games.get(i).console || "PS3"] = true
-        var p = order.filter(function(c) { return set[c] })
-        return p.length ? p : ["PS3"]
+        return order.filter(function(c) { return set[c] }).concat(Object.keys(set).filter(function(c) { return order.indexOf(c) < 0 }))
     }
+    readonly property var consoleMeta: ({ "PS3": [qsTr("PlayStation 3"), "cat_ps3"], "PS4": [qsTr("PlayStation 4"), "cat_ps4"],
+                                          "Switch": [qsTr("Nintendo Switch"), "cat_switch"],
+                                          "Wii": [qsTr("Wii"), "cat_wii"], "WiiU": [qsTr("Wii U"), "cat_wiiu"],
+                                          "3DS": [qsTr("Nintendo 3DS"), "cat_3ds"], "Xbox360": [qsTr("Xbox 360"), "cat_x360"] })
     readonly property int gamesCat: 3
-    readonly property int partyCat: 3 + presentConsoles.length
-    readonly property int friendsCat: 4 + presentConsoles.length
+    readonly property int partyCat: 4
+    readonly property int friendsCat: 5
     property var cats: {
         games.count; games.scanning; system.onlineName; system.firmwareInstalled; system.firmwareVersion; gamepad.count; prefs.avatar
         online.state; online.session; online.message; online.friends; online.friendsLoading; online.friendsError; online.players; online.bans; cfgTick
@@ -713,23 +716,16 @@ Window {
                  action: function() { openPage(rowsFn, ic(icon), 1) } }
     }
 
-    function buildCats() {
-        var gameItems = []
-        // the game that keeps running behind the home screen, first, like the PS3's
-        if (launcher.running && runningGame) {
-            let g = runningGame
-            gameItems.push({ title: g.title, desc: qsTr("Running"), icon: g.icon || ic("it_games"), wide: !!g.icon, badge: qsTr("Running"),
-                             console: g.console || "PS3",
-                             action: resumeGame,
-                             options: function() { return [{ title: qsTr("Resume Game"), action: resumeGame },
-                                                           { title: qsTr("Close Game"), action: closeGame }] } })
-        }
-        for (var i = 0; i < games.count; i++) {
-            let g = games.get(i)
-            gameItems.push({
-                title: g.title, desc: gameUpdates.available[g.serial] ? updateInfo(g.serial) : g.serial, icon: g.icon || ic("it_games"), wide: !!g.icon,
-                console: g.console || "PS3",
-                badge: gameUpdates.available[g.serial] ? qsTr("Update") : "",
+    // one game: an XMB item (desc, badge) or a row of its console's page (help, value)
+    function gameItem(g) {
+        // PS3/PS4/Switch serials mean something; the other consoles' are made up from the file name
+        var named = ["PS3", "PS4", "Switch"].indexOf(g.console || "PS3") < 0
+        var desc = gameUpdates.available[g.serial] ? updateInfo(g.serial) : named ? (consoleMeta[g.console] || [g.console])[0] : g.serial
+        var badge = gameUpdates.available[g.serial] ? qsTr("Update") : ""
+        return {
+                title: g.title, desc: desc, help: desc, icon: g.icon || ic("it_games"), wide: !!g.icon && wideIcon(g),
+                pic: g.pic || "", console: g.console || "PS3",
+                badge: badge, value: badge,
                 action: function() { play(g) },
                 options: function() {
                     return [{ title: qsTr("Start"), action: function() { play(g) } },
@@ -748,10 +744,37 @@ Window {
                                 dialog.confirm(qsTr("Remove"), qsTr("Take %1 off the list? The game's files stay where they are.").arg(g.title), function() { games.remove(g.serial) })
                             } }].filter(Boolean)
                 }
-            })
         }
+    }
+    // PS3 icons (ICON0.PNG) are 320x176; covers and the other consoles' icons keep their own shape in a square
+    function wideIcon(g) { return (g.console || "PS3") === "PS3" }
+    function consoleGamesPage(c) {
+        var rows = []
+        for (var i = 0; i < games.count; i++) { let g = games.get(i); if ((g.console || "PS3") === c) rows.push(gameItem(g)) }
+        return rows.length ? rows : [{ title: qsTr("No games"), disabled: true }]
+    }
+
+    function buildCats() {
+        var gameItems = []
+        // the game that keeps running behind the home screen, first, like the PS3's
+        if (launcher.running && runningGame) {
+            let g = runningGame
+            gameItems.push({ title: g.title, desc: qsTr("Running"), icon: g.icon || ic("it_games"), wide: !!g.icon && wideIcon(g), badge: qsTr("Running"),
+                             pic: g.pic || "",
+                             action: resumeGame,
+                             options: function() { return [{ title: qsTr("Resume Game"), action: resumeGame },
+                                                           { title: qsTr("Close Game"), action: closeGame }] } })
+        }
+        // then one entry per console: ✕ opens its games
+        presentConsoles.forEach(function(c) {
+            var meta = consoleMeta[c] || [c, "cat_game"]
+            var titles = []
+            for (var i = 0; i < games.count; i++) if ((games.get(i).console || "PS3") === c) titles.push(games.get(i).title)
+            gameItems.push({ title: meta[0], icon: ic(meta[1]), desc: titles.length === 1 ? qsTr("1 game") : qsTr("%1 games").arg(titles.length), preview: titles,
+                             action: function() { openPage(function() { return consoleGamesPage(c) }, ic(meta[1]), gamesCat) } })
+        })
         var pending = Object.keys(gameUpdates.available).length
-        // the library-wide items live at the end of the first (default) console column
+        // the library-wide items follow the consoles
         var util = [
             { title: qsTr("Add Games"), icon: ic("it_addgames"), action: addGames,
               desc: games.scanning ? qsTr("Looking for games...") : qsTr("Find the games in a folder, and every folder inside it") },
@@ -762,18 +785,6 @@ Window {
                   : gameUpdates.checking ? qsTr("Checking for updates...") : qsTr("All your games are up to date") },
             { title: qsTr("How to Play"), icon: ic("it_help"), action: guide, desc: qsTr("Controls, quitting a game, and playing online") }
         ]
-        // split the games into one XMB column per console, each with its own console icon (PS3/PS4/Wii/3DS)
-        var consoleMeta = { "PS3": [qsTr("PlayStation 3"), "cat_ps3"], "PS4": [qsTr("PlayStation 4"), "cat_ps4"],
-                            "Wii": [qsTr("Wii"), "cat_wii"], "WiiU": [qsTr("Wii U"), "cat_wiiu"],
-                            "3DS": [qsTr("Nintendo 3DS"), "cat_3ds"], "Xbox360": [qsTr("Xbox 360"), "cat_x360"] }
-        var byConsole = {}
-        gameItems.forEach(function(it) { var k = it.console || "PS3"; (byConsole[k] = byConsole[k] || []).push(it) })
-        var consoleCats = presentConsoles.map(function(c, idx) {
-            var meta = consoleMeta[c] || [c, "cat_game"]
-            var items = (byConsole[c] || []).slice()
-            if (idx === 0) items = items.concat(util)   // default column also carries Add Games / Updates / Help
-            return { name: meta[0], icon: ic(meta[1]), items: items }
-        })
 
         var active = online.state !== "off"
         var steam = online.steamRunning()
@@ -845,11 +856,11 @@ Window {
                 settingsItem(qsTr("Accessory Settings"), qsTr("Controllers and button assignments"), "it_gamepad", accessoryPage),
                 settingsItem(qsTr("Network Settings"), qsTr("Online ID and the connection test"), "it_network", networkSettingsPage),
                 settingsItem(qsTr("System Settings"), qsTr("Language, system information and setup"), "it_system", systemSettingsPage) ] },
-            { name: qsTr("Online"), icon: ic("cat_network"), items: network }
-        ].concat(consoleCats, [
+            { name: qsTr("Online"), icon: ic("cat_network"), items: network },
+            { name: qsTr("Game"), icon: ic("cat_game"), items: gameItems.concat(util) },
             { name: qsTr("Party"), icon: ic("cat_party"), items: partyItems() },
             { name: qsTr("Friends"), icon: ic("cat_friends"), items: friends }
-        ])
+        ]
     }
 
     // ---------------------------------------------------------------- sounds
@@ -1000,11 +1011,21 @@ Window {
                 running: !launcher.running
             }
 
+            // the focused game's picture (PIC1.PNG, or downloaded art) behind the menus, like the PS3's
+            Image {
+                anchors.fill: parent
+                source: root.topPage ? (page.cur && page.cur.pic || "") : (xmb.current && xmb.current.pic || "")
+                fillMode: Image.PreserveAspectCrop
+                asynchronous: true
+                opacity: status === Image.Ready && !boot.running && !setup.open ? 0.28 : 0 // dim: the menus stay readable on bright title screens
+                Behavior on opacity { NumberAnimation { duration: 400 } }
+            }
+
             Xmb {
                 id: xmb
                 anchors.fill: parent
                 cats: root.cats
-                cat: prefs.xmbColumn
+                cat: Math.min(prefs.xmbColumn, root.friendsCat) // an older layout had a column per console
                 // the crossbar slides out to the left while an inner screen is open
                 opacity: root.topPage || setup.open || boot.running ? 0 : 1
                 transform: Translate { x: root.topPage ? -120 : 0; Behavior on x { NumberAnimation { duration: 200; easing.type: Easing.OutSine } } }
@@ -1036,6 +1057,7 @@ Window {
                 parentIcon: root.topPage ? root.topPage.parentIcon : ""
                 onSound: function(name) { root.sound(name) }
                 onBack: { if (root.topPage && root.topPage.back) root.topPage.back(); else root.popPage() }
+                onShowOptions: function(e) { options.show(e.options(), 0) }
             }
 
             ClockBox {
