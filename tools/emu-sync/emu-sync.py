@@ -26,6 +26,10 @@ FORKS = [
     {"name": "shadnet", "path": "/home/main/src/shadnet-uscl", "ours": "uscl",   "upstream": "main",   "build": None},
     {"name": "rpcn",    "path": "/home/main/src/rpcn-uscl",    "ours": "master", "upstream": "master", "build": None},
     {"name": "obde",    "path": "/home/main/src/obde-uscl",    "ours": "uscl",   "upstream": "main",   "build": None},
+    # Switch 2 core: follows nx2-experimental, the line Eglantine's daily builds ship (nx2, the default
+    # branch, lags it by hundreds of commits, Mario Kart World work included)
+    {"name": "eglantine", "path": "/home/main/src/eglantine", "ours": "uscl", "upstream": "nx2-experimental",
+     "build": "cmake --build build-uscl --target yuzu yuzu-cmd"},
 ]
 CONFIG = os.path.expanduser("~/.config/uscl/emu-sync.json")
 

@@ -295,7 +295,8 @@ bool Online::supports(const QString& serial)
 	// RPCN alone is enough for these (GAMES.md); the rest need a preset's servers
 	static const QStringList rpcn_only = {"BLUS31426"}; // Minecraft
 	// Wii (Dolphin NetPlay): library ids are "Wii-<name>" (uscl-shell/tools/scan_emu_games.py)
-	return SwitchCore::isSerial(serial) || serial.startsWith("Wii-") || serial.startsWith("3DS-") || *presetFor(serial).bridge || rpcn_only.contains(serial);
+	// Switch 2 (04...) runs on Eglantine, which has no USCL room join yet: offline only
+	return (SwitchCore::isSerial(serial) && !serial.startsWith("04")) || serial.startsWith("Wii-") || serial.startsWith("3DS-") || *presetFor(serial).bridge || rpcn_only.contains(serial);
 }
 
 bool Online::steamRunning()

@@ -1,0 +1,106 @@
+From 0cc724be426e2389a2930937574f03f815ae03be Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 14:35:18 -0700
+Subject: [PATCH 3/3] vulkan: upload staging and stream buffers in host-cached
+ memory on NVIDIA
+
+Texture uploads unswizzle straight into the staging buffer in 16-byte pieces
+scattered across rows. Into write-combined (Upload) or BAR-mapped (Stream)
+memory that ran at ~270 MB/s inside the emulator on an RTX 4060 / PCIe 3.0,
+so each streamed texture stalled the GPU thread 10-20 ms: most of the
+stutter. Host-cached memory takes the same writes at ~8 GB/s.
+
+Mario Kart World Grand Prix race, i5-10600K + RTX 4060:
+  fps 23 -> 30-44, p99 frame time ~140 ms -> ~50-70 ms,
+  frames over 50 ms per 10 s 142 -> 26-37.
+
+On by default for NVIDIA's proprietary driver only (the one measured);
+USCL_CACHED_STAGING=0/1 forces it off/on.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../vulkan_common/vulkan_memory_allocator.cpp | 33 ++++++++++++++++++-
+ 1 file changed, 32 insertions(+), 1 deletion(-)
+
+diff --git a/src/video_core/vulkan_common/vulkan_memory_allocator.cpp b/src/video_core/vulkan_common/vulkan_memory_allocator.cpp
+index 96a322a49..13f9fb86a 100644
+--- a/src/video_core/vulkan_common/vulkan_memory_allocator.cpp
++++ b/src/video_core/vulkan_common/vulkan_memory_allocator.cpp
+@@ -29,13 +29,31 @@
+ #include "video_core/vulkan_common/vulkan_wrapper.h"
+ #include "video_core/gpu_logging/gpu_logging.h"
+ #include "common/settings.h"
++#include <cstdlib>
+ 
+ namespace Vulkan {
+ namespace {
+ 
+ // Helpers translating MemoryUsage to flags/usage
+ 
++    // Upload staging and the stream buffer in host-cached memory instead of write-combined
++    // (Upload) or BAR-mapped device memory (Stream). The CPU writes texture data into these
++    // in 16-byte pieces scattered across rows; into write-combined/BAR memory that ran at ~270 MB/s
++    // inside the emulator on an RTX 4060 (PCIe 3.0), so uploads stalled the GPU thread for 10-20 ms
++    // a texture. Cached: ~8 GB/s; Mario Kart World races went from ~23 to ~44 fps and p99 frame
++    // times from ~140 to ~50 ms. Default on for NVIDIA's proprietary driver (the only one measured);
++    // USCL_CACHED_STAGING=0/1 forces it off/on. Set once by the MemoryAllocator constructor.
++    bool g_cached_staging = false;
++
++    bool CachedStagingFor(MemoryUsage usage) {
++        return g_cached_staging && (usage == MemoryUsage::Upload || usage == MemoryUsage::Stream);
++    }
++
+     [[maybe_unused]] VkMemoryPropertyFlags MemoryUsagePropertyFlags(MemoryUsage usage) {
++        if (CachedStagingFor(usage)) {
++            return VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
++                   VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
++        }
+         switch (usage) {
+             case MemoryUsage::DeviceLocal:
+                 return VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+@@ -56,7 +74,7 @@ namespace {
+     }
+ 
+     [[nodiscard]] VkMemoryPropertyFlags MemoryUsagePreferredVmaFlags(MemoryUsage usage) {
+-        if (usage == MemoryUsage::Download) {
++        if (usage == MemoryUsage::Download || CachedStagingFor(usage)) {
+             return VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+         }
+         return usage != MemoryUsage::DeviceLocal ? VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+@@ -64,6 +82,9 @@ namespace {
+     }
+ 
+     [[nodiscard]] VmaAllocationCreateFlags MemoryUsageVmaFlags(MemoryUsage usage) {
++        if (CachedStagingFor(usage)) {
++            return VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
++        }
+         switch (usage) {
+             case MemoryUsage::Upload:
+             case MemoryUsage::Stream:
+@@ -79,6 +100,9 @@ namespace {
+     }
+ 
+     [[nodiscard]] VmaMemoryUsage MemoryUsageVma(MemoryUsage usage) {
++        if (CachedStagingFor(usage)) {
++            return VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
++        }
+         switch (usage) {
+             case MemoryUsage::DeviceLocal:
+             case MemoryUsage::Stream:
+@@ -191,6 +215,13 @@ MemoryAllocator::MemoryAllocator(const Device &device_)
+             properties{device_.GetPhysical().GetMemoryProperties().memoryProperties},
+             buffer_image_granularity{
+                     device_.GetPhysical().GetProperties().limits.bufferImageGranularity} {
++    if (const char* const forced = std::getenv("USCL_CACHED_STAGING")) {
++        g_cached_staging = forced[0] != '0';
++    } else {
++        g_cached_staging = device.GetDriverID() == VK_DRIVER_ID_NVIDIA_PROPRIETARY;
++    }
++    LOG_INFO(Render_Vulkan, "Upload staging and stream buffers in {} memory",
++             g_cached_staging ? "host-cached" : "the default");
+ 
+     // Preserve the previous "RenderDoc small heap" trimming behavior that we had in original vma minus the heap bug
+     if (device.HasDebuggingToolAttached())
+-- 
+2.56.0
+
