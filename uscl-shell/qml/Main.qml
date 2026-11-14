@@ -118,7 +118,9 @@ Window {
         if (online.state === "starting" || online.state === "waiting") {
             dialog.show(qsTr("Online Session"), qsTr("Wait for the session to connect before starting the game.")); return
         }
-        if (online.state === "off" && online.supports(g.serial) && system.onlineName && online.steamRunning()) {
+        var goesOnline = online.state !== "off" || (online.supports(g.serial) && system.onlineName && online.steamRunning())
+        if (goesOnline && updateNeeded(g)) { updateFirst(g, function() { launchGame(g) }); return }
+        if (online.state === "off" && goesOnline) {
             onlineGame = g
             ownSession = true
             online.host(g.serial, g.title, g.path, g.console) // the game starts once the session is up (onStateChanged)
@@ -138,7 +140,18 @@ Window {
             if (prefs.autoScale) system.setRpcs3Value("Video", "Resolution Scale", String(autoScaleValue))
         }
         // shortcut: a game started before the session runs as it started (patches on); restart it to play online
-        if (launcher.startGame(g.path, g.title, online.state !== "off", g.console, system.onlineName || online.steamName)) runningGame = g
+        if (launcher.startGame(g.path, g.title, online.state !== "off" && !updateNeeded(g), g.console, system.onlineName || online.steamName)) runningGame = g
+    }
+    // USCL goes online only on a game's newest update, so everyone in a session runs the same game code
+    function updateNeeded(g) { return (g.console || "PS3") === "PS3" ? gameUpdates.requiredVersion(g.serial, g.version) : "" }
+    function updateFirst(g, offline) {
+        sound("error")
+        var buttons = []
+        if (gameUpdates.available[g.serial]) buttons.push({ title: qsTr("Update Game"), action: function() { installUpdates([g.serial]) } })
+        if (offline) buttons.push({ title: qsTr("Start Offline"), action: offline })
+        buttons.push({ title: qsTr("Cancel") })
+        dialog.show(qsTr("Game Updates"), qsTr("%1 needs update %2 to play online. You have %3.").arg(g.title).arg(updateNeeded(g)).arg(g.version || "01.00"),
+                    { buttons: buttons })
     }
     function gameTitle(serial) {
         for (var i = 0; i < games.count; i++)
@@ -740,7 +753,10 @@ Window {
                                       gameUpdates.check([{ serial: g.serial, version: g.version }])
                                       notice.show(qsTr("Checking for updates..."), ic("it_update"))
                                   } },
-                            { title: qsTr("Host Online Session"), action: function() { needsName(function() { online.host(g.serial, g.title, g.path, g.console) }) } },
+                            { title: qsTr("Host Online Session"), action: function() {
+                                  if (updateNeeded(g)) updateFirst(g)
+                                  else needsName(function() { online.host(g.serial, g.title, g.path, g.console) })
+                              } },
                             g.console === "PS3" ? { title: qsTr("Downloadable Content"), action: function() { openDlc(g) } } : null,
                             { title: qsTr("Information"), action: function() { dialog.show(qsTr("Information"), gameInfo(g)) } },
                             { title: qsTr("Remove from List"), action: function() {

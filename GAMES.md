@@ -6,6 +6,11 @@ what's next. One row per game; details live in `games/<serial>.md`. Update the r
 **Status:** ✅ plays online through USCL · 🧪 works in a local test, not yet across PCs over Steam ·
 🚧 in progress · 📋 next up · ⬜ not started · ❌ no online multiplayer
 
+**Version** is the game's newest update, and the only one USCL takes online: the home screen checks Sony's update
+list for every PS3 game and refuses to host, join or start an own session on an older copy (it offers the update or
+an offline start). Notes, addresses and built-in patches below are for that version; when a game gets a newer
+update, port them (`tools/dev-scripts/portaddr.py` maps addresses between two builds).
+
 **Online service** (what the game talks to; decides how much work it is, see "Routes" below):
 PSN = Sony only (rooms/matching through RPCN) · Demonware = Activision · Blaze = EA ·
 own = the publisher's own servers · GameSpy (revived by OpenSpy) · ? = not profiled yet
@@ -18,11 +23,11 @@ own = the publisher's own servers · GameSpy (revived by OpenSpy) · ? = not pro
 | Call of Duty: Modern Warfare 2 | [BLUS30377](games/BLUS30377.md) | 1.14 | Demonware (older, its own lobby protocol) | 🧪 our Demonware (`uscl-dw` patch 0013): two copies on one PC matchmade and played the same Hardcore Free-for-all (2026-10-25); invites don't work in RPCS3 | two PCs over the Steam tunnel |
 | Call of Duty: Black Ops II | [BLUS31011](games/BLUS31011.md) | 1.19 | Demonware + PSN friends/invites | ✅ a full match between two PCs over Steam (Linux host, Windows member, 2026-10-27): Find Match, quality test, game traffic through the tunnel | lobby player names; Join Friend / invites; per-game RPCS3 settings (glitches, CPU) |
 | Call of Duty: Black Ops II (PS4, shadPS4) | [CUSA57548](games/CUSA57548.md) | update in `CUSA57548-UPDATE` | Demonware (title 2430, auth3 HTTPS) + shadNet | ✅ public Free-for-All matches between two PCs over Steam, also hosted from the USCL app (2026-10-28) | in-game friends / invites (PlayerSessions); Windows app build |
-| Gotham City Impostors (PSN) | [NPUB30252](games/NPUB30252.md) | 1.00 trial + full-game unlock | GameSpy (`sirenps3`, shut down 2014) + PSN tickets | 🚧 full-game licence accepted; stuck at the title without GameSpy (2026-10-26) | answer the SSLv3 GameSpy login (`sirenps3.api.gamespy.net`) |
-| NBA Jam | [BLUS30696](games/BLUS30696.md) | 1.00 | Blaze 2.11 + RPCN ticket | 🧪 two players matchmake into one lobby through our Blaze stand-in (`uscl-blaze`) and the relay carries game traffic both ways (2026-11-07) | clean two-PC test to see the match play; tunnel the relay over Steam |
-| NHL 15 | [BLUS31436](games/BLUS31436.md) | 1.01 | Blaze 3.19 (ProtoSSL TLS) + RPCN ticket | 🚧 **logs in & connects to the EA servers** — full heat2 login solved (ConsoleLoginResponse + UserAuthenticated), online ticker plays, reaches "Retrieving data" (2026-11-09) | reaches the main menu and the Online Versus Play hub (2026-11-13: OSDKSettings + RPCS3 dynamic-messages patch); next: the roster check before matchmaking |
-| Madden NFL 25 | [BLUS31178](games/BLUS31178.md) | 1.00 | Blaze 13.3 (ProtoSSL TLS) + RPCN ticket | 🚧 **logs in and reaches the main menu online** (2026-11-13: Nucleus OAuth + Authentication2 login, sorted TDF maps, `SG_MATCHUP`; the "FGGameSim crash" was missing server data) | serve `OSDK_MADSET` (tuning data), then Online Head to Head matchmaking |
-| Grand Theft Auto V | [BLUS31156](games/BLUS31156.md) | disc 1.01 (Online needs the last update) | own (Rockstar ROS, HTTPS 443) + PSN ticket | 🚧 profiled 2026-11-06: boots, signs in to RPCN, calls `prod.ros.rockstargames.com` | install the last title update, profile again; ROS stand-in after the EA games |
+| Gotham City Impostors (PSN) | [NPUB30252](games/NPUB30252.md) | 1.06 + full-game unlock | GameSpy (`sirenps3`, shut down 2014) + PSN tickets | 🚧 full-game licence accepted; stuck at the title without GameSpy (2026-10-26) | answer the SSLv3 GameSpy login (`sirenps3.api.gamespy.net`) |
+| NBA Jam | [BLUS30696](games/BLUS30696.md) | 1.01 | Blaze 2.11 + RPCN ticket | 🧪 two players matchmake into one lobby through our Blaze stand-in (`uscl-blaze`) and the relay carries game traffic both ways (2026-11-07) | clean two-PC test to see the match play; tunnel the relay over Steam |
+| NHL 15 | [BLUS31436](games/BLUS31436.md) | 1.01 | Blaze 3.19 (ProtoSSL TLS) + RPCN ticket | 🚧 logs in, reaches the online menus, passes the roster check and sends its first matchmaking request (2026-11-13, update 1.01; built-in patches uscl-rpcs3 0013) | Blaze 3.x game setup: the game crashes on our setup notification (`0xa2ee44`, host network address null; uscl-blaze 0017 WIP) |
+| Madden NFL 25 | [BLUS31178](games/BLUS31178.md) | 1.03 | Blaze 13.3 (ProtoSSL TLS) + RPCN ticket | 🚧 **logs in and reaches the main menu online** (2026-11-13: Nucleus OAuth + Authentication2 login, sorted TDF maps, `SG_MATCHUP`; the "FGGameSim crash" was missing server data) | serve `OSDK_MADSET` (tuning data), then Online Head to Head matchmaking |
+| Grand Theft Auto V | [BLUS31156](games/BLUS31156.md) | 1.27 | own (Rockstar ROS, HTTPS 443) + PSN ticket | 🚧 profiled 2026-11-06: boots, signs in to RPCN, calls `prod.ros.rockstargames.com` | install the last title update, profile again; ROS stand-in after the EA games |
 
 ## Switch integration
 

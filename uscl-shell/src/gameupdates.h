@@ -42,6 +42,11 @@ public:
 	// downloads and installs every update these games don't have yet
 	Q_INVOKABLE void install(const QStringList& serials);
 
+	// USCL goes online only on a game's newest update: the version Sony lists when it is newer than `installed`,
+	// else empty. The newest version is remembered from the last check, so this also answers without a connection.
+	Q_INVOKABLE static QString requiredVersion(const QString& serial, const QString& installed);
+	static void setLatest(const QString& serial, const QString& version);
+
 	static QList<Package> parseList(const QByteArray& xml);
 	// "01.19" > "01.09"; versions are MM.mm
 	static bool newer(const QString& a, const QString& b);

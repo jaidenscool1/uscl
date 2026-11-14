@@ -1,0 +1,54 @@
+From 429d53e09b0d4d618163ffb9309b39cf60312295 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 16:42:47 -0700
+Subject: [PATCH] USCL: built-in NHL 15 patches for update 1.01: dynamic
+ messages, the game's own rosters are current
+
+USCL goes online only on a game's newest update. NHL 15 1.01 moves the dynamic-messages fix by +0x240; the new roster patch lets matchmaking start without EA's roster download (the check compares the server's version with a hash of the local roster database).
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ Utilities/bin_patch.cpp | 21 +++++++++++++++------
+ 1 file changed, 15 insertions(+), 6 deletions(-)
+
+diff --git a/Utilities/bin_patch.cpp b/Utilities/bin_patch.cpp
+index b7f90843b..1197a499d 100644
+--- a/Utilities/bin_patch.cpp
++++ b/Utilities/bin_patch.cpp
+@@ -1518,18 +1518,27 @@ PPU-d26243d3556a8d446a97da71df8c12da4b7867a1:
+       - [ be32, 0x0032b424, 0x480b9811 ] # in 0x32b3f4: long64 via the swapping function
+       - [ be32, 0x0032b938, 0x480b92fd ] # in 0x32b8a8: long64 via the swapping function
+ 
+-PPU-04d55e4c1fd97c0b19d80ed39f302ca67aee7d25:
++PPU-51362497acf73aa1e27f739c220ed3e693483608:
+   "USCL: dynamic messages with none to show":
+     Games:
+       "NHL 15":
+-        BLUS31436: [ 01.00 ]
++        BLUS31436: [ 01.01 ]
+     Author: "USCL"
+-    Notes: "Online main menu. The OSDK message rotation (0x7f94e4) reads its first message without checking the list has one; EA's servers always sent some, a community server may not. Skip the rotation when the list is empty."
++    Notes: "Online main menu. The OSDK message rotation (0x7f9724) reads its first message without checking the list has one; EA's servers always sent some, a community server may not. Skip the rotation when the list is empty."
+     Patch Version: 1.0
+     Patch:
+-      - [ be32, 0x007f9528, 0x2c030000 ] # cmpwi r3,0 (message from 0x7f9010)
+-      - [ be32, 0x007f952c, 0x41820034 ] # beq 0x7f9560 (nothing to show)
+-      - [ be32, 0x007f9530, 0x4bfff381 ] # bl 0x7f88b0
++      - [ be32, 0x007f9768, 0x2c030000 ] # cmpwi r3,0 (message from 0x7f9250)
++      - [ be32, 0x007f976c, 0x41820034 ] # beq 0x7f97a0 (nothing to show)
++      - [ be32, 0x007f9770, 0x4bfff381 ] # bl 0x7f8af0
++  "USCL: the game's own rosters are current":
++    Games:
++      "NHL 15":
++        BLUS31436: [ 01.01 ]
++    Author: "USCL"
++    Notes: "Online matchmaking. The roster check (0xf488f8) compares the server's roster version with a hash of the game's own roster database and demands a download when they differ; EA's roster files are gone. Every USCL player runs the same game update, so the rosters already match: read the 'roster download enabled' flag as off."
++    Patch Version: 1.0
++    Patch:
++      - [ be32, 0x00f489b8, 0x3be00000 ] # li r31,0 (was lbz r31,0x1d(r5): the flag)
+ )", true);
+ 		// generated ones too big for the source (BO2 crossplay netfield tables): uscl_patches.yml next to RPCS3
+ 		load(map, fs::get_executable_dir() + "uscl_patches.yml", "", true);
+-- 
+2.56.0
+
