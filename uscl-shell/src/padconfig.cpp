@@ -85,6 +85,9 @@ Nunchuk/Stick/Up = `Left Y-`
 Nunchuk/Stick/Down = `Left Y+`
 Nunchuk/Stick/Left = `Left X-`
 Nunchuk/Stick/Right = `Left X+`
+Nunchuk/Swing/Forward = `Shoulder L`
+Nunchuk/Swing/Up = `Shoulder L`
+Rumble/Motor = `Motor L` | `Motor R`
 )";
 	// The pad's own motion sensors are the Wii Remote's: swing, tilt and point by moving it (R3 recenters the pointer)
 	const char* const wiimote_motion = R"(IMUAccelerometer/Up = `Accel Up`
@@ -102,11 +105,22 @@ IMUGyroscope/Yaw Right = `Gyro Yaw Right`
 IMUIR/Enabled = True
 IMUIR/Recenter = `Thumb R`
 )";
-	// No motion sensors: point with the right stick, shake with R1
+	// No motion sensors: point with the right stick and flick it to swing the Wii Remote (only the flick swings, a
+	// held stick just points, and slow moves don't swing; up also pushes forward), tilt with the left stick, shake with R1
 	const char* const wiimote_stick = R"(IR/Up = `Right Y-`
 IR/Down = `Right Y+`
 IR/Left = `Right X-`
 IR/Right = `Right X+`
+Swing/Up = max(0, 2 * (`Right Y-` - smooth(`Right Y-`, 0.3)) - 1)
+Swing/Down = max(0, 2 * (`Right Y+` - smooth(`Right Y+`, 0.3)) - 1)
+Swing/Left = max(0, 2 * (`Right X-` - smooth(`Right X-`, 0.3)) - 1)
+Swing/Right = max(0, 2 * (`Right X+` - smooth(`Right X+`, 0.3)) - 1)
+Swing/Forward = max(0, 2 * (`Right Y-` - smooth(`Right Y-`, 0.3)) - 1)
+Swing/Backward = max(0, 2 * (`Right Y+` - smooth(`Right Y+`, 0.3)) - 1)
+Tilt/Forward = `Left Y-`
+Tilt/Backward = `Left Y+`
+Tilt/Left = `Left X-`
+Tilt/Right = `Left X+`
 Shake/X = `Shoulder R`
 Shake/Y = `Shoulder R`
 Shake/Z = `Shoulder R`

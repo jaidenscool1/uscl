@@ -31,7 +31,16 @@ Baseball, Bowling and Golf refuse to start with a Nunchuk attached, Boxing asks 
   the Wii Remote's. Swing, tilt and point by moving it; R3 recenters the pointer. Dolphin reads them natively
   through SDL (no DSU server). Wii Sports is mostly accelerometer swings, so it maps naturally; tune sensitivity in
   Dolphin if needed.
-- **Other pads:** point with the right stick, shake with R1.
+- **Other pads:** the right stick points; **flick** it to swing the Wii Remote (a held stick only points), the left
+  stick tilts it, R1 shakes it. Tested in Wii Sports (2026-11-14, virtual Xbox pad):
+  - Tennis ✅ flick up to toss, flick again to serve/hit; flick left/right for backhand/forehand.
+  - Bowling ✅ hold the left stick down (remote raised) and R2 (B), flick the right stick down then up, let go of R2.
+  - Boxing ✅ L3 plugs in the Nunchuk; L1 = left punch (Nunchuk), flick up = right punch.
+  - Golf ❌ not yet: left stick up points the remote down and left/right raises the club, but no stick motion hits
+    the ball so far. Use a motion pad.
+  - Baseball and Wii Sports Resort: not tested yet.
+- **All pads:** L1 is also the Nunchuk punch (one pad has one set of sensors, so the Nunchuk's motion is a button);
+  rumble goes to the pad; the Wii Remote speaker plays through the PC; MotionPlus is attached (Resort needs it).
 - **Other motion sources** (set up in Dolphin yourself): a real Wii Remote by Bluetooth passthrough (most accurate,
   MotionPlus detected) or as a "Real Wii Remote", or a phone's gyro through DSU/cemuhook.
 

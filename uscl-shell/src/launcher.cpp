@@ -175,7 +175,9 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 	if (console == "Wii" && !ownDolphin().isEmpty())
 	{
 		program = ownDolphin();
-		args = {"-u", QDir(dolphinConfigDir()).absoluteFilePath(".."), "-C", "Dolphin.Analytics.PermissionAsked=True"};
+		// the Wii Remote's speaker plays through the PC (Wii Sports' racket hits, bowling ball, pins); off in Dolphin by default
+		args = {"-u", QDir(dolphinConfigDir()).absoluteFilePath(".."), "-C", "Dolphin.Analytics.PermissionAsked=True",
+		        "-C", "Dolphin.Core.WiimoteEnableSpeaker=True"};
 		if (netplay.isEmpty())
 			args << "-b" << "-e" << path;
 		else
@@ -194,7 +196,7 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 		}
 	}
 	else if (console == "Wii")
-		args = {"run", "org.DolphinEmu.dolphin-emu", "-b", "-e", path};
+		args = {"run", "org.DolphinEmu.dolphin-emu", "-C", "Dolphin.Core.WiimoteEnableSpeaker=True", "-b", "-e", path};
 	else if (console == "3DS" && !ownAzahar().isEmpty())
 	{
 		program = ownAzahar();
