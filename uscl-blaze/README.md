@@ -5,7 +5,7 @@
 | **Console** | PlayStation 3 |
 | **Upstream** | [skate6743/Skate3BlazeServer](https://github.com/skate6743/Skate3BlazeServer) (C#, no license, so USCL doesn't vendor it) |
 | **Pinned base** | `f248282` + the 14 Skate 3 teams/invite patches USCL carries |
-| **Our changes** | `patches/0001`–`0016`, applied with `git am`; `tls/` (TLS terminator for Blaze 3.x games) |
+| **Our changes** | `patches/0001`–`0017`, applied with `git am`; `tls/` (TLS terminator for Blaze 3.x games) |
 | **Runs on** | the host's PC; players reach it through [uscl-bridge](../uscl-bridge/) (`skate3` preset) |
 
 The stand-in for **EA's Blaze** online service: what [uscl-dw](../uscl-dw/) is for Activision's Demonware. It is
@@ -44,6 +44,9 @@ The game reaches it through RPCS3's IP swap list (every `gosredirector.*.ea.com`
 - **0014**: the full write-up, `docs/EA-Sports-Blaze3-heat2.md` (it lands in the built server tree).
 - **0015**: **OSDKSettings** (component 2249): the settings groups, ticker settings, user views and account settings
   NHL 15 looks up (it also needs uscl-rpcs3 patch 0012 for its dynamic-message rotation).
+- **0017** (WIP): Blaze 3.x matchmaking: the heat2 reader takes types 7 to 11 (NHL 15's `startMatchmaking`), and 3.x
+  clients get notification 20 as `NotifyGameSetup` instead of 2.x's join + finished pair. NHL 15 still crashes after
+  it ([notes](../games/BLUS31436.md)).
 - **0016**: **Madden 25 login**: heat2 maps sorted by key (clients binary-search them), the Nucleus OAuth step on the
   HTTP server (`/connect/auth`) + Authentication2 login, and the `SG_MATCHUP` settings group.
 
