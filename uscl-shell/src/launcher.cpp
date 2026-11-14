@@ -132,7 +132,12 @@ bool Launcher::start(const QStringList& args, const QString& title, bool online,
 QString Launcher::ownDolphin()
 {
 	const QString path = qEnvironmentVariableIsSet("USCL_DOLPHIN") ? qEnvironmentVariable("USCL_DOLPHIN")
+#ifdef Q_OS_WIN
+	// own folder: Dolphin ships its own Qt DLLs, which would clash with RPCS3's next to uscl.exe
+	                                                               : QCoreApplication::applicationDirPath() + "/Dolphin/Dolphin.exe";
+#else
 	                                                               : QCoreApplication::applicationDirPath() + "/dolphin-emu";
+#endif
 	return QFileInfo(path).isExecutable() ? path : QString();
 }
 

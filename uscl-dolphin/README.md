@@ -3,10 +3,10 @@
 | | |
 |---|---|
 | **Consoles** | Wii, GameCube |
-| **Emulator** | [Dolphin](https://github.com/dolphin-emu/dolphin) (GPL-2.0+), used **unchanged**: the Flathub app `org.DolphinEmu.dolphin-emu` (tested 2609a) |
-| **Our changes** | none to Dolphin. USCL starts it (`uscl-shell` `Launcher::startEmu`), sets up its controllers (`uscl-shell/src/padconfig.cpp`) and carries NetPlay (`uscl-bridge` preset `dolphin`, UDP 2626) |
+| **Emulator** | [Dolphin](https://github.com/dolphin-emu/dolphin) (GPL-2.0+) 2609a with our patch (`patches/`), shipped in the AppImage; without it USCL plays Wii games offline in the Flathub app `org.DolphinEmu.dolphin-emu` |
+| **Our changes** | `patches/0001`: `USCL_NETPLAY=host\|join` hosts/joins NetPlay without the setup dialog, the host starts once `USCL_NETPLAY_PLAYERS` are in. USCL starts it (`uscl-shell` `Launcher::startEmu`, own profile `uscl/dolphin`), sets up its controllers (`uscl-shell/src/padconfig.cpp`) and carries NetPlay (`uscl-bridge` preset `dolphin`, UDP 2626) |
 | **Online** | Dolphin NetPlay over the Steam tunnel |
-| **Status** | Wii Sports (`SP2E01`) boots from USCL with two controllers; NetPlay over Steam is next |
+| **Status** | Host/join from the home screen works on one Linux PC; two PCs and Windows not tested yet |
 
 ## How online works: NetPlay
 Most Wii games, Wii Sports included, never had online play: multiplayer meant passing Wii Remotes around one couch.
@@ -35,7 +35,25 @@ With Automatic Controller Setup on (the default), every connected pad, USB or Bl
 
 NetPlay sends inputs, it doesn't give you a remote: each player supplies their own motion source.
 
-## Status (2026-11-12)
+## Build
+```
+git clone https://github.com/dolphin-emu/dolphin && cd dolphin && git checkout 2609a && git submodule update --init
+# git apply, not git am: NetPlay only lets in players whose Dolphin has the same git commit (NetPlayServer.cpp)
+git apply <uscl>/uscl-dolphin/patches/*.patch
+# for the AppImage: Sys/ next to the binary, no FFmpeg (frame dumps) so the bundle stays small
+cmake -S . -B build-appimage -G Ninja -DCMAKE_BUILD_TYPE=Release -DLINUX_LOCAL_DEV=ON -DENCODE_FRAMEDUMPS=OFF \
+  -DENABLE_ANALYTICS=OFF -DENABLE_AUTOUPDATE=OFF && ninja -C build-appimage
+```
+`packaging/build-linux.sh` picks it up from `USCL_DOLPHIN_BUILD` (default `~/src/dolphin-uscl/build-appimage`). For
+a dev run, point `USCL_DOLPHIN` at `build-appimage/Binaries/dolphin-emu`. NetPlay checks the Dolphin commit
+(`git rev-parse HEAD`), so every build must be 2609a with the patch applied uncommitted; the title then reads
+`2609a-dirty`. An official 2609a build has the same commit and can join too. On Windows USCL looks for `Dolphin\Dolphin.exe` next
+to `uscl.exe` (the installer doesn't build it yet).
+
+## Status (2026-11-13)
+- The AppImage ships our Dolphin (`dolphin-emu` + `Sys/`), so Wii online works without a dev setup on Linux.
+- 2026-11-12: two patched Dolphins hosted/joined and auto-started Wii Sports on one PC; the home screen hosted a
+  Steam session and started Dolphin as host, a second copy joined on 127.0.0.1:2626.
 - Dolphin 2609a boots `SP2E01` to the game-select menu (Vulkan). See [games/SP2E01.md](../games/SP2E01.md).
 - USCL starts Wii games in Dolphin and writes the controller setup: tested with a DualSense Edge + Xbox 360 pad,
   which Dolphin binds as `SDL/0/DualSense Edge Wireless Controller` (Wii Remote 1) and `SDL/0/Xbox 360 Controller`
@@ -43,14 +61,13 @@ NetPlay sends inputs, it doesn't give you a remote: each player supplies their o
 - `uscl-bridge` has the `dolphin` preset (UDP 2626).
 
 ## Next
-1. One PC, two Dolphin copies: host NetPlay, join `127.0.0.1:2626`, confirm Wii Sports Tennis/Boxing stays in sync
-   with Wii Remote motion exchanged (Wii NetPlay with motion can desync: measure it).
-2. Host/join NetPlay from the home screen, like the PS3 games.
-3. Two PCs over the Steam tunnel (`host dolphin` / `join <session>`).
+1. Windows: build our Dolphin (`Source/dolphin-emu.sln`, MSVC, bundled Qt) into the installer as `Dolphin\`.
+2. Two PCs over the Steam tunnel (home screen Host / Join), the same bar as the PS3 games.
+3. Measure desyncs in a long Wii Sports match with motion input (Wii NetPlay with motion is known to desync).
 
 ## Run it by hand today
 ```
-# host
+# host (any Dolphin 2609a; the patch only skips these dialogs)
 dolphin-emu                                   # NetPlay → Host → the game, port 2626
 uscl-bridge host dolphin                      # forwards 2626 over the Steam lobby; prints the session id
 # joiner
