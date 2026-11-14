@@ -164,6 +164,14 @@ QString Launcher::azaharConfigFile()
 	                             : GameModel::rpcs3ConfigDir() + "uscl/azahar/config/azahar-emu/qt-config.ini";
 }
 
+// Every Dolphin start: fullscreen like the other consoles; pads count even when the home screen kept the focus (Dolphin
+// drops all input otherwise); the Wii Remote's speaker plays through the PC (Wii Sports' racket and pins; off by default)
+static QStringList dolphinOptions()
+{
+	return {"-C", "Dolphin.Display.Fullscreen=True", "-C", "Dolphin.Input.BackgroundInput=True",
+	        "-C", "Dolphin.Core.WiimoteEnableSpeaker=True"};
+}
+
 bool Launcher::startEmu(const QString& path, const QString& title, const QString& console, const QString& netplay,
                         const QString& nickname, int players)
 {
@@ -175,9 +183,8 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 	if (console == "Wii" && !ownDolphin().isEmpty())
 	{
 		program = ownDolphin();
-		// the Wii Remote's speaker plays through the PC (Wii Sports' racket hits, bowling ball, pins); off in Dolphin by default
-		args = {"-u", QDir(dolphinConfigDir()).absoluteFilePath(".."), "-C", "Dolphin.Analytics.PermissionAsked=True",
-		        "-C", "Dolphin.Core.WiimoteEnableSpeaker=True"};
+		args = {"-u", QDir(dolphinConfigDir()).absoluteFilePath(".."), "-C", "Dolphin.Analytics.PermissionAsked=True"};
+		args << dolphinOptions();
 		if (netplay.isEmpty())
 			args << "-b" << "-e" << path;
 		else
@@ -196,7 +203,7 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 		}
 	}
 	else if (console == "Wii")
-		args = {"run", "org.DolphinEmu.dolphin-emu", "-C", "Dolphin.Core.WiimoteEnableSpeaker=True", "-b", "-e", path};
+		args = QStringList{"run", "org.DolphinEmu.dolphin-emu"} + dolphinOptions() + QStringList{"-b", "-e", path};
 	else if (console == "3DS" && !ownAzahar().isEmpty())
 	{
 		program = ownAzahar();
