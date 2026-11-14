@@ -5,7 +5,7 @@
 | **Console** | PlayStation 3 |
 | **Upstream** | [RPCS3/rpcs3](https://github.com/RPCS3/rpcs3) (GPL-2.0) |
 | **Pinned base** | `eee3f0f` (upstream 2026-11-05) |
-| **Our changes** | `patches/0001`–`0012`, applied with `git am` |
+| **Our changes** | `patches/0001`–`0013`, applied with `git am` |
 | **Ships in** | Windows installer and Linux AppImage (`packaging/`) |
 | **Online services it talks to** | [uscl-rpcn](../uscl-rpcn/) (PSN), [uscl-dw](../uscl-dw/) (Call of Duty), [uscl-blaze](../uscl-blaze/) (EA) |
 

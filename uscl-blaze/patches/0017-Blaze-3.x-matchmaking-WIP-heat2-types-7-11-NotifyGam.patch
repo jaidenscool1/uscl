@@ -1,0 +1,205 @@
+From 53f3e5e88be31a6da1eeea1aa53a8524667020c3 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 17:08:39 -0700
+Subject: [PATCH] Blaze 3.x matchmaking (WIP): heat2 types 7-11,
+ NotifyGameSetup for 3.x clients
+
+NHL 15 1.01 sends startMatchmaking; the request decodes and the game takes the 3.x setup notification, then null-derefs at 0xa2ee44 (game->vt[0x5c]() returns null: the host network address).
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ .../Notifications/NotifyGameSetup3.cs         | 75 +++++++++++++++++++
+ Skate Custom Server/Blaze/Tdf/Heat2Reader.cs  | 33 ++++++++
+ Skate Custom Server/Servers/ServerUtils.cs    |  9 +++
+ Tests/Heat2Test/Program.cs                    | 19 +++++
+ 4 files changed, 136 insertions(+)
+ create mode 100644 Skate Custom Server/Blaze/Components/Gamemanager/Notifications/NotifyGameSetup3.cs
+
+diff --git a/Skate Custom Server/Blaze/Components/Gamemanager/Notifications/NotifyGameSetup3.cs b/Skate Custom Server/Blaze/Components/Gamemanager/Notifications/NotifyGameSetup3.cs
+new file mode 100644
+index 0000000..5d20bda
+--- /dev/null
++++ b/Skate Custom Server/Blaze/Components/Gamemanager/Notifications/NotifyGameSetup3.cs	
+@@ -0,0 +1,75 @@
++using Blaze.Components.Gamemanager.Models;
++using Blaze.Tdf.Attributes;
++using Servers.Blaze.Models;
++
++namespace Blaze.GamemanagerComponent
++{
++    // Blaze 3.x (NHL 15, Madden 25): notification 20 is NotifyGameSetup, not 2.x's NotifyJoinGame. Same game and
++    // roster, plus the queue and the reason the player is being set up (shapes: Aim2Strike/BlazeSDK, MIT).
++    public struct NotifyGameSetup3
++    {
++        [TdfMember("GAME")]
++        public ReplicatedGameData GameData;
++
++        [TdfMember("PROS")]
++        public List<ReplicatedGamePlayer> Players;
++
++        [TdfMember("QUEU")]
++        public List<ReplicatedGamePlayer> Queue;
++
++        [TdfMember("REAS")]
++        public GameSetupReason Reason;
++
++        // 2.x's relay games name a pseudo-player (id 123) as topology host. A 3.x client looks the topology host up
++        // in the roster and uses it unchecked (NHL 15 crashes at 0xa2ee44), so name the platform host instead.
++        static ReplicatedGameData Game3(ReplicatedGameData game)
++        {
++            game.TopologyHost = game.PlatformHost;
++            return game;
++        }
++
++        // 3.x has no NotifyMatchmakingFinished: the result rides in the setup reason. The host of a game the
++        // server just made "created" it, anyone else "joined an existing game".
++        public static NotifyGameSetup3 From(NotifyJoinGame join, User receiver) => new NotifyGameSetup3
++        {
++            GameData = Game3(join.GameData),
++            Players = join.Players,
++            Queue = new List<ReplicatedGamePlayer>(),
++            Reason = new GameSetupReason
++            {
++                Matchmaking = new MatchmakingSetupContext
++                {
++                    Fit = 100,
++                    MaxFit = 100,
++                    SessionId = join.MatchmakingId,
++                    Result = join.GameData.PlatformHost.PlayerId == receiver.Session.BlazeId ? 0 : 2,
++                    UserSessionId = (uint)receiver.Session.UserId
++                }
++            }
++        };
++    }
++
++    public struct GameSetupReason
++    {
++        [TdfUnionCase(3)]
++        public MatchmakingSetupContext? Matchmaking;
++    }
++
++    public struct MatchmakingSetupContext
++    {
++        [TdfMember("FIT")]
++        public uint Fit;
++
++        [TdfMember("MAXF")]
++        public uint MaxFit;
++
++        [TdfMember("MSID")]
++        public uint SessionId;
++
++        [TdfMember("RSLT")]
++        public int Result; // 0 created game, 2 joined existing game
++
++        [TdfMember("USID")]
++        public uint UserSessionId;
++    }
++}
+diff --git a/Skate Custom Server/Blaze/Tdf/Heat2Reader.cs b/Skate Custom Server/Blaze/Tdf/Heat2Reader.cs
+index 045861d..6db32c2 100644
+--- a/Skate Custom Server/Blaze/Tdf/Heat2Reader.cs	
++++ b/Skate Custom Server/Blaze/Tdf/Heat2Reader.cs	
+@@ -40,9 +40,41 @@ namespace Blaze.Tdf
+             Heat2Writer.LIST => (TdfType.Array, ReadList(p, ref i)),
+             Heat2Writer.MAP => (TdfType.Map, ReadMap(p, ref i)),
+             Heat2Writer.UNION => (TdfType.Union, ReadUnion(p, ref i)),
++            7 => ReadVariable(p, ref i),
++            8 => (TdfType.Int64, (object)(long)Skip(p, ref i, 2)),  // object type: component, type
++            9 => (TdfType.Int64, (object)(long)Skip(p, ref i, 3)),  // object id: component, type, id (kept)
++            10 => (TdfType.Int64, (object)(long)ReadFloat(p, ref i)),
++            11 => (TdfType.Int64, (object)(long)VarInt(p, ref i)),  // time value
+             _ => throw new NotSupportedException($"heat2 type {type}"),
+         };
+ 
++        // reads n varints, returns the last
++        static ulong Skip(byte[] p, ref int i, int n)
++        {
++            ulong last = 0;
++            while (n-- > 0) last = VarInt(p, ref i);
++            return last;
++        }
++
++        static float ReadFloat(byte[] p, ref int i)
++        {
++            i += 4;
++            return BitConverter.ToSingle(new[] { p[i - 1], p[i - 2], p[i - 3], p[i - 4] }, 0); // big-endian on the wire
++        }
++
++        // variable TDF: present byte, then the TDF's id, the member again (tag + type + value) and a terminator
++        static (TdfType, object) ReadVariable(byte[] p, ref int i)
++        {
++            if (p[i++] == 0)
++                return (TdfType.Struct, new TdfStruct());
++            VarInt(p, ref i);
++            i += 3;
++            byte type = p[i++];
++            var value = ReadValue(p, ref i, type);
++            i++;
++            return value;
++        }
++
+         // little-endian varint, exact inverse of Heat2Writer.VarInt (first byte carries 6 value bits, rest carry 7)
+         public static ulong VarInt(byte[] p, ref int i)
+         {
+@@ -120,6 +152,7 @@ namespace Blaze.Tdf
+             Heat2Writer.LIST => TdfType.Array,
+             Heat2Writer.MAP => TdfType.Map,
+             Heat2Writer.UNION => TdfType.Union,
++            7 => TdfType.Struct,
+             _ => TdfType.Int64,
+         };
+     }
+diff --git a/Skate Custom Server/Servers/ServerUtils.cs b/Skate Custom Server/Servers/ServerUtils.cs
+index ea2e53f..36dc8a8 100644
+--- a/Skate Custom Server/Servers/ServerUtils.cs	
++++ b/Skate Custom Server/Servers/ServerUtils.cs	
+@@ -22,6 +22,15 @@ namespace Servers
+         public static async Task SendNotificationToUser(User receiver, object notification, BlazeComponent component, ushort command,
+                                                         bool omitEmptyCollections = false)
+         {
++            // Blaze 3.x clients: 20 is NotifyGameSetup (the matchmaking result rides in it); 10 would read as
++            // "matchmaking failed"
++            if (receiver.IsHeat2 && component == BlazeComponent.Gamemanager)
++            {
++                if (notification is global::Blaze.GamemanagerComponent.NotifyMatchmakingFinished)
++                    return;
++                if (notification is global::Blaze.GamemanagerComponent.NotifyJoinGame join)
++                    notification = global::Blaze.GamemanagerComponent.NotifyGameSetup3.From(join, receiver);
++            }
+             TdfStruct tdfNotification = TdfReflection.ToTdfStruct(notification, omitEmptyCollections);
+             BlazeMessage msg = new BlazeMessage();
+             msg.Component = (ushort)component;
+diff --git a/Tests/Heat2Test/Program.cs b/Tests/Heat2Test/Program.cs
+index 9b63a30..d904d27 100644
+--- a/Tests/Heat2Test/Program.cs
++++ b/Tests/Heat2Test/Program.cs
+@@ -106,6 +106,25 @@ static class T
+             Check(m.Flag && m.Num == 7 && m.Txt == "configname", "reflection model bind (bool/int/string)");
+         }
+ 
++        // --- the rarer heat2 types (NHL 15's startMatchmaking uses them): a member after each must still line up ---
++        {
++            var body = new List<byte>();
++            void Tag(string t, byte type) { body.AddRange(TdfUtils.EncodeTdfTag(t)); body.Add(type); }
++            Tag("AAA", 8); body.AddRange(new byte[] { 4, 1 });                 // object type
++            Tag("BBB", 9); body.AddRange(new byte[] { 4, 1, 77 });             // object id
++            Tag("CCC", 10); body.AddRange(new byte[] { 0x3F, 0xC0, 0, 0 });    // float 1.5
++            Tag("DDD", 11); body.Add(5);                                       // time value
++            Tag("EEE", 7); body.AddRange(new byte[] { 1, 9 }); Tag("EEE", 0); body.AddRange(new byte[] { 3, 0 }); // variable, present
++            Tag("FFF", 7); body.Add(0);                                        // variable, absent
++            Tag("ZZZ", 0); body.Add(42);
++            var packet = new byte[12 + body.Count];
++            packet[0] = (byte)(body.Count >> 8); packet[1] = (byte)body.Count;
++            body.CopyTo(packet, 12);
++            var f = Heat2Reader.ReadFields(packet);
++            Check(f.Count == 7 && (long)f[1].Value == 77 && (long)f[2].Value == 1 && (long)f[3].Value == 5 && (long)f[4].Value == 3 &&
++                  f[6].Tag == "ZZZ" && (long)f[6].Value == 42, "heat2 types 7-11 (variable, object type/id, float, time)");
++        }
++
+         // --- end-to-end through the REAL FetchClientConfigHandler over a socket pair ---
+         // Proves the whole fix: heat2 CFID decodes, the handler finds clientconfig/<CFID>.txt, and the heat2 response
+         // carries it back. With the old empty-model bug CFID would be "" -> file not found -> empty CONF map.
+-- 
+2.56.0
+

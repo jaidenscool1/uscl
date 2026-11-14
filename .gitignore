@@ -1,2 +1,3 @@
 /build/
 /uscl-shell/build*/
+__pycache__/

@@ -218,3 +218,23 @@ segment maps `vaddr 0x10000 → file 0x0` (file offset = vaddr − 0x10000).
 self-contained; run with `USCL_BLAZE_LISTEN=42101` so a plaintext `tap.py` can sit on the advertised 42100).
 Probe `~/.local/share/uscl/rpcs3-ea-probe` (`USCL_ONLINE=1`); RPCN `~/.local/share/uscl/rpcn-probe` (run from
 there — needs its cert.pem/rpcn.cfg/ticket_private.pem). Chain: NHL → TLS(42127) → tap(42100) → Blaze(42101).
+
+## Update 2026-11-13: newest updates only; NHL 15 reaches matchmaking
+Branch `agent/jaiden-pc/latest-patch-online`.
+- **Rule: USCL goes online only on a game's newest update.** The home screen remembers the newest version from
+  Sony's list per PS3 game (`GameUpdates::requiredVersion`) and refuses to host, join or start an own session on an
+  older copy (offers the update or an offline start). PS3 only: PS4, Switch, Wii and 3DS games are not checked.
+- **Every owned PS3 game is on its newest update** in the app profile (`~/.config/uscl`): Madden 25 1.03, NHL 15
+  1.01, NBA Jam 1.01, Black Ops 1.13, Gotham City Impostors 1.06, GTA V 1.27, LittleBigPlanet 3 1.26, Minecraft
+  1.84, MW2 1.14, BO2 1.19, Skate 3 1.05. Packages: `/mnt/games/GAME_DUMPS/PS3_UPDATES/<serial>/` (SHA-1 verified).
+  Test profiles: `rpcs3-ea-probe` has Madden, NHL, NBA Jam; `rpcs3-ea-probe2` NHL; `rpcs3-bo-probe` Black Ops.
+- **An update moves every address.** `tools/dev-scripts/portaddr.py <old.elf> <new.elf> <addr>...` finds the same
+  code in the new build; built-in RPCS3 patches are keyed by PPU hash and need a new entry per update.
+- **Re-checked on the new updates:** Madden 25 (main menu online), NBA Jam (logs in), NHL 15 (online menus).
+  Not booted yet on their new updates: Black Ops, LBP3, GTA V, Gotham City Impostors.
+- **NHL 15:** `games/BLUS31436.md`. Roster check passed with a built-in patch (uscl-rpcs3 0013), the game sends
+  `startMatchmaking`, crashes on our 3.x game setup (uscl-blaze 0017 WIP). Pick up there.
+- **Local state:** Blaze server source with 0015 to 0017: `~/src/nbajam-blaze/.claude/worktrees/latest` (branch
+  `uscl-latest`), deployed to the usual `out/linux-x64` (previous build in `linux-x64-prev`, the 2026-11-09 one in
+  `linux-x64-old-1109`). RPCS3: `perf-rebase` worktree has the 0013 commit. Two virtual pads from older sessions may
+  still exist, so a new x360 pad is "Xbox 360 Controller 2".
