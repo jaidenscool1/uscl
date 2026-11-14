@@ -146,7 +146,7 @@ namespace
 			const QString wii = PadConfig::dolphinIni("[Wiimote1]\nDevice = Old\nSource = 1\n[Wiimote2]\nSource = 1\n[BalanceBoard]\nSource = 0\n", "Wiimote", {ds, xb});
 			check(wii.count("[Wiimote1]") == 1 && wii.contains("[Wiimote1]\nDevice = SDL/0/PS5 Controller\nSource = 1\n") &&
 			      wii.contains("[Wiimote2]\nDevice = SDL/0/Xbox Series X Controller\nSource = 1\n") && wii.contains("[Wiimote3]\nSource = 0\n") &&
-			      wii.contains("[BalanceBoard]\nSource = 0") && !wii.contains("Old") &&
+			      wii.contains("[BalanceBoard]\nSource = 0") && !wii.contains("Old") && wii.contains("Extension = toggle(`Thumb L`)") &&
 			      wii.section("[Wiimote2]", 0, 0).contains("IMUGyroscope/Pitch Up = `Gyro Pitch Up`") &&
 			      !wii.section("[Wiimote2]", 1).contains("IMUGyroscope") && wii.section("[Wiimote2]", 1).contains("IR/Up = `Right Y-`"), "Dolphin Wii Remotes");
 			const QString gc = PadConfig::dolphinIni("[GCPad2]\nDevice = Keep\n", "GCPad", {ds});

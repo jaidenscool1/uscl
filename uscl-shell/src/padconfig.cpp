@@ -65,7 +65,9 @@ namespace
 		return lines.join('\n');
 	}
 
-	const char* const wiimote_common = R"(Extension = Nunchuk
+	// No Nunchuk until L3 plugs it in (L3 again unplugs it): Wii Sports' Tennis, Baseball, Bowling and Golf won't
+	// start with one attached, Boxing and other Nunchuk games ask for it on screen
+	const char* const wiimote_common = R"(Extension = toggle(`Thumb L`)
 Buttons/A = `Button S`
 Buttons/B = `Trigger R`
 Buttons/1 = `Button W`
