@@ -1,0 +1,105 @@
+From e56547c9205020649719b8fae3349673d7c89760 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 12:16:52 -0700
+Subject: [PATCH 2/2] texture_cache: skip the join upload when the copies write
+ every texel
+
+JoinImages uploaded the new image from guest memory unless one alias copy
+covered every level and layer. Mario Kart World joins three GPU-written
+single-layer 2048x2048 depth targets into a three-layer array every few
+seconds; each non-alias join is copied whole into its layer, so the 24 MiB
+CPU unswizzle + upload was always overwritten. Count coverage per level and
+layer across alias copies and GPU-modified (not CPU-modified) joins.
+
+MKW race, RTX 4060: those uploads go from ~40 per run to 1; A/B 22.6 vs
+21.6 fps (2 pairs).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/texture_cache/texture_cache.h | 62 ++++++++++++++++++--
+ 1 file changed, 58 insertions(+), 4 deletions(-)
+
+diff --git a/src/video_core/texture_cache/texture_cache.h b/src/video_core/texture_cache/texture_cache.h
+index fb0df9b74..3764c64fa 100644
+--- a/src/video_core/texture_cache/texture_cache.h
++++ b/src/video_core/texture_cache/texture_cache.h
+@@ -3307,11 +3307,14 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
+     };
+     // Whether that copy writes every texel of the new image: a plain copy (same format) of every
+     // level and layer from its origin.
+-    const auto writes_whole_image = [&](const AliasedImage& aliased) {
++    const auto plain_copy_source = [&](const AliasedImage& aliased) {
+         const Image& source = slot_images[aliased.id];
+-        if (new_image.info.type != ImageType::e2D || source.info.format != new_image.info.format ||
+-            source.info.astc_opaque != new_image.info.astc_opaque ||
+-            True((source.flags | new_image.flags) & ImageFlagBits::UnwrittenSparse)) {
++        return new_image.info.type == ImageType::e2D && source.info.format == new_image.info.format &&
++               source.info.astc_opaque == new_image.info.astc_opaque &&
++               False((source.flags | new_image.flags) & ImageFlagBits::UnwrittenSparse);
++    };
++    const auto writes_whole_image = [&](const AliasedImage& aliased) {
++        if (!plain_copy_source(aliased)) {
+             return false;
+         }
+         const u32 block_width = VideoCore::Surface::DefaultBlockWidth(new_image.info.format);
+@@ -3348,6 +3351,57 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
+             break;
+         }
+     }
++    // Or the copies together write every texel: Mario Kart World joins three single-layer
++    // 2048x2048 depth targets into a three-layer array every few seconds, each copied whole into
++    // its layer, and uploaded all 48 MiB from guest memory first. All copies still run.
++    if (!copied_whole && !join_copies_to_do.empty() && new_image.info.type == ImageType::e2D &&
++        False(new_image.flags & ImageFlagBits::UnwrittenSparse)) {
++        const u32 block_width = VideoCore::Surface::DefaultBlockWidth(new_image.info.format);
++        const u32 block_height = VideoCore::Surface::DefaultBlockHeight(new_image.info.format);
++        const auto writes_subresource = [&](const JoinCopy& join, s32 level, s32 layer, u32 width,
++                                            u32 height) {
++            if (join.is_alias) {
++                const AliasedImage* const aliased = alias_copy(join);
++                return aliased != nullptr && plain_copy_source(*aliased) &&
++                       std::ranges::any_of(aliased->copies, [&](const ImageCopy& copy) {
++                           const auto& dst = copy.dst_subresource;
++                           return dst.base_level == level && dst.base_layer <= layer &&
++                                  layer < dst.base_layer + dst.num_layers &&
++                                  copy.dst_offset == Offset3D{} && copy.extent.width >= width &&
++                                  copy.extent.height >= height;
++                       });
++            }
++            // The loop below copies a GPU-modified join whole (MakeShrinkImageCopies: every level
++            // and layer it has, at the destination's full mip size).
++            const Image& overlap = slot_images[join.id];
++            if (True(overlap.flags & ImageFlagBits::CpuModified) ||
++                False(overlap.flags & ImageFlagBits::GpuModified) ||
++                overlap.info.type != ImageType::e2D ||
++                overlap.info.num_samples != new_image.info.num_samples) {
++                return false;
++            }
++            const std::optional<SubresourceBase> base = new_image.TryFindBase(overlap.gpu_addr);
++            if (!base || level < base->level ||
++                level >= base->level + overlap.info.resources.levels || layer < base->layer ||
++                layer >= base->layer + overlap.info.resources.layers) {
++                return false;
++            }
++            const Extent3D dst_size = MipSize(new_image.info.size, static_cast<u32>(base->level));
++            return overlap.info.size.width >= dst_size.width &&
++                   overlap.info.size.height >= dst_size.height;
++        };
++        copied_whole = true;
++        for (s32 level = 0; copied_whole && level < new_image.info.resources.levels; ++level) {
++            const Extent3D size = MipSize(new_image.info.size, static_cast<u32>(level));
++            const u32 width = Common::DivCeil(size.width, block_width);
++            const u32 height = Common::DivCeil(size.height, block_height);
++            for (s32 layer = 0; copied_whole && layer < new_image.info.resources.layers; ++layer) {
++                copied_whole = std::ranges::any_of(join_copies_to_do, [&](const JoinCopy& join) {
++                    return writes_subresource(join, level, layer, width, height);
++                });
++            }
++        }
++    }
+     if (overwritten_by_clear()) {
+         // Stays CpuModified: UpdateRenderTargets' PrepareImage drops the upload only when
+         // IsFullClear agrees the clear covers the whole image, and uploads it otherwise.
+-- 
+2.56.0
+

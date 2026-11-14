@@ -1,18 +1,25 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: USCL <uscl@users.noreply.github.com>
-Date: Sat, 14 Nov 2026 10:40:00 +0000
-Subject: [PATCH] Map connected controllers to players with USCL_AUTO_PADS
+From 9b1758c3a6a52727eed3f27573f4651123ba1900 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 10:45:24 -0700
+Subject: [PATCH 1/2] Map connected controllers to players with USCL_AUTO_PADS
 
 SDL3 port of uscl-eden 0012: with USCL_AUTO_PADS set, every connected game
 controller becomes players 1-8 in connection order, mapped with Eglantine's
 own per-controller defaults (Joy-Con pairs as one, motion). Wheels and flight
 sticks are skipped; with no controller the settings are left alone.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
+ src/input_common/drivers/sdl_driver.cpp | 32 +++++++++++++++++
+ src/input_common/drivers/sdl_driver.h   |  3 ++
+ src/input_common/main.cpp               | 48 +++++++++++++++++++++++++
+ 3 files changed, 83 insertions(+)
+
 diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
-index a30855407..a962fcd65 100644
+index 1194796a0..9c9dd04af 100644
 --- a/src/input_common/drivers/sdl_driver.cpp
 +++ b/src/input_common/drivers/sdl_driver.cpp
-@@ -5,6 +5,7 @@
+@@ -8,6 +8,7 @@
  
  #include <algorithm>
  #include <array>
@@ -20,7 +27,7 @@ index a30855407..a962fcd65 100644
  #include <numbers>
  #include "common/logging.h"
  #include "common/math_util.h"
-@@ -785,6 +786,37 @@ std::vector<Common::ParamPackage> SDLDriver::GetInputDevices() const {
+@@ -788,6 +789,37 @@ std::vector<Common::ParamPackage> SDLDriver::GetInputDevices() const {
      return devices;
  }
  
@@ -143,3 +150,6 @@ index 6c8443ff6..f0169e93e 100644
      template <typename Engine>
      void UnregisterEngine(std::shared_ptr<Engine>& engine) {
          Common::Input::UnregisterInputFactory(engine->GetEngineName());
+-- 
+2.56.0
+
