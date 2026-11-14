@@ -88,6 +88,36 @@ namespace
 		return pairs.join(',');
 	}
 
+	// An extracted dump (exefs/main beside main.npdm) has no file name to read an ID from: the npdm's ACI0 holds it.
+	QString npdmProgramId(const QString& main)
+	{
+		QFile f(QFileInfo(main).absolutePath() + "/main.npdm");
+		if (!f.open(QIODevice::ReadOnly) || f.size() > 1024 * 1024)
+			return {};
+		const QByteArray d = f.readAll();
+		if (d.size() < 0x80 || !d.startsWith("META"))
+			return {};
+		const quint64 aci = qFromLittleEndian<quint32>(d.constData() + 0x70);
+		if (aci + 0x18 > quint64(d.size()) || d.mid(aci, 4) != "ACI0")
+			return {};
+		return QString("%1").arg(qFromLittleEndian<quint64>(d.constData() + aci + 0x10), 16, 16, QChar('0')).toUpper();
+	}
+
+	// Newest numbered update folder holding a full dump (updates/<version>/exefs/main), or empty.
+	QString newestUpdate(const QDir& updates)
+	{
+		QString name;
+		qulonglong best = 0;
+		for (const QString& n : updates.entryList(QDir::Dirs | QDir::NoDotAndDotDot))
+		{
+			bool ok = false;
+			const qulonglong v = n.toULongLong(&ok);
+			if (ok && (name.isEmpty() || v > best) && QFileInfo::exists(updates.filePath(n + "/exefs/main")))
+				best = v, name = n;
+		}
+		return name;
+	}
+
 	QString findTool(const QString& variable, const QString& name)
 	{
 		if (qEnvironmentVariableIsSet(variable.toLatin1().constData()))
@@ -142,9 +172,9 @@ QProcessEnvironment SwitchCore::environment()
 	// Eden's bundled SDL2 needs XWayland on desktops that force the Wayland driver globally.
 	if (env.value("SDL_VIDEODRIVER") == "wayland" && !env.value("DISPLAY").isEmpty())
 		env.insert("SDL_VIDEODRIVER", "x11");
-	// The tested Qt/Vulkan core also needs XWayland on this desktop.
+	// The Qt/Vulkan cores (Eden's and Eglantine for Switch 2) need XWayland on this desktop; the SDL core ignores it.
 	const QString platform = env.value("QT_QPA_PLATFORM");
-	if (qtFrontend() && platform.startsWith("wayland") && !env.value("DISPLAY").isEmpty())
+	if (platform.startsWith("wayland") && !env.value("DISPLAY").isEmpty())
 		env.insert("QT_QPA_PLATFORM", "xcb");
 #endif
 #ifdef _WIN32
@@ -153,8 +183,17 @@ QProcessEnvironment SwitchCore::environment()
 	return env;
 }
 
-QString SwitchCore::executable(bool settings)
+bool SwitchCore::isSwitch2(const QString& path)
 {
+	// Switch 2 program IDs start with 04, Switch ones with 01.
+	return describe(path).value("serial").toString().startsWith("04");
+}
+
+QString SwitchCore::executable(bool settings, const QString& game)
+{
+	// Eden can't run Switch 2 builds; Eglantine (an Eden fork with NX2 support) can.
+	if (!game.isEmpty() && isSwitch2(game))
+		return findTool("USCL_SWITCH2_CORE", "eglantine");
 	return findTool(settings ? "USCL_SWITCH_GUI" : "USCL_SWITCH_CORE", settings ? "eden" : "eden-cli");
 }
 
@@ -165,12 +204,16 @@ QString SwitchCore::roomExecutable()
 
 bool SwitchCore::isGame(const QString& path)
 {
-	const QString ext = QFileInfo(path).suffix().toLower();
-	if (ext != "nsp" && ext != "xci" && ext != "nro")
+	const QFileInfo info(path);
+	const QString ext = info.suffix().toLower();
+	const bool extracted = info.fileName() == "main" && info.dir().dirName() == "exefs";
+	if (ext != "nsp" && ext != "xci" && ext != "nro" && !extracted)
 		return false;
 	QFile f(path);
 	if (!f.open(QIODevice::ReadOnly))
 		return false;
+	if (extracted)
+		return f.read(4) == "NSO0" && !npdmProgramId(path).isEmpty();
 	if (ext == "nsp")
 	{
 		const auto header = f.read(16);
@@ -197,6 +240,34 @@ QVariantMap SwitchCore::describe(const QString& path)
 {
 	if (!isGame(path))
 		return {};
+	if (QFileInfo(path).fileName() == "main")
+	{
+		// Dumpers write base/ and full updates/<version>/ side by side: list only the newest.
+		QDir version = QFileInfo(path).dir(), dump;
+		version.cdUp();
+		dump = version;
+		dump.cdUp();
+		QString title = version.dirName();
+		if (version.dirName() == "base")
+		{
+			if (!newestUpdate(QDir(dump.filePath("updates"))).isEmpty())
+				return {};
+			title = dump.dirName();
+		}
+		else if (dump.dirName() == "updates")
+		{
+			if (newestUpdate(dump) != version.dirName())
+				return {};
+			dump.cdUp();
+			title = dump.dirName();
+		}
+		static const QRegularExpression noise("\\[[^\\]]*\\]|[ _]v\\d+(\\.\\d+)*$");
+		title = title.remove(noise).replace('_', ' ').trimmed();
+		const QString serial = npdmProgramId(path);
+		if ((serial.toULongLong(nullptr, 16) & 0x1fff) != 0)
+			return {};
+		return {{"title", title}, {"serial", serial}, {"path", QFileInfo(path).absoluteFilePath()}, {"console", "Switch"}, {"version", ""}};
+	}
 	QString title = QFileInfo(path).completeBaseName();
 	static const QRegularExpression id("\\[([0-9a-fA-F]{16})\\]");
 	const auto match = id.match(title);
@@ -219,6 +290,9 @@ QVariantMap SwitchCore::describe(const QString& path)
 
 QStringList SwitchCore::arguments(const QString& path, bool online, const QString& nickname)
 {
+	// shortcut: Switch 2 runs offline on stock Eglantine (no --uscl-room); port uscl-eden 0003 to it for rooms
+	if (isSwitch2(path))
+		return {"-f", "-g", QFileInfo(path).absoluteFilePath()};
 	const QString config = configDir() + "sdl2-config.ini";
 	const bool qt = qtFrontend();
 	QStringList args = qt ? QStringList{"-f"} : QStringList{"--config", config, "--fullscreen"};
@@ -237,6 +311,15 @@ QStringList SwitchCore::arguments(const QString& path, bool online, const QStrin
 
 QString SwitchCore::prepareLaunchConfig()
 {
+	// Eglantine offers to move a legacy eden folder when its own config folder is missing; one choice renames
+	// Eden's profile away, so the folder always exists before a launch.
+#ifdef _WIN32
+	const QString eglantine = profileDir() + "data/eglantine/config";
+#else
+	const QString eglantine = profileDir() + "config/eglantine";
+#endif
+	if (!QDir().mkpath(eglantine))
+		return QCoreApplication::translate("SwitchCore", "Couldn't prepare the Switch 2 profile.");
 	if (qtFrontend()) return {};
 	const QString source = configDir() + "qt-config.ini";
 	// With no GUI configuration, let the SDL frontend create its own defaults.
@@ -264,7 +347,10 @@ QString SwitchCore::prepareLaunchConfig()
 
 QString SwitchCore::prerequisiteError(const QString& path)
 {
-	if (!QFileInfo(executable()).isExecutable())
+	const bool switch2 = !path.isEmpty() && isSwitch2(path);
+	if (switch2 && !QFileInfo(executable(false, path)).isExecutable())
+		return QCoreApplication::translate("SwitchCore", "The Switch 2 emulator (Eglantine) is missing. Put eglantine on PATH or set USCL_SWITCH2_CORE.");
+	if (!QFileInfo(executable()).isExecutable() && !switch2)
 		return QCoreApplication::translate("SwitchCore", "The Switch emulator is missing. Configure it in Settings → Switch Emulation.");
 #ifdef _WIN32
 	if (QFileInfo(QFileInfo(executable()).absolutePath() + "/user").isDir())
@@ -272,6 +358,11 @@ QString SwitchCore::prerequisiteError(const QString& path)
 #endif
 	if (QFileInfo(path).suffix().compare("nro", Qt::CaseInsensitive) == 0)
 		return {};
+	if (switch2)
+	{
+		const QString keys = profileDir() + "data/eglantine/keys/prod.keys";
+		return QFileInfo(keys).isFile() ? QString() : QCoreApplication::translate("SwitchCore", "Copy prod.keys dumped from your console to %1.").arg(keys);
+	}
 	if (!QFileInfo(dataDir() + "keys/prod.keys").isFile())
 		return QCoreApplication::translate("SwitchCore", "Import prod.keys dumped from your Switch in Settings → Switch Emulation.");
 	return {};

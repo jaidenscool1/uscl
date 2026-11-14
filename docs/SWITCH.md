@@ -15,6 +15,14 @@ Environment overrides: `USCL_SWITCH_CORE`, `USCL_SWITCH_GUI`, `USCL_SWITCH_ROOM`
 
 This implementation is an external-core integration. Release installers do not yet bundle Eden. Distributing a core later requires its runtime dependencies, license notices and corresponding-source obligations to be handled alongside packaging.
 
+## Switch 2 games
+
+Eden v0.2.1 cannot run Switch 2 builds. USCL launches games whose program ID starts with `04` (Switch 2; Switch ones start with `01`) with **Eglantine**, a GPL-3.0 Eden fork with NX2 support ([releases](https://github.com/Eglantine-Community/Eglantine/releases), Linux AppImage, Windows, macOS). Put it on PATH as `eglantine`, or point `USCL_SWITCH2_CORE` (or the `switch/USCL_SWITCH2_CORE` setting) at it. It starts with Eglantine's stock arguments, `-f -g <game>`.
+
+- Extracted dumps (`exefs/` with `main` and `main.npdm`, beside `romfs/`) are recognized for both consoles; the title ID comes from `main.npdm` and the title from the dump's folder name. With `base/` and full `updates/<version>/` dumps side by side, only the newest update is listed.
+- Eglantine keeps its own data folder (`<profile>/data/eglantine`: `keys/prod.keys`, `nand/system/Contents/registered/` for firmware). USCL creates `<profile>/config/eglantine` before each launch so Eglantine never offers to move Eden's `eden` folder.
+- Offline only for now: Eglantine has no `--uscl-room`, so Host/Join refuses Switch 2 games. Porting uscl-eden 0003 to it is the next step for rooms over Steam.
+
 ## Friends over Steam
 
 1. Use the same Eden release and game updates/DLC on every PC. Every player has their own game and console files.

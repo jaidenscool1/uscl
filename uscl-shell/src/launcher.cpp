@@ -235,13 +235,15 @@ bool Launcher::startGame(const QString& path, const QString& title, bool online,
 	if (console == "Switch")
 	{
 		QString problem = SwitchCore::prerequisiteError(path);
+		if (problem.isEmpty() && online && SwitchCore::isSwitch2(path))
+			problem = tr("Switch 2 games play offline in USCL for now.");
 		if (problem.isEmpty()) problem = SwitchCore::prepareLaunchConfig();
 		if (!problem.isEmpty())
 		{
 			emit finished(true, problem);
 			return false;
 		}
-		return start(SwitchCore::arguments(path, online, nickname), title, false, true, false, SwitchCore::executable());
+		return start(SwitchCore::arguments(path, online, nickname), title, false, true, false, SwitchCore::executable(false, path));
 	}
 	if (QFileInfo::exists(path + "/sce_sys/param.sfo"))
 	{
