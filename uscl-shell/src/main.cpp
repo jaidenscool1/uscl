@@ -151,6 +151,7 @@ namespace
 			      wii.section("[Wiimote2]", 1).contains("Swing/Right = max(0, 2 * (`Right X+` - smooth(`Right X+`, 0.3)) - 1)") &&
 			      wii.section("[Wiimote2]", 1).contains("Tilt/Backward = `Left Y+`") && !wii.section("[Wiimote2]", 0, 0).contains("Swing/Right") &&
 			      wii.section("[Wiimote2]", 0, 0).contains("IMUGyroscope/Pitch Up = `Gyro Pitch Up`") &&
+			      wii.section("[Wiimote2]", 0, 0).contains("IMUIR/Enabled = False\nIR/Up = `Right Y-`") &&
 			      !wii.section("[Wiimote2]", 1).contains("IMUGyroscope") && wii.section("[Wiimote2]", 1).contains("IR/Up = `Right Y-`"), "Dolphin Wii Remotes");
 			const QString gc = PadConfig::dolphinIni("[GCPad2]\nDevice = Keep\n", "GCPad", {ds});
 			check(gc.contains("[GCPad1]\nDevice = SDL/0/PS5 Controller\n") && gc.contains("[GCPad2]\nDevice = Keep") && !gc.contains("[GCPad3]"), "Dolphin GameCube pads");

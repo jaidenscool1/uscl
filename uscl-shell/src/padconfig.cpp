@@ -89,7 +89,8 @@ Nunchuk/Swing/Forward = `Shoulder L`
 Nunchuk/Swing/Up = `Shoulder L`
 Rumble/Motor = `Motor L` | `Motor R`
 )";
-	// The pad's own motion sensors are the Wii Remote's: swing, tilt and point by moving it (R3 recenters the pointer)
+	// The pad's own motion sensors are the Wii Remote's (swing, tilt, MotionPlus); the right stick points. Pointing by
+	// gyro drifts off screen: a DualSense Edge at rest reads ~3 deg/s, over Dolphin's 2 deg/s dead zone (2026-11-14)
 	const char* const wiimote_motion = R"(IMUAccelerometer/Up = `Accel Up`
 IMUAccelerometer/Down = `Accel Down`
 IMUAccelerometer/Left = `Accel Left`
@@ -102,8 +103,11 @@ IMUGyroscope/Roll Left = `Gyro Roll Left`
 IMUGyroscope/Roll Right = `Gyro Roll Right`
 IMUGyroscope/Yaw Left = `Gyro Yaw Left`
 IMUGyroscope/Yaw Right = `Gyro Yaw Right`
-IMUIR/Enabled = True
-IMUIR/Recenter = `Thumb R`
+IMUIR/Enabled = False
+IR/Up = `Right Y-`
+IR/Down = `Right Y+`
+IR/Left = `Right X-`
+IR/Right = `Right X+`
 )";
 	// No motion sensors: point with the right stick and flick it to swing the Wii Remote (only the flick swings, a
 	// held stick just points, and slow moves don't swing; up also pushes forward), tilt with the left stick, shake with R1
