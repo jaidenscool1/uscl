@@ -284,7 +284,7 @@ namespace
 			check(found.size() == 2 && found.value("0100152000022000") == kart, "Switch scan excludes archives, updates, DLC and truncated containers");
 			check(SwitchCore::describe(kart).value("console") == "Switch" && SwitchCore::describe(kart).value("title") == "Mario Kart 8 Deluxe", "Switch description");
 			check(SwitchCore::isSerial("0100152000022000") && !SwitchCore::isSerial("BLUS31426"), "console ID separation");
-			check(Online::supports("0100152000022000"), "Switch games support automatic USCL session hosting");
+			check(Online::supports("0100152000022000") && !Online::supports("0400C3F00006E000"), "Switch games (not Switch 2) support automatic USCL session hosting");
 			{
 				// Switch 2: extracted dumps (exefs/main + main.npdm); a full update dump wins over base
 				const auto dump = [&](const QString& dir, quint64 id) {
@@ -298,14 +298,14 @@ namespace
 					return write("ns2/" + dir + "/exefs/main", QByteArray("NSO0").leftJustified(0x100, '\0'));
 				};
 				const QString world = dump("Kart World [ROM]/base", 0x0400C3F00006E000);
-				dump("Sports_v1.1.0/base", 0x04008E001F098000);
-				dump("Sports_v1.1.0/updates/1", 0x04008E001F098000);
-				const QString sports = dump("Sports_v1.1.0/updates/65536", 0x04008E001F098000);
+				dump("SwitchSports_v1.1.0/base", 0x04008E001F098000);
+				dump("SwitchSports_v1.1.0/updates/1", 0x04008E001F098000);
+				const QString sports = dump("SwitchSports_v1.1.0/updates/65536", 0x04008E001F098000);
 				write("ns2/stray/exefs/main", "NSO0");
 				const auto ns2 = GameModel::findGames(root.filePath("games/ns2"));
 				check(ns2.size() == 2 && ns2.value("0400C3F00006E000") == world && ns2.value("04008E001F098000") == sports,
 				      "Switch 2 scan finds extracted dumps, newest update only");
-				check(SwitchCore::describe(world).value("title") == "Kart World" && SwitchCore::describe(sports).value("title") == "Sports",
+				check(SwitchCore::describe(world).value("title") == "Kart World" && SwitchCore::describe(sports).value("title") == "Switch Sports",
 				      "Switch 2 dump titles");
 				check(SwitchCore::isSwitch2(world) && !SwitchCore::isSwitch2(kart), "Switch 2 detection");
 				qputenv("USCL_SWITCH2_CORE", "/opt/eglantine");
@@ -477,7 +477,7 @@ int main(int argc, char* argv[])
 			byConsole[g.value("console").toString()] << g.value("title").toString();
 		}
 		for (const QString& c : {QStringLiteral("PS3"), QStringLiteral("PS4"), QStringLiteral("Wii"),
-		                         QStringLiteral("WiiU"), QStringLiteral("3DS"), QStringLiteral("Xbox360")})
+		                         QStringLiteral("WiiU"), QStringLiteral("3DS"), QStringLiteral("Switch"), QStringLiteral("Xbox360")})
 			if (byConsole.contains(c))
 			{
 				std::printf("== %s (%d) ==\n", qPrintable(c), int(byConsole[c].size()));

@@ -262,7 +262,8 @@ QVariantMap SwitchCore::describe(const QString& path)
 			title = dump.dirName();
 		}
 		static const QRegularExpression noise("\\[[^\\]]*\\]|[ _]v\\d+(\\.\\d+)*$");
-		title = title.remove(noise).replace('_', ' ').trimmed();
+		static const QRegularExpression camel("([a-z])([A-Z])"); // NintendoSwitchSports -> Nintendo Switch Sports
+		title = title.remove(noise).replace('_', ' ').replace(camel, "\\1 \\2").trimmed();
 		const QString serial = npdmProgramId(path);
 		if ((serial.toULongLong(nullptr, 16) & 0x1fff) != 0)
 			return {};
@@ -290,7 +291,7 @@ QVariantMap SwitchCore::describe(const QString& path)
 
 QStringList SwitchCore::arguments(const QString& path, bool online, const QString& nickname)
 {
-	// shortcut: Switch 2 runs offline on stock Eglantine (no --uscl-room); port uscl-eden 0003 to it for rooms
+	// shortcut: Switch 2 runs offline (Eglantine has no --uscl-room); port uscl-eden 0003 to uscl-eglantine for rooms
 	if (isSwitch2(path))
 		return {"-f", "-g", QFileInfo(path).absoluteFilePath()};
 	const QString config = configDir() + "sdl2-config.ini";
@@ -320,6 +321,15 @@ QString SwitchCore::prepareLaunchConfig()
 #endif
 	if (!QDir().mkpath(eglantine))
 		return QCoreApplication::translate("SwitchCore", "Couldn't prepare the Switch 2 profile.");
+	{
+		// Eglantine asks "close Eglantine?" on SIGTERM, so stop() would always end in a kill; 2 = Ask_Never lets it save and exit.
+		QSettings ui(eglantine + "/qt-config.ini", QSettings::IniFormat);
+		ui.setValue("UI/confirmStop/default", false);
+		ui.setValue("UI/confirmStop", 2);
+		ui.sync();
+		if (ui.status() != QSettings::NoError)
+			return QCoreApplication::translate("SwitchCore", "Couldn't save Switch 2 launch settings.");
+	}
 	if (qtFrontend()) return {};
 	const QString source = configDir() + "qt-config.ini";
 	// With no GUI configuration, let the SDL frontend create its own defaults.

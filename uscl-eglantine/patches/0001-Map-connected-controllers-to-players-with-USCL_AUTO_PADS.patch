@@ -1,0 +1,145 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: USCL <uscl@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 10:40:00 +0000
+Subject: [PATCH] Map connected controllers to players with USCL_AUTO_PADS
+
+SDL3 port of uscl-eden 0012: with USCL_AUTO_PADS set, every connected game
+controller becomes players 1-8 in connection order, mapped with Eglantine's
+own per-controller defaults (Joy-Con pairs as one, motion). Wheels and flight
+sticks are skipped; with no controller the settings are left alone.
+---
+diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
+index a30855407..a962fcd65 100644
+--- a/src/input_common/drivers/sdl_driver.cpp
++++ b/src/input_common/drivers/sdl_driver.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <set>
+ #include <numbers>
+ #include "common/logging.h"
+ #include "common/math_util.h"
+@@ -785,6 +786,37 @@ std::vector<Common::ParamPackage> SDLDriver::GetInputDevices() const {
+     return devices;
+ }
+ 
++std::vector<Common::ParamPackage> SDLDriver::GetPadsInConnectionOrder() {
++    const auto devices = GetInputDevices();
++    // Joy-Cons that form a pair are listed again as one "Nintendo Dual Joy-Con" device
++    std::set<std::pair<std::string, std::string>> paired;
++    for (const auto& device : devices) {
++        if (device.Has("guid2")) {
++            paired.emplace(device.Get("guid", ""), device.Get("port", ""));
++            paired.emplace(device.Get("guid2", ""), device.Get("port", ""));
++        }
++    }
++    std::vector<std::pair<SDL_JoystickID, Common::ParamPackage>> pads;
++    for (const auto& device : devices) {
++        if (!device.Has("guid2") && paired.contains({device.Get("guid", ""), device.Get("port", "")})) {
++            continue;
++        }
++        const auto joystick = GetSDLJoystickByGUID(device.Get("guid", ""), device.Get("port", 0));
++        // steering wheels, flight sticks etc. have no game controller mapping: not a player's pad
++        if (!joystick || !joystick->GetSDLGameController()) {
++            continue;
++        }
++        // instance ids count up as devices connect
++        pads.emplace_back(SDL_GetJoystickID(joystick->GetSDLJoystick()), device);
++    }
++    std::sort(pads.begin(), pads.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
++    std::vector<Common::ParamPackage> out;
++    for (auto& pad : pads) {
++        out.push_back(std::move(pad.second));
++    }
++    return out;
++}
++
+ Common::Input::DriverResult SDLDriver::SetVibration(
+     const PadIdentifier& identifier, const Common::Input::VibrationStatus& vibration) {
+     const auto joystick =
+diff --git a/src/input_common/drivers/sdl_driver.h b/src/input_common/drivers/sdl_driver.h
+index e6751b668..332848886 100644
+--- a/src/input_common/drivers/sdl_driver.h
++++ b/src/input_common/drivers/sdl_driver.h
+@@ -54,6 +54,9 @@ public:
+ 
+     std::vector<Common::ParamPackage> GetInputDevices() const override;
+ 
++    /// USCL: connected game controllers (Joy-Con pairs as one), oldest connection first
++    std::vector<Common::ParamPackage> GetPadsInConnectionOrder();
++
+     ButtonMapping GetButtonMappingForDevice(const Common::ParamPackage& params) override;
+     AnalogMapping GetAnalogMappingForDevice(const Common::ParamPackage& params) override;
+     MotionMapping GetMotionMappingForDevice(const Common::ParamPackage& params) override;
+diff --git a/src/input_common/main.cpp b/src/input_common/main.cpp
+index 6c8443ff6..f0169e93e 100644
+--- a/src/input_common/main.cpp
++++ b/src/input_common/main.cpp
+@@ -4,9 +4,12 @@
+ // SPDX-FileCopyrightText: 2017 Citra Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <cstdlib>
+ #include <memory>
+ #include "common/input.h"
++#include "common/logging.h"
+ #include "common/param_package.h"
++#include "common/settings.h"
+ #include "input_common/drivers/camera.h"
+ #include "input_common/drivers/keyboard.h"
+ #include "input_common/drivers/mouse.h"
+@@ -99,8 +102,53 @@ struct InputSubsystem::Impl {
+                                             std::make_shared<TouchFromButton>());
+         Common::Input::RegisterInputFactory("analog_from_button",
+                                             std::make_shared<StickFromButton>());
++#ifdef HAVE_SDL3
++        AutoMapPads();
++#endif
+     }
+ 
++#ifdef HAVE_SDL3
++    // USCL: with USCL_AUTO_PADS set, every connected game controller (USB or Bluetooth) becomes
++    // players 1-8 in the order it was connected, mapped like Configure Input -> Input Device does
++    // (button layout per controller type, Joy-Con pairs, motion). No controller: settings stay.
++    void AutoMapPads() {
++        if (!std::getenv("USCL_AUTO_PADS")) {
++            return;
++        }
++        const auto pads = sdl->GetPadsInConnectionOrder();
++        if (pads.empty()) {
++            return;
++        }
++        auto& players = Settings::values.players.GetValue();
++        for (std::size_t i = 0; i < 8; ++i) {
++            auto& player = players[i];
++            if (i >= pads.size()) {
++                player.connected = false;
++                continue;
++            }
++            const auto& pad = pads[i];
++            player.connected = true;
++            player.controller_type = pad.Has("guid2") ? Settings::ControllerType::DualJoyconDetached
++                                                      : Settings::ControllerType::ProController;
++            player.profile_name.clear();
++            player.buttons.fill({});
++            player.analogs.fill({});
++            player.motions.fill({});
++            for (const auto& [id, param] : sdl->GetButtonMappingForDevice(pad)) {
++                player.buttons[id] = param.Serialize();
++            }
++            for (const auto& [id, param] : sdl->GetAnalogMappingForDevice(pad)) {
++                player.analogs[id] = param.Serialize();
++            }
++            for (const auto& [id, param] : sdl->GetMotionMappingForDevice(pad)) {
++                player.motions[id] = param.Serialize();
++            }
++            LOG_INFO(Input, "USCL: player {} = {}", i + 1, pad.Get("display", ""));
++        }
++        players[8].connected = false; // handheld: the players above are the controllers
++    }
++#endif
++
+     template <typename Engine>
+     void UnregisterEngine(std::shared_ptr<Engine>& engine) {
+         Common::Input::UnregisterInputFactory(engine->GetEngineName());
