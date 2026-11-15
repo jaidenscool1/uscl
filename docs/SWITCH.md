@@ -15,6 +15,16 @@ Environment overrides: `USCL_SWITCH_CORE`, `USCL_SWITCH_GUI`, `USCL_SWITCH_ROOM`
 
 This implementation is an external-core integration. Release installers do not yet bundle Eden. Distributing a core later requires its runtime dependencies, license notices and corresponding-source obligations to be handled alongside packaging.
 
+## Switch 2 games
+
+Eden v0.2.1 cannot run Switch 2 builds. USCL launches games whose program ID starts with `04` (Switch 2; Switch ones start with `01`) with **Eglantine**, a GPL-3.0 Eden fork with NX2 support, built with our patch ([uscl-eglantine](../uscl-eglantine/README.md)) so controllers are mapped automatically like Switch games. Put it on PATH as `eglantine`, or point `USCL_SWITCH2_CORE` (or the `switch/USCL_SWITCH2_CORE` setting) at it. It starts with Eglantine's own arguments, `-f -g <game>`; USCL sets its "confirm before stopping" to never, so holding Guide closes it cleanly.
+
+Tested 2026-11-14 (Linux, NVIDIA, firmware/keys 22.5.0): Mario Kart World starts from the home screen, the pad is player 1 (Switch A/B are the right/bottom face buttons), and a Grand Prix race plays. Nintendo Switch Sports Resort v1.1.0 boots past the safety screen, then freezes in the island flyover every time, which is an Eglantine limitation (its README lists only Mario Kart World and Splatoon Raiders).
+
+- Extracted dumps (`exefs/` with `main` and `main.npdm`, beside `romfs/`) are recognized for both consoles; the title ID comes from `main.npdm` and the title from the dump's folder name. With `base/` and full `updates/<version>/` dumps side by side, only the newest update is listed.
+- Eglantine keeps its own data folder (`<profile>/data/eglantine`: `keys/prod.keys`, `nand/system/Contents/registered/` for firmware). USCL creates `<profile>/config/eglantine` before each launch so Eglantine never offers to move Eden's `eden` folder.
+- Offline only for now: Eglantine has no `--uscl-room`, so USCL starts Switch 2 games without its automatic session, and starting one inside a session is refused. Porting uscl-eden 0003 to it is the next step for rooms over Steam.
+
 ## Friends over Steam
 
 1. Use the same Eden release and game updates/DLC on every PC. Every player has their own game and console files.

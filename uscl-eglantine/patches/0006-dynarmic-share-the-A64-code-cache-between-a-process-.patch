@@ -1,0 +1,1008 @@
+From 7149838f17531b22cf23e84620f75fd40d93837c Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 21:20:11 -0700
+Subject: [PATCH 6/6] dynarmic: share the A64 code cache between a process's
+ cores
+
+Every core had its own JIT and compiled each block it ran: Mario Kart World
+compiled 1.55M blocks for 511k distinct ones, and its boot hitches were almost
+all compilation. The cores of a process now share core 0's cache, each keeping
+its own state:
+
+- per-core values the code used to embed (tpidr pointers, exclusive monitor
+  slots) are read from the core's jit state; the callbacks are one object that
+  forwards to the core running on the calling thread
+- blocks link through 8-byte slots (jmp [rip+slot], mov rcx,[rip+slot]) set
+  with atomic stores, so no instruction is rewritten while another core may
+  run it
+- each core has its own fast dispatch table (a shared one is written while
+  other cores read it; without one every indirect branch took the cache lock)
+- invalidation keeps the code space (another core may be in it), unlinks and
+  bumps an epoch on which every core empties its RSB and dispatch table
+
+Mario Kart World, boot to race: 510k blocks compiled instead of 1.55M, frames
+over 100 ms 20-26 instead of 29-40, race unchanged. Switch Sports Resort runs
+as before. USCL_SHARED_JIT=0 gives every core its own cache again.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/core/arm/dynarmic/arm_dynarmic_64.cpp     |  91 +++++++++
+ .../src/dynarmic/backend/x64/a32_jitstate.h   |   3 +
+ .../src/dynarmic/backend/x64/a64_emit_x64.cpp |  80 +++++++-
+ .../src/dynarmic/backend/x64/a64_emit_x64.h   |   7 +
+ .../dynarmic/backend/x64/a64_interface.cpp    | 189 +++++++++++++-----
+ .../src/dynarmic/backend/x64/a64_jitstate.h   |   7 +
+ .../src/dynarmic/backend/x64/emit_x64.cpp     |  50 +++++
+ .../src/dynarmic/backend/x64/emit_x64.h       |   9 +
+ .../backend/x64/emit_x64_memory.cpp.inc       |  37 +++-
+ .../dynarmic/backend/x64/emit_x64_memory.h    |   5 +-
+ .../src/dynarmic/backend/x64/shared_code.h    |  19 ++
+ .../src/dynarmic/interface/A32/config.h       |   3 +
+ .../src/dynarmic/interface/A64/config.h       |  11 +
+ 13 files changed, 450 insertions(+), 61 deletions(-)
+ create mode 100644 src/dynarmic/src/dynarmic/backend/x64/shared_code.h
+
+diff --git a/src/core/arm/dynarmic/arm_dynarmic_64.cpp b/src/core/arm/dynarmic/arm_dynarmic_64.cpp
+index 0f2991f81..20413a732 100644
+--- a/src/core/arm/dynarmic/arm_dynarmic_64.cpp
++++ b/src/core/arm/dynarmic/arm_dynarmic_64.cpp
+@@ -29,6 +29,84 @@ namespace Core {
+ 
+ using namespace Common::Literals;
+ 
++namespace {
++
++/// The core whose guest code runs on this thread (RunThread/StepThread).
++thread_local DynarmicCallbacks64* t_running_callbacks = nullptr;
++
++/// With the JIT's code shared between cores every core's Jit takes this one object (the code
++/// calls it at addresses fixed when it was emitted); it forwards to the running core.
++class SharedCallbacks64 final : public Dynarmic::A64::UserCallbacks {
++public:
++    u64 MemoryRead(u64 vaddr, size_t size) override {
++        return t_running_callbacks->DynarmicCallbacks64::MemoryRead(vaddr, size);
++    }
++    Dynarmic::A64::Vector MemoryRead128(u64 vaddr) override {
++        return t_running_callbacks->DynarmicCallbacks64::MemoryRead128(vaddr);
++    }
++    std::optional<u32> MemoryReadCode(u64 vaddr) override {
++        return t_running_callbacks->DynarmicCallbacks64::MemoryReadCode(vaddr);
++    }
++    void InstructionSynchronizationBarrierRaised() override {
++        t_running_callbacks->DynarmicCallbacks64::InstructionSynchronizationBarrierRaised();
++    }
++    void MemoryWrite(Dynarmic::A64::VAddr vaddr, u64 value, std::size_t size) override {
++        t_running_callbacks->DynarmicCallbacks64::MemoryWrite(vaddr, value, size);
++    }
++    void MemoryWrite128(u64 vaddr, Dynarmic::A64::Vector value) override {
++        t_running_callbacks->DynarmicCallbacks64::MemoryWrite128(vaddr, value);
++    }
++    bool MemoryWriteExclusive8(u64 vaddr, std::uint8_t value, std::uint8_t expected) override {
++        return t_running_callbacks->DynarmicCallbacks64::MemoryWriteExclusive8(vaddr, value, expected);
++    }
++    bool MemoryWriteExclusive16(u64 vaddr, std::uint16_t value, std::uint16_t expected) override {
++        return t_running_callbacks->DynarmicCallbacks64::MemoryWriteExclusive16(vaddr, value, expected);
++    }
++    bool MemoryWriteExclusive32(u64 vaddr, std::uint32_t value, std::uint32_t expected) override {
++        return t_running_callbacks->DynarmicCallbacks64::MemoryWriteExclusive32(vaddr, value, expected);
++    }
++    bool MemoryWriteExclusive64(u64 vaddr, std::uint64_t value, std::uint64_t expected) override {
++        return t_running_callbacks->DynarmicCallbacks64::MemoryWriteExclusive64(vaddr, value, expected);
++    }
++    bool MemoryWriteExclusive128(u64 vaddr, Dynarmic::A64::Vector value,
++                                 Dynarmic::A64::Vector expected) override {
++        return t_running_callbacks->DynarmicCallbacks64::MemoryWriteExclusive128(vaddr, value, expected);
++    }
++    void InstructionCacheOperationRaised(Dynarmic::A64::InstructionCacheOperation op, u64 value) override {
++        t_running_callbacks->DynarmicCallbacks64::InstructionCacheOperationRaised(op, value);
++    }
++    void ExceptionRaised(u64 pc, Dynarmic::A64::Exception exception) override {
++        t_running_callbacks->DynarmicCallbacks64::ExceptionRaised(pc, exception);
++    }
++    void CallSVC(u32 svc) override {
++        t_running_callbacks->DynarmicCallbacks64::CallSVC(svc);
++    }
++    void AddTicks(u64 ticks) override {
++        t_running_callbacks->DynarmicCallbacks64::AddTicks(ticks);
++    }
++    u64 GetTicksRemaining() override {
++        return t_running_callbacks->DynarmicCallbacks64::GetTicksRemaining();
++    }
++    u64 GetCNTPCT() override {
++        return t_running_callbacks->DynarmicCallbacks64::GetCNTPCT();
++    }
++};
++
++SharedCallbacks64 g_shared_callbacks;
++
++/// One JIT code cache for all cores of a process: a block runs on whichever core needs it
++/// without being compiled again (Mario Kart World compiled each block about 3 times).
++/// USCL_SHARED_JIT=0 gives every core its own.
++bool SharedJit() {
++    static const bool shared = [] {
++        const char* value = std::getenv("USCL_SHARED_JIT");
++        return value == nullptr || value[0] != '0';
++    }();
++    return shared;
++}
++
++} // namespace
++
+ DynarmicCallbacks64::DynarmicCallbacks64(ArmDynarmic64& parent, Kernel::KProcess* process)
+     : m_parent{parent}, m_memory(process->GetMemory())
+     , m_process(process), m_debugger_enabled{parent.m_system.DebuggerEnabled()}
+@@ -427,15 +505,28 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
+         config.fastmem_pointer = std::nullopt;
+         config.fastmem_exclusive_access = false;
+     }
++    if (page_table && SharedJit()) {
++        config.shared_code = true;
++        config.callbacks = &g_shared_callbacks;
++        // One cache instead of one per core; offsets in it must stay under 1 GiB.
++        config.code_cache_size = std::uint32_t(960_MiB);
++        if (m_core_index != 0) {
++            auto* const first = static_cast<ArmDynarmic64*>(m_cb->m_process->GetArmInterface(0));
++            ASSERT(first != nullptr && first->m_jit);
++            config.share_code_with = &*first->m_jit;
++        }
++    }
+     m_jit.emplace(config);
+ }
+ 
+ HaltReason ArmDynarmic64::RunThread(Kernel::KThread* thread) {
++    t_running_callbacks = &*m_cb;
+     m_jit->ClearExclusiveState();
+     return TranslateHaltReason(m_jit->Run());
+ }
+ 
+ HaltReason ArmDynarmic64::StepThread(Kernel::KThread* thread) {
++    t_running_callbacks = &*m_cb;
+     m_jit->ClearExclusiveState();
+     return TranslateHaltReason(m_jit->Step());
+ }
+diff --git a/src/dynarmic/src/dynarmic/backend/x64/a32_jitstate.h b/src/dynarmic/src/dynarmic/backend/x64/a32_jitstate.h
+index ad151e609..6d771b4e9 100644
+--- a/src/dynarmic/src/dynarmic/backend/x64/a32_jitstate.h
++++ b/src/dynarmic/src/dynarmic/backend/x64/a32_jitstate.h
+@@ -54,6 +54,9 @@ struct A32JitState {
+     u32 exclusive_state = 0;
+ 
+     u32 rsb_ptr = 0;
++    // Unused: A32 code is never shared between cores (the shared emitter code names them).
++    u64 exclusive_address_ptr = 0;
++    u64 exclusive_value_ptr = 0;
+     std::array<u64, RSB_SIZE> rsb_location_descriptors;
+     std::array<u64, RSB_SIZE> rsb_codeptrs;
+ 
+diff --git a/src/dynarmic/src/dynarmic/backend/x64/a64_emit_x64.cpp b/src/dynarmic/src/dynarmic/backend/x64/a64_emit_x64.cpp
+index 50ddcb9a3..374f894e5 100644
+--- a/src/dynarmic/src/dynarmic/backend/x64/a64_emit_x64.cpp
++++ b/src/dynarmic/src/dynarmic/backend/x64/a64_emit_x64.cpp
+@@ -60,6 +60,7 @@ FP::FPCR A64EmitContext::FPCR(bool fpcr_controlled) const {
+ 
+ A64EmitX64::A64EmitX64(BlockOfCode& code, A64::UserConfig conf, A64::Jit* jit_interface)
+         : EmitX64(code), conf(conf), jit_interface{jit_interface} {
++    shared_slots = conf.shared_code;
+     GenMemory128Accessors();
+     GenFastmemFallbacks();
+     GenTerminalHandlers();
+@@ -175,7 +176,10 @@ void A64EmitX64::ClearCache() {
+     EmitX64::ClearCache();
+     block_ranges.ClearCache();
+     ClearFastDispatchTable();
+-    fastmem_patch_info.clear();
++    if (!shared_slots) {
++        // Shared code keeps its code (other cores may be in it), so its faults still resolve.
++        fastmem_patch_info.clear();
++    }
+ }
+ 
+ void A64EmitX64::InvalidateCacheRanges(const boost::icl::interval_set<u64>& ranges) {
+@@ -228,13 +232,17 @@ void A64EmitX64::GenTerminalHandlers() {
+         terminal_handler_fast_dispatch_hint = code.getCurr<const void*>();
+         calculate_location_descriptor();
+         code.L(rsb_cache_miss);
+-        code.mov(r8, u64(fast_dispatch_table.data()));
++        if (conf.shared_code) {
++            code.mov(r8, qword[code.ABI_JIT_PTR + offsetof(A64JitState, fast_dispatch_table_ptr)]);
++        } else {
++            code.mov(r8, u64(fast_dispatch_table.data()));
++        }
+         //code.mov(r12, qword[code.ABI_JIT_PTR + offsetof(A64JitState, pc)]);
+         code.mov(r12, rbx);
+         if (code.HasHostFeature(HostFeature::SSE42)) {
+             code.crc32(r12, r8);
+         }
+-        code.and_(r12d, fast_dispatch_table_mask);
++        code.and_(r12d, conf.shared_code ? fast_dispatch_table_mask_shared : fast_dispatch_table_mask);
+         code.lea(r12, ptr[r8 + r12]);
+         code.cmp(rbx, qword[r12 + offsetof(FastDispatchEntry, location_descriptor)]);
+         code.jne(fast_dispatch_cache_miss, code.T_NEAR);
+@@ -598,7 +606,11 @@ void A64EmitX64::EmitA64GetDCZID(A64EmitContext& ctx, IR::Inst* inst) {
+ void A64EmitX64::EmitA64GetTPIDR(A64EmitContext& ctx, IR::Inst* inst) {
+     const Xbyak::Reg64 result = ctx.reg_alloc.ScratchGpr(code);
+     if (conf.tpidr_el0) {
+-        code.mov(result, u64(conf.tpidr_el0));
++        if (conf.shared_code) {
++            code.mov(result, qword[code.ABI_JIT_PTR + offsetof(A64JitState, tpidr_el0_ptr)]);
++        } else {
++            code.mov(result, u64(conf.tpidr_el0));
++        }
+         code.mov(result, qword[result]);
+     } else {
+         code.xor_(result.cvt32(), result.cvt32());
+@@ -609,7 +621,11 @@ void A64EmitX64::EmitA64GetTPIDR(A64EmitContext& ctx, IR::Inst* inst) {
+ void A64EmitX64::EmitA64GetTPIDRRO(A64EmitContext& ctx, IR::Inst* inst) {
+     const Xbyak::Reg64 result = ctx.reg_alloc.ScratchGpr(code);
+     if (conf.tpidrro_el0) {
+-        code.mov(result, u64(conf.tpidrro_el0));
++        if (conf.shared_code) {
++            code.mov(result, qword[code.ABI_JIT_PTR + offsetof(A64JitState, tpidrro_el0_ptr)]);
++        } else {
++            code.mov(result, u64(conf.tpidrro_el0));
++        }
+         code.mov(result, qword[result]);
+     } else {
+         code.xor_(result.cvt32(), result.cvt32());
+@@ -622,7 +638,11 @@ void A64EmitX64::EmitA64SetTPIDR(A64EmitContext& ctx, IR::Inst* inst) {
+     const Xbyak::Reg64 value = ctx.reg_alloc.UseGpr(code, args[0]);
+     const Xbyak::Reg64 addr = ctx.reg_alloc.ScratchGpr(code);
+     if (conf.tpidr_el0) {
+-        code.mov(addr, u64(conf.tpidr_el0));
++        if (conf.shared_code) {
++            code.mov(addr, qword[code.ABI_JIT_PTR + offsetof(A64JitState, tpidr_el0_ptr)]);
++        } else {
++            code.mov(addr, u64(conf.tpidr_el0));
++        }
+         code.mov(qword[addr], value);
+     }
+ }
+@@ -766,7 +786,33 @@ bool A64EmitX64::EmitTerminal(IR::Term::Terminal const& terminal, IR::LocationDe
+     UNREACHABLE();
+ }
+ 
++void A64EmitX64::EmitSharedLink(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
++    Xbyak::Label slot, stub;
++    code.jmp(ptr[rip + slot]);
++    code.L(stub);
++    code.mov(rax, A64::LocationDescriptor{target_desc}.PC());
++    code.mov(qword[code.ABI_JIT_PTR + offsetof(A64JitState, pc)], rax);
++    code.jmp(code.GetReturnFromRunCodeAddress());
++    const CodePtr unlinked = stub.getAddress();
++    EmitLinkSlot(slot, target_code_ptr ? target_code_ptr : unlinked, unlinked);
++}
++
++void A64EmitX64::EmitLinkSlot(Xbyak::Label& slot, CodePtr value, CodePtr unlinked) {
++    code.align(8);
++    code.L(slot);
++    AddLinkSlot(code.getCurr<const u8*>());
++    code.dq(std::bit_cast<u64>(value));
++    code.dq(std::bit_cast<u64>(unlinked));
++}
++
+ void A64EmitX64::EmitPatchJg(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
++    if (conf.shared_code) {
++        Xbyak::Label skip;
++        code.jng(skip, code.T_NEAR);
++        EmitSharedLink(target_desc, target_code_ptr);
++        code.L(skip);
++        return;
++    }
+     const CodePtr patch_location = code.getCurr();
+     if (target_code_ptr) {
+         code.jg(target_code_ptr);
+@@ -779,6 +825,13 @@ void A64EmitX64::EmitPatchJg(const IR::LocationDescriptor& target_desc, CodePtr
+ }
+ 
+ void A64EmitX64::EmitPatchJz(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
++    if (conf.shared_code) {
++        Xbyak::Label skip;
++        code.jnz(skip, code.T_NEAR);
++        EmitSharedLink(target_desc, target_code_ptr);
++        code.L(skip);
++        return;
++    }
+     const CodePtr patch_location = code.getCurr();
+     if (target_code_ptr) {
+         code.jz(target_code_ptr);
+@@ -791,6 +844,10 @@ void A64EmitX64::EmitPatchJz(const IR::LocationDescriptor& target_desc, CodePtr
+ }
+ 
+ void A64EmitX64::EmitPatchJmp(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
++    if (conf.shared_code) {
++        EmitSharedLink(target_desc, target_code_ptr);
++        return;
++    }
+     const CodePtr patch_location = code.getCurr();
+     if (target_code_ptr) {
+         code.jmp(target_code_ptr);
+@@ -806,6 +863,14 @@ void A64EmitX64::EmitPatchMovRcx(CodePtr target_code_ptr) {
+     if (!target_code_ptr) {
+         target_code_ptr = code.GetReturnFromRunCodeAddress();
+     }
++    if (conf.shared_code) {
++        Xbyak::Label slot, load;
++        code.jmp(load, code.T_NEAR);
++        EmitLinkSlot(slot, target_code_ptr, code.GetReturnFromRunCodeAddress());
++        code.L(load);
++        code.mov(code.rcx, qword[rip + slot]);
++        return;
++    }
+     const CodePtr patch_location = code.getCurr();
+     code.mov(code.rcx, u64(target_code_ptr));
+     code.EnsurePatchLocationSize(patch_location, 10);
+@@ -813,7 +878,8 @@ void A64EmitX64::EmitPatchMovRcx(CodePtr target_code_ptr) {
+ 
+ void A64EmitX64::Unpatch(const IR::LocationDescriptor& location) {
+     EmitX64::Unpatch(location);
+-    if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
++    // Shared code: each core empties its own table when the cache's epoch changes.
++    if (conf.HasOptimization(OptimizationFlag::FastDispatch) && !conf.shared_code) {
+         code.DisableWriting();
+         (*fast_dispatch_table_lookup)(location.Value()) = {};
+         code.EnableWriting();
+diff --git a/src/dynarmic/src/dynarmic/backend/x64/a64_emit_x64.h b/src/dynarmic/src/dynarmic/backend/x64/a64_emit_x64.h
+index 03c2a5f82..d71b6b9be 100644
+--- a/src/dynarmic/src/dynarmic/backend/x64/a64_emit_x64.h
++++ b/src/dynarmic/src/dynarmic/backend/x64/a64_emit_x64.h
+@@ -65,6 +65,9 @@ public:
+     static_assert(sizeof(FastDispatchEntry) == 0x10);
+     static constexpr u64 fast_dispatch_table_mask = 0xFFFFF0;
+     static constexpr size_t fast_dispatch_table_size = 0x100000;
++    /// Shared code: every core has its own table (only it writes it), smaller than the one above.
++    static constexpr u64 fast_dispatch_table_mask_shared = 0xFFFF0;
++    static constexpr size_t fast_dispatch_table_size_shared = 0x10000;
+ 
+     void ClearFastDispatchTable();
+     void GenMemory128Accessors();
+@@ -124,6 +127,10 @@ public:
+     void EmitPatchJz(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr = nullptr) override;
+     void EmitPatchJmp(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr = nullptr) override;
+     void EmitPatchMovRcx(CodePtr target_code_ptr = nullptr) override;
++    /// Shared code: jumps through a link slot, unlinked to a stub returning to the dispatcher.
++    void EmitSharedLink(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr);
++    /// Shared code: an 8-byte aligned slot holding `value`, then its unlinked value.
++    void EmitLinkSlot(Xbyak::Label& slot, CodePtr value, CodePtr unlinked);
+ 
+ //data
+     const A64::UserConfig conf;
+diff --git a/src/dynarmic/src/dynarmic/backend/x64/a64_interface.cpp b/src/dynarmic/src/dynarmic/backend/x64/a64_interface.cpp
+index 2043498f1..f55dd60a7 100644
+--- a/src/dynarmic/src/dynarmic/backend/x64/a64_interface.cpp
++++ b/src/dynarmic/src/dynarmic/backend/x64/a64_interface.cpp
+@@ -13,6 +13,7 @@
+ #include <cstring>
+ #include <memory>
+ #include <mutex>
++#include <shared_mutex>
+ 
+ #include <boost/icl/interval_set.hpp>
+ #include "common/assert.h"
+@@ -24,6 +25,8 @@
+ #include "dynarmic/backend/x64/a64_jitstate.h"
+ #include "dynarmic/backend/x64/block_of_code.h"
+ #include "dynarmic/backend/x64/devirtualize.h"
++#include "dynarmic/backend/x64/exclusive_monitor_friend.h"
++#include "dynarmic/backend/x64/shared_code.h"
+ #include "dynarmic/backend/x64/jitstate_info.h"
+ #include "dynarmic/common/atomic.h"
+ #include "dynarmic/frontend/A64/translate/a64_translate.h"
+@@ -63,21 +66,49 @@ static Optimization::PolyfillOptions GenPolyfillOptions(const BlockOfCode& code)
+     };
+ }
+ 
++/// Thread running guest code (A64::Jit::Run/Step): the dispatcher's block lookups use its state.
++namespace {
++thread_local void* t_running = nullptr;  // the running Jit::Impl
++}  // namespace
++
+ struct Jit::Impl final {
+ public:
+-    Impl(Jit* jit, UserConfig conf)
+-        : conf(conf)
+-        , block_of_code(GenRunCodeCallbacks(conf.callbacks, &GetCurrentBlockThunk, this, conf), JitStateInfo{jit_state}, conf.code_cache_size, GenRCP(conf))
+-        , emitter(block_of_code, conf, jit)
+-        , polyfill_options(GenPolyfillOptions(block_of_code))
+-    {
++    /// The code space and everything describing it: one per Jit, or one per process with
++    /// UserConfig::shared_code (then emitter.shared_mutex guards it while cores compile).
++    struct Cache {
++        Cache(Jit* jit, Impl* creator, const UserConfig& conf)
++                : conf(conf)
++                , block_of_code(GenRunCodeCallbacks(conf.callbacks, &GetCurrentBlockThunk, creator, conf), JitStateInfo{A64JitState{}}, conf.code_cache_size, GenRCP(conf))
++                , emitter(block_of_code, conf, jit)
++                , polyfill_options(GenPolyfillOptions(block_of_code)) {}
++
++        const UserConfig conf;
++        BlockOfCode block_of_code;
++        A64EmitX64 emitter;
++        Optimization::PolyfillOptions polyfill_options;
++        IR::Block ir_block = {LocationDescriptor(0, FP::FPCR(0), false)};
++        bool invalidate_entire_cache = false;
++        boost::icl::interval_set<u64> invalid_cache_ranges;
++        std::mutex invalidation_mutex;
++        /// Bumped by every invalidation of shared code: each core then empties its RSB.
++        std::atomic<u64> epoch{0};
++    };
++
++    Impl(Jit* jit, UserConfig conf_)
++        : conf(SharedConfig(conf_))
++        , cache(conf.share_code_with ? conf.share_code_with->impl->cache
++                                     : std::make_shared<Cache>(jit, this, conf)) {
+         ASSERT(conf.page_table_address_space_bits >= 12 && conf.page_table_address_space_bits <= 64);
++        ASSERT(!conf.shared_code || cache->conf.shared_code);
++        SetCoreValues();
+     }
+ 
+     ~Impl() = default;
+ 
+     HaltReason Run() {
+         ASSERT(!is_executing);
++        t_running = this;
++        t_shared_processor_id = conf.processor_id;
+         PerformRequestedCacheInvalidation(static_cast<HaltReason>(Atomic::Load(&jit_state.halt_reason)));
+         is_executing = true;
+         // TODO: Check code alignment
+@@ -90,7 +121,7 @@ public:
+             }
+             return CodePtr((uintptr_t(GetCurrentBlock()) + 15) & ~uintptr_t(15));
+         }();
+-        const HaltReason hr = block_of_code.RunCode(&jit_state, current_code_ptr);
++        const HaltReason hr = cache->block_of_code.RunCode(&jit_state, current_code_ptr);
+         PerformRequestedCacheInvalidation(hr);
+         is_executing = false;
+         return hr;
+@@ -98,31 +129,34 @@ public:
+ 
+     HaltReason Step() {
+         ASSERT(!is_executing);
++        t_running = this;
++        t_shared_processor_id = conf.processor_id;
+         PerformRequestedCacheInvalidation(static_cast<HaltReason>(Atomic::Load(&jit_state.halt_reason)));
+         is_executing = true;
+-        const HaltReason hr = block_of_code.StepCode(&jit_state, GetCurrentSingleStep());
++        const HaltReason hr = cache->block_of_code.StepCode(&jit_state, GetCurrentSingleStep());
+         PerformRequestedCacheInvalidation(hr);
+         is_executing = false;
+         return hr;
+     }
+ 
+     void ClearCache() {
+-        std::unique_lock lock{invalidation_mutex};
+-        invalidate_entire_cache = true;
++        std::unique_lock lock{cache->invalidation_mutex};
++        cache->invalidate_entire_cache = true;
+         HaltExecution(HaltReason::CacheInvalidation);
+     }
+ 
+     void InvalidateCacheRange(u64 start_address, size_t length) {
+-        std::unique_lock lock{invalidation_mutex};
++        std::unique_lock lock{cache->invalidation_mutex};
+         const auto end_address = static_cast<u64>(start_address + length - 1);
+         const auto range = boost::icl::discrete_interval<u64>::closed(start_address, end_address);
+-        invalid_cache_ranges.add(range);
++        cache->invalid_cache_ranges.add(range);
+         HaltExecution(HaltReason::CacheInvalidation);
+     }
+ 
+     void Reset() {
+         ASSERT(!is_executing);
+         jit_state = {};
++        SetCoreValues();
+     }
+ 
+     void HaltExecution(HaltReason hr) {
+@@ -223,14 +257,38 @@ public:
+     }
+ 
+     std::string Disassemble() const {
+-        const size_t size = reinterpret_cast<const char*>(block_of_code.getCurr()) - reinterpret_cast<const char*>(block_of_code.GetCodeBegin());
+-        auto const* p = reinterpret_cast<const char*>(block_of_code.GetCodeBegin());
++        const size_t size = reinterpret_cast<const char*>(cache->block_of_code.getCurr()) - reinterpret_cast<const char*>(cache->block_of_code.GetCodeBegin());
++        auto const* p = reinterpret_cast<const char*>(cache->block_of_code.GetCodeBegin());
+         return Common::DisassembleX64(p, p + size);
+     }
+ 
+ private:
++    static UserConfig SharedConfig(UserConfig conf) {
++#ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
++        // Emitting toggles the code space non-executable: no other core may run in it meanwhile.
++        conf.shared_code = false;
++        conf.share_code_with = nullptr;
++#endif
++        return conf;
++    }
++
++    /// The values shared code reads from this core's state.
++    void SetCoreValues() {
++        if (conf.shared_code && conf.HasOptimization(OptimizationFlag::FastDispatch)) {
++            fast_dispatch_table.assign(A64EmitX64::fast_dispatch_table_size_shared, {});
++            jit_state.fast_dispatch_table_ptr = std::bit_cast<u64>(fast_dispatch_table.data());
++        }
++        jit_state.tpidr_el0_ptr = std::bit_cast<u64>(conf.tpidr_el0);
++        jit_state.tpidrro_el0_ptr = std::bit_cast<u64>(conf.tpidrro_el0);
++        if (conf.global_monitor) {
++            jit_state.exclusive_address_ptr = std::bit_cast<u64>(GetExclusiveMonitorAddressPointer(conf.global_monitor, conf.processor_id));
++            jit_state.exclusive_value_ptr = std::bit_cast<u64>(GetExclusiveMonitorValuePointer(conf.global_monitor, conf.processor_id));
++        }
++    }
++
+     static CodePtr GetCurrentBlockThunk(void* thisptr) {
+-        Jit::Impl* this_ = static_cast<Jit::Impl*>(thisptr);
++        // Shared code: the core running on this thread, not the one that made the cache.
++        Jit::Impl* this_ = static_cast<Jit::Impl*>(t_running ? t_running : thisptr);
+         return this_->GetCurrentBlock();
+     }
+ 
+@@ -247,26 +305,44 @@ private:
+     }
+ 
+     CodePtr GetBlock(IR::LocationDescriptor descriptor) {
++        auto& emitter = cache->emitter;
++        if (!conf.shared_code) {
++            if (auto block = emitter.GetBasicBlock(descriptor))
++                return block->entrypoint;
++            return Compile(descriptor);
++        }
++        {
++            std::shared_lock lock{emitter.shared_mutex};
++            if (auto block = emitter.GetBasicBlock(descriptor))
++                return block->entrypoint;
++        }
++        std::unique_lock lock{emitter.shared_mutex};
+         if (auto block = emitter.GetBasicBlock(descriptor))
+-            return block->entrypoint;
++            return block->entrypoint;  // another core compiled it meanwhile
++        return Compile(descriptor);
++    }
+ 
++    CodePtr Compile(IR::LocationDescriptor descriptor) {
++        auto& c = *cache;
+         constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
+-        if (block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE) {
++        if (c.block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE) {
++            // Shared code can't be evacuated while other cores may run it.
++            ASSERT_MSG(!conf.shared_code, "shared JIT code cache full");
+             // Immediately evacuate cache
+-            invalidate_entire_cache = true;
++            c.invalidate_entire_cache = true;
+             PerformRequestedCacheInvalidation(HaltReason::CacheInvalidation);
+         }
+-        block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
++        c.block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
+ 
+         // JIT Compile
+         const auto compile_start = std::chrono::steady_clock::now();
+         const auto get_code = [this](u64 vaddr) { return conf.callbacks->MemoryReadCode(vaddr); };
+         // LocationDescriptor ctor() does important ops (like tflags) do not skip
+         auto const arch_descriptor = A64::LocationDescriptor{descriptor};
+-        ir_block.Reset(arch_descriptor);
+-        A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
+-        Optimization::Optimize(ir_block, conf, polyfill_options);
+-        const CodePtr entrypoint = emitter.Emit(ir_block).entrypoint;
++        c.ir_block.Reset(arch_descriptor);
++        A64::Translate(c.ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
++        Optimization::Optimize(c.ir_block, c.conf, c.polyfill_options);
++        const CodePtr entrypoint = c.emitter.Emit(c.ir_block).entrypoint;
+         g_jit_stats.blocks_compiled.fetch_add(1, std::memory_order_relaxed);
+         g_jit_stats.compile_ns.fetch_add(
+             std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+@@ -277,37 +353,60 @@ private:
+     }
+ 
+     void PerformRequestedCacheInvalidation(HaltReason hr) {
++        auto& c = *cache;
+         if (Has(hr, HaltReason::CacheInvalidation)) {
+-            std::unique_lock lock{invalidation_mutex};
+-
+-            ClearHalt(HaltReason::CacheInvalidation);
+-
+-            if (!invalidate_entire_cache && invalid_cache_ranges.empty()) {
++            if (!conf.shared_code) {
++                std::unique_lock lock{c.invalidation_mutex};
++
++                ClearHalt(HaltReason::CacheInvalidation);
++
++                if (!c.invalidate_entire_cache && c.invalid_cache_ranges.empty()) {
++                    return;
++                }
++
++                jit_state.ResetRSB();
++                if (c.invalidate_entire_cache) {
++                    c.block_of_code.ClearCache();
++                    c.emitter.ClearCache();
++                } else {
++                    c.emitter.InvalidateCacheRanges(c.invalid_cache_ranges);
++                }
++                c.invalid_cache_ranges.clear();
++                c.invalidate_entire_cache = false;
+                 return;
+             }
+-
+-            jit_state.ResetRSB();
+-            if (invalidate_entire_cache) {
+-                block_of_code.ClearCache();
+-                emitter.ClearCache();
+-            } else {
+-                emitter.InvalidateCacheRanges(invalid_cache_ranges);
++            ClearHalt(HaltReason::CacheInvalidation);
++            std::unique_lock emit_lock{c.emitter.shared_mutex};
++            std::unique_lock lock{c.invalidation_mutex};
++            if (c.invalidate_entire_cache || !c.invalid_cache_ranges.empty()) {
++                // The code space is kept: other cores may be running in it.
++                if (c.invalidate_entire_cache) {
++                    c.emitter.ClearCache();
++                } else {
++                    c.emitter.InvalidateCacheRanges(c.invalid_cache_ranges);
++                }
++                c.invalid_cache_ranges.clear();
++                c.invalidate_entire_cache = false;
++                c.epoch.fetch_add(1, std::memory_order_release);
++            }
++        }
++        if (conf.shared_code) {
++            // Return-stack entries may point at blocks another core invalidated.
++            const u64 epoch = c.epoch.load(std::memory_order_acquire);
++            if (epoch != seen_epoch) {
++                seen_epoch = epoch;
++                jit_state.ResetRSB();
++                std::fill(fast_dispatch_table.begin(), fast_dispatch_table.end(), A64EmitX64::FastDispatchEntry{});
+             }
+-            invalid_cache_ranges.clear();
+-            invalidate_entire_cache = false;
+         }
+     }
+ 
+-    IR::Block ir_block = {LocationDescriptor(0, FP::FPCR(0), false)};
+-    const UserConfig conf;
++    const UserConfig conf;  ///< This core's (the cache holds the one its code was emitted with)
+     A64JitState jit_state;
+-    BlockOfCode block_of_code;
+-    A64EmitX64 emitter;
+-    Optimization::PolyfillOptions polyfill_options;
++    std::shared_ptr<Cache> cache;
+     bool is_executing = false;
+-    bool invalidate_entire_cache = false;
+-    boost::icl::interval_set<u64> invalid_cache_ranges;
+-    std::mutex invalidation_mutex;
++    u64 seen_epoch = 0;
++    std::vector<A64EmitX64::FastDispatchEntry> fast_dispatch_table;  ///< Shared code: this core's
+ };
+ 
+ Jit::Jit(UserConfig conf)
+diff --git a/src/dynarmic/src/dynarmic/backend/x64/a64_jitstate.h b/src/dynarmic/src/dynarmic/backend/x64/a64_jitstate.h
+index c3d8b04d1..e2cc420e6 100644
+--- a/src/dynarmic/src/dynarmic/backend/x64/a64_jitstate.h
++++ b/src/dynarmic/src/dynarmic/backend/x64/a64_jitstate.h
+@@ -56,6 +56,13 @@ struct A64JitState {
+     std::array<u64, RSB_SIZE> rsb_location_descriptors;
+     std::array<u64, RSB_SIZE> rsb_codeptrs;
+ 
++    // This core's values, read at run time by code shared between cores (UserConfig::shared_code).
++    u64 tpidr_el0_ptr = 0;
++    u64 tpidrro_el0_ptr = 0;
++    u64 exclusive_address_ptr = 0;
++    u64 exclusive_value_ptr = 0;
++    u64 fast_dispatch_table_ptr = 0;  ///< This core's (A64EmitX64::fast_dispatch_table_size_shared entries)
++
+     u32 GetPstate() const {
+         return NZCV::FromX64(cpsr_nzcv);
+     }
+diff --git a/src/dynarmic/src/dynarmic/backend/x64/emit_x64.cpp b/src/dynarmic/src/dynarmic/backend/x64/emit_x64.cpp
+index 4752d0ac5..1b3e4574c 100644
+--- a/src/dynarmic/src/dynarmic/backend/x64/emit_x64.cpp
++++ b/src/dynarmic/src/dynarmic/backend/x64/emit_x64.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include "dynarmic/backend/x64/emit_x64.h"
+ 
++#include <atomic>
+ #include <iterator>
+ 
+ #include "common/assert.h"
+@@ -363,6 +364,11 @@ EmitX64::BlockDescriptor EmitX64::RegisterBlock(const IR::LocationDescriptor& de
+ }
+ 
+ void EmitX64::AddPatchLocation(const IR::LocationDescriptor& target_desc, PatchKind kind) {
++    if (shared_slots) {
++        // The EmitPatch* that follows records its slot (AddLinkSlot).
++        pending_link_target = target_desc;
++        return;
++    }
+     const size_t offset = code.getCurr<const u8*>() - static_cast<const u8*>(code.getCode());
+     ASSERT(offset > 0 && offset < (size_t(1) << 30));
+     const u32 entry = u32(offset << 2) | u32(kind);
+@@ -379,11 +385,49 @@ void EmitX64::AddPatchLocation(const IR::LocationDescriptor& target_desc, PatchK
+     patch_info.rest->push_back(entry);
+ }
+ 
++void EmitX64::AddLinkSlot(const u8* slot) {
++    ASSERT(shared_slots && pending_link_target);
++    const size_t offset = slot - static_cast<const u8*>(code.getCode());
++    ASSERT(offset > 0 && offset < (size_t(1) << 30) && offset % 8 == 0);
++    PatchInformation& patch_info = patch_information[*pending_link_target];
++    pending_link_target.reset();
++    for (u32& entry : patch_info.first) {
++        if (entry == 0) {
++            entry = u32(offset << 2);
++            return;
++        }
++    }
++    if (!patch_info.rest) {
++        patch_info.rest = std::make_unique<std::vector<u32>>();
++    }
++    patch_info.rest->push_back(u32(offset << 2));
++}
++
+ void EmitX64::Patch(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
+     const auto it = patch_information.find(target_desc);
+     if (it == patch_information.end()) {
+         return;
+     }
++    if (shared_slots) {
++        // Other cores may be running the code that jumps through these: one aligned 8-byte
++        // store each (the unlinked value sits in the word after the slot).
++        const auto set_slot = [&](u32 entry) {
++            u64* const slot = reinterpret_cast<u64*>(const_cast<u8*>(static_cast<const u8*>(code.getCode())) + (entry >> 2));
++            const u64 value = target_code_ptr ? std::bit_cast<u64>(target_code_ptr) : slot[1];
++            std::atomic_ref<u64>{*slot}.store(value, std::memory_order_release);
++        };
++        for (const u32 entry : it->second.first) {
++            if (entry != 0) {
++                set_slot(entry);
++            }
++        }
++        if (it->second.rest) {
++            for (const u32 entry : *it->second.rest) {
++                set_slot(entry);
++            }
++        }
++        return;
++    }
+     const CodePtr save_code_ptr = code.getCurr();
+     const auto patch = [&](u32 entry) {
+         code.SetCodePtr(static_cast<const u8*>(code.getCode()) + (entry >> 2));
+@@ -420,6 +464,12 @@ void EmitX64::Unpatch(const IR::LocationDescriptor& target_desc) {
+ }
+ 
+ void EmitX64::ClearCache() {
++    if (shared_slots) {
++        // The code stays (other cores may be in it): unlink everything that jumps to a block.
++        for (const auto& [target, info] : patch_information) {
++            Patch(target, nullptr);
++        }
++    }
+     block_descriptors.clear();
+     patch_information.clear();
+ 
+diff --git a/src/dynarmic/src/dynarmic/backend/x64/emit_x64.h b/src/dynarmic/src/dynarmic/backend/x64/emit_x64.h
+index 527ffd79d..86c8ddc16 100644
+--- a/src/dynarmic/src/dynarmic/backend/x64/emit_x64.h
++++ b/src/dynarmic/src/dynarmic/backend/x64/emit_x64.h
+@@ -15,6 +15,7 @@
+ #include <functional>
+ #include <memory>
+ #include <optional>
++#include <shared_mutex>
+ #include <string>
+ #include <type_traits>
+ #include <vector>
+@@ -130,6 +131,9 @@ public:
+     /// Records that the code about to be emitted at the current position is a patch of `kind`.
+     void AddPatchLocation(const IR::LocationDescriptor& target_desc, PatchKind kind);
+     void Patch(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr);
++    /// Shared code: records the 8-byte link slot at `slot` (followed by its unlinked value) for
++    /// the target AddPatchLocation named last.
++    void AddLinkSlot(const u8* slot);
+     virtual void Unpatch(const IR::LocationDescriptor& target_desc);
+     virtual void EmitPatchJg(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr = nullptr) = 0;
+     virtual void EmitPatchJz(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr = nullptr) = 0;
+@@ -138,6 +142,11 @@ public:
+ 
+     // State
+     BlockOfCode& code;
++    /// Code shared between cores (A64::UserConfig::shared_code): blocks link through slots
++    /// instead of patched jumps, and shared_mutex guards the tables below.
++    bool shared_slots = false;
++    std::optional<IR::LocationDescriptor> pending_link_target;
++    std::shared_mutex shared_mutex;
+     ExceptionHandler exception_handler;
+     ::Common::unordered_map<IR::LocationDescriptor, BlockDescriptor> block_descriptors;
+     ::Common::unordered_map<IR::LocationDescriptor, PatchInformation> patch_information;
+diff --git a/src/dynarmic/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc b/src/dynarmic/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc
+index a4b423ce1..dbd98dfd3 100644
+--- a/src/dynarmic/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc
++++ b/src/dynarmic/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc
+@@ -63,6 +63,11 @@ void AxxEmitX64::AddFastmemPatch(CodePtr location, CodePtr resume_location, void
+ }
+ 
+ FakeCall AxxEmitX64::FastmemCallback(u64 rip_) {
++    // Shared code: other cores compile into the same tables meanwhile.
++    std::unique_lock<std::shared_mutex> shared_lock{shared_mutex, std::defer_lock};
++    if (shared_slots) {
++        shared_lock.lock();
++    }
+     const u64 base = std::bit_cast<u64>(code.getCode());
+     const auto iter = rip_ >= base && rip_ - base <= UINT32_MAX
+                         ? std::lower_bound(fastmem_patch_info.begin(), fastmem_patch_info.end(), u32(rip_ - base),
+@@ -254,7 +259,7 @@ void AxxEmitX64::EmitExclusiveReadMemory(AxxEmitContext& ctx, IR::Inst* inst) {
+             code.mfence();
+         }
+         code.CallLambda([](AxxUserConfig& conf, Axx::VAddr vaddr) -> T {
+-            return conf.global_monitor->ReadAndMark<T>(conf.processor_id, vaddr, [&]() -> T {
++            return conf.global_monitor->ReadAndMark<T>(RuntimeProcessorId(conf), vaddr, [&]() -> T {
+                 return (conf.callbacks->*callback)(vaddr, bitsize / CHAR_BIT);
+             });
+         });
+@@ -273,7 +278,7 @@ void AxxEmitX64::EmitExclusiveReadMemory(AxxEmitContext& ctx, IR::Inst* inst) {
+             code.mfence();
+         }
+         code.CallLambda([](AxxUserConfig& conf, Axx::VAddr vaddr, Vector& ret) {
+-            ret = conf.global_monitor->ReadAndMark<Vector>(conf.processor_id, vaddr, [&]() -> Vector {
++            ret = conf.global_monitor->ReadAndMark<Vector>(RuntimeProcessorId(conf), vaddr, [&]() -> Vector {
+                 return (conf.callbacks->*callback)(vaddr);
+             });
+         });
+@@ -313,7 +318,7 @@ void AxxEmitX64::EmitExclusiveWriteMemory(AxxEmitContext& ctx, IR::Inst* inst) {
+     if constexpr (bitsize != 128) {
+         using T = mcl::unsigned_integer_of_size<bitsize>;
+         code.CallLambda([](AxxUserConfig& conf, Axx::VAddr vaddr, T value) -> u32 {
+-            return conf.global_monitor->DoExclusiveOperation<T>(conf.processor_id, vaddr, [&](T expected) -> bool {
++            return conf.global_monitor->DoExclusiveOperation<T>(RuntimeProcessorId(conf), vaddr, [&](T expected) -> bool {
+                 return (conf.callbacks->*callback)(vaddr, value, expected);
+             }) ? 0 : 1;
+         });
+@@ -325,7 +330,7 @@ void AxxEmitX64::EmitExclusiveWriteMemory(AxxEmitContext& ctx, IR::Inst* inst) {
+         code.lea(code.ABI_PARAM3, ptr[rsp + ABI_SHADOW_SPACE]);
+         code.movaps(xword[code.ABI_PARAM3], xmm1);
+         code.CallLambda([](AxxUserConfig& conf, Axx::VAddr vaddr, Vector& value) -> u32 {
+-            return conf.global_monitor->DoExclusiveOperation<Vector>(conf.processor_id, vaddr, [&](Vector expected) -> bool {
++            return conf.global_monitor->DoExclusiveOperation<Vector>(RuntimeProcessorId(conf), vaddr, [&](Vector expected) -> bool {
+                 return (conf.callbacks->*callback)(vaddr, value, expected);
+             }) ? 0 : 1;
+         });
+@@ -368,7 +373,11 @@ void AxxEmitX64::EmitExclusiveReadMemoryInline(AxxEmitContext& ctx, IR::Inst* in
+     EmitExclusiveLock(code, conf, tmp, tmp2.cvt32());
+ 
+     code.mov(code.byte[code.ABI_JIT_PTR + offsetof(AxxJitState, exclusive_state)], u8(1));
+-    code.mov(tmp, std::bit_cast<u64>(GetExclusiveMonitorAddressPointer(conf.global_monitor, conf.processor_id)));
++    if (conf.shared_code) {
++        code.mov(tmp, qword[code.ABI_JIT_PTR + offsetof(AxxJitState, exclusive_address_ptr)]);
++    } else {
++        code.mov(tmp, std::bit_cast<u64>(GetExclusiveMonitorAddressPointer(conf.global_monitor, conf.processor_id)));
++    }
+     code.mov(qword[tmp], vaddr);
+ 
+     const auto fastmem_marker = ShouldFastmem(ctx, inst);
+@@ -395,7 +404,11 @@ void AxxEmitX64::EmitExclusiveReadMemoryInline(AxxEmitContext& ctx, IR::Inst* in
+         code.call(wrapped_fn);
+     }
+ 
+-    code.mov(tmp, std::bit_cast<u64>(GetExclusiveMonitorValuePointer(conf.global_monitor, conf.processor_id)));
++    if (conf.shared_code) {
++        code.mov(tmp, qword[code.ABI_JIT_PTR + offsetof(AxxJitState, exclusive_value_ptr)]);
++    } else {
++        code.mov(tmp, std::bit_cast<u64>(GetExclusiveMonitorValuePointer(conf.global_monitor, conf.processor_id)));
++    }
+     EmitWriteMemoryMov<bitsize>(code, tmp, value_idx, false);
+ 
+     EmitExclusiveUnlock(code, conf, tmp, tmp2.cvt32());
+@@ -447,14 +460,22 @@ void AxxEmitX64::EmitExclusiveWriteMemoryInline(AxxEmitContext& ctx, IR::Inst* i
+     code.movzx(tmp.cvt32(), code.byte[code.ABI_JIT_PTR + offsetof(AxxJitState, exclusive_state)]);
+     code.test(tmp.cvt8(), tmp.cvt8());
+     code.je(*end, code.T_NEAR);
+-    code.mov(tmp, std::bit_cast<u64>(GetExclusiveMonitorAddressPointer(conf.global_monitor, conf.processor_id)));
++    if (conf.shared_code) {
++        code.mov(tmp, qword[code.ABI_JIT_PTR + offsetof(AxxJitState, exclusive_address_ptr)]);
++    } else {
++        code.mov(tmp, std::bit_cast<u64>(GetExclusiveMonitorAddressPointer(conf.global_monitor, conf.processor_id)));
++    }
+     code.cmp(qword[tmp], vaddr);
+     code.jne(*end, code.T_NEAR);
+ 
+     EmitExclusiveTestAndClear(code, conf, vaddr, tmp, rax);
+ 
+     code.mov(code.byte[code.ABI_JIT_PTR + offsetof(AxxJitState, exclusive_state)], u8(0));
+-    code.mov(tmp, std::bit_cast<u64>(GetExclusiveMonitorValuePointer(conf.global_monitor, conf.processor_id)));
++    if (conf.shared_code) {
++        code.mov(tmp, qword[code.ABI_JIT_PTR + offsetof(AxxJitState, exclusive_value_ptr)]);
++    } else {
++        code.mov(tmp, std::bit_cast<u64>(GetExclusiveMonitorValuePointer(conf.global_monitor, conf.processor_id)));
++    }
+ 
+     if constexpr (bitsize == 128) {
+         code.mov(rax, qword[tmp + 0]);
+diff --git a/src/dynarmic/src/dynarmic/backend/x64/emit_x64_memory.h b/src/dynarmic/src/dynarmic/backend/x64/emit_x64_memory.h
+index 44945106a..45fd9a039 100644
+--- a/src/dynarmic/src/dynarmic/backend/x64/emit_x64_memory.h
++++ b/src/dynarmic/src/dynarmic/backend/x64/emit_x64_memory.h
+@@ -18,6 +18,7 @@
+ #include "dynarmic/backend/x64/a32_emit_x64.h"
+ #include "dynarmic/backend/x64/a64_emit_x64.h"
+ #include "dynarmic/backend/x64/exclusive_monitor_friend.h"
++#include "dynarmic/backend/x64/shared_code.h"
+ #include "dynarmic/common/spin_lock_x64.h"
+ #include "dynarmic/interface/exclusive_monitor.h"
+ #include "dynarmic/ir/acc_type.h"
+@@ -393,7 +394,9 @@ void EmitExclusiveTestAndClear(BlockOfCode& code, const UserConfig& conf, Xbyak:
+     code.mov(tmp, 0xDEAD'DEAD'DEAD'DEAD);
+     const size_t processor_count = GetExclusiveMonitorProcessorCount(conf.global_monitor);
+     for (size_t processor_index = 0; processor_index < processor_count; processor_index++) {
+-        if (processor_index == conf.processor_id) {
++        // Shared code doesn't know its core: it clears its own slot too, harmless as the core's
++        // exclusive state is cleared right after.
++        if (processor_index == conf.processor_id && !conf.shared_code) {
+             continue;
+         }
+         Xbyak::Label ok;
+diff --git a/src/dynarmic/src/dynarmic/backend/x64/shared_code.h b/src/dynarmic/src/dynarmic/backend/x64/shared_code.h
+new file mode 100644
+index 000000000..5d35efc0d
+--- /dev/null
++++ b/src/dynarmic/src/dynarmic/backend/x64/shared_code.h
+@@ -0,0 +1,19 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#pragma once
++
++#include <cstddef>
++
++namespace Dynarmic::Backend::X64 {
++
++/// Processor id of the core whose guest code this thread runs (set by A64::Jit::Run), for code
++/// shared between cores (A64::UserConfig::shared_code).
++inline thread_local std::size_t t_shared_processor_id = 0;
++
++template<typename Config>
++std::size_t RuntimeProcessorId(const Config& conf) {
++    return conf.shared_code ? t_shared_processor_id : conf.processor_id;
++}
++
++}  // namespace Dynarmic::Backend::X64
+diff --git a/src/dynarmic/src/dynarmic/interface/A32/config.h b/src/dynarmic/src/dynarmic/interface/A32/config.h
+index 49063ed61..416fedeec 100644
+--- a/src/dynarmic/src/dynarmic/interface/A32/config.h
++++ b/src/dynarmic/src/dynarmic/interface/A32/config.h
+@@ -180,6 +180,9 @@ struct UserConfig {
+     /// Processor ID
+     std::uint8_t processor_id = 0;
+ 
++    /// Only for A64 (see its UserConfig); the shared emitter code reads it.
++    bool shared_code = false;
++
+     /// Determines if we should detect memory accesses via page_table that straddle are
+     /// misaligned. Accesses that straddle page boundaries will fallback to the relevant
+     /// memory callback.
+diff --git a/src/dynarmic/src/dynarmic/interface/A64/config.h b/src/dynarmic/src/dynarmic/interface/A64/config.h
+index 9db1d3caa..c8c73d9fe 100644
+--- a/src/dynarmic/src/dynarmic/interface/A64/config.h
++++ b/src/dynarmic/src/dynarmic/interface/A64/config.h
+@@ -26,6 +26,8 @@ class ExclusiveMonitor;
+ namespace Dynarmic {
+ namespace A64 {
+ 
++class Jit;
++
+ using VAddr = std::uint64_t;
+ 
+ using Vector = std::array<std::uint64_t, 2>;
+@@ -224,6 +226,15 @@ struct UserConfig {
+     /// Processor ID
+     std::uint8_t processor_id = 0;
+ 
++    /// One code cache for every core of a process (x64): set on every core's Jit, with
++    /// share_code_with naming the Jit that made the cache (nullptr for that first one). Every
++    /// core's `callbacks` must then be the same object, forwarding to the core running on the
++    /// calling thread. Emitted code reads per-core values (tpidr pointers, exclusive monitor
++    /// slots) from the core's state and links blocks through slots it can update while other
++    /// cores run it; the fast dispatcher is off.
++    bool shared_code = false;
++    Jit* share_code_with = nullptr;
++
+     /// This enables unsafe optimizations that reduce emulation accuracy in favour of speed.
+     /// For safety, in order to enable unsafe optimizations you have to set BOTH this flag
+     /// AND the appropriate flag bits above.
+-- 
+2.56.0
+
