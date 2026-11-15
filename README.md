@@ -117,7 +117,7 @@ offline). Click a badge for details.
 |---|---|---|---|
 | PS4 | Call of Duty: Black Ops II (`CUSA57548`) | shadNet + our Demonware | 🟡 two PCs played matches; PS3 crossplay in progress ([notes](games/CUSA57548.md)) |
 | Switch | Mario Kart 8 Deluxe (`0100152000022000`) | Eden room (Wireless Play) | 🟡 two copies raced on one PC ([notes](games/0100152000022000.md)) |
-| Switch 2 | Mario Kart World (`0400C3F00006E000`) | none yet (Eglantine has no room support) | 🟠 plays offline from the home screen; racing ~41–42 fps ([`uscl-eglantine`](uscl-eglantine/)) |
+| Switch 2 | Mario Kart World (`0400C3F00006E000`) | none yet (Eglantine has no room support) | 🟠 plays offline from the home screen; racing ~47 fps ([`uscl-eglantine`](uscl-eglantine/)) |
 | Switch 2 | Nintendo Switch Sports Resort (`04008E001F098000`) | none yet | 🟠 boots, then freezes in the emulator ([`uscl-eglantine`](uscl-eglantine/)) |
 | Wii | Wii Sports + Wii Sports Resort (`SP2E01`) | Dolphin NetPlay | 🟠 boots; NetPlay test next ([notes](games/SP2E01.md)) |
 | 3DS | Mario Kart 7, Pokémon X/Y, Luigi's Mansion 2, ... | Azahar rooms | 🟠 runs in Azahar; room test next ([`uscl-3ds`](uscl-3ds/)) |

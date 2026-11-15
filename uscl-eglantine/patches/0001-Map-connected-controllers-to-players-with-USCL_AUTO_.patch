@@ -1,7 +1,7 @@
-From 89161bf13a55cda31741e32ba58b21c57bac9285 Mon Sep 17 00:00:00 2001
+From c8bdddb7a42e67b781042ea7e4f5092573c090cd Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 10:45:24 -0700
-Subject: [PATCH 1/8] Map connected controllers to players with USCL_AUTO_PADS
+Subject: [PATCH 1/9] Map connected controllers to players with USCL_AUTO_PADS
 
 SDL3 port of uscl-eden 0012: with USCL_AUTO_PADS set, every connected game
 controller becomes players 1-8 in connection order, mapped with Eglantine's
