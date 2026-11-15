@@ -1,0 +1,68 @@
+From 6b63729274ab92abd2e797a75e39e262fcce7906 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 15:44:22 -0700
+Subject: [PATCH 9/9] nx2:vi2: skip the 3 ms present grace while channels stay
+ suspended
+
+A present waits for its own frame unless a GPU channel is suspended, then
+falls back to the previous frame after a 3 ms grace. Mario Kart World's
+channels are suspended at every racing present, so every frame paid the
+grace (~3.2 ms 'blocked on the GPU fence') before doing the same fallback.
+After 8 presents in a row that gave up, give up at once; a present that sees
+its frame finish restores the grace. MKW racing: fence wait ~3.2 ms ->
+~0-0.3 ms per frame, 35.1 -> 38.4 fps (two interleaved A/B pairs).
+USCL_PRESENT_GRACE=fixed restores the old behaviour.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/core/hle/service/nx2_gsv.h | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
+index afd6d6ed5..8f7384405 100644
+--- a/src/core/hle/service/nx2_gsv.h
++++ b/src/core/hle/service/nx2_gsv.h
+@@ -1847,7 +1847,20 @@ private:
+         }
+         const auto entered = std::chrono::steady_clock::now();
+         m_host_while_suspended = frames_ahead != 0;
+-        if (frames_ahead == 1 || (frames_ahead == -1 && !WaitForFrame(~w[22], w[24], true))) {
++        // A channel suspended at the present usually stays so (title 1's are on every racing
++        // frame): after 8 presents in a row that gave up waiting for this frame, give up at once
++        // instead of after the 3 ms grace, which only delayed the same outcome on the game's
++        // critical path (Mario Kart World racing: ~3.2 ms of every frame). A present that sees
++        // its frame finish restores the grace. USCL_PRESENT_GRACE=fixed keeps the 3 ms always.
++        static const bool adaptive_grace = [] {
++            const char* value = std::getenv("USCL_PRESENT_GRACE");
++            return value == nullptr || std::string_view{value} != "fixed";
++        }();
++        m_suspend_grace = adaptive_grace && m_gave_up_streak >= 8 ? std::chrono::milliseconds{0}
++                                                                  : std::chrono::milliseconds{3};
++        const bool this_frame_done = frames_ahead == -1 && WaitForFrame(~w[22], w[24], true);
++        m_gave_up_streak = frames_ahead == -1 && !this_frame_done ? m_gave_up_streak + 1 : 0;
++        if (frames_ahead == 1 || (frames_ahead == -1 && !this_frame_done)) {
+             LOG_DEBUG(Service, "nx2:vi2 present #{} fence ({}, {:#x}), waiting for ({}, {:#x}); now {:#x}",
+                       m_presents, ~w[22], w[24], m_previous_fence_id, m_previous_fence_value,
+                       ~w[22] < 192 ? system.Host1x().GetSyncpointManager().GetGuestSyncpointValue(~w[22]) : 0U);
+@@ -2073,6 +2086,9 @@ private:
+     VideoCommon::Nx2Timeline::FrameStats m_timeline;
+     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)
+     u32 m_previous_fence_value{};
++    /// How long a present waits for its own frame while a channel is suspended (see the present).
++    std::chrono::milliseconds m_suspend_grace{3};
++    u32 m_gave_up_streak{};
+ 
+     // The console flips one frame per 60 Hz vblank and keeps the rest queued, so a game can't
+     // present faster than that. Every slot is reported free here: hold each present until the
+@@ -2272,7 +2288,7 @@ private:
+                 if (unless_gpu_waits) {
+                     gpu_waited |= system.GPU().HasSuspendedChannels();
+                     if (gpu_waited &&
+-                        std::chrono::steady_clock::now() - start > std::chrono::milliseconds{3}) {
++                        std::chrono::steady_clock::now() - start > m_suspend_grace) {
+                         gave_up = true;
+                         return true;
+                     }
+-- 
+2.56.0
+

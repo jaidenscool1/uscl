@@ -1,7 +1,7 @@
-From 9cb8453fa0b13765f9bc905039d1691ab22bcc3d Mon Sep 17 00:00:00 2001
+From bc081c2de383c6dfd63411634c7c760c3e52e83a Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 12:16:52 -0700
-Subject: [PATCH 2/8] texture_cache: skip the join upload when the copies write
+Subject: [PATCH 2/9] texture_cache: skip the join upload when the copies write
  every texel
 
 JoinImages uploaded the new image from guest memory unless one alias copy
