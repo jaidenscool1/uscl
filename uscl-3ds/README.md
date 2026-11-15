@@ -4,7 +4,7 @@
 |---|---|
 | **Console** | Nintendo 3DS |
 | **Emulator** | [Azahar](https://github.com/azahar-emu/azahar) (GPL-2.0) 2126.2, the maintained Citra successor. Offline: the Flathub app `org.azahar_emu.Azahar` is enough. Online: our build (2126.2 + `patches/`, `tools/dev-scripts/build-azahar.sh`) |
-| **Our changes** | `patches/0001` joins a room at startup (`USCL_ROOM`); `0002` makes that work for real players (valid nickname, no chat popup, a booted `.cci` counts as the inserted card so Download Play works). USCL starts it (`uscl-shell` `Launcher::startEmu`), sets up its controller (`uscl-shell/src/padconfig.cpp`) and carries its rooms (`uscl-bridge` preset `3ds`, UDP 24872) |
+| **Our changes** | `patches/0001` joins a room at startup (`USCL_ROOM`); `0002` makes that work for real players (valid nickname, no chat popup, a booted `.cci` counts as the inserted card so Download Play works); `0003` answers the Nintendo Network login with a server USCL picks (`USCL_NEX`). USCL starts it (`uscl-shell` `Launcher::startEmu`), sets up its controller (`uscl-shell/src/padconfig.cpp`) and carries its rooms (`uscl-bridge` preset `3ds`, UDP 24872) |
 | **Online** | Azahar rooms (local wireless / Download Play) over the Steam tunnel; Nintendo Network online later (Pretendo / NEX) |
 | **Status** | 2026-11-14: **Mario Kart 7 local race between two Azahar copies in one room works** (one PC). Steam two-PC test next |
 
@@ -59,18 +59,34 @@ uses their own PC's controller.
   segfaulted in `libnvidia-glcore`; the second copy in the test ran on Mesa (`LIBGL_ALWAYS_SOFTWARE=1
   __GLX_VENDOR_LIBRARY_NAME=mesa`, about 65-100 % speed).
 - **Games are decrypted:** the `.cci` dumps have the NCCH NoCrypto flag, so no 3DS AES keys or boot9 are needed.
-- **Nintendo Network (MK7 Online Multiplayer):** stops at "Connecting to the Internet...". `ac:u` connect is stubbed
-  as success and `frd:u` Login/HasLoggedIn are stubs; the first missing piece is **`frd:u RequestGameAuthentication`
-  (0x28) / `GetGameAuthenticationData` (0x29)**, the NASC login that hands the game its NEX server address and token.
-  Also unimplemented on the way: `AttachToEventNotification`, `SetNotificationMask`, `ac:u` 0x130042.
+- **Nintendo Network (MK7 Online Multiplayer):** stock Azahar stops at "Connecting to the Internet..." because
+  `frd:u RequestGameAuthentication` (0x28) / `GetGameAuthenticationData` (0x29), the NASC login that hands the game
+  its NEX server address and token, aren't implemented. **`0003` answers them locally** (no Nintendo, no HTTPS):
+
+  | Variable | Meaning |
+  |---|---|
+  | `USCL_NEX=<host>:<port>` | NEX authentication server the game is sent to (unset: NASC 110 "server no longer available") |
+  | `USCL_NEX_TOKEN` | NASC token handed to the game (default `uscl`) |
+  | `USCL_NEX_PASSWORD` | `GetMyPassword`: the NEX/Kerberos password the game logs in with |
+  | `USCL_NEX_PID` | principal id in `GetMyFriendKey` (Azahar's is 0) |
+
+  Tested 2026-11-14: MK7 asks for **game server `0x00030600`**, takes `127.0.0.1:60000`, reads the password and sends
+  **PRUDP v0 SYNs** there (`af a1 40 00 …`, ten tries over ~30 s), then logs out and returns to its menu. So the
+  emulator side of the login works; what's missing is a NEX server answering.
+- **NEX server:** Pretendo's open-source [mario-kart-7](https://github.com/PretendoNetwork/mario-kart-7) server
+  (Go, nex-go; access key `6181dff1`, NEX 2.4.3) has the authentication + secure servers and matchmaking. It needs
+  Postgres and Pretendo's account gRPC, which it only asks for NEX passwords; a 5-line change makes it return
+  `USCL_NEX_PASSWORD` instead. Built locally (`~/src/pretendo-mk7`, Postgres 18 extracted to `~/.local/pg18`), but
+  **not run yet**: starting it was held for the player's go-ahead.
 
 ## Next
 1. Two PCs over Steam: `uscl-bridge host 3ds` / `join` (the preset is the Switch room's, already tested with Eden).
    Needs our Azahar on the other PC (Windows build of 2126.2 + patches).
 2. A Mii: MK7 asks for one at every start and the race shows "Player"; Azahar can import a Mii or use the Mii
    Maker applet (needs system files).
-3. Nintendo Network: answer `RequestGameAuthentication` in our Azahar with a locator for a NEX server we run (as
-   with Demonware/Blaze), then a NEX game server (Pretendo's servers are open source, nex-go).
+3. Nintendo Network: run the MK7 NEX server against `USCL_NEX=127.0.0.1:<auth port>` and see how far MK7's login
+   gets (Kerberos ticket, secure server, matchmaking); then a `3ds-nex` bridge preset (the auth + secure UDP ports)
+   and unique `USCL_NEX_PID`s per player (e.g. from the Steam id).
 
 ## Run it by hand
 ```

@@ -1,0 +1,268 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 14 Nov 2026 22:10:00 -0700
+Subject: [PATCH] frd: Nintendo Network login against a server USCL runs
+ (USCL_NEX)
+
+Nintendo's NASC/NEX servers are gone, so a game's online mode stopped at
+"Connecting to the Internet..." in frd:u RequestGameAuthentication (0x28),
+which Azahar did not implement. Answer the NASC LOGIN locally:
+- RequestGameAuthentication / GetGameAuthenticationData: USCL_NEX=<host>:<port>
+  becomes the game server address (token USCL_NEX_TOKEN, default "uscl");
+  without USCL_NEX the answer is NASC 110 "server no longer available";
+- GetMyPassword: USCL_NEX_PASSWORD, the NEX (Kerberos) password;
+- USCL_NEX_PID sets the principal id in GetMyFriendKey (Azahar leaves it 0);
+- AttachToEventNotification, SetNotificationMask, Logout: simple stubs.
+Layouts from libctru (frd.h GameAuthenticationData, 0x138 bytes).
+
+Mario Kart 7 then asks for game server 0x00030600 and sends PRUDP v0 SYNs
+to USCL_NEX (tested 2026-11-14; no NEX server answering yet).
+---
+--- a/src/core/hle/service/frd/frd.h
++++ b/src/core/hle/service/frd/frd.h
+@@ -5,6 +5,7 @@
+ #pragma once
+ 
+ #include <memory>
++#include <vector>
+ #include "common/common_types.h"
+ #include "core/hle/service/service.h"
+ 
+@@ -257,6 +258,15 @@
+          */
+         void GetLastResponseResult(Kernel::HLERequestContext& ctx);
+ 
++        // USCL: Nintendo Network login without Nintendo. RequestGameAuthentication answers the NASC
++        // LOGIN locally with the game server in USCL_NEX=<host>:<port> (token USCL_NEX_TOKEN).
++        void AttachToEventNotification(Kernel::HLERequestContext& ctx);
++        void SetNotificationMask(Kernel::HLERequestContext& ctx);
++        void RequestGameAuthentication(Kernel::HLERequestContext& ctx);
++        void GetGameAuthenticationData(Kernel::HLERequestContext& ctx);
++        void GetMyPassword(Kernel::HLERequestContext& ctx);
++        void Logout(Kernel::HLERequestContext& ctx);
++
+     protected:
+         std::shared_ptr<Module> frd;
+     };
+@@ -267,6 +277,9 @@
+     bool logged_in = false;
+     std::shared_ptr<Kernel::Event> login_event;
+     Core::TimingEventType* login_delay_event;
++    // shortcut: not in savestates; a state saved mid-login just logs in again
++    std::shared_ptr<Kernel::Event> notification_event;
++    std::vector<u8> game_auth_data;
+     Core::System& system;
+ 
+     template <class Archive>
+--- a/src/core/hle/service/frd/frd.cpp
++++ b/src/core/hle/service/frd/frd.cpp
+@@ -3,7 +3,9 @@
+ // Refer to the license.txt file included.
+ 
+ #include <array>
++#include <cstdlib>
+ #include <cstring>
++#include <ctime>
+ #include <vector>
+ #include "common/archives.h"
+ #include "common/assert.h"
+@@ -281,7 +283,114 @@
+     rb.Push(ResultSuccess);
+ }
+ 
+-Module::Module(Core::System& system) : system(system) {};
++void Module::Interface::AttachToEventNotification(Kernel::HLERequestContext& ctx) {
++    IPC::RequestParser rp(ctx);
++    frd->notification_event = rp.PopObject<Kernel::Event>();
++    IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
++    rb.Push(ResultSuccess);
++    LOG_WARNING(Service_FRD, "(STUBBED) called");
++}
++
++void Module::Interface::SetNotificationMask(Kernel::HLERequestContext& ctx) {
++    IPC::RequestParser rp(ctx);
++    const u32 mask = rp.Pop<u32>();
++    IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
++    rb.Push(ResultSuccess);
++    LOG_WARNING(Service_FRD, "(STUBBED) called, mask={:08X}", mask);
++}
++
++namespace {
++// libctru GameAuthenticationData: what the NASC LOGIN hands the game
++struct GameAuthenticationData {
++    u32_le nasc_result;
++    u32_le http_status_code;
++    std::array<char, 0x20> server_address;
++    u16_le server_port;
++    std::array<u8, 6> padding;
++    std::array<char, 0x100> token;
++    u64_le server_time;
++};
++static_assert(sizeof(GameAuthenticationData) == 0x138);
++
++// NEX DateTime: year<<26 | month<<22 | day<<17 | hour<<12 | minute<<6 | second
++u64 NexTimeNow() {
++    const std::time_t now = std::time(nullptr);
++    const std::tm t = *std::gmtime(&now);
++    return (u64(t.tm_year + 1900) << 26) | (u64(t.tm_mon + 1) << 22) | (u64(t.tm_mday) << 17) |
++           (u64(t.tm_hour) << 12) | (u64(t.tm_min) << 6) | u64(t.tm_sec);
++}
++} // namespace
++
++void Module::Interface::RequestGameAuthentication(Kernel::HLERequestContext& ctx) {
++    IPC::RequestParser rp(ctx);
++    const u32 server_id = rp.Pop<u32>();
++    std::array<u32, 6> ingamesn; // 12 UTF-16 characters
++    rp.PopRaw(ingamesn);
++    const u32 sdk_major = rp.Pop<u32>();
++    const u32 sdk_minor = rp.Pop<u32>();
++    rp.PopPID();
++    const auto event = rp.PopObject<Kernel::Event>();
++
++    GameAuthenticationData data{};
++    data.http_status_code = 200;
++    data.server_time = NexTimeNow();
++    const char* nex = std::getenv("USCL_NEX");
++    const char* colon = nex ? std::strrchr(nex, ':') : nullptr;
++    if (colon && colon != nex && std::size_t(colon - nex) < data.server_address.size()) {
++        data.nasc_result = 1; // NASC_SUCCESS
++        std::memcpy(data.server_address.data(), nex, colon - nex);
++        data.server_port = static_cast<u16>(std::strtoul(colon + 1, nullptr, 10));
++        const char* token = std::getenv("USCL_NEX_TOKEN");
++        std::strncpy(data.token.data(), token ? token : "uscl", data.token.size() - 1);
++    } else {
++        data.nasc_result = 110; // NASC_SERVER_NO_LONGER_AVAILABLE: what Nintendo's servers say now
++    }
++    frd->game_auth_data.resize(sizeof(data));
++    std::memcpy(frd->game_auth_data.data(), &data, sizeof(data));
++    LOG_INFO(Service_FRD, "USCL: game auth server_id={:08X} sdk={:x}.{:x} -> nasc {} {}:{}", server_id,
++             sdk_major, sdk_minor, u32{data.nasc_result}, data.server_address.data(),
++             u16{data.server_port});
++    if (event)
++        event->Signal();
++
++    IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
++    rb.Push(ResultSuccess);
++}
++
++void Module::Interface::GetGameAuthenticationData(Kernel::HLERequestContext& ctx) {
++    IPC::RequestParser rp(ctx);
++    std::vector<u8> buffer = frd->game_auth_data;
++    buffer.resize(sizeof(GameAuthenticationData));
++    IPC::RequestBuilder rb = rp.MakeBuilder(1, 2);
++    rb.Push(ResultSuccess);
++    rb.PushStaticBuffer(std::move(buffer), 0);
++}
++
++void Module::Interface::GetMyPassword(Kernel::HLERequestContext& ctx) {
++    IPC::RequestParser rp(ctx);
++    const u32 size = rp.Pop<u32>();
++    // the NEX (Kerberos) password the game logs in with; our servers set the same one per player
++    const char* password = std::getenv("USCL_NEX_PASSWORD");
++    std::vector<u8> buffer(size);
++    if (password && size)
++        std::strncpy(reinterpret_cast<char*>(buffer.data()), password, size - 1);
++    IPC::RequestBuilder rb = rp.MakeBuilder(1, 2);
++    rb.Push(ResultSuccess);
++    rb.PushStaticBuffer(std::move(buffer), 0);
++}
++
++void Module::Interface::Logout(Kernel::HLERequestContext& ctx) {
++    IPC::RequestParser rp(ctx);
++    frd->logged_in = false;
++    IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
++    rb.Push(ResultSuccess);
++}
++
++Module::Module(Core::System& system) : system(system) {
++    // USCL_NEX_PID: this player's NEX principal id (GetMyFriendKey); Azahar leaves it 0 otherwise
++    if (const char* pid = std::getenv("USCL_NEX_PID"))
++        my_friend_key.friend_id = static_cast<u32>(std::strtoul(pid, nullptr, 0));
++};
+ Module::~Module() = default;
+ 
+ void InstallInterfaces(Core::System& system) {
+--- a/src/core/hle/service/frd/frd_a.cpp
++++ b/src/core/hle/service/frd/frd_a.cpp
+@@ -14,7 +14,7 @@
+         {0x0001, &FRD_A::HasLoggedIn, "HasLoggedIn"},
+         {0x0002, &FRD_A::IsOnline, "IsOnline"},
+         {0x0003, &FRD_A::Login, "Login"},
+-        {0x0004, nullptr, "Logout"},
++        {0x0004, &FRD_A::Logout, "Logout"},
+         {0x0005, &FRD_A::GetMyFriendKey, "GetMyFriendKey"},
+         {0x0006, &FRD_A::GetMyPreference, "GetMyPreference"},
+         {0x0007, &FRD_A::GetMyProfile, "GetMyProfile"},
+@@ -26,7 +26,7 @@
+         {0x000D, &FRD_A::GetMyFavoriteGame, "GetMyFavoriteGame"},
+         {0x000E, nullptr, "GetMyNcPrincipalId"},
+         {0x000F, &FRD_A::GetMyComment, "GetMyComment"},
+-        {0x0010, nullptr, "GetMyPassword"},
++        {0x0010, &FRD_A::GetMyPassword, "GetMyPassword"},
+         {0x0011, &FRD_A::GetFriendKeyList, "GetFriendKeyList"},
+         {0x0012, nullptr, "GetFriendPresence"},
+         {0x0013, nullptr, "GetFriendScreenName"},
+@@ -42,16 +42,16 @@
+         {0x001D, nullptr, "UpdateGameModeDescription"},
+         {0x001E, nullptr, "UpdateGameMode"},
+         {0x001F, nullptr, "SendInvitation"},
+-        {0x0020, nullptr, "AttachToEventNotification"},
+-        {0x0021, nullptr, "SetNotificationMask"},
++        {0x0020, &FRD_A::AttachToEventNotification, "AttachToEventNotification"},
++        {0x0021, &FRD_A::SetNotificationMask, "SetNotificationMask"},
+         {0x0022, nullptr, "GetEventNotification"},
+         {0x0023, &FRD_A::GetLastResponseResult, "GetLastResponseResult"},
+         {0x0024, nullptr, "PrincipalIdToFriendCode"},
+         {0x0025, nullptr, "FriendCodeToPrincipalId"},
+         {0x0026, nullptr, "IsValidFriendCode"},
+         {0x0027, nullptr, "ResultToErrorCode"},
+-        {0x0028, nullptr, "RequestGameAuthentication"},
+-        {0x0029, nullptr, "GetGameAuthenticationData"},
++        {0x0028, &FRD_A::RequestGameAuthentication, "RequestGameAuthentication"},
++        {0x0029, &FRD_A::GetGameAuthenticationData, "GetGameAuthenticationData"},
+         {0x002A, nullptr, "RequestServiceLocator"},
+         {0x002B, nullptr, "GetServiceLocatorData"},
+         {0x002C, nullptr, "DetectNatProperties"},
+--- a/src/core/hle/service/frd/frd_u.cpp
++++ b/src/core/hle/service/frd/frd_u.cpp
+@@ -14,7 +14,7 @@
+         {0x0001, &FRD_U::HasLoggedIn, "HasLoggedIn"},
+         {0x0002, &FRD_U::IsOnline, "IsOnline"},
+         {0x0003, &FRD_U::Login, "Login"},
+-        {0x0004, nullptr, "Logout"},
++        {0x0004, &FRD_U::Logout, "Logout"},
+         {0x0005, &FRD_U::GetMyFriendKey, "GetMyFriendKey"},
+         {0x0006, &FRD_U::GetMyPreference, "GetMyPreference"},
+         {0x0007, &FRD_U::GetMyProfile, "GetMyProfile"},
+@@ -26,7 +26,7 @@
+         {0x000D, &FRD_U::GetMyFavoriteGame, "GetMyFavoriteGame"},
+         {0x000E, nullptr, "GetMyNcPrincipalId"},
+         {0x000F, &FRD_U::GetMyComment, "GetMyComment"},
+-        {0x0010, nullptr, "GetMyPassword"},
++        {0x0010, &FRD_U::GetMyPassword, "GetMyPassword"},
+         {0x0011, &FRD_U::GetFriendKeyList, "GetFriendKeyList"},
+         {0x0012, nullptr, "GetFriendPresence"},
+         {0x0013, nullptr, "GetFriendScreenName"},
+@@ -42,16 +42,16 @@
+         {0x001D, nullptr, "UpdateGameModeDescription"},
+         {0x001E, nullptr, "UpdateGameMode"},
+         {0x001F, nullptr, "SendInvitation"},
+-        {0x0020, nullptr, "AttachToEventNotification"},
+-        {0x0021, nullptr, "SetNotificationMask"},
++        {0x0020, &FRD_U::AttachToEventNotification, "AttachToEventNotification"},
++        {0x0021, &FRD_U::SetNotificationMask, "SetNotificationMask"},
+         {0x0022, nullptr, "GetEventNotification"},
+         {0x0023, &FRD_U::GetLastResponseResult, "GetLastResponseResult"},
+         {0x0024, nullptr, "PrincipalIdToFriendCode"},
+         {0x0025, nullptr, "FriendCodeToPrincipalId"},
+         {0x0026, nullptr, "IsValidFriendCode"},
+         {0x0027, nullptr, "ResultToErrorCode"},
+-        {0x0028, nullptr, "RequestGameAuthentication"},
+-        {0x0029, nullptr, "GetGameAuthenticationData"},
++        {0x0028, &FRD_U::RequestGameAuthentication, "RequestGameAuthentication"},
++        {0x0029, &FRD_U::GetGameAuthenticationData, "GetGameAuthenticationData"},
+         {0x002A, nullptr, "RequestServiceLocator"},
+         {0x002B, nullptr, "GetServiceLocatorData"},
+         {0x002C, nullptr, "DetectNatProperties"},
+-- 
+2.47.0
