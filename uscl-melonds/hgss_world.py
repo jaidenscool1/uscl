@@ -54,9 +54,11 @@ UNION_TEXT = 738
 # after their YES / NO ("Whoops! Sorry, but I have to do something else.")
 REQUEST_TEXT = {"battle": (21, 22, 23, 22, 201), "trade pokemon": (26, 27, 28, 27, 201),
                 "trade item": (26, 27, 28, 27, 201)}
-# Battles go through the game's own Colosseum: warp both players to its desk, back home after the battle.
+# Battles and trades go through the game's own link rooms: warp both players to the desk, the attendant's menu opens,
+# back home after leaving the room. Trades: the Union Room (talk to each other there, TRADE).
 # shortcut: always Cherrygrove's Pokemon Center; a nearer one (same layout) when players are elsewhere
 COLOSSEUM_DESK = (69, 11, 5, 0)    # MAP_CHERRYGROVE_POKECENTER_1F, in front of std_wireless_colosseum at (11, 4), facing up
+UNION_DESK = (69, 6, 5, 0)         # same map, in front of std_union_room at (6, 4), facing up
 LINK_MAPS = {2, 4, 5}              # MAP_UNION, MAP_WIFI_SINGLE_BATTLE_AREA, MAP_WIFI_MULTI_BATTLE_AREA: the game shows
                                    # the linked player itself, so no puppets there
 LOAD_SCRIPT_BANKS = 0x02040168     # LoadScriptsAndMessagesParameterized(fs, ctx, scriptBank, msgBank): we swap msgBank
@@ -64,6 +66,11 @@ MO_SCRIPT = 0x20                   # LocalMapObject.scriptId
 PUPPET_SCRIPT = 2000               # _std_misc: loads the large scr_seq_0003 (room for our bytecode); marks a puppet talk
 MAN_OBJECTS, MO_SIZE = 0x124, 0x12C   # MapObjectManager.objects (objectCount at +4), sizeof(LocalMapObject)
 STD_COLOSSEUM = 9001               # std_wireless_colosseum: the Colosseum attendant's own script
+STD_UNION_ROOM = 9003              # std_union_room: the Union Room attendant's own script
+# shortcut: Gen 4 has no item trades; ITEM goes to the Union Room too (a traded Pokemon keeps its held item)
+LINK_DESKS = {"battle": (COLOSSEUM_DESK, STD_COLOSSEUM, "the Colosseum"),
+              "trade pokemon": (UNION_DESK, STD_UNION_ROOM, "the Union Room"),
+              "trade item": (UNION_DESK, STD_UNION_ROOM, "the Union Room")}
 CTX_SCRIPT_PTR, CTX_MSGDATA, CTX_MAP_SCRIPTS = 0x08, 0x78, 0x7C           # ScriptContext fields
 TASK_ENV, ENV_LAST_INTERACTED, ENV_RESULT = 0x0C, 0x2C, 0xA4              # TaskManager.env, ScriptEnvironment fields
 # (text bank, prompt, [(message, choice)]): Union Room "Talking to ...": "BATTLE", "TRADE", "CANCEL";
@@ -650,17 +657,18 @@ def loop(args, game, sock, peers, remote, puppets, session):
     menus = Menus(game, who)
     tname = None
     quiet_until, last_map = 0.0, None   # no puppet creation while our own map is being torn down / rebuilt
-    trip, last_me = None, None          # battle trip: {"home": (map, x, z, facing), "fought": bool}
+    trip, last_me = None, None          # link trip: {"home": (map, x, z, facing), "fought": bool (been in the room)}
 
-    def start_trip():
+    def start_trip(req):
         nonlocal trip
+        desk, script, room = LINK_DESKS[req]
         if last_me and not (trip and trip["fought"]):
-            if not trip:              # asked again before battling: same home, warp and attendant again
+            if not trip:              # asked again before entering: same home, warp and attendant again
                 x, _, z = last_me["tile"]
                 trip = {"home": (last_me["map"], x, z, last_me["dir"]), "fought": False}
-            menus.show(menus.warp(*COLOSSEUM_DESK), 0)
-            menus.show(menus.talk(STD_COLOSSEUM), 0)      # her menu opens by itself after the fade
-            print("[%s] battle: to the Colosseum desk, attendant's menu next" % args.name, flush=True)
+            menus.show(menus.warp(*desk), 0)
+            menus.show(menus.talk(script), 0)      # her menu opens by itself after the fade
+            print("[%s] %s: to %s desk, attendant's menu next" % (args.name, req, room), flush=True)
     link = None        # the wireless link role melonDS was last told (patched melonDS: monitor uscl-link)
 
     while True:
@@ -701,8 +709,8 @@ def loop(args, game, sock, peers, remote, puppets, session):
                     yes = value == 0
                     print("[%s] %s %s's %s" % (args.name, "accepted" if yes else "declined", spec["who"], spec["req"]), flush=True)
                     send({"to": spec["who"], "ans": spec["req"], "ok": yes})
-                    if yes and spec["req"] == "battle":
-                        start_trip()
+                    if yes:
+                        start_trip(spec["req"])
                     text = REQUEST_TEXT[spec["req"]]
                     menus.show(menus.popup(text[1] if yes else text[2], None), obj)
             if CREATE_SCRIPT_CTX in game.g.handlers:
@@ -716,8 +724,8 @@ def loop(args, game, sock, peers, remote, puppets, session):
             if me and trip and not menus.busy():
                 if me["map"] in LINK_MAPS:
                     trip["fought"] = True
-                elif trip["fought"] and me["map"] == COLOSSEUM_DESK[0]:
-                    print("[%s] battle over: back home %s" % (args.name, trip["home"]), flush=True)
+                elif trip["fought"] and me["map"] == COLOSSEUM_DESK[0]:    # both desks are on this map
+                    print("[%s] link room left: back home %s" % (args.name, trip["home"]), flush=True)
                     menus.show(menus.warp(*trip["home"]), 0)
                     trip = None
             if me and me["map"] != last_map:
@@ -752,8 +760,8 @@ def loop(args, game, sock, peers, remote, puppets, session):
                             print("[%s] %s %s your %s" % (args.name, st["name"], "accepted" if ok else "declined", st["ans"]), flush=True)
                             text = REQUEST_TEXT[st["ans"]]
                             menus.show(menus.popup(text[3] if ok else text[4], None), puppets.get(st["name"], (0,))[0])
-                            if ok and st["ans"] == "battle":
-                                start_trip()
+                            if ok:
+                                start_trip(st["ans"])
                     elif st.get("v") == 1 and st.get("name") != args.name:
                         old = remote.get(st["name"])
                         same = old and (old[0]["map"], old[0]["sprite"]) == (st["map"], st["sprite"])
@@ -1016,6 +1024,7 @@ def selftest():
     w32(MAN + 4, 3); w32(MAN + MAN_OBJECTS, ATT - 2 * MO_SIZE)
     w32(ATT, MO_ACTIVE); w32(ATT + MO_SCRIPT, STD_COLOSSEUM)
     assert game.find_object(STD_COLOSSEUM) == ATT and game.find_object(1234) is None
+    assert set(LINK_DESKS) == set(REQUEST_TEXT)       # every accepted request has a desk to go to
     menus.queue = [(menus.talk(STD_COLOSSEUM), 0)]
     menus.pump()                                       # a field task is still running: wait
     assert len(menus.queue) == 1

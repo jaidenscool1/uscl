@@ -221,4 +221,8 @@ Phases:
   session or join through uscl-bridge for a friend's, and it worked for a battle between two copies on one PC.
   Next: a battle between two PCs over Steam, the agents answering the attendant's menus, the nearest Pokémon Center
   instead of Cherrygrove's, more than two players per link (LAN clients connect to each other by address).
-- **D4:** trades the same way; other Gen 4 games (SoulSilver, Platinum) get their own address tables.
+- **D4 (overworld trades done 2026-11-15):** an accepted TRADE warps both players to the Union Room desk (same
+  Pokémon Center) and opens the attendant's own menu; in the Union Room they talk to each other and trade with the
+  game's own screens; leaving the room warps each home. ITEM goes there too (Gen 4 has no item trades; a traded
+  Pokémon keeps its held item). Worked between two copies on one PC. Next: other Gen 4 games (SoulSilver, Platinum)
+  get their own address tables.

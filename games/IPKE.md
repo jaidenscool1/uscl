@@ -142,3 +142,8 @@ Rejected: rebuilding a battle from the other player's party data inside one game
   friend (the hosted link holds 127.0.0.1:7064, which the joining bridge listens on). One PC, A `--bridge` (host),
   B `--link join`: the LAN host bound UDP 127.0.0.1:7064 only, and a battle from the overworld went through without
   touching melonDS's Multiplayer menu. GDB stubs now listen on 127.0.0.1 only. Two PCs over Steam: untested.
+- 2026-11-15: **trades from the overworld work.** An accepted TRADE (POKéMON or ITEM) warps both players to
+  `UNION_DESK` (map 69, tile (6, 5) facing up, in front of `std_union_room` (9003) at (6, 4)) and starts the
+  attendant's script on her object, as for battles. In the Union Room (MAP_UNION, 2) the players talked to each other
+  and traded with the game's own screens; leaving the room back to map 69 warped each home. Gen 4 has no item trades,
+  so ITEM goes to the Union Room too. Two copies on one PC, A `--link host`, B `--link join`.

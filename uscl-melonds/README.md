@@ -6,7 +6,7 @@
 | **Emulator** | [melonDS](https://github.com/melonDS-emu/melonDS) (GPL-3.0), pinned base `497aa6cdd26f45f8064b78916b00a773eab4ded7` (2026-11-04) |
 | **Our changes** | `patches/0001`–`0002` (GPL-3.0), applied with `git am`: the wireless link starts itself over uscl-bridge, and the GDB stub listens on 127.0.0.1 only. `hgss_world.py` (Pokémon HeartGold shared overworld) talks to the GDB stub |
 | **Online** | shared overworld: per-game agent over UDP; battles and trades: melonDS's LAN link (ENet, UDP 7064) on 127.0.0.1, which uscl-bridge carries over Steam |
-| **Status** | two copies on one PC: shared overworld, talk menu, battles from the overworld with the link started by the agents (patched melonDS, 2026-11-15); two PCs over Steam untested |
+| **Status** | two copies on one PC: shared overworld, talk menu, battles and trades from the overworld with the link started by the agents (patched melonDS, 2026-11-15); two PCs over Steam untested |
 
 ## Why melonDS
 - **Every USCL OS:** builds on Windows, Linux and macOS (CMake + vcpkg presets, Flathub on Linux, official builds for
@@ -62,7 +62,9 @@ join <code>`, which finds that session among your Steam friends' sessions.
 **Talking to another player** (face them, press A) opens the game's own menu: BATTLE / TRADE / CANCEL, and TRADE
 opens POKéMON / ITEM / CANCEL. The other player gets the request as an in-game YES/NO question with your trainer name, and both see the answer.
 When a BATTLE is accepted, both players are warped to the Colosseum desk in Cherrygrove's Pokémon Center and the
-attendant's menu opens. After the battle, back at the desk, each player is warped home. Trades come next.
+attendant's menu opens. After the battle, back at the desk, each player is warped home. An accepted TRADE works the
+same way through the Union Room desk: inside, talk to each other and pick TRADE. ITEM goes there too (HeartGold has
+no item trades: give the Pokémon the item to hold).
 
 **The wireless link** (battles, trades) needs the patched melonDS. The agent sets it from the player's session: our
 own session hosts it on 127.0.0.1:7064, a joined one connects to 127.0.0.1:7064, where uscl-bridge listens and
