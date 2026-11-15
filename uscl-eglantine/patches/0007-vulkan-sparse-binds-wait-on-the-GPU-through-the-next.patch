@@ -1,0 +1,459 @@
+From 3e481b869b6daf8be32be709cf8ff3bdec76b99f Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 10:38:40 -0700
+Subject: [PATCH 7/8] vulkan: sparse binds wait on the GPU, through the next
+ submission
+
+Every vkQueueBindSparse (zero block, tiles, layers) waited for a fence on
+the CPU, stalling the GPU thread until the graphics queue drained: ~33 ms
+per bind in Mario Kart World's terrain streaming. The bind now signals a
+semaphore that the scheduler attaches, at every stage, to the next batch
+it submits, whatever submits it. That batch holds the clear or the uploads
+recorded after the bind, also when a staging request or anything else
+flushes before the uploads are all recorded (a semaphore waited on only by
+an explicit flush after the uploads would miss that case). The semaphore
+is kept until its batch completes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../renderer_vulkan/vk_master_semaphore.cpp   | 104 +++++++++++-------
+ .../renderer_vulkan/vk_master_semaphore.h     |  11 +-
+ .../renderer_vulkan/vk_scheduler.cpp          |  15 ++-
+ src/video_core/renderer_vulkan/vk_scheduler.h |  13 +++
+ .../renderer_vulkan/vk_texture_cache.cpp      |  54 ++++-----
+ 5 files changed, 121 insertions(+), 76 deletions(-)
+
+diff --git a/src/video_core/renderer_vulkan/vk_master_semaphore.cpp b/src/video_core/renderer_vulkan/vk_master_semaphore.cpp
+index 51c37d828..30d5fc28f 100644
+--- a/src/video_core/renderer_vulkan/vk_master_semaphore.cpp
++++ b/src/video_core/renderer_vulkan/vk_master_semaphore.cpp
+@@ -7,6 +7,7 @@
+ // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <vector>
+ #include <thread>
+ 
+ #include <ranges>
+@@ -121,22 +122,64 @@ void MasterSemaphore::Wait(u64 tick) {
+ 
+ VkResult MasterSemaphore::SubmitQueue(vk::CommandBuffer& cmdbuf, vk::CommandBuffer& upload_cmdbuf,
+                                       VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
+-                                      u64 host_tick) {
++                                      u64 host_tick, std::span<const VkSemaphore> extra_waits) {
+     if (semaphore) {
+         return SubmitQueueTimeline(cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore,
+-                                   host_tick);
++                                   host_tick, extra_waits);
+     } else {
+-        return SubmitQueueFence(cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore, host_tick);
++        return SubmitQueueFence(cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore, host_tick,
++                                extra_waits);
+     }
+ }
+ 
+ static constexpr VkPipelineStageFlags wait_stage_mask = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+ 
++namespace {
++// The wait semaphores of one batch: the swapchain's (shader and colour output stages) and the
++// extra ones, waited for at every stage.
++struct BatchWaits {
++    BatchWaits(VkSemaphore wait_semaphore, std::span<const VkSemaphore> extra_waits) {
++        if (wait_semaphore) {
++            Add(wait_semaphore, wait_stage_mask);
++        }
++        for (const VkSemaphore extra : extra_waits) {
++            Add(extra, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
++        }
++    }
++    void Add(VkSemaphore semaphore, VkPipelineStageFlags stages) {
++        semaphores.push_back(semaphore);
++        masks.push_back(stages);
++        values.push_back(0);
++        infos.push_back(VkSemaphoreSubmitInfo{
++            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
++            .pNext = nullptr,
++            .semaphore = semaphore,
++            .value = 0,
++            .stageMask = static_cast<VkPipelineStageFlags2>(stages),
++            .deviceIndex = 0,
++        });
++    }
++    u32 Count() const {
++        return static_cast<u32>(semaphores.size());
++    }
++    // Pointers must be null when the count is zero (best-practices)
++    template <typename T>
++    static const T* Data(const std::vector<T>& list) {
++        return list.empty() ? nullptr : list.data();
++    }
++    std::vector<VkSemaphore> semaphores;
++    std::vector<VkPipelineStageFlags> masks;
++    std::vector<u64> values; // binary semaphores: ignored
++    std::vector<VkSemaphoreSubmitInfo> infos;
++};
++} // Anonymous namespace
++
+ VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
+                                               vk::CommandBuffer& upload_cmdbuf,
+                                               VkSemaphore signal_semaphore,
+-                                              VkSemaphore wait_semaphore, u64 host_tick) {
++                                              VkSemaphore wait_semaphore, u64 host_tick,
++                                              std::span<const VkSemaphore> extra_waits) {
+     const VkSemaphore timeline_semaphore = *semaphore;
+ 
+     if (device.HasSynchronization2()) {
+@@ -179,22 +222,14 @@ VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
+             num_signal_semaphores = 2;
+         }
+ 
+-        const u32 num_wait_semaphores = wait_semaphore ? 1 : 0;
+-        const VkSemaphoreSubmitInfo wait_info{
+-            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+-            .pNext = nullptr,
+-            .semaphore = wait_semaphore,
+-            .value = 0,
+-            .stageMask = static_cast<VkPipelineStageFlags2>(wait_stage_mask),
+-            .deviceIndex = 0,
+-        };
++        const BatchWaits waits{wait_semaphore, extra_waits};
+ 
+         const VkSubmitInfo2 submit_info2{
+             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+             .pNext = nullptr,
+             .flags = 0,
+-            .waitSemaphoreInfoCount = num_wait_semaphores,
+-            .pWaitSemaphoreInfos = num_wait_semaphores ? &wait_info : nullptr,
++            .waitSemaphoreInfoCount = waits.Count(),
++            .pWaitSemaphoreInfos = BatchWaits::Data(waits.infos),
+             .commandBufferInfoCount = static_cast<u32>(cmdbuffer_infos.size()),
+             .pCommandBufferInfos = cmdbuffer_infos.data(),
+             .signalSemaphoreInfoCount = num_signal_semaphores,
+@@ -209,20 +244,17 @@ VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
+ 
+     const std::array cmdbuffers{*upload_cmdbuf, *cmdbuf};
+ 
+-    const u32 num_wait_semaphores = wait_semaphore ? 1 : 0;
+-    // Pointers must be null when the count is zero (best-practices)
+-    const VkSemaphore* p_wait_sems =
+-        (num_wait_semaphores > 0) ? &wait_semaphore : nullptr;
+-    const VkPipelineStageFlags* p_wait_masks =
+-        (num_wait_semaphores > 0) ? &wait_stage_mask : nullptr;
++    const BatchWaits waits{wait_semaphore, extra_waits};
++    const u32 num_wait_semaphores = waits.Count();
++    const VkSemaphore* p_wait_sems = BatchWaits::Data(waits.semaphores);
++    const VkPipelineStageFlags* p_wait_masks = BatchWaits::Data(waits.masks);
+     const VkSemaphore* p_signal_sems =
+         (num_signal_semaphores > 0) ? signal_semaphores.data() : nullptr;
+-    const u64 wait_zero = 0; // dummy for binary wait
+     const VkTimelineSemaphoreSubmitInfo timeline_si{
+         .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+         .pNext = nullptr,
+         .waitSemaphoreValueCount = num_wait_semaphores,
+-        .pWaitSemaphoreValues    = num_wait_semaphores ? &wait_zero : nullptr,
++        .pWaitSemaphoreValues = BatchWaits::Data(waits.values),
+         .signalSemaphoreValueCount = num_signal_semaphores,
+         .pSignalSemaphoreValues = signal_values.data(),
+     };
+@@ -244,7 +276,7 @@ VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
+ VkResult MasterSemaphore::SubmitQueueFence(vk::CommandBuffer& cmdbuf,
+                                            vk::CommandBuffer& upload_cmdbuf,
+                                            VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
+-                                           u64 host_tick) {
++                                           u64 host_tick, std::span<const VkSemaphore> extra_waits) {
+     if (device.HasSynchronization2()) {
+         const std::array<VkCommandBufferSubmitInfo, 2> cmdbuffer_infos{{
+             {
+@@ -271,22 +303,14 @@ VkResult MasterSemaphore::SubmitQueueFence(vk::CommandBuffer& cmdbuf,
+             .deviceIndex = 0,
+         };
+ 
+-        const u32 num_wait_semaphores = wait_semaphore ? 1 : 0;
+-        const VkSemaphoreSubmitInfo wait_info{
+-            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+-            .pNext = nullptr,
+-            .semaphore = wait_semaphore,
+-            .value = 0,
+-            .stageMask = static_cast<VkPipelineStageFlags2>(wait_stage_mask),
+-            .deviceIndex = 0,
+-        };
++        const BatchWaits waits{wait_semaphore, extra_waits};
+ 
+         const VkSubmitInfo2 submit_info2{
+             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+             .pNext = nullptr,
+             .flags = 0,
+-            .waitSemaphoreInfoCount = num_wait_semaphores,
+-            .pWaitSemaphoreInfos = num_wait_semaphores ? &wait_info : nullptr,
++            .waitSemaphoreInfoCount = waits.Count(),
++            .pWaitSemaphoreInfos = BatchWaits::Data(waits.infos),
+             .commandBufferInfoCount = static_cast<u32>(cmdbuffer_infos.size()),
+             .pCommandBufferInfos = cmdbuffer_infos.data(),
+             .signalSemaphoreInfoCount = num_signal_semaphores,
+@@ -306,12 +330,10 @@ VkResult MasterSemaphore::SubmitQueueFence(vk::CommandBuffer& cmdbuf,
+     }
+ 
+     const u32 num_signal_semaphores = signal_semaphore ? 1 : 0;
+-    const u32 num_wait_semaphores = wait_semaphore ? 1 : 0;
+-
+-    const VkSemaphore* p_wait_sems =
+-            (num_wait_semaphores > 0) ? &wait_semaphore : nullptr;
+-    const VkPipelineStageFlags* p_wait_masks =
+-        (num_wait_semaphores > 0) ? &wait_stage_mask : nullptr;
++    const BatchWaits waits{wait_semaphore, extra_waits};
++    const u32 num_wait_semaphores = waits.Count();
++    const VkSemaphore* p_wait_sems = BatchWaits::Data(waits.semaphores);
++    const VkPipelineStageFlags* p_wait_masks = BatchWaits::Data(waits.masks);
+     const VkSemaphore* p_signal_sems =
+         (num_signal_semaphores > 0) ? &signal_semaphore : nullptr;
+     const std::array cmdbuffers{*upload_cmdbuf, *cmdbuf};
+diff --git a/src/video_core/renderer_vulkan/vk_master_semaphore.h b/src/video_core/renderer_vulkan/vk_master_semaphore.h
+index f580c25d3..24fbb44c5 100644
+--- a/src/video_core/renderer_vulkan/vk_master_semaphore.h
++++ b/src/video_core/renderer_vulkan/vk_master_semaphore.h
+@@ -12,6 +12,7 @@
+ #include <mutex>
+ #include <thread>
+ #include <queue>
++#include <span>
+ 
+ #include "common/common_types.h"
+ #include "common/polyfill_thread.h"
+@@ -54,17 +55,19 @@ public:
+     /// Waits for a tick to be hit on the GPU
+     void Wait(u64 tick);
+ 
+-    /// Submits the device graphics queue, updating the tick as necessary
++    /// Submits the device graphics queue, updating the tick as necessary.
++    /// extra_waits: semaphores the whole batch waits for, at every stage (sparse binds).
+     VkResult SubmitQueue(vk::CommandBuffer& cmdbuf, vk::CommandBuffer& upload_cmdbuf,
+-                         VkSemaphore signal_semaphore, VkSemaphore wait_semaphore, u64 host_tick);
++                         VkSemaphore signal_semaphore, VkSemaphore wait_semaphore, u64 host_tick,
++                         std::span<const VkSemaphore> extra_waits = {});
+ 
+ private:
+     VkResult SubmitQueueTimeline(vk::CommandBuffer& cmdbuf, vk::CommandBuffer& upload_cmdbuf,
+                                  VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
+-                                 u64 host_tick);
++                                 u64 host_tick, std::span<const VkSemaphore> extra_waits);
+     VkResult SubmitQueueFence(vk::CommandBuffer& cmdbuf, vk::CommandBuffer& upload_cmdbuf,
+                               VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
+-                              u64 host_tick);
++                              u64 host_tick, std::span<const VkSemaphore> extra_waits);
+ 
+     void WaitThread(std::stop_token token);
+ 
+diff --git a/src/video_core/renderer_vulkan/vk_scheduler.cpp b/src/video_core/renderer_vulkan/vk_scheduler.cpp
+index ca9fa1871..2d8131f6a 100644
+--- a/src/video_core/renderer_vulkan/vk_scheduler.cpp
++++ b/src/video_core/renderer_vulkan/vk_scheduler.cpp
+@@ -455,7 +455,19 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
+     draws_since_submit = 0;
+ 
+     const u64 signal_value = master_semaphore->NextTick();
++    while (!retired_submit_waits.empty() &&
++           master_semaphore->IsFree(retired_submit_waits.front().first)) {
++        retired_submit_waits.pop_front();
++    }
++    std::vector<VkSemaphore> extra_waits;
++    extra_waits.reserve(next_submit_waits.size());
++    for (vk::Semaphore& semaphore : next_submit_waits) {
++        extra_waits.push_back(*semaphore);
++        retired_submit_waits.emplace_back(signal_value, std::move(semaphore));
++    }
++    next_submit_waits.clear();
+     RecordWithUploadBuffer([signal_semaphore, wait_semaphore, signal_value,
++                            extra_waits = std::move(extra_waits),
+                             this](vk::CommandBuffer cmdbuf, vk::CommandBuffer upload_cmdbuf) {
+         static constexpr VkMemoryBarrier WRITE_BARRIER{
+             .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+@@ -480,7 +492,8 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
+ 
+         std::scoped_lock lock{submit_mutex};
+         switch (const VkResult result = master_semaphore->SubmitQueue(
+-                    cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore, signal_value)) {
++                    cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore, signal_value,
++                    extra_waits)) {
+         case VK_SUCCESS:
+             // Log successful queue submission
+             if (GPU::Logging::IsActive() &&
+diff --git a/src/video_core/renderer_vulkan/vk_scheduler.h b/src/video_core/renderer_vulkan/vk_scheduler.h
+index 37edf0a6d..1218efc74 100644
+--- a/src/video_core/renderer_vulkan/vk_scheduler.h
++++ b/src/video_core/renderer_vulkan/vk_scheduler.h
+@@ -10,12 +10,14 @@
+ #pragma once
+ 
+ #include <chrono>
++#include <deque>
+ #include <condition_variable>
+ #include <cstddef>
+ #include <functional>
+ #include <memory>
+ #include <thread>
+ #include <utility>
++#include <vector>
+ #include <queue>
+ #include <span>
+ 
+@@ -55,6 +57,14 @@ public:
+     /// Sends the current execution context to the GPU.
+     u64 Flush(VkSemaphore signal_semaphore = {}, VkSemaphore wait_semaphore = {});
+ 
++    /// The next batch sent to the GPU, whatever sends it, waits at every stage for `semaphore`,
++    /// which is kept until that batch has completed. Sparse binds use it: the commands recorded
++    /// after a bind (the uploads into its blocks) must not run before it, even when something
++    /// flushes before the code that recorded them is done.
++    void WaitBeforeNextSubmit(vk::Semaphore semaphore) {
++        next_submit_waits.push_back(std::move(semaphore));
++    }
++
+     /// Sends the current execution context to the GPU and waits for it to complete.
+     void Finish(VkSemaphore signal_semaphore = {}, VkSemaphore wait_semaphore = {});
+ 
+@@ -441,6 +451,9 @@ private:
+ 
+     void AllocateNewContext();
+ 
++    std::vector<vk::Semaphore> next_submit_waits; ///< GPU thread: see WaitBeforeNextSubmit
++    std::deque<std::pair<u64, vk::Semaphore>> retired_submit_waits; ///< Until their batch is done
++
+     void EndPendingOperations();
+ 
+     void EndRenderPass();
+diff --git a/src/video_core/renderer_vulkan/vk_texture_cache.cpp b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
+index 2f112a6d4..8c92e76b9 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
+@@ -3754,6 +3754,10 @@ bool Image::BindZeroBlock() {
+         .bindCount = static_cast<u32>(opaque_binds.size()),
+         .pBinds = opaque_binds.data(),
+     };
++    // The next batch sent to the GPU (holding what is recorded after this: the clear or the
++    // uploads into the new blocks) waits for the bind on the GPU. A fence wait here stalled the
++    // GPU thread until the graphics queue drained: ~33 ms per bind in Mario Kart World.
++    vk::Semaphore semaphore = device.GetLogical().CreateSemaphore();
+     const VkBindSparseInfo bind_info{
+         .sType = VK_STRUCTURE_TYPE_BIND_SPARSE_INFO,
+         .pNext = nullptr,
+@@ -3765,25 +3769,20 @@ bool Image::BindZeroBlock() {
+         .pImageOpaqueBinds = opaque_binds.empty() ? nullptr : &opaque_bind_info,
+         .imageBindCount = image_binds.empty() ? 0U : 1U,
+         .pImageBinds = image_binds.empty() ? nullptr : &image_bind_info,
+-        .signalSemaphoreCount = 0,
+-        .pSignalSemaphores = nullptr,
++        .signalSemaphoreCount = 1,
++        .pSignalSemaphores = semaphore.address(),
+     };
+-    vk::Fence fence = device.GetLogical().CreateFence(VkFenceCreateInfo{
+-        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+-        .pNext = nullptr,
+-        .flags = 0,
+-    });
+     VkResult result;
+     {
+         std::scoped_lock lock{scheduler->submit_mutex};
+-        result = device.GetGraphicsQueue().BindSparse(bind_info, *fence);
++        result = device.GetGraphicsQueue().BindSparse(bind_info);
+     }
+     if (result != VK_SUCCESS) {
+         LOG_ERROR(Render_Vulkan, "Sparse tiled image {:#x}: binding the zeroed block failed ({})",
+                   gpu_addr, static_cast<int>(result));
+         return false;
+     }
+-    fence.Wait();
++    scheduler->WaitBeforeNextSubmit(std::move(semaphore));
+     // Every block now reads the shared block (and the tail its own memory): zero them all.
+     ClearTiles();
+     return true;
+@@ -3985,6 +3984,10 @@ bool Image::BindTiles(std::span<const VideoCommon::LevelRect> rects) {
+         .bindCount = static_cast<u32>(opaque_binds.size()),
+         .pBinds = opaque_binds.data(),
+     };
++    // The next batch sent to the GPU (holding what is recorded after this: the clear or the
++    // uploads into the new blocks) waits for the bind on the GPU. A fence wait here stalled the
++    // GPU thread until the graphics queue drained: ~33 ms per bind in Mario Kart World.
++    vk::Semaphore semaphore = device.GetLogical().CreateSemaphore();
+     const VkBindSparseInfo bind_info{
+         .sType = VK_STRUCTURE_TYPE_BIND_SPARSE_INFO,
+         .pNext = nullptr,
+@@ -3996,19 +3999,13 @@ bool Image::BindTiles(std::span<const VideoCommon::LevelRect> rects) {
+         .pImageOpaqueBinds = opaque_binds.empty() ? nullptr : &opaque_bind_info,
+         .imageBindCount = image_binds.empty() ? 0U : 1U,
+         .pImageBinds = image_binds.empty() ? nullptr : &image_bind_info,
+-        .signalSemaphoreCount = 0,
+-        .pSignalSemaphores = nullptr,
++        .signalSemaphoreCount = 1,
++        .pSignalSemaphores = semaphore.address(),
+     };
+-    // Bound before the command buffer that uploads the blocks is submitted (as BindLayers).
+-    vk::Fence fence = device.GetLogical().CreateFence(VkFenceCreateInfo{
+-        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+-        .pNext = nullptr,
+-        .flags = 0,
+-    });
+     VkResult result;
+     {
+         std::scoped_lock lock{scheduler->submit_mutex};
+-        result = device.GetGraphicsQueue().BindSparse(bind_info, *fence);
++        result = device.GetGraphicsQueue().BindSparse(bind_info);
+     }
+     if (result != VK_SUCCESS) {
+         LOG_ERROR(Render_Vulkan, "Sparse tiled image {:#x}: binding failed ({})", gpu_addr,
+@@ -4016,7 +4013,7 @@ bool Image::BindTiles(std::span<const VideoCommon::LevelRect> rects) {
+         roll_back();
+         return false;
+     }
+-    fence.Wait();
++    scheduler->WaitBeforeNextSubmit(std::move(semaphore));
+     return true;
+ }
+ 
+@@ -4144,6 +4141,10 @@ std::vector<u32> Image::BindLayers(std::span<const u32> layers) {
+         .bindCount = static_cast<u32>(opaque_binds.size()),
+         .pBinds = opaque_binds.data(),
+     };
++    // The next batch sent to the GPU (holding what is recorded after this: the clear or the
++    // uploads into the new blocks) waits for the bind on the GPU. A fence wait here stalled the
++    // GPU thread until the graphics queue drained: ~33 ms per bind in Mario Kart World.
++    vk::Semaphore semaphore = device.GetLogical().CreateSemaphore();
+     const VkBindSparseInfo bind_info{
+         .sType = VK_STRUCTURE_TYPE_BIND_SPARSE_INFO,
+         .pNext = nullptr,
+@@ -4155,20 +4156,13 @@ std::vector<u32> Image::BindLayers(std::span<const u32> layers) {
+         .pImageOpaqueBinds = opaque_binds.empty() ? nullptr : &opaque_bind_info,
+         .imageBindCount = image_binds.empty() ? 0U : 1U,
+         .pImageBinds = image_binds.empty() ? nullptr : &image_bind_info,
+-        .signalSemaphoreCount = 0,
+-        .pSignalSemaphores = nullptr,
++        .signalSemaphoreCount = 1,
++        .pSignalSemaphores = semaphore.address(),
+     };
+-    // Bound before the command buffer that uploads the layers is submitted (as the multi-range
+-    // buffer cache does).
+-    vk::Fence fence = device.GetLogical().CreateFence(VkFenceCreateInfo{
+-        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+-        .pNext = nullptr,
+-        .flags = 0,
+-    });
+     VkResult result;
+     {
+         std::scoped_lock lock{scheduler->submit_mutex};
+-        result = device.GetGraphicsQueue().BindSparse(bind_info, *fence);
++        result = device.GetGraphicsQueue().BindSparse(bind_info);
+     }
+     if (result != VK_SUCCESS) {
+         LOG_ERROR(Render_Vulkan, "Sparse layered image {:#x}: binding failed ({})", gpu_addr,
+@@ -4176,7 +4170,7 @@ std::vector<u32> Image::BindLayers(std::span<const u32> layers) {
+         roll_back();
+         return {};
+     }
+-    fence.Wait();
++    scheduler->WaitBeforeNextSubmit(std::move(semaphore));
+     return bound;
+ }
+ 
+-- 
+2.56.0
+
