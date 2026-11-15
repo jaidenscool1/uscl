@@ -40,10 +40,16 @@ if (-not $glslang -and $env:VULKAN_SDK) { $glslang = "$env:VULKAN_SDK\Bin\glslan
 if (-not $glslang -or -not (Test-Path $glslang)) { $glslang = "$repo\build\tools\glslang\bin\glslang.exe" }
 if (-not (Test-Path $glslang)) { throw 'glslangValidator not found: install the Vulkan SDK, or unzip a Khronos glslang Windows release into build\tools\glslang.' }
 
+# CPM patches dependencies (Boost, ...) with the first patch.exe it finds; Strawberry Perl's, first on PATH on
+# GitHub's runners, asserts. Git for Windows ships a working one.
+$extra = @()
+$gitPatch = Join-Path (Split-Path (Split-Path (Get-Command git.exe).Source)) 'usr\bin\patch.exe'
+if (Test-Path $gitPatch) { $extra += "-DPATCH_EXECUTABLE=$gitPatch" }
+
 $build = "$source\build-uscl"
 cmake -S $source -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DGLSLANGVALIDATOR=$glslang" `
     -DENABLE_QT=ON -DYUZU_TESTS=OFF -DBUILD_TESTING=OFF -DENABLE_WEB_SERVICE=OFF `
-    -DYUZU_ROOM_STANDALONE=OFF -DYUZU_DISABLE_LLVM=ON
+    -DYUZU_ROOM_STANDALONE=OFF -DYUZU_DISABLE_LLVM=ON @extra
 if ($LASTEXITCODE) { throw 'cmake configure failed' }
 cmake --build $build --target yuzu yuzu-cmd -j $jobs   # eden.exe (settings) + eden-cli.exe (runs games)
 if ($LASTEXITCODE) { throw 'build failed' }
