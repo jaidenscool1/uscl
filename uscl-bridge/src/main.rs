@@ -196,25 +196,26 @@ fn main() {
         },
         Some(cmd @ ("host" | "join")) => {
             let arg = std::env::args().nth(2);
-            let (join, spec) = if cmd == "host" {
+            let (join, code, spec) = if cmd == "host" {
                 let spec = arg.unwrap_or_default();
                 if let Err(e) = tunnel::parse_forwards(&spec) {
                     eprintln!("{e}");
                     std::process::exit(2);
                 }
-                (None, spec)
+                (None, None, spec)
             } else {
-                let join = arg.map(|s| s.parse().map(steamworks::LobbyId::from_raw).unwrap_or_else(|_| {
-                    eprintln!("session id must be the number the host printed");
+                let code = arg.as_deref().and_then(tunnel::parse_code);
+                let join = arg.filter(|_| code.is_none()).map(|s| s.parse().map(steamworks::LobbyId::from_raw).unwrap_or_else(|_| {
+                    eprintln!("session id must be the number or the 6-letter code the host printed");
                     std::process::exit(2);
                 }));
-                (join, String::new())
+                (join, code, String::new())
             };
             let client = Client::init_app(APP_ID).unwrap_or_else(|e| {
                 eprintln!("Steam init failed (is Steam running?): {e:?}");
                 std::process::exit(1);
             });
-            if let Err(e) = tunnel::run(client, cmd == "host", join, &spec) {
+            if let Err(e) = tunnel::run(client, cmd == "host", join, code, &spec) {
                 eprintln!("FAIL: {e}");
                 std::process::exit(1);
             }
@@ -243,7 +244,7 @@ fn main() {
             }
         },
         _ => {
-            eprintln!("usage: uscl-bridge host [skate3 | bo2 | switch | dolphin | 3ds | tcp:PORT,udp:FIRST-LAST,sudp:PORT,...] | join [session id] | friends | selftest | serve | client-test");
+            eprintln!("usage: uscl-bridge host [skate3 | bo2 | switch | dolphin | 3ds | tcp:PORT,udp:FIRST-LAST,sudp:PORT,...] | join [session id | code] | friends | selftest | serve | client-test");
             std::process::exit(2);
         }
     }

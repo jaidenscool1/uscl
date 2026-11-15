@@ -1,0 +1,244 @@
+From ec6dc8763f117136150fdb8fb451639fe3b9ffc6 Mon Sep 17 00:00:00 2001
+From: USCL agent codex <codex@uscl.invalid>
+Date: Sat, 14 Nov 2026 19:37:26 -0700
+Subject: [PATCH 1/2] USCL: start the wireless link over uscl-bridge, no LAN
+ menu
+
+melonDS's LAN link (ENet, UDP 7064) carries DS local wireless between PCs.
+For USCL it runs on 127.0.0.1 and uscl-bridge carries it over Steam:
+
+- `--uscl-link host|join` starts it at launch: host binds 127.0.0.1:7064
+  (no discovery broadcasts), join connects to 127.0.0.1 and keeps
+  retrying until the host is up.
+- GDB `monitor uscl-link host|join|off` (qRcmd) switches it while the
+  game runs, so a per-game agent can follow the player's Steam session
+  (host our own, join a friend's, or free the port before joining).
+
+Shortcut: two players per link (LAN's clients connect to each other by
+address, and through the bridge every player is 127.0.0.1).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/ARM.cpp                      |  6 ++++
+ src/Platform.h                   |  2 ++
+ src/frontend/qt_sdl/CLI.cpp      | 11 +++++++
+ src/frontend/qt_sdl/CLI.h        |  1 +
+ src/frontend/qt_sdl/Platform.cpp |  6 ++++
+ src/frontend/qt_sdl/main.cpp     | 51 ++++++++++++++++++++++++++++++++
+ src/frontend/qt_sdl/main.h       |  1 +
+ src/net/LAN.cpp                  |  3 +-
+ src/net/LAN.h                    |  2 ++
+ 9 files changed, 82 insertions(+), 1 deletion(-)
+
+diff --git a/src/ARM.cpp b/src/ARM.cpp
+index 3937a99..47d4e87 100644
+--- a/src/ARM.cpp
++++ b/src/ARM.cpp
+@@ -1073,6 +1073,12 @@ int ARM::RemoteCmd(const u8* cmd, size_t len)
+         Reset();
+         return 0;
+     }
++    if (!strcmp((const char*)cmd, "uscl-link host") || !strcmp((const char*)cmd, "uscl-link join") ||
++        !strcmp((const char*)cmd, "uscl-link off"))
++    {
++        Platform::USCL_Link((const char*)cmd + 10, NDS.UserData);
++        return 0;
++    }
+ 
+     return 1; // not implemented (yet)
+ }
+diff --git a/src/Platform.h b/src/Platform.h
+index 4341f6d..05a319b 100644
+--- a/src/Platform.h
++++ b/src/Platform.h
+@@ -297,6 +297,8 @@ void WriteDateTime(int year, int month, int day, int hour, int minute, int secon
+ // local multiplayer comm interface
+ // packet type: DS-style TX header (12 bytes) + original 802.11 frame
+ void MP_Begin(void* userdata);
++/// USCL: start or switch the wireless link over uscl-bridge ("host", "join" or "off"); from the emu thread
++void USCL_Link(const char* role, void* userdata);
+ void MP_End(void* userdata);
+ int MP_SendPacket(u8* data, int len, u64 timestamp, void* userdata);
+ int MP_RecvPacket(u8* data, u64* timestamp, void* userdata);
+diff --git a/src/frontend/qt_sdl/CLI.cpp b/src/frontend/qt_sdl/CLI.cpp
+index 5e352ca..f849551 100644
+--- a/src/frontend/qt_sdl/CLI.cpp
++++ b/src/frontend/qt_sdl/CLI.cpp
+@@ -43,6 +43,7 @@ CommandLineOptions* ManageArgs(QApplication& melon)
+ 
+     parser.addOption(QCommandLineOption({"b", "boot"}, "Whether to boot firmware on startup. Defaults to \"auto\" (boot if NDS rom given)", "auto/always/never", "auto"));
+     parser.addOption(QCommandLineOption({"f", "fullscreen"}, "Start melonDS in fullscreen mode"));
++    parser.addOption(QCommandLineOption("uscl-link", "Start the LAN wireless link on 127.0.0.1 for uscl-bridge: host, or join the host through the bridge", "host/join"));
+ 
+ #ifdef ARCHIVE_SUPPORT_ENABLED
+     parser.addOption(QCommandLineOption({"a", "archive-file"}, "Specify file to load inside an archive given (NDS)", "rom"));
+@@ -54,6 +55,16 @@ CommandLineOptions* ManageArgs(QApplication& melon)
+     CommandLineOptions* options = new CommandLineOptions;
+ 
+     options->fullscreen = parser.isSet("fullscreen");
++    if (parser.isSet("uscl-link"))
++    {
++        QString link = parser.value("uscl-link");
++        if (link != "host" && link != "join")
++        {
++            Log(LogLevel::Error, "ERROR: --uscl-link only accepts host/join\n");
++            exit(1);
++        }
++        options->usclLink = link;
++    }
+ 
+     QStringList posargs = parser.positionalArguments();
+     switch (posargs.size())
+diff --git a/src/frontend/qt_sdl/CLI.h b/src/frontend/qt_sdl/CLI.h
+index beb120b..d78c537 100644
+--- a/src/frontend/qt_sdl/CLI.h
++++ b/src/frontend/qt_sdl/CLI.h
+@@ -34,6 +34,7 @@ struct CommandLineOptions
+     std::optional<QString> gbaRomArchivePath;
+     bool fullscreen;
+     bool boot;
++    std::optional<QString> usclLink;    // "host" or "join": start the wireless link over uscl-bridge (127.0.0.1)
+ };
+ 
+ extern CommandLineOptions* ManageArgs(QApplication& melon);
+diff --git a/src/frontend/qt_sdl/Platform.cpp b/src/frontend/qt_sdl/Platform.cpp
+index dda7e78..0feefe2 100644
+--- a/src/frontend/qt_sdl/Platform.cpp
++++ b/src/frontend/qt_sdl/Platform.cpp
+@@ -457,6 +457,12 @@ void WriteDateTime(int year, int month, int day, int hour, int minute, int secon
+ }
+ 
+ 
++void USCL_Link(const char* role, void* userdata)
++{
++    std::string r = role;
++    QMetaObject::invokeMethod(QCoreApplication::instance(), [r]() { usclStartLink(r); }, Qt::QueuedConnection);
++}
++
+ void MP_Begin(void* userdata)
+ {
+     int inst = ((EmuInstance*)userdata)->getInstanceID();
+diff --git a/src/frontend/qt_sdl/main.cpp b/src/frontend/qt_sdl/main.cpp
+index c7f9787..f0fe3e6 100644
+--- a/src/frontend/qt_sdl/main.cpp
++++ b/src/frontend/qt_sdl/main.cpp
+@@ -61,6 +61,11 @@
+ #include "Net.h"
+ 
+ #include "CLI.h"
++#include "LAN.h"
++
++#include <chrono>
++#include <mutex>
++#include <thread>
+ 
+ #include "Net_PCap.h"
+ #include "Net_Slirp.h"
+@@ -214,6 +219,49 @@ void pathInit()
+ }
+ 
+ 
++// USCL: the wireless link goes through uscl-bridge on this PC (127.0.0.1:7064), which carries it over Steam.
++// "host": this player's session; "join": the session uscl-bridge joined; "off": back to local. Main thread.
++static std::mutex usclLinkMutex;     // the join thread holds it while it uses the LAN object
++static int usclLinkGen = 0;          // a newer call stops the older join thread
++
++void usclStartLink(const std::string& role)
++{
++    std::lock_guard<std::mutex> lock(usclLinkMutex);
++    int gen = ++usclLinkGen;
++    if (role == "off")
++    {
++        setMPInterface(MPInterface_Local);
++        return;
++    }
++    setMPInterface(MPInterface_LAN);   // a new LAN object: the old session ends
++    LAN& lan = (LAN&)MPInterface::Get();
++    lan.LoopbackOnly = true;
++    std::string player = Config::GetGlobalTable().GetString("LAN.PlayerName");
++    if (player.empty()) player = "USCL";
++    if (role == "host")
++    {
++        if (!lan.StartHost(player.c_str(), 16))
++            Log(LogLevel::Error, "USCL: can't host the link on 127.0.0.1:7064\n");
++        return;
++    }
++    // the host may come up later: keep trying (StartClient waits up to 5 s each time)
++    std::thread([gen, player]() {
++        for (;;)
++        {
++            {
++                std::lock_guard<std::mutex> lock(usclLinkMutex);
++                if (gen != usclLinkGen) return;
++                if (((LAN&)MPInterface::Get()).StartClient(player.c_str(), "127.0.0.1"))
++                {
++                    Log(LogLevel::Info, "USCL: link joined\n");
++                    return;
++                }
++            }
++            std::this_thread::sleep_for(std::chrono::seconds(2));
++        }
++    }).detach();
++}
++
+ void setMPInterface(MPInterfaceType type)
+ {
+     // switch to the requested MP interface
+@@ -424,6 +472,9 @@ int main(int argc, char** argv)
+             win->toggleFullscreen();
+     }
+ 
++    if (options->usclLink.has_value())
++        usclStartLink(options->usclLink->toStdString());
++
+     int ret = melon.exec();
+ 
+     delete options;
+diff --git a/src/frontend/qt_sdl/main.h b/src/frontend/qt_sdl/main.h
+index 40e14de..83b189a 100644
+--- a/src/frontend/qt_sdl/main.h
++++ b/src/frontend/qt_sdl/main.h
+@@ -62,5 +62,6 @@ int numEmuInstances();
+ void broadcastInstanceCommand(int cmd, QVariant& param, int sourceinst);
+ 
+ void setMPInterface(melonDS::MPInterfaceType type);
++void usclStartLink(const std::string& role);
+ 
+ #endif // MAIN_H
+diff --git a/src/net/LAN.cpp b/src/net/LAN.cpp
+index 0f43803..a967285 100644
+--- a/src/net/LAN.cpp
++++ b/src/net/LAN.cpp
+@@ -228,6 +228,7 @@ bool LAN::StartHost(const char* playername, int numplayers)
+ 
+     ENetAddress addr;
+     addr.host = ENET_HOST_ANY;
++    if (LoopbackOnly) enet_address_set_host_ip(&addr, "127.0.0.1");
+     addr.port = kLANPort;
+ 
+     Host = enet_host_create(&addr, 16, 2, 0, 0);
+@@ -257,7 +258,7 @@ bool LAN::StartHost(const char* playername, int numplayers)
+     Active = true;
+     IsHost = true;
+ 
+-    StartDiscovery();
++    if (!LoopbackOnly) StartDiscovery();
+     return true;
+ }
+ 
+diff --git a/src/net/LAN.h b/src/net/LAN.h
+index 162c95e..2e32d11 100644
+--- a/src/net/LAN.h
++++ b/src/net/LAN.h
+@@ -83,6 +83,8 @@ public:
+         u8 Status; // 0=idle 1=playing
+     };
+ 
++    bool LoopbackOnly = false;   // USCL: bind the host to 127.0.0.1, no discovery broadcasts
++
+     bool StartDiscovery();
+     void EndDiscovery();
+     bool StartHost(const char* player, int numplayers);
+-- 
+2.53.0.windows.1
+

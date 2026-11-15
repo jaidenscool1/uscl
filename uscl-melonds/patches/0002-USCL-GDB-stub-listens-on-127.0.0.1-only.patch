@@ -1,0 +1,37 @@
+From 82a89a6ce452f7b7c7140d4cbc8a7598e21c2d5e Mon Sep 17 00:00:00 2001
+From: USCL agent codex <codex@uscl.invalid>
+Date: Sat, 14 Nov 2026 19:37:26 -0700
+Subject: [PATCH 2/2] USCL: GDB stub listens on 127.0.0.1 only
+
+The stub gives full control of the emulated DS (memory, registers,
+breakpoints). It bound to every interface, so other PCs on the network
+could reach it. USCL's agents connect from the same PC.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/debug/GdbStub.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/debug/GdbStub.cpp b/src/debug/GdbStub.cpp
+index b1dcea4..2409f7b 100644
+--- a/src/debug/GdbStub.cpp
++++ b/src/debug/GdbStub.cpp
+@@ -120,13 +120,13 @@ bool GdbStub::Init(int port)
+ #endif
+ 
+ 	server->sin_family = AF_INET;
+-	server->sin_addr.s_addr = htonl(INADDR_ANY);
++	server->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+ 	server->sin_port = htons(Port);
+ 
+ 	r = bind(SockFd, (const sockaddr*)server, sizeof(*server));
+ 	if (r < 0)
+ 	{
+-		Log(LogLevel::Error, "[GDB] err: can't bind to address <any> and port %d\n", Port);
++		Log(LogLevel::Error, "[GDB] err: can't bind to address 127.0.0.1 and port %d\n", Port);
+ 		goto err;
+ 	}
+ 
+-- 
+2.53.0.windows.1
+

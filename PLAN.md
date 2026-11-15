@@ -183,3 +183,42 @@ the publisher's servers. The player decided:
 **Independent Switch service (2026-11-10, in progress):** `uscl-switch-online` implements a loopback-only private room control plane with ephemeral player credentials, exact game/update/DLC compatibility, public/invite rooms, region filters and expiry cleanup. Eden patch 0004 negotiates capabilities through an explicit headless probe. An original game-facing adapter in `uscl-switch-online/native/` adds TLS/WebSocket, PRUDP Lite, RMC, a private ticket authority, NEX matchmaking objects and loopback NAT checks on top of that control plane; its twelve tests pass but it has not been driven by the real game. This is a foundation analogous in architecture to RPCN, not native Mario Kart Online Play compatibility. Guest account/friend integration, Steam identity binding, durable accounts, tournaments and native-menu race validation remain open. The current working play path stays Wireless Play; the prototype port is not forwarded. See `uscl-switch-online/README.md`.
 
 **Native diagnostic progress (2026-11-10):** Eden patch 0005 adds an exact-title/exact-template, opt-in route through NSD and the DNS resolver (game server plus the `nncs1`/`nncs2` account hosts to loopback); patch 0006 supplies a parsed private identity and loopback address under the same opt-in; patch 0007 allows a finer UDP controller poll via `USCL_UDP_POLL_MS`; patch 0008 implements `ISslConnection::Peek`. In isolated real-game runs, Online Play reaches the local adapter on TCP 443, completes native authentication, and confirms Friends → Create Room to create a private room: `CreateMatchmakeSessionWithParam` (109/38), a "no relay" signature key, loopback NAT checks, NAT-property reporting, progress update and the room-code request, with the game showing the room lobby. Native login and private-room creation are validated; a second client joining by room code and racing remain unsupported. A DSU pad server (`tools/dev-scripts/dsu-pad.py`) drives Eden's cemuhook UDP controller for menu navigation. Seven backend tests, real Eden negotiation/error tests, observer socket/TLS/WebSocket tests, twelve adapter tests, compiled routing-policy checks, Linux build and full patch replay pass. See `uscl-switch-online/NATIVE-DIAGNOSTIC.md`.
+
+## Nintendo DS: a shared world in Pokémon HeartGold (player, 2026-11-13; design, nothing run in a game yet)
+Goal: friends play HeartGold together in **one shared world**. Everyone is in the same world and sees the others,
+each player explores freely on their own, and players can battle each other out in the world. HeartGold has no
+such mode: its multiplayer is local wireless (Colosseum battles, Union Room, trades) and the closed Nintendo WFC.
+
+- **Emulator: melonDS** (GPL-3.0, Windows/Linux/macOS), unchanged at first; patches go in `uscl-melonds/patches`.
+  Reasons and setup: `uscl-melonds/README.md`. Game notes and RAM map: `games/IPKE.md`.
+- **Not lockstep.** Each player runs their own game and save. A per-player agent (`uscl-melonds/hgss_world.py`)
+  reads the player's map, tile, position, facing and sprite from RAM through melonDS's GDB stub (127.0.0.1) and
+  sends them to the other agents. Every other player on the same map is drawn as an overworld object that the agent
+  creates with the game's own `MapObject_Create` (called on the game's thread at a once-per-frame safe point) and
+  moves each tick. Only 127.0.0.1 and ports, so it works on every OS.
+- **Battles are the game's real link battle**, carried by melonDS LAN mode (ENet, UDP 7064) over the Steam tunnel,
+  started from the overworld by facing the other player and pressing A.
+- **Over Steam:** the host runs the agent's fan-out relay; a bridge preset (`hgss`) forwards the relay's UDP port
+  and melonDS LAN's port, like the `dolphin` and `3ds` presets.
+
+Phases:
+- **D0 (2026-11-13, done):** emulator picked, ROM confirmed (`IPKE`, USA rev 0, the pret decomp's exact ROM),
+  RAM map and game functions found, agent written. **Done 2026-11-13: two melonDS 1.1 copies on one PC, each player
+  sees the other as an NPC on the same map, following their steps.**
+- **D1:** puppets look alive: walking animation through the game's movement commands instead of teleporting (done
+  2026-11-13, with catch-up running and the `--relay` mode + `hgss` bridge preset for D2), bike /
+  surf sprites, several players, hidden during cutscenes and battles; measure the GDB stub's speed cost (interpreter
+  only) and move to a small melonDS patch (memory socket) if it is too slow.
+- **D2:** two PCs over Steam: relay mode in the agent, `hgss` bridge preset, started by the USCL app with the game.
+  Built 2026-11-14 (untested across PCs): 6-letter session codes in the bridge (`join <code>`), the agent hosts the
+  player's own session and opens the game's keyboard on L+R to show the code or type a friend's.
+- **D3 (overworld battles done 2026-11-15):** talking to another player opens a BATTLE / TRADE (POKéMON, ITEM) menu and sends the
+  request to them; the other player gets an in-game YES/NO. A Colosseum link battle between two melonDS copies over
+  LAN mode works (2026-11-15); the `hgss` preset forwards LAN's UDP 7064. Battles from the overworld work
+  (2026-11-15): an accepted BATTLE warps both players to the Colosseum desk and opens the attendant's own menu;
+  after the battle each is warped back to where they stood. The link no longer needs melonDS's LAN menu
+  (`uscl-melonds/patches`, 2026-11-15): the agent tells patched melonDS to host it on 127.0.0.1:7064 for its own
+  session or join through uscl-bridge for a friend's, and it worked for a battle between two copies on one PC.
+  Next: a battle between two PCs over Steam, the agents answering the attendant's menus, the nearest Pokémon Center
+  instead of Cherrygrove's, more than two players per link (LAN clients connect to each other by address).
+- **D4:** trades the same way; other Gen 4 games (SoulSilver, Platinum) get their own address tables.

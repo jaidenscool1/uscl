@@ -80,6 +80,12 @@ fn preset(name: &str) -> Option<&'static str> {
         // trades/battles and NSMB2 co-op work over Steam. Nintendo-Network *online* (MK7 worldwide, Pokemon GTS)
         // needs a Pretendo/NEX stand-in instead. See uscl-3ds/.
         "3ds" => Some("udp:24872"),
+        // Pokemon HeartGold shared overworld (uscl-melonds/hgss_world.py): the host runs the agents' relay on UDP 47600,
+        // every member's agent sends to 127.0.0.1:47600 and the tunnel carries it there. Positions only, ~200 B at 30 Hz.
+        // Plus melonDS LAN mode (ENet, UDP 7064) for the game's own link battles and trades: the host's melonDS hosts
+        // the link on 127.0.0.1, members join 127.0.0.1 (the agents start both: uscl-melonds/patches; LAN discovery
+        // on 7063 doesn't cross the tunnel).
+        "hgss" => Some("udp:47600,udp:7064"),
         // Eden local wireless room, forwarded over Steam.
         "switch" => Some("udp:24872"),
         _ => None,
@@ -304,6 +310,23 @@ fn join_session(client: &Client, lobby: LobbyId) -> Result<LobbyId, String> {
 
 const NOT_USCL: &str = "that lobby isn't a USCL session";
 
+/// Short code players type to join a session (e.g. in a game's own keyboard). Derived from the lobby id, so a joiner
+/// finds the session among its friends' lobbies without reading lobby data. 30 bits, no 0/O/1/I.
+pub fn session_code(lobby: u64) -> String {
+    const ABC: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut x = lobby.wrapping_add(0x9E37_79B9_7F4A_7C15); // splitmix64 finalizer
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
+    (0..6).map(|i| ABC[((x >> (5 * i)) & 31) as usize] as char).collect()
+}
+
+/// "abc234" -> Some("ABC234") when it can be a session code.
+pub fn parse_code(s: &str) -> Option<String> {
+    let s = s.to_ascii_uppercase();
+    (s.len() == 6 && s.bytes().all(|b| b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains(&b))).then_some(s)
+}
+
 /// Lobbies of this app that friends are in, with who's in them: the sessions we could join.
 fn friend_sessions(client: &Client) -> Vec<(LobbyId, String)> {
     let app = client.utils().app_id();
@@ -320,7 +343,7 @@ fn friend_sessions(client: &Client) -> Vec<(LobbyId, String)> {
 }
 
 /// `join`: None joins the one session a friend is in, or a Steam invite, whichever comes first.
-pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Result<(), String> {
+pub fn run(client: Client, host: bool, join: Option<LobbyId>, code: Option<String>, spec: &str) -> Result<(), String> {
     let fwd = parse_forwards(spec)?;
     let sudp = parse_slot_udp(spec);
     client.networking_utils().init_relay_network_access();
@@ -378,7 +401,9 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
                         last = Instant::now();
                         // join each candidate to read its data; stay only if exactly one is a USCL session
                         let mut ok: Vec<(LobbyId, String)> = Vec::new();
-                        let fresh: Vec<_> = friend_sessions(&client).into_iter().filter(|(l, _)| !skip.contains(l)).collect();
+                        let fresh: Vec<_> = friend_sessions(&client).into_iter()
+                            .filter(|(l, _)| !skip.contains(l) && code.as_ref().is_none_or(|c| session_code(l.raw()) == *c))
+                            .collect();
                         for (l, who) in fresh {
                             match join_session(&client, l) {
                                 Ok(l) => ok.push((l, who)),
@@ -406,7 +431,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
         }
     };
     let host_id = mm.lobby_owner(lobby);
-    println!("uscl-bridge: session {} ({}); give friends this number or invite them from Steam", lobby.raw(), if host { "hosting" } else { "joined" });
+    println!("uscl-bridge: session {} code {} ({}); give friends this number or code, or invite them from Steam", lobby.raw(), session_code(lobby.raw()), if host { "hosting" } else { "joined" });
     client.friends().set_rich_presence("status", Some("USCL session"));
 
     let fwd = if host { fwd } else { parse_forwards(&mm.lobby_data(lobby, "fwd").unwrap_or_default())? };
@@ -976,6 +1001,7 @@ mod tests {
         assert_eq!(parse_slot_udp("skate3"), Vec::<u16>::new());
         assert_eq!(parse_forwards("dolphin").unwrap(), vec![(true, 2626)]); // Dolphin netplay (ENet): one UDP port
         assert_eq!(parse_forwards("3ds").unwrap(), vec![(true, 24872)]); // Azahar room (ENet)
+        assert_eq!(parse_forwards("hgss").unwrap(), vec![(true, 47600), (true, 7064)]); // HeartGold relay + melonDS LAN
         assert_eq!(slot_frame(3074, b"x"), [UDP_SLOT, 0x0c, 0x02, b'x']);
     }
 
@@ -985,6 +1011,17 @@ mod tests {
         assert_eq!(parse_ids(bans), HashSet::from([76561198000000001, 76561198000000002]));
         assert_eq!(parse_ids("76561198000000003,76561198000000004"), HashSet::from([76561198000000003, 76561198000000004]));
         assert!(parse_ids("").is_empty());
+    }
+
+    #[test]
+    fn codes() {
+        let c = session_code(109775241058000000);
+        assert_eq!(c.len(), 6);
+        assert_eq!(parse_code(&c.to_ascii_lowercase()), Some(c.clone()));
+        assert_eq!(session_code(109775241058000000), c); // stable
+        assert_ne!(session_code(109775241058000001), c);
+        assert_eq!(parse_code("ABC10O"), None); // 1, 0, O are not in the alphabet
+        assert_eq!(parse_code("12345678"), None);
     }
 
     #[test]
