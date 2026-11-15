@@ -95,6 +95,15 @@ click the harness can't drive (see `uscl-3ds/README.md`).
 | New Super Mario Bros. 2 | co-op (local) | rooms (local co-op) | 📋 profiled |
 | Super Mario 3D Land; Zelda OoT3D / MM3D / ALBW | single-player (ALBW StreetPass only) | runs on USCL, no online | ⬜ no MP |
 
+## Nintendo DS (melonDS)
+Via **melonDS** (notes in `uscl-melonds/`). Battles and trades are the games' local wireless (melonDS LAN mode over the
+tunnel, planned). Pokémon HeartGold also gets a **shared overworld**: a per-player agent (`uscl-melonds/hgss_world.py`)
+reads each player's position through melonDS's GDB stub and draws the others as overworld NPCs.
+
+| Game | Game code | Multiplayer route | Status | Next step |
+|---|---|---|---|---|
+| Pokémon HeartGold (USA rev 0) | [IPKE](games/IPKE.md) | shared overworld agent + local wireless battles over the tunnel | 🧪 two melonDS copies on one PC: each player sees the other on the same map, following their steps (2026-11-13) | players walk smoothly; in-game code box (L+R) hosts / joins Steam sessions, joining untested across PCs; talking to another player opens a BATTLE / TRADE (POKéMON, ITEM) menu; the other player gets an in-game YES/NO request; an accepted BATTLE takes both to the Colosseum desk and home again after the link battle, the link started by the agents (patched melonDS) | two PCs over Steam (D2), then trades (D4) |
+
 ## Routes (how much work a game is)
 - **PSN only:** RPCN plus the session tunnel already carry it. Test it and fix small things. No reverse engineering.
 - **Demonware / Blaze:** our own stand-in server for that service, shared by every game on it. The first game is
