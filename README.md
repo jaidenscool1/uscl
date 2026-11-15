@@ -32,7 +32,7 @@ PS3 came first. USCL now also runs PS4, Switch, Wii, GameCube, 3DS, Wii U and Xb
 | **PlayStation 4** | shadPS4, our build ([`uscl-shadps4`](uscl-shadps4/)) | [shadNet](uscl-shadnet/) + our Demonware | 🟡 Black Ops II played between two PCs; PS3 ↔ PS4 crossplay in progress |
 | **Nintendo Switch** | Eden, our build ([`uscl-eden`](uscl-eden/)) | Eden local-wireless rooms over Steam | 🟡 Mario Kart 8 Deluxe races two copies on one PC ([setup](docs/SWITCH.md)) |
 | **Wii / GameCube** | Dolphin ([`uscl-dolphin`](uscl-dolphin/), no fork) | Dolphin NetPlay over Steam | 🟠 games launch from USCL; NetPlay over Steam next |
-| **Nintendo 3DS** | Azahar ([`uscl-3ds`](uscl-3ds/), no fork) | Azahar rooms over Steam | 🟠 Azahar opens from USCL (the game is picked in Azahar for now); rooms over Steam next |
+| **Nintendo 3DS** | Azahar, our build ([`uscl-3ds`](uscl-3ds/) patches) | Azahar rooms over Steam | 🟡 Mario Kart 7 local race between two copies in one room; home screen hosts the room; two PCs next |
 | **Wii U** | Cemu (no fork yet) | later: a Pretendo / NEX stand-in | ⚪ starts Cemu from USCL (untested) |
 | **Xbox 360** | Xenia (Wine on Linux) | later | ⚪ experimental launch |
 | **More** | | | planned: see [PLAN.md](PLAN.md) |
@@ -41,8 +41,8 @@ PS3 came first. USCL now also runs PS4, Switch, Wii, GameCube, 3DS, Wii U and Xb
 ⚪ runs, online not started.
 
 Where we change an emulator, we keep our changes as patch files against a pinned upstream commit (the `uscl-*`
-folders). Dolphin, Azahar and Cemu are used unchanged: on Linux USCL starts their Flathub apps, so install those
-yourself for now.
+folders). Offline, Dolphin, Azahar and Cemu are used unchanged: on Linux USCL starts their Flathub apps, so install
+those yourself for now. 3DS rooms need our Azahar build (`tools/dev-scripts/build-azahar.sh`).
 
 ## Get it
 Download the newest version from **[Releases](https://github.com/jaidenscool1/uscl/releases)**.
@@ -120,7 +120,7 @@ offline). Click a badge for details.
 | Switch 2 | Mario Kart World (`0400C3F00006E000`) | none yet (Eglantine has no room support) | 🟠 plays offline from the home screen; racing ~41–42 fps ([`uscl-eglantine`](uscl-eglantine/)) |
 | Switch 2 | Nintendo Switch Sports Resort (`04008E001F098000`) | none yet | 🟠 boots, then freezes in the emulator ([`uscl-eglantine`](uscl-eglantine/)) |
 | Wii | Wii Sports + Wii Sports Resort (`SP2E01`) | Dolphin NetPlay | 🟠 boots; NetPlay test next ([notes](games/SP2E01.md)) |
-| 3DS | Mario Kart 7, Pokémon X/Y, Luigi's Mansion 2, ... | Azahar rooms | 🟠 runs in Azahar; room test next ([`uscl-3ds`](uscl-3ds/)) |
+| 3DS | Mario Kart 7, Pokémon X/Y, Luigi's Mansion 2, ... | Azahar rooms | 🟡 MK7 two copies raced in one room ([`uscl-3ds`](uscl-3ds/)) |
 
 ## How online works
 Old console games expect servers that are gone. USCL uses one of two ways, depending on the game:

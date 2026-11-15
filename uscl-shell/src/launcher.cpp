@@ -126,8 +126,8 @@ bool Launcher::start(const QStringList& args, const QString& title, bool online,
 }
 
 // Wii and 3DS games don't run in RPCS3 -- they launch in Dolphin / Azahar (flatpaks). A crash or quit comes back
-// here the same way an RPCS3 game does. 3DS: the frontend needs software GL on this NVIDIA/Wayland setup
-// (LIBGL_ALWAYS_SOFTWARE=1); the game still renders on Vulkan. See uscl-3ds/ and uscl-dolphin/.
+// here the same way an RPCS3 game does. 3DS: on Wayland our Azahar runs under XWayland (native Wayland renders
+// black on NVIDIA) with OpenGL; the Flathub app needs software GL for its frontend. See uscl-3ds/ and uscl-dolphin/.
 // Our Dolphin (uscl-dolphin patches: NetPlay host/join without its dialogs), else the Flathub app (offline only)
 QString Launcher::ownDolphin()
 {
@@ -152,8 +152,13 @@ QString Launcher::dolphinConfigDir()
 QString Launcher::ownAzahar(const QString& name)
 {
 	const QString var = name == "azahar-room" ? "USCL_AZAHAR_ROOM" : "USCL_AZAHAR";
+#ifdef _WIN32
+	const QString file = name + ".exe";
+#else
+	const QString file = name;
+#endif
 	const QString path = qEnvironmentVariableIsSet(var.toLatin1().constData()) ? qEnvironmentVariable(var.toLatin1().constData())
-	                                                                            : QCoreApplication::applicationDirPath() + "/" + name;
+	                                                                            : QCoreApplication::applicationDirPath() + "/" + file;
 	return QFileInfo(path).isExecutable() ? path : QString();
 }
 
@@ -207,16 +212,21 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 	else if (console == "3DS" && !ownAzahar().isEmpty())
 	{
 		program = ownAzahar();
-		args = {path};
+		args = {"-f", path};   // fullscreen like the other consoles
 		const QString profile = GameModel::rpcs3ConfigDir() + "uscl/azahar/";
 		env.insert("XDG_CONFIG_HOME", profile + "config");
 		env.insert("XDG_DATA_HOME", profile + "data");
+#ifdef __linux__
+		const QString platform = env.value("QT_QPA_PLATFORM");
+		if (!env.value("DISPLAY").isEmpty() && (platform.isEmpty() || platform.startsWith("wayland")))
+			env.insert("QT_QPA_PLATFORM", "xcb");
+#endif
 		// in a session: the room on the host's PC (UDP 24872), reached through the tunnel (uscl-bridge preset "3ds")
 		if (!netplay.isEmpty())
 			env.insert("USCL_ROOM", nickname + "@127.0.0.1:24872");
 	}
 	else if (console == "3DS")
-		args = {"run", "--env=LIBGL_ALWAYS_SOFTWARE=1", "org.azahar_emu.Azahar", path};
+		args = {"run", "--env=LIBGL_ALWAYS_SOFTWARE=1", "org.azahar_emu.Azahar", "-f", path};
 	else if (console == "WiiU")
 		args = {"run", "info.cemu.Cemu", "-f", "-g", path};   // Cemu: fullscreen, load game
 	else if (console == "Xbox360")

@@ -84,15 +84,16 @@ Switch Sports** runs on live Switch Online — a future `uscl-ryujinx` LDN tunne
 A third platform, via **Azahar** (Citra successor; notes in `uscl-3ds/`). Early-shutdown reality: Nintendo's 3DS
 online ended April 2024. Two paths: **Azahar rooms** (local/Download-Play multiplayer, `uscl-bridge host 3ds`,
 `udp:24872`, ENet) work now; **worldwide online** (MK7 global, Pokémon GTS) needs a future **Pretendo/NEX** stand-in.
-Azahar runs (GL fixed with `LIBGL_ALWAYS_SOFTWARE=1`; games are decrypted, no keys needed); booting a game is a GUI
-click the harness can't drive (see `uscl-3ds/README.md`).
+Our Azahar build (2126.2 + `uscl-3ds/patches`) boots games by path under XWayland with OpenGL; games are decrypted,
+no keys needed. 2026-11-14: two copies in one `azahar-room` raced MK7 locally; the home screen hosts the room and
+its Azahar joins it (see `uscl-3ds/README.md`).
 
 | Game | Multiplayer | USCL path | Status |
 |---|---|---|---|
-| Mario Kart 7 | local + worldwide | rooms (local) now; Pretendo (worldwide) | 📋 profiled 2026-11-07; Azahar GL blocker |
+| Mario Kart 7 | local + worldwide | rooms (local) now; Pretendo (worldwide) | 🟡 local race between two copies in one room (2026-11-14); online stops at frd:u game authentication |
 | Luigi's Mansion: Dark Moon | co-op (ScareScraper) | rooms (local co-op) | 📋 profiled |
 | Pokémon X / Y / Omega Ruby / Ultra Sun / Ultra Moon | trade/battle (local) + GTS online | rooms (local); Pretendo (GTS) | 📋 profiled |
-| New Super Mario Bros. 2 | co-op (local) | rooms (local co-op) | 📋 profiled |
+| New Super Mario Bros. 2 | co-op (local) | rooms (local co-op) | 🟠 co-op connects, map in sync; drops at level load on the test PC (GPU crashes there), retest |
 | Super Mario 3D Land; Zelda OoT3D / MM3D / ALBW | single-player (ALBW StreetPass only) | runs on USCL, no online | ⬜ no MP |
 
 ## Nintendo DS (melonDS)

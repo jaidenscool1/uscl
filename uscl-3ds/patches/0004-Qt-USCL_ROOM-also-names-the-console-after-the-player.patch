@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 14 Nov 2026 22:20:00 -0700
+Subject: [PATCH] Qt: USCL_ROOM also names the console after the player
+
+Games show the 3DS console name to the others (New Super Mario Bros. 2 lists
+"Which Mario do you want to play with?" by it, "<name>'s Luigi has arrived!"),
+and every Azahar was called "AZAHAR". With USCL_ROOM the player's name (first
+10 characters, Unicode allowed) becomes the console username in the profile's
+config savegame before the game starts.
+---
+--- a/src/citra_qt/citra_qt.cpp
++++ b/src/citra_qt/citra_qt.cpp
+@@ -557,6 +557,14 @@
+                             ? static_cast<char>(c.unicode())
+                             : '_';
+         nickname.resize(std::max<std::size_t>(nickname.size(), 4), '_');
++        // the console name the others see in games ("<name>'s Luigi"): the player's, 10 characters
++        if (const std::u16string name = spec.left(at).left(10).toStdU16String(); !name.empty()) {
++            const auto cfg = Service::CFG::GetModule(system);
++            if (cfg->GetUsername() != name) {
++                cfg->SetUsername(name);
++                cfg->UpdateConfigNANDSavegame();
++            }
++        }
+         if (member && at >= 0 && colon > at) {
+             member->Join(nickname, Service::CFG::GetConsoleIdHash(system),
+                          spec.mid(at + 1, colon - at - 1).toStdString().c_str(),
+-- 
+2.47.0
