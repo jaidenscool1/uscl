@@ -132,7 +132,12 @@ bool Launcher::start(const QStringList& args, const QString& title, bool online,
 QString Launcher::ownDolphin()
 {
 	const QString path = qEnvironmentVariableIsSet("USCL_DOLPHIN") ? qEnvironmentVariable("USCL_DOLPHIN")
+#ifdef Q_OS_WIN
+	// own folder: Dolphin ships its own Qt DLLs, which would clash with RPCS3's next to uscl.exe
+	                                                               : QCoreApplication::applicationDirPath() + "/Dolphin/Dolphin.exe";
+#else
 	                                                               : QCoreApplication::applicationDirPath() + "/dolphin-emu";
+#endif
 	return QFileInfo(path).isExecutable() ? path : QString();
 }
 
@@ -159,6 +164,14 @@ QString Launcher::azaharConfigFile()
 	                             : GameModel::rpcs3ConfigDir() + "uscl/azahar/config/azahar-emu/qt-config.ini";
 }
 
+// Every Dolphin start: fullscreen like the other consoles; pads count even when the home screen kept the focus (Dolphin
+// drops all input otherwise); the Wii Remote's speaker plays through the PC (Wii Sports' racket and pins; off by default)
+static QStringList dolphinOptions()
+{
+	return {"-C", "Dolphin.Display.Fullscreen=True", "-C", "Dolphin.Input.BackgroundInput=True",
+	        "-C", "Dolphin.Core.WiimoteEnableSpeaker=True"};
+}
+
 bool Launcher::startEmu(const QString& path, const QString& title, const QString& console, const QString& netplay,
                         const QString& nickname, int players)
 {
@@ -171,6 +184,7 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 	{
 		program = ownDolphin();
 		args = {"-u", QDir(dolphinConfigDir()).absoluteFilePath(".."), "-C", "Dolphin.Analytics.PermissionAsked=True"};
+		args << dolphinOptions();
 		if (netplay.isEmpty())
 			args << "-b" << "-e" << path;
 		else
@@ -189,7 +203,7 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 		}
 	}
 	else if (console == "Wii")
-		args = {"run", "org.DolphinEmu.dolphin-emu", "-b", "-e", path};
+		args = QStringList{"run", "org.DolphinEmu.dolphin-emu"} + dolphinOptions() + QStringList{"-b", "-e", path};
 	else if (console == "3DS" && !ownAzahar().isEmpty())
 	{
 		program = ownAzahar();

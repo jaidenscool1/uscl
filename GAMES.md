@@ -74,7 +74,7 @@ Steam with `uscl-bridge host dolphin` (`udp:2626`, ENet).
 
 | Game | ID | Online route | Status | Next step |
 |---|---|---|---|---|
-| Wii Sports + Wii Sports Resort | [SP2E01](games/SP2E01.md) | no native online → Dolphin NetPlay over the tunnel | 🧪 Dolphin 2609a boots to the game menu; bridge `dolphin` preset added (2026-11-07) | two-instance NetPlay input-sync test with motion, then two PCs over Steam |
+| Wii Sports + Wii Sports Resort | [SP2E01](games/SP2E01.md) | no native online → Dolphin NetPlay over the tunnel | ✅ two PCs over Steam (Linux host, Windows joiner): Tennis with motion, no desync in 4 min (2026-11-14) | join from the Friends list; two-player match with motion pads |
 
 The *online*-capable "Wii Sports" are later/other platforms, not ready yet: **Wii Sports Club** (Wii U) needs a
 Nintendo-Network/Quazal-NEX stand-in (Pretendo doesn't support it online yet) — a future `uscl-cemu`; **Nintendo

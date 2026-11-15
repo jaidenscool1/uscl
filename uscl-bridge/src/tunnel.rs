@@ -689,6 +689,11 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, code: Option<Strin
                     }
                     Err(e) => eprintln!("uscl-bridge: session lost, retrying: {e}"),
                 }
+            } else if !host && !list.contains(&me) && join_session(&client, lobby).is_ok() {
+                // our own Steam client reconnected: Steam took us out of the lobby, which the host still has
+                changed = true;
+                host_gone = false;
+                println!("uscl-bridge: Steam reconnected; back in session {}", lobby.raw());
             } else if !host && !list.contains(&host_id) {
                 if !host_gone {
                     host_gone = true;
