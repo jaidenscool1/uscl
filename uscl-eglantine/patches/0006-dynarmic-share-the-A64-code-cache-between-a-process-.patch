@@ -1,7 +1,7 @@
-From 7149838f17531b22cf23e84620f75fd40d93837c Mon Sep 17 00:00:00 2001
+From e4f0c62cfa40a024429531143342dada6ff6540b Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 21:20:11 -0700
-Subject: [PATCH 6/6] dynarmic: share the A64 code cache between a process's
+Subject: [PATCH 6/8] dynarmic: share the A64 code cache between a process's
  cores
 
 Every core had its own JIT and compiled each block it ran: Mario Kart World

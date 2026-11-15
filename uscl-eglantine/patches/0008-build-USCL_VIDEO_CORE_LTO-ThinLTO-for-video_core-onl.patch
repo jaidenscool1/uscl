@@ -1,0 +1,39 @@
+From 0d498004a42e5ca09aa39f260b13a36ae5f1c165 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 12:33:48 -0700
+Subject: [PATCH 8/8] build: USCL_VIDEO_CORE_LTO, ThinLTO for video_core only
+
+A whole-program ThinLTO build crashed Switch Sports Resort once on
+"this == GetCurrentThreadPointer(kernel)": the core's guest threads are
+fibers that resume on other host threads, and a thread_local read inlined
+across files can be reused from before the switch. The GPU threads, where
+racing time goes, have no fibers, so only video_core gets ThinLTO (clang,
+link with lld -flto=thin).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/CMakeLists.txt | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/video_core/CMakeLists.txt b/src/video_core/CMakeLists.txt
+index 590ba5bed..1668ae51b 100644
+--- a/src/video_core/CMakeLists.txt
++++ b/src/video_core/CMakeLists.txt
+@@ -466,6 +466,14 @@ if (ENABLE_OPENGL)
+ endif()
+ 
+ target_link_libraries(video_core PUBLIC common core)
++
++# USCL_VIDEO_CORE_LTO=ON (clang + lld): ThinLTO for the GPU threads' code only. Not for core: its
++# guest threads are fibers that resume on other host threads, and thread_local reads (the current
++# KThread) inlined across files there can be cached from before the switch.
++option(USCL_VIDEO_CORE_LTO "ThinLTO for video_core only (clang, link with lld -flto=thin)" OFF)
++if (USCL_VIDEO_CORE_LTO)
++    target_compile_options(video_core PRIVATE -flto=thin)
++endif()
+ # Shader precache builder: game archives use zstd (also with dictionaries) and zlib.
+ target_link_libraries(video_core PRIVATE zstd::zstd ZLIB::ZLIB)
+ target_link_libraries(video_core PUBLIC shader_recompiler stb bc_decoder gpu_logging)
+-- 
+2.56.0
+
