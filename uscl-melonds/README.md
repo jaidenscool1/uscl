@@ -76,7 +76,14 @@ The relay passes each player's position to everyone else. Over Steam it runs on 
 hgss` (UDP 47600) on the host, `uscl-bridge join <session>` on each friend's PC, and every agent keeps
 `--peer 127.0.0.1:47600` (on a friend's PC the bridge listens there and carries it to the host). The other players
 walk and run with the game's own step animations (the same movement commands scripts use for NPCs); a player more
-than 3 tiles away is moved there directly.
+than 3 tiles away is moved there directly. Each player's walking Pokémon is shown too, following them; talking to
+it talks to its trainer. NPCs match for everyone: on each map the player whose name sorts first leads, and
+the other agents pause their own NPCs' wandering and walk them the same way (~10 times a second, never during a
+script such as talking to an NPC). The agent stops melonDS once per tick (~30/s) for its reads and writes: a running melonDS
+answers one GDB packet per frame, which made puppets choppy.
+
+Stuck behind a Pokémon Center counter after Continue (a save made while the game still thought you were in a link
+room)? Start the agent once with `--warp 69,8,6,1` (map, x, z, facing) to move out, then save.
 
 **Stop agents with `--stop <file>`** (create the file): they remove their breakpoints first. melonDS keeps
 breakpoints after the debugger is gone, so a killed agent can leave the game stuck at the next script start

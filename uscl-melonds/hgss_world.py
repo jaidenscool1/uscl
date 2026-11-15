@@ -31,6 +31,11 @@ PUPPET_ID_BASE = 0xF0        # object ids no map uses; marks our puppets
 MOVEMENT_STILL = 0           # most common object-event movement (item balls, standing NPCs)
 # The game's own keyboard ("Your friend's name?") as the session-code box
 FS_TASKMAN = 0x10                  # FieldSystem.taskman
+FS_FOLLOW_MON, FOLLOW_ACTIVE = 0xE4, 0x16   # FieldSystem.followMon (mapObject first), FollowMon.active
+MO_PARAMS = 0x38                   # LocalMapObject.param[3]: a follower's species, form/shiny bits
+MON_SUFFIX = "/mon"                # remote[name + MON_SUFFIX]: that player's walking Pokemon
+MO_PAUSED = 0x40                   # MAPOBJECTFLAG_MOVEMENT_PAUSED: its own movement type (wander, look around) stops
+NPC_EVERY = 3                      # NPC sync every 3rd tick (~10/s)
 CREATE_TASK = 0x020504F0           # FieldSystem_CreateTask(fs, func, env) -> TaskManager *
 TASK_DONE = 0x0203E3A8             # Battle_Init: `return TRUE;` (a task ends only on exactly TRUE, task.c)
 CALLTASK_NAMING = 0x0203F6E0       # CallTask_NamingScreen(taskman, type, species, maxLen, partyIdx, defaultStr, retVar)
@@ -486,8 +491,25 @@ class Game:
             "dir": struct.unpack_from("<I", o, MO_FACING)[0],
             "tile": list(struct.unpack_from("<III", o, MO_CUR_XYZ)),
             "pos": list(struct.unpack_from("<iii", o, MO_POS)),
+            "mon": self.follower(fs),
             "_man": man,
         }
+
+    def follower(self, fs):
+        """The Pokemon walking behind the player (HeartGold's followers), or None."""
+        f = self.g.read(fs + FS_FOLLOW_MON, 0x20)
+        obj = struct.unpack_from("<I", f, 0)[0]
+        if not (f[FOLLOW_ACTIVE] and ram(obj)):
+            return None
+        o = self.g.read(obj, MO_MOVE_CMD + 4)
+        if not struct.unpack_from("<I", o, MO_FLAGS)[0] & MO_ACTIVE:
+            return None
+        return {"sprite": struct.unpack_from("<I", o, MO_SPRITE)[0],
+                "dir": struct.unpack_from("<I", o, MO_FACING)[0],
+                "tile": list(struct.unpack_from("<III", o, MO_CUR_XYZ)),
+                "pos": list(struct.unpack_from("<iii", o, MO_POS)),
+                "step": struct.unpack_from("<I", o, MO_MOVE_CMD)[0],
+                "params": list(struct.unpack_from("<3i", o, MO_PARAMS))}
 
     def trainer_name(self):
         """The player's own trainer name, in the game's character codes."""
@@ -497,6 +519,33 @@ class Game:
             return None
         name = list(struct.unpack("<8H", self.g.read(profile, 16)))
         return name[:name.index(0xFFFF)] if 0xFFFF in name else name
+
+    def npcs(self, man, slots=None):
+        """The map's own objects (NPCs; not the player, followers or our puppets): {id: (address, state)}. With
+        `slots` (addresses from an earlier call) only those are read; else all 64 slots (38 GDB packets)."""
+        out = {}
+        if slots is None:
+            base = self.g.u32(man + MAN_OBJECTS)
+            raw = self.g.read(base, min(self.g.u32(man + 4), 64) * MO_SIZE)
+            objs = [(base + i, raw[i:i + MO_SIZE]) for i in range(0, len(raw), MO_SIZE)]
+        else:
+            objs = [(a, self.g.read(a, MO_MOVE_CMD + 4)) for a in slots]
+        for a, o in objs:
+            flags, _, oid = struct.unpack_from("<III", o, 0)
+            if flags & MO_ACTIVE and oid < PUPPET_ID_BASE:     # the player is 255, a follower 253
+                out[oid] = (a, {"tile": list(struct.unpack_from("<III", o, MO_CUR_XYZ)),
+                                "pos": list(struct.unpack_from("<iii", o, MO_POS)),
+                                "dir": struct.unpack_from("<I", o, MO_FACING)[0],
+                                "step": struct.unpack_from("<I", o, MO_MOVE_CMD)[0], "flags": flags})
+        return out
+
+    def set_paused(self, obj, on):
+        flags = self.g.u32(obj)     # called while the CPU is stopped: no race with the game
+        self.g.write(obj, struct.pack("<I", flags | MO_PAUSED if on else flags & ~MO_PAUSED))
+
+    def busy(self):
+        """A field task (script, warp, menu) is running."""
+        return self.g.u32(self.g.u32(FIELD_SYS_PTR) + FS_TASKMAN) != 0
 
     def find_object(self, script_id):
         """The first active map object on the current map whose script is script_id, or None."""
@@ -520,6 +569,8 @@ class Game:
         if obj and ram(obj):
             self.g.write(obj + MO_ID, struct.pack("<I", pid))
             self.g.write(obj + MO_SCRIPT, struct.pack("<I", PUPPET_SCRIPT))   # talking to it starts our menu
+            if "params" in peer:   # a follower: species, form, shiny (shortcut: set after the sprite may have loaded)
+                self.g.write(obj + MO_PARAMS, struct.pack("<3i", *peer["params"]))
             return obj
         return None
 
@@ -653,6 +704,8 @@ def loop(args, game, sock, peers, remote, puppets, session):
     lr_since, lr_released = None, True
     def who(obj):
         n = next((n for n, (o, _, _) in puppets.items() if o == obj), None)
+        if n and n.endswith(MON_SUFFIX):
+            n = n[:-len(MON_SUFFIX)]       # talking to someone's Pokemon talks to them
         return n, remote[n][0].get("tname") if n in remote else None
     menus = Menus(game, who)
     tname = None
@@ -670,6 +723,11 @@ def loop(args, game, sock, peers, remote, puppets, session):
             menus.show(menus.talk(script), 0)      # her menu opens by itself after the fade
             print("[%s] %s: to %s desk, attendant's menu next" % (args.name, req, room), flush=True)
     link = None        # the wireless link role melonDS was last told (patched melonDS: monitor uscl-link)
+    ticks, rate_since = 0, time.time()
+    # NPCs: on each map the player whose name sorts first moves them for everyone (lead); the others copy
+    npc_cache, npc_scanned, npc_out, npc_from, paused = {}, 0.0, None, {}, {}
+    if args.warp:      # one-off: move the player (e.g. out from behind a Pokemon Center counter)
+        menus.show(menus.warp(*args.warp), 0)
 
     while True:
         t0 = time.time()
@@ -688,10 +746,13 @@ def loop(args, game, sock, peers, remote, puppets, session):
                 game.g.resume()
             print("[%s] stopped cleanly" % args.name, flush=True)
             return
-        if CREATE_SCRIPT_CTX in game.g.handlers:
-            game.g.halt()                 # a breakpoint is armed: talk to melonDS only while the CPU is stopped
-        else:
-            game.g.poll()
+        # one stop per tick: a running melonDS answers one GDB packet per frame (a tick is ~15 packets, ~4 ticks/s:
+        # choppy puppets), a stopped one answers at once; also, with a breakpoint armed, talk only while stopped
+        game.g.halt()
+        ticks += 1
+        if time.time() - rate_since > 30:
+            print("[%s] %.1f ticks/s" % (args.name, ticks / (time.time() - rate_since)), flush=True)
+            ticks, rate_since = 0, time.time()
         try:
             if menus.todo:
                 spec, value, obj = menus.todo
@@ -725,11 +786,19 @@ def loop(args, game, sock, peers, remote, puppets, session):
                 if me["map"] in LINK_MAPS:
                     trip["fought"] = True
                 elif trip["fought"] and me["map"] == COLOSSEUM_DESK[0]:    # both desks are on this map
-                    print("[%s] link room left: back home %s" % (args.name, trip["home"]), flush=True)
-                    menus.show(menus.warp(*trip["home"]), 0)
-                    trip = None
+                    # the game's own return script runs first (walks out from behind the counter, clears flag 0x966).
+                    # Warping during it leaves 0x966 set: Continue then puts the player behind the counter, stuck.
+                    if game.busy():
+                        trip["idle"] = None
+                    elif not trip.get("idle"):
+                        trip["idle"] = time.time()
+                    elif time.time() - trip["idle"] > 1.5:
+                        print("[%s] link room left: back home %s" % (args.name, trip["home"]), flush=True)
+                        menus.show(menus.warp(*trip["home"]), 0)
+                        trip = None
             if me and me["map"] != last_map:
                 last_map, quiet_until = me["map"], time.time() + 2
+                npc_cache, npc_scanned, paused = {}, 0.0, {}     # the old map's objects are gone
             if me and tname is None:
                 tname = game.trainer_name()
             if me:
@@ -737,12 +806,14 @@ def loop(args, game, sock, peers, remote, puppets, session):
                 if STEP_WALK <= me["cmd"] < STEP_MAX:
                     step = me["cmd"]
                 msg = json.dumps({"v": 1, "name": args.name, "seq": seq, "step": step, "tname": tname,
+                                  **({"npcs": npc_out} if npc_out else {}),
                                   **{k: v for k, v in me.items() if not k.startswith("_")}}).encode()
+                npc_out = None
                 for a in peers:
                     sock.sendto(msg, a)
             while True:
                 try:
-                    data, _ = sock.recvfrom(2048)
+                    data, _ = sock.recvfrom(65536)
                 except (BlockingIOError, ConnectionResetError):
                     break   # Windows reports ICMP port-unreachable as ConnectionResetError
                 try:
@@ -767,6 +838,17 @@ def loop(args, game, sock, peers, remote, puppets, session):
                         same = old and (old[0]["map"], old[0]["sprite"]) == (st["map"], st["sprite"])
                         st["_since"] = old[0]["_since"] if same else time.time()   # map + sprite unchanged since
                         remote[st["name"]] = (st, time.time())
+                        if st.get("npcs"):
+                            npc_from[st["name"]] = (st.pop("npcs"), time.time())
+                        mname, mon = st["name"] + MON_SUFFIX, st.get("mon")
+                        old = remote.get(mname)
+                        if mon:      # their follower: a puppet of its own, walking like a player
+                            mon = dict(mon, map=st["map"], name=mname)
+                            same = old and (old[0]["map"], old[0]["sprite"]) == (mon["map"], mon["sprite"])
+                            mon["_since"] = old[0]["_since"] if same else time.time()
+                            remote[mname] = (mon, time.time())
+                        elif old:    # put away: map -1 removes its puppet
+                            remote[mname] = (dict(old[0], map=-1), time.time())
                 except (ValueError, KeyError):
                     pass
             if me:
@@ -808,6 +890,33 @@ def loop(args, game, sock, peers, remote, puppets, session):
                                 print("[%s] %s appeared on map %d at %s (object %08x)" % (args.name, name, me["map"], st["tile"], obj), flush=True)
                         if obj and name in puppets:
                             game.follow(obj, st)
+                here = [n for n, (s, ts) in remote.items()
+                        if not n.endswith(MON_SUFFIX) and s["map"] == me["map"] and time.time() - ts < 2]
+                lead = min(here + [args.name])
+                theirs = npc_from.get(lead, (None, 0))
+                follow_npcs = lead != args.name and theirs[0] and time.time() - theirs[1] < 2                     and theirs[0]["map"] == me["map"]
+                if paused and not follow_npcs:      # we lead now, or the lead left: our NPCs move by themselves again
+                    for a in paused.values():
+                        game.set_paused(a, False)
+                    paused = {}
+                if ticks % NPC_EVERY == 0 and here and me["map"] not in LINK_MAPS and time.time() > quiet_until                         and not game.busy():
+                    if time.time() - npc_scanned > 2:
+                        npc_cache, npc_scanned = game.npcs(me["_man"]), time.time()
+                    else:
+                        npc_cache = game.npcs(me["_man"], [a for a, _ in npc_cache.values()])
+                    if lead == args.name:
+                        npc_out = {"map": me["map"], "objs": [[i, s["tile"], s["dir"], s["step"]]
+                                                              for i, (_, s) in sorted(npc_cache.items())]}
+                    elif follow_npcs:
+                        for oid, tile, d, stp in theirs[0]["objs"]:
+                            if oid not in npc_cache:
+                                continue    # not on our map (an event flag hides it in our save)
+                            a, own = npc_cache[oid]
+                            if oid not in paused:
+                                game.set_paused(a, True); paused[oid] = a
+                            # their pixel position from the tile; height stays ours (same map)
+                            pos = [tile[0] * 0x10000 + 0x8000, own["pos"][1], tile[2] * 0x10000 + 0x8000]
+                            game.follow(a, {"tile": tile, "dir": d, "step": stp, "pos": pos})
                 line = "me map %d tile %s | " % (me["map"], me["tile"]) + ", ".join(
                     "%s map %d tile %s%s" % (n, s["map"], s["tile"], " (shown)" if n in puppets else "")
                     for n, (s, _) in sorted(remote.items()))
@@ -839,7 +948,7 @@ def relay(port, host="127.0.0.1"):
     clients = {}    # address -> last time heard
     while True:
         try:
-            data, src = sock.recvfrom(2048)
+            data, src = sock.recvfrom(65536)
         except ConnectionResetError:
             continue    # Windows: an earlier send hit a closed port
         now = time.time()
@@ -1024,7 +1133,21 @@ def selftest():
     w32(MAN + 4, 3); w32(MAN + MAN_OBJECTS, ATT - 2 * MO_SIZE)
     w32(ATT, MO_ACTIVE); w32(ATT + MO_SCRIPT, STD_COLOSSEUM)
     assert game.find_object(STD_COLOSSEUM) == ATT and game.find_object(1234) is None
+    w32(ATT + MO_ID, 3); w32(ATT + MO_FACING, 1); struct.pack_into("<III", mem, ATT + MO_CUR_XYZ - B, 11, 0, 4)
+    npcs = game.npcs(MAN)                              # only the attendant is active: the map's one NPC
+    assert list(npcs) == [3] and npcs[3][0] == ATT and npcs[3][1]["tile"] == [11, 0, 4], npcs
+    assert game.npcs(MAN, [ATT]) == npcs
+    game.set_paused(ATT, True); assert mem[ATT - B] & MO_PAUSED
+    game.set_paused(ATT, False); assert not mem[ATT - B] & MO_PAUSED and mem[ATT - B] & MO_ACTIVE
     assert set(LINK_DESKS) == set(REQUEST_TEXT)       # every accepted request has a desk to go to
+    assert game.player()["mon"] is None               # no follower out
+    MON = 0x02103800
+    w32(FS + FS_FOLLOW_MON, MON); mem[FS + FS_FOLLOW_MON + FOLLOW_ACTIVE - B] = 1
+    w32(MON, MO_ACTIVE); w32(MON + MO_SPRITE, 581); w32(MON + MO_PARAMS, 155)
+    struct.pack_into("<III", mem, MON + MO_CUR_XYZ - B, 7, 0, 10)
+    mon = game.player()["mon"]
+    assert (mon["sprite"], mon["tile"], mon["params"][0]) == (581, [7, 0, 10], 155), mon
+    w32(FS + FS_FOLLOW_MON, 0)
     menus.queue = [(menus.talk(STD_COLOSSEUM), 0)]
     menus.pump()                                       # a field task is still running: wait
     assert len(menus.queue) == 1
@@ -1042,6 +1165,8 @@ if __name__ == "__main__":
     ap.add_argument("--stop", help="exit cleanly (breakpoints removed) once this file exists; kill an agent only this way")
     ap.add_argument("--relay", type=int, metavar="PORT", help="run the host's relay on 127.0.0.1:PORT instead of an agent")
     ap.add_argument("--link", choices=["host", "join"], help="wireless link role without --bridge (one-PC tests)")
+    ap.add_argument("--warp", type=lambda v: tuple(int(n) for n in v.split(",")), metavar="MAP,X,Z,DIR",
+                    help="warp the player there once at start (dir 0 up, 1 down, 2 left, 3 right)")
     ap.add_argument("--arm", help="only draw other players while this file exists (testing: save the game first)")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()

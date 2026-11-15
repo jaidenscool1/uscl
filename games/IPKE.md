@@ -147,3 +147,21 @@ Rejected: rebuilding a battle from the other player's party data inside one game
   attendant's script on her object, as for battles. In the Union Room (MAP_UNION, 2) the players talked to each other
   and traded with the game's own screens; leaving the room back to map 69 warped each home. Gen 4 has no item trades,
   so ITEM goes to the Union Room too. Two copies on one PC, A `--link host`, B `--link join`.
+- 2026-11-15: **stuck behind the counter after Continue.** Entering a link room sets flag `0x966` and saves; the
+  game's own return script (map init script, `std_union_room_return` / `std_wireless_colosseum_return`) walks the
+  player out and clears it. The agent warped home before that script ran, so `0x966` stayed set, and
+  `FieldTask_ContinueGame_Normal` then loaded both saves at the link-room exit behind the counter. Fix: back on the
+  Pokémon Center map, warp home only after no field task has run for 1.5 s. `--warp MAP,X,Z,DIR` got both out.
+- 2026-11-15: **following Pokémon shown.** `FieldSystem.followMon` (`+0xE4`: map object pointer, `active` at
+  `+0xE4+0x16`); the follower's map object has its follower sprite (428–993) and `param[0..2]` (species, form/shiny,
+  `+0x38`). The agent sends it with the player's state; the other side spawns it as a puppet with those params,
+  moved like a player puppet.
+- 2026-11-15: **smooth puppets: halt once per tick.** A running melonDS answers one GDB packet per frame, so a
+  ~15-packet tick ran at ~4/s (choppy, jumpy with followers). Stopping the CPU first makes every packet immediate:
+  29.4 ticks/s measured on both agents, smooth in game.
+- 2026-11-15: **NPCs in sync.** Each game moves its NPCs with its own random numbers (movement types: wander, look
+  around), so players saw them differently. Now the player whose name sorts first on a map leads: its agent reads
+  the map's objects (ids below 0xF0: not the player 255, a follower 253 or our puppets) every 3rd tick and sends
+  `[id, tile, facing, step]`; the others set `MAPOBJECTFLAG_MOVEMENT_PAUSED` (0x40) on the same ids and walk them
+  with held movements like puppets. Skipped while a field task runs. Full scan of the 64 slots every 2 s, cached
+  slots in between. Cherrygrove (map 67), two copies on one PC: NPCs match in both games.
