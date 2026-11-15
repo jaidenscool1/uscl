@@ -1,7 +1,7 @@
-From 0cc724be426e2389a2930937574f03f815ae03be Mon Sep 17 00:00:00 2001
+From 2f0270b5fdcbe6b1f233187ff95e382f7b52beb5 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 14:35:18 -0700
-Subject: [PATCH 3/3] vulkan: upload staging and stream buffers in host-cached
+Subject: [PATCH 3/6] vulkan: upload staging and stream buffers in host-cached
  memory on NVIDIA
 
 Texture uploads unswizzle straight into the staging buffer in 16-byte pieces

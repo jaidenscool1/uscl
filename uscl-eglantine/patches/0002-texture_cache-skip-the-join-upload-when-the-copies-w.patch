@@ -1,7 +1,7 @@
-From 15cd7c8f2902a7d4583084ff2edac392f0a038c3 Mon Sep 17 00:00:00 2001
+From 07178d899221bf31c3bf6d0d7838846aed1b551d Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 12:16:52 -0700
-Subject: [PATCH 2/3] texture_cache: skip the join upload when the copies write
+Subject: [PATCH 2/6] texture_cache: skip the join upload when the copies write
  every texel
 
 JoinImages uploaded the new image from guest memory unless one alias copy
@@ -20,10 +20,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 58 insertions(+), 4 deletions(-)
 
 diff --git a/src/video_core/texture_cache/texture_cache.h b/src/video_core/texture_cache/texture_cache.h
-index fb0df9b74..3764c64fa 100644
+index 7aecb7660..4627975c7 100644
 --- a/src/video_core/texture_cache/texture_cache.h
 +++ b/src/video_core/texture_cache/texture_cache.h
-@@ -3307,11 +3307,14 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
+@@ -3484,11 +3484,14 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
      };
      // Whether that copy writes every texel of the new image: a plain copy (same format) of every
      // level and layer from its origin.
@@ -42,7 +42,7 @@ index fb0df9b74..3764c64fa 100644
              return false;
          }
          const u32 block_width = VideoCore::Surface::DefaultBlockWidth(new_image.info.format);
-@@ -3348,6 +3351,57 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
+@@ -3525,6 +3528,57 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
              break;
          }
      }
@@ -97,9 +97,9 @@ index fb0df9b74..3764c64fa 100644
 +            }
 +        }
 +    }
-     if (overwritten_by_clear()) {
-         // Stays CpuModified: UpdateRenderTargets' PrepareImage drops the upload only when
-         // IsFullClear agrees the clear covers the whole image, and uploads it otherwise.
+     // EDEN_NX2_TC_SKIP_STALE_UPLOAD=1: a new single-level 2D render target whose guest bytes all
+     // lie under older images the GPU wrote and the CPU did not (never downloaded: guest memory
+     // holds older bytes than a console's memory would) skips uploading those stale bytes. Ocarina
 -- 
 2.56.0
 

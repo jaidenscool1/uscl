@@ -1,0 +1,136 @@
+From b2fed69194372d56a5282182c6e455f4d0772173 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 18:23:54 -0700
+Subject: [PATCH 4/6] textures: unswizzle large textures on several threads
+
+Output lines are independent, so UnswizzleTexture splits textures over 2 MiB
+into line ranges across a small pool (a third of the host's threads, 1-6) and
+the calling thread. Mario Kart World races: +10% average FPS (38 -> 42-43).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/textures/decoders.cpp | 57 +++++++++++++++++++++++++---
+ 1 file changed, 51 insertions(+), 6 deletions(-)
+
+diff --git a/src/video_core/textures/decoders.cpp b/src/video_core/textures/decoders.cpp
+index ddd464470..c358a8a98 100644
+--- a/src/video_core/textures/decoders.cpp
++++ b/src/video_core/textures/decoders.cpp
+@@ -11,12 +11,16 @@
+ #include <cmath>
+ #include <cstdlib>
+ #include <cstring>
++#include <algorithm>
++#include <latch>
+ #include <span>
++#include <thread>
+ 
+ #include "common/alignment.h"
+ #include "common/assert.h"
+ #include "common/bit_util.h"
+ #include "common/div_ceil.h"
++#include "common/thread_worker.h"
+ #include "video_core/gpu.h"
+ #include "video_core/textures/decoders.h"
+ 
+@@ -47,7 +51,8 @@ void incrpdep(u32& value) {
+ 
+ template <bool TO_LINEAR, u32 BYTES_PER_PIXEL, bool NATIVE_MASKS = false>
+ void SwizzleImpl(std::span<u8> output, std::span<const u8> input, u32 width, u32 height, u32 depth,
+-                 u32 block_height, u32 block_depth, u32 stride, bool native_tiling) {
++                 u32 block_height, u32 block_depth, u32 stride, bool native_tiling, u32 line_begin,
++                 u32 line_end) {
+     // Native GOBs exchange bits 5 and 6; deposit them directly instead of swapping each element.
+     static constexpr u32 x_bits = NativeGobOffset(SWIZZLE_X_BITS, NATIVE_MASKS);
+     static constexpr u32 y_bits = NativeGobOffset(SWIZZLE_Y_BITS, NATIVE_MASKS);
+@@ -82,7 +87,7 @@ void SwizzleImpl(std::span<u8> output, std::span<const u8> input, u32 width, u32
+         const u32 z = slice + origin_z;
+         const u32 offset_z = (z >> block_depth) * slice_size +
+                              ((z & block_depth_mask) << (GOB_SIZE_SHIFT + block_height));
+-        for (u32 line = 0; line < height; ++line) {
++        for (u32 line = line_begin; line < line_end; ++line) {
+             const u32 y = line + origin_y;
+             const u32 swizzled_y = pdep<y_bits>(y);
+ 
+@@ -201,7 +206,9 @@ void SwizzleSubrectImpl(std::span<u8> output, std::span<const u8> input, u32 wid
+ 
+ template <bool TO_LINEAR>
+ void Swizzle(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel, u32 width,
+-             u32 height, u32 depth, u32 block_height, u32 block_depth, u32 stride_alignment, bool native_tiling) {
++             u32 height, u32 depth, u32 block_height, u32 block_depth, u32 stride_alignment, bool native_tiling,
++             u32 line_begin = 0, u32 line_end = ~0U) {
++    line_end = (std::min)(line_end, height);
+     static const bool native_masks = [] {
+         const char* value = std::getenv("EDEN_NX2_NATIVE_SWIZZLE_MASKS");
+         return value != nullptr && value[0] == '1';
+@@ -211,10 +218,12 @@ void Swizzle(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixe
+     case x:                                                                                        \
+         if (native_tiling && native_masks) {                                                        \
+             return SwizzleImpl<TO_LINEAR, x, true>(output, input, width, height, depth, block_height, \
+-                                                    block_depth, stride_alignment, true);           \
++                                                    block_depth, stride_alignment, true,            \
++                                                    line_begin, line_end);                          \
+         }                                                                                          \
+         return SwizzleImpl<TO_LINEAR, x>(output, input, width, height, depth, block_height,        \
+-                                         block_depth, stride_alignment, native_tiling);
++                                         block_depth, stride_alignment, native_tiling,        \
++                                         line_begin, line_end);
+         BPP_CASE(1)
+         BPP_CASE(2)
+         BPP_CASE(3)
+@@ -230,6 +239,18 @@ void Swizzle(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixe
+     }
+ }
+ 
++/// Helpers for large unswizzles: about a third of the host's threads (1-6), so smaller CPUs keep
++/// theirs for the emulated cores.
++u32 UnswizzleHelpers() {
++    static const u32 helpers = std::clamp(std::thread::hardware_concurrency() / 3, 1U, 6U);
++    return helpers;
++}
++
++Common::ThreadWorker& UnswizzlePool() {
++    static Common::ThreadWorker pool(UnswizzleHelpers(), "TextureUnswizzle");
++    return pool;
++}
++
+ } // Anonymous namespace
+ 
+ void UnswizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel,
+@@ -239,8 +260,32 @@ void UnswizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes
+     const u32 new_bpp = (std::min)(4U, static_cast<u32>(std::countr_zero(width * bytes_per_pixel)));
+     width = (width * bytes_per_pixel) >> new_bpp;
+     bytes_per_pixel = 1U << new_bpp;
++    // Output lines are independent: split big textures (streamed terrain atlases ran 40-300 ms on
++    // the GPU thread) by line ranges, the calling thread taking the first.
++    constexpr u64 ParallelBytes = 2ULL << 20;
++    const u64 bytes = u64{width} * bytes_per_pixel * height * depth;
++    const u32 helpers = UnswizzleHelpers();
++    const u32 parts = bytes < ParallelBytes ? 1U
++                                            : (std::min)({helpers + 1, height,
++                                                          static_cast<u32>(bytes / (ParallelBytes / 2))});
++    if (parts <= 1) {
++        Swizzle<false>(output, input, bytes_per_pixel, width, height, depth, block_height,
++                       block_depth, stride, native_tiling);
++        return;
++    }
++    const u32 lines_per_part = Common::DivCeil(height, parts);
++    std::latch done{static_cast<std::ptrdiff_t>(parts - 1)};
++    for (u32 part = 1; part < parts; ++part) {
++        UnswizzlePool().QueueWork([&, part] {
++            Swizzle<false>(output, input, bytes_per_pixel, width, height, depth, block_height,
++                           block_depth, stride, native_tiling, part * lines_per_part,
++                           (part + 1) * lines_per_part);
++            done.count_down();
++        });
++    }
+     Swizzle<false>(output, input, bytes_per_pixel, width, height, depth, block_height, block_depth,
+-                   stride, native_tiling);
++                   stride, native_tiling, 0, lines_per_part);
++    done.wait();
+ }
+ 
+ void SwizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel, u32 width,
+-- 
+2.56.0
+
