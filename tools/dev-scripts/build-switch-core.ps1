@@ -45,7 +45,7 @@ cmake -S $source -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DGLSLANGVALIDAT
     -DENABLE_QT=ON -DYUZU_TESTS=OFF -DBUILD_TESTING=OFF -DENABLE_WEB_SERVICE=OFF `
     -DYUZU_ROOM_STANDALONE=OFF -DYUZU_DISABLE_LLVM=ON
 if ($LASTEXITCODE) { throw 'cmake configure failed' }
-cmake --build $build --target yuzu -j $jobs
+cmake --build $build --target yuzu yuzu-cmd -j $jobs   # eden.exe (settings) + eden-cli.exe (runs games)
 if ($LASTEXITCODE) { throw 'build failed' }
 
 # The bin folder holds eden.exe plus the Qt/SDL/FFmpeg DLLs Eden's build copies beside it.

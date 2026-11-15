@@ -153,7 +153,7 @@ QString Launcher::ownAzahar(const QString& name)
 {
 	const QString var = name == "azahar-room" ? "USCL_AZAHAR_ROOM" : "USCL_AZAHAR";
 #ifdef _WIN32
-	const QString file = name + ".exe";
+	const QString file = "Azahar/" + name + ".exe";   // own folder: Azahar's Qt DLLs (see ownDolphin)
 #else
 	const QString file = name;
 #endif

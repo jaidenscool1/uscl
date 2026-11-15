@@ -9,6 +9,9 @@
 #                     left out of the AppImage when missing     default ~/src/shadps4-uscl/build, ~/src/shadnet-uscl/build
 #   USCL_DOLPHIN_BUILD  Wii games online: Dolphin (uscl-dolphin) build dir, configured as in uscl-dolphin/README.md;
 #                     left out when missing                     default ~/src/dolphin-uscl/build-appimage
+#   USCL_AZAHAR_BIN / USCL_EDEN_BIN / USCL_EGLANTINE_BIN / USCL_MELONDS_BIN  folders with azahar + azahar-room (3DS),
+#                     eden + eden-cli (Switch), eglantine (Switch 2), melonDS (DS); each left out when missing.
+#                     Build them portable (no -march=native): pinned base + that folder's patches, see each README
 # Output: build/USCL-x86_64.AppImage. Tools (linuxdeploy) are cached in ~/.cache/uscl-build.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -53,6 +56,14 @@ if [ -x "$DOLPHIN_BUILD/Binaries/dolphin-emu" ]; then
   cp -rL "$DOLPHIN_BUILD/Binaries/Sys" "$BIN/"
   mkdir -p "$APPDIR/usr/share/licenses" && cp -rL "$DOLPHIN_BUILD/Binaries/Licenses" "$APPDIR/usr/share/licenses/dolphin"
 fi
+# 3DS (uscl-3ds), Switch (uscl-eden), Switch 2 (uscl-eglantine), DS (uscl-melonds): the home screen finds them next to uscl
+AZAHAR_BIN=${USCL_AZAHAR_BIN:-$HOME/src/azahar-uscl/build/bin/Release}
+EDEN_BIN=${USCL_EDEN_BIN:-$HOME/.cache/uscl-build/eden-src/build-uscl/bin}
+EGLANTINE_BIN=${USCL_EGLANTINE_BIN:-$HOME/src/eglantine/build-portable/bin}
+MELONDS_BIN=${USCL_MELONDS_BIN:-$HOME/.cache/uscl-build/melonds-src/build}
+for exe in "$AZAHAR_BIN/azahar" "$AZAHAR_BIN/azahar-room" "$EDEN_BIN/eden" "$EDEN_BIN/eden-cli" "$EGLANTINE_BIN/eglantine" "$MELONDS_BIN/melonDS"; do
+  if [ -x "$exe" ]; then install -m755 "$exe" "$BIN/"; else echo "left out (not built): $exe"; fi
+done
 
 echo "== data templates (copied to the user's USCL folder when they first host)"
 DATA=$APPDIR/usr/share/uscl
@@ -97,9 +108,9 @@ cd "$OUT"
 mkdir -p "$APPDIR/usr/plugins"
 cp -r "$QT_PLUGINS/wayland-graphics-integration-client" "$APPDIR/usr/plugins/"
 export QML_SOURCES_PATHS="$REPO/uscl-shell/qml"   # so the Qt plugin bundles the QML modules the home screen imports
-EXTRA_EXES=(); for e in shadps4 shadnet dolphin-emu; do [ -x "$BIN/$e" ] && EXTRA_EXES+=(--executable "$BIN/$e"); done
-# shadNet needs QtHttpServer, which a system Qt may lack (built to ~/.local/qt6-extra here)
-LD_LIBRARY_PATH=$HOME/.local/qt6-extra/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} \
+EXTRA_EXES=(); for e in shadps4 shadnet dolphin-emu azahar azahar-room eden eden-cli eglantine melonDS; do [ -x "$BIN/$e" ] && EXTRA_EXES+=(--executable "$BIN/$e"); done
+# shadNet needs QtHttpServer and Eden/Eglantine Qt Charts, which a system Qt may lack (~/.local/qt6-extra, ~/.local/opt/qt6charts here)
+LD_LIBRARY_PATH=$HOME/.local/qt6-extra/lib:$HOME/.local/opt/qt6charts/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} \
 linuxdeploy --appdir "$APPDIR" --plugin qt --executable "$BIN/uscl" --executable "$BIN/uscl-rpcn" --executable "$BIN/dw-server" "${EXTRA_EXES[@]}" \
   --deploy-deps-only "$APPDIR/usr/plugins/wayland-graphics-integration-client"
 # same cleanup as RPCS3's .ci/deploy-linux.sh: these break other distros / gamescope

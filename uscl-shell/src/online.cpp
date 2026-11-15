@@ -662,7 +662,12 @@ void Online::host(const QString& serial, const QString& title, const QString& pa
 		QDir().mkpath(data + "/shadnet");
 		if (QFile cfg(data + "/shadnet/shadnet.cfg"); !cfg.exists() && cfg.open(QIODevice::WriteOnly))
 			cfg.write("[General]\nHost=127.0.0.1\nUnsecuredPort=31513\nWebApiPort=31515\nAdminApiEnabled=false\n");
-		if (!start(shadnet, toolPath("shadnet"), {}, data + "/shadnet", rpcn_env))
+#ifdef _WIN32
+		const QString shadnet_exe = toolPath("shadNet/shadnet");   // own folder: its Qt DLLs (see Launcher::ownDolphin)
+#else
+		const QString shadnet_exe = toolPath("shadnet");
+#endif
+		if (!start(shadnet, shadnet_exe, {}, data + "/shadnet", rpcn_env))
 			return;
 	}
 	if (p.demonware)

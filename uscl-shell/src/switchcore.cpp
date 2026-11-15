@@ -127,10 +127,12 @@ namespace
 			return configured;
 #ifdef _WIN32
 		const QString file = name + ".exe";
+		// own folder: each core ships its own Qt DLLs, which would clash with RPCS3's next to uscl.exe
+		const QString bundled = QCoreApplication::applicationDirPath() + (name == "eglantine" ? "/Eglantine/" : "/Eden/") + file;
 #else
 		const QString file = name;
-#endif
 		const QString bundled = QCoreApplication::applicationDirPath() + '/' + file;
+#endif
 		return QFileInfo(bundled).isExecutable() ? bundled : QStandardPaths::findExecutable(file);
 	}
 
