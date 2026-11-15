@@ -8,7 +8,7 @@
 | **Our changes** | `patches/0001`–`0006`, applied with `git am`. We keep them on our fork only (no upstream PRs) |
 | **Ships in** | not yet: build the core yourself (below) |
 | **Online** | offline only; Eglantine has no `--uscl-room` yet (port uscl-eden 0003 next) |
-| **Status** | Mario Kart World: boots from the USCL home screen, controller auto-mapped, Grand Prix race played. Nintendo Switch Sports Resort v1.1.0: boots past the safety screen, then freezes in the island flyover every time (emulator-side) |
+| **Status** | Mario Kart World: boots from the USCL home screen, controller auto-mapped, Grand Prix race played. Nintendo Switch Sports Resort v1.1.0: boots past the safety screen at 60 fps, then freezes when its intro movie ends, every time (emulator-side, see Open issues) |
 
 No console keys, firmware or games are included. USCL keeps the core's data in `<profile>/data/eglantine` (`keys/prod.keys`, firmware NCAs in `nand/system/Contents/registered/`).
 
@@ -25,6 +25,12 @@ The working fork is `~/src/eglantine`, branch `uscl` (origin = upstream). `pytho
 - 0006 shares the JIT's code cache between a process's cores. Each core had its own and compiled every block it ran: Mario Kart World compiled 1.55M blocks for 511k distinct ones, and its boot stutter was almost all compilation. Per-core values the code used to embed are read from each core's state, blocks link through 8-byte slots set with atomic stores (no live instruction is rewritten), each core keeps its own fast-dispatch table, and invalidation keeps the code space. Mario Kart World, boot to race: 510k blocks compiled instead of 1.55M, frames over 100 ms 20–26 instead of 29–40; Switch Sports Resort runs as before. `USCL_SHARED_JIT=0` gives every core its own cache again.
 
 Settings that helped on an RTX 4060 + i5-10600K (per profile, not set by USCL): GPU accuracy Low (Mario Kart World racing ~25 → ~33 fps, renders correctly), docked mode, 16× anisotropic filtering and SMAA (no cost). Racing stays in the game's own 30 fps mode: a racing frame needs ~18–20 ms of emulated CPU work against a 16.7 ms budget. Leave `EDEN_NX2_SPIKES` (the frame spike recorder) off outside debugging: with it on, runs here showed corrupt texture descriptors and crashes.
+
+## Open issues
+
+- **Switch Sports Resort freezes ~1 s after its intro movie ends.** The game stops the video decoder (vdecsvc 207 stop, 115 finalize, then `nx2:gsv` 903, which has no handler) and within ~30 ms GPU channels 1, 2 and 4 suspend on queue semaphores (device `0x8029008`, `0x8029010`, `0x8029014`; acquire-equal 6–12 values ahead of memory, nothing pending in the buffer cache). A dump of the guest threads then shows every core idle: two high-priority threads blocked in SendSyncRequest (most likely the `nx2:vi2` present, which waits for the frame's GPU fence) and the rest in their normal address-arbiter waits. Not fixed by: auto-stubbing 903, `EDEN_NX2_FRAMES_AHEAD=1` (gets furthest), `EDEN_NX2_SPLIT=0`, `EDEN_NX2_FENCE_BATCH=0`, GPU accuracy High. Not waiting for the previous frame while a channel is suspended freezes it at boot instead, so that wait is needed. Next: find which channel or CPU path normally releases those semaphores after the movie (watch them by device address). Debug probes (guest thread dump on a 2 s GPU semaphore wait) are on the fork's `uscl-nsr` branch.
+- **Mario Kart World stutter left:** 1–1.5 s hitches when a race loads (the GPU back thread processing one very large first frame: spread over ordinary per-draw work, no single cause), and short hitches while the game loads assets on the emulated CPU. Racing runs in the game's own 30 fps mode because a racing frame needs ~18–20 ms of emulated CPU work.
+- **Frame spike recorder:** with `EDEN_NX2_SPIKES` on, runs here showed corrupt texture descriptors and crashes; the recorder was fine on builds without the unmerged sparse-bind change (fork branch `uscl-sparse-bind`, sparse tile binds waiting on a GPU semaphore instead of the CPU: −28 ms per bind), which stays out until that is understood.
 
 ## Build (Linux)
 
