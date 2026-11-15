@@ -91,7 +91,7 @@ its Azahar joins it (see `uscl-3ds/README.md`).
 | Mario Kart 7 | local + worldwide | rooms (local) now; Pretendo (worldwide) | 🟡 local race between two copies in one room (2026-11-14); online stops at frd:u game authentication |
 | Luigi's Mansion: Dark Moon | co-op (ScareScraper) | rooms (local co-op) | 📋 profiled |
 | Pokémon X / Y / Omega Ruby / Ultra Sun / Ultra Moon | trade/battle (local) + GTS online | rooms (local); Pretendo (GTS) | 📋 profiled |
-| New Super Mario Bros. 2 | co-op (local) | rooms (local co-op) | 📋 profiled |
+| New Super Mario Bros. 2 | co-op (local) | rooms (local co-op) | 🟠 co-op connects, map in sync; drops at level load on the test PC (GPU crashes there), retest |
 | Super Mario 3D Land; Zelda OoT3D / MM3D / ALBW | single-player (ALBW StreetPass only) | runs on USCL, no online | ⬜ no MP |
 
 ## Routes (how much work a game is)

@@ -75,9 +75,15 @@ uses their own PC's controller.
   emulator side of the login works; what's missing is a NEX server answering.
 - **NEX server:** Pretendo's open-source [mario-kart-7](https://github.com/PretendoNetwork/mario-kart-7) server
   (Go, nex-go; access key `6181dff1`, NEX 2.4.3) has the authentication + secure servers and matchmaking. It needs
-  Postgres and Pretendo's account gRPC, which it only asks for NEX passwords; a 5-line change makes it return
-  `USCL_NEX_PASSWORD` instead. Built locally (`~/src/pretendo-mk7`, Postgres 18 extracted to `~/.local/pg18`), but
-  **not run yet**: starting it was held for the player's go-ahead.
+  Postgres and Pretendo's account gRPC, which it only asks for NEX passwords; `nex/0001` (against upstream 1f00a0c)
+  makes it return `USCL_NEX_PASSWORD` instead. Built locally (`~/src/pretendo-mk7`, Postgres 18 extracted to
+  `~/.local/pg18`), but **not run yet**: starting it was held for the player's go-ahead. Its settings:
+  `PN_MK7_POSTGRES_URI`, `PN_MK7_AUTHENTICATION_SERVER_PORT`, `PN_MK7_SECURE_SERVER_HOST`/`_PORT`,
+  `PN_MK7_ACCOUNT_GRPC_HOST`/`_PORT` (any value with `USCL_NEX_PASSWORD` set; the client doesn't connect up front).
+- **New Super Mario Bros. 2 co-op:** Luigi's copy finds Mario's (listed by console name, see `0004`), joins, both
+  play the co-op intro and reach the World 1 map in sync, then "Wireless communication has been interrupted" at
+  every level load. Each time the GPU copy had crashed in `libnvidia-glcore` at that moment (or stalled on shader
+  compiles), so on this PC it's inconclusive; retest on a healthy GPU / two PCs.
 
 ## Next
 1. Two PCs over Steam: `uscl-bridge host 3ds` / `join` (the preset is the Switch room's, already tested with Eden).
