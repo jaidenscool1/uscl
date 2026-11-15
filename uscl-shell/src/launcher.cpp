@@ -147,8 +147,13 @@ QString Launcher::dolphinConfigDir()
 QString Launcher::ownAzahar(const QString& name)
 {
 	const QString var = name == "azahar-room" ? "USCL_AZAHAR_ROOM" : "USCL_AZAHAR";
+#ifdef _WIN32
+	const QString file = name + ".exe";
+#else
+	const QString file = name;
+#endif
 	const QString path = qEnvironmentVariableIsSet(var.toLatin1().constData()) ? qEnvironmentVariable(var.toLatin1().constData())
-	                                                                            : QCoreApplication::applicationDirPath() + "/" + name;
+	                                                                            : QCoreApplication::applicationDirPath() + "/" + file;
 	return QFileInfo(path).isExecutable() ? path : QString();
 }
 

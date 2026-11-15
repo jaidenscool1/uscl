@@ -471,7 +471,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, spec: &str) -> Res
         println!("uscl-bridge: forwarding {} ports to the host's server", fwd.len() - failed.len());
         if !failed.is_empty() {
             if fwd == [(true, 24872)] {
-                return Err("the Switch room port UDP 24872 is in use; close other Switch rooms and try again".into());
+                return Err("the room port UDP 24872 is in use; close other Switch or 3DS rooms and try again".into());
             }
             // e.g. port 80 on Linux needs privileges
             eprintln!("uscl-bridge: couldn't listen on {} (in use, or a port below 1024 on Linux)", failed.join(", "));
