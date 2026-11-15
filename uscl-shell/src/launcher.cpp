@@ -198,7 +198,7 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 	else if (console == "3DS" && !ownAzahar().isEmpty())
 	{
 		program = ownAzahar();
-		args = {path};
+		args = {"-f", path};   // fullscreen like the other consoles
 		const QString profile = GameModel::rpcs3ConfigDir() + "uscl/azahar/";
 		env.insert("XDG_CONFIG_HOME", profile + "config");
 		env.insert("XDG_DATA_HOME", profile + "data");
@@ -212,7 +212,7 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 			env.insert("USCL_ROOM", nickname + "@127.0.0.1:24872");
 	}
 	else if (console == "3DS")
-		args = {"run", "--env=LIBGL_ALWAYS_SOFTWARE=1", "org.azahar_emu.Azahar", path};
+		args = {"run", "--env=LIBGL_ALWAYS_SOFTWARE=1", "org.azahar_emu.Azahar", "-f", path};
 	else if (console == "WiiU")
 		args = {"run", "info.cemu.Cemu", "-f", "-g", path};   // Cemu: fullscreen, load game
 	else if (console == "Xbox360")
