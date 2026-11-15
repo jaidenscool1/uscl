@@ -6,7 +6,7 @@
 | **Upstream** | [shadps4-emu/shadPS4](https://github.com/shadps4-emu/shadPS4) (GPL-2.0) |
 | **Pinned base** | `3eecea9` |
 | **Our changes** | `patches/0001-uscl.patch`, one diff applied with `git apply` (becomes a `git am` series later) |
-| **Ships in** | the Linux AppImage when built with it (`USCL_SHADPS4_BUILD`); not in the Windows installer yet |
+| **Ships in** | both installers (with shadNet; Windows: `shadps4.exe`, `shadNet\`) |
 | **Online services it talks to** | [uscl-shadnet](../uscl-shadnet/) (sign-in), [uscl-dw](../uscl-dw/) (Call of Duty) |
 | **Status** | Black Ops II (`CUSA57548`) played between two PCs over Steam; PS3 ↔ PS4 crossplay in progress |
 

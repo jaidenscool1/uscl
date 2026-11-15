@@ -35,7 +35,7 @@ jobs:
           - {emu: shadnet,   runner: windows-2025}
           - {emu: dolphin,   runner: windows-2025-vs2026}   # 2609a needs VS 2026 (Source/PCH/pch.h)
           - {emu: azahar,    runner: windows-2025}
-          - {emu: eden,      runner: windows-2025}          # build-switch-core.ps1 wants VS 2022
+          - {emu: eden,      runner: windows-2025}
           - {emu: eglantine, runner: windows-2025}
           - {emu: melonds,   runner: windows-2025-vs2026}
     name: ${{ matrix.emu }}

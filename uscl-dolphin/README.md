@@ -59,7 +59,7 @@ cmake -S . -B build-appimage -G Ninja -DCMAKE_BUILD_TYPE=Release -DLINUX_LOCAL_D
 a dev run, point `USCL_DOLPHIN` at `build-appimage/Binaries/dolphin-emu`. NetPlay checks the Dolphin commit
 (`git rev-parse HEAD`), so every build must be 2609a with the patch applied uncommitted; the title then reads
 `2609a-dirty`. An official 2609a build has the same commit and can join too. On Windows USCL looks for `Dolphin\Dolphin.exe` next
-to `uscl.exe` (the installer doesn't build it yet).
+to `uscl.exe`; `.github/workflows/windows-emulators.yml` builds it for the installer.
 
 Windows: `cmake --preset ninja-release-x64 -DENABLE_ANALYTICS=OFF -DENABLE_AUTOUPDATE=OFF` then
 `cmake --build build\release\x64` in a VS developer prompt; the result is `build\release\x64\Binaries\` (copy the
@@ -89,9 +89,8 @@ whole folder: Qt DLLs, `Sys\`). 2609a wants **Visual Studio 2026** (`Source/PCH/
 - `uscl-bridge` has the `dolphin` preset (UDP 2626).
 
 ## Next
-1. Windows installer: build our Dolphin (CMake preset above, VS 2026) into it as `Dolphin\`.
-2. Join from the Friends list on both OSes (Steam presence of the host's bridge, see Status).
-3. A two-player match (both PCs with pads), and real motion pads (DualSense) instead of shake buttons.
+1. Join from the Friends list on both OSes (Steam presence of the host's bridge, see Status).
+2. A two-player match (both PCs with pads), and real motion pads (DualSense) instead of shake buttons.
 
 ## Run it by hand today
 ```

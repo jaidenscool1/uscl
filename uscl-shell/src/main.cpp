@@ -13,6 +13,7 @@
 
 #include <QFontDatabase>
 #include <QGuiApplication>
+#include <QIcon>
 #include <QScreen>
 #include <QSettings>
 #include <QQmlApplicationEngine>
@@ -447,6 +448,8 @@ int main(int argc, char* argv[])
 	QGuiApplication::setOrganizationName("uscl");
 	QGuiApplication::setApplicationName("shell");
 	QGuiApplication::setApplicationDisplayName("USCL");
+	QGuiApplication::setWindowIcon(QIcon(":/qt/qml/Uscl/xmb/avatars/uscl.png"));   // the USCL orb (tools/xmb_assets.py icons)
+	QGuiApplication::setDesktopFileName("uscl");   // Wayland docks take the icon from uscl.desktop
 
 	if (app.arguments().contains("--self-test"))
 		return selfTest();

@@ -6,6 +6,7 @@
 | **Emulator** | [Azahar](https://github.com/azahar-emu/azahar) (GPL-2.0) 2126.2, the maintained Citra successor. Offline: the Flathub app `org.azahar_emu.Azahar` is enough. Online: our build (2126.2 + `patches/`, `tools/dev-scripts/build-azahar.sh`) |
 | **Our changes** | `patches/0001` joins a room at startup (`USCL_ROOM`); `0002` makes that work for real players (valid nickname, no chat popup, a booted `.cci` counts as the inserted card so Download Play works); `0003` answers the Nintendo Network login with a server USCL picks (`USCL_NEX`); `0004` names the console after the player. USCL starts it (`uscl-shell` `Launcher::startEmu`), sets up its controller (`uscl-shell/src/padconfig.cpp`) and carries its rooms (`uscl-bridge` preset `3ds`, UDP 24872) |
 | **Online** | Azahar rooms (local wireless / Download Play) over the Steam tunnel; Nintendo Network online later (Pretendo / NEX) |
+| **Ships in** | both installers: `azahar` + `azahar-room` (Windows: `Azahar\`) |
 | **Status** | 2026-11-14: **Mario Kart 7 local race between two Azahar copies in one room works** (one PC). Steam two-PC test next |
 
 ## How online works

@@ -83,8 +83,10 @@ python3 "$REPO/uscl-shadps4/mk_mm_patch.py" "$DATA/shadps4/user/patches/uscl" >/
 
 echo "== desktop entry"
 DESKTOP=$(ls "$APPDIR"/usr/share/applications/*.desktop | head -1)
-sed -i -e 's/^Name=.*/Name=USCL/' -e 's/^GenericName=.*/GenericName=PS3 emulator with online play over Steam/' \
-  -e 's/^Comment=.*/Comment=Play PS3 games online with your Steam friends/' "$DESKTOP"
+sed -i -e 's/^Name=.*/Name=USCL/' -e 's/^GenericName=.*/GenericName=Play your console games online with Steam friends/' \
+  -e 's/^Comment=.*/Comment=PS3, PS4, Wii, 3DS, Switch and DS games online over Steam/' -e 's/^Icon=.*/Icon=uscl/' "$DESKTOP"
+# the USCL orb (uscl-shell/tools/xmb_assets.py icons); linuxdeploy links it as the AppImage's icon
+install -Dm644 "$REPO/uscl-shell/icons/uscl.png" "$APPDIR/usr/share/icons/hicolor/512x512/apps/uscl.png"
 
 echo "== AppImage"
 for t in linuxdeploy linuxdeploy-plugin-qt; do

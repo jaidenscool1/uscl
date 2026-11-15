@@ -6,6 +6,7 @@
 | **Emulator** | [melonDS](https://github.com/melonDS-emu/melonDS) (GPL-3.0), pinned base `497aa6cdd26f45f8064b78916b00a773eab4ded7` (2026-11-04) |
 | **Our changes** | `patches/0001`–`0002` (GPL-3.0), applied with `git am`: the wireless link starts itself over uscl-bridge, and the GDB stub listens on 127.0.0.1 only. `hgss_world.py` (Pokémon HeartGold shared overworld) talks to the GDB stub |
 | **Online** | shared overworld: per-game agent over UDP; battles and trades: melonDS's LAN link (ENet, UDP 7064) on 127.0.0.1, which uscl-bridge carries over Steam |
+| **Ships in** | both installers (Windows: `melonDS\`); the home screen doesn't start DS games yet, the agent does |
 | **Status** | two copies on one PC: shared overworld, talk menu, battles from the overworld with the link started by the agents (patched melonDS, 2026-11-15); two PCs over Steam untested |
 
 ## Why melonDS

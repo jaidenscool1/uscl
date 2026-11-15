@@ -41,8 +41,8 @@ PS3 came first. USCL now also runs PS4, Switch, Wii, GameCube, 3DS, Wii U and Xb
 ⚪ runs, online not started.
 
 Where we change an emulator, we keep our changes as patch files against a pinned upstream commit (the `uscl-*`
-folders). Offline, Dolphin, Azahar and Cemu are used unchanged: on Linux USCL starts their Flathub apps, so install
-those yourself for now. 3DS rooms need our Azahar build (`tools/dev-scripts/build-azahar.sh`).
+folders), and both installers ship those builds. Only Cemu (Wii U) is used unchanged: on Linux USCL starts its
+Flathub app.
 
 ## Get it
 Download the newest version from **[Releases](https://github.com/jaidenscool1/uscl/releases)**.
@@ -50,16 +50,16 @@ Download the newest version from **[Releases](https://github.com/jaidenscool1/us
 | PC | File | How |
 |---|---|---|
 | Windows 10/11 | `USCL-Setup.exe` | Run it. No admin rights needed. USCL goes in the Start menu. |
-| Linux | `USCL-x86_64.AppImage` | Make it executable and run it. To add it to your app menu: [`packaging/linux/install.sh`](packaging/linux/install.sh) `USCL-x86_64.AppImage` |
+| Linux (any x86-64 distro) | `USCL-x86_64.AppImage` + `install.sh` | Put both in one folder and run `bash install.sh`: USCL goes in your app menu. Or just make the AppImage executable and run it. |
+| macOS | | not supported yet |
 
 You'll need **Steam running and signed in**, and **your own copies of your games** (disc folders, ISOs, installed
 games, or the console's game files). USCL doesn't include any games, console keys or firmware. On first start it
 walks you through the rest.
 
-The installers include everything PS3 needs. For other consoles: PS4 is in the Linux AppImage when it is built with
-shadPS4 (not in the Windows installer yet);
-Switch needs the patched Eden core ([docs/SWITCH.md](docs/SWITCH.md)) and your own console keys; Wii, GameCube, 3DS
-and Wii U use Dolphin, Azahar and Cemu from Flathub (Linux).
+Both installers include our builds of every emulator USCL uses: RPCS3 (PS3), shadPS4 (PS4), Dolphin (Wii,
+GameCube), Azahar (3DS), Eden (Switch), Eglantine (Switch 2) and melonDS (DS). Switch and Switch 2 need your own
+console keys and firmware ([docs/SWITCH.md](docs/SWITCH.md)); Wii U uses Cemu from Flathub (Linux).
 
 ## Controllers
 Any controller works, USB or Bluetooth: DualSense, DualShock, Xbox, Switch Pro, Joy-Cons, and other pads SDL

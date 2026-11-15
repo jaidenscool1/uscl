@@ -1,5 +1,5 @@
 # Build the pinned, patched Eden frontend on Windows (MSVC). Windows twin of build-switch-core.sh.
-# Needs Visual Studio 2022 with "Desktop development with C++" (it supplies CMake and Ninja)
+# Needs Visual Studio 2022 or 2026 with "Desktop development with C++" (it supplies CMake and Ninja)
 # and the Vulkan SDK (for glslangValidator).
 # Eden's MSVC configuration downloads Qt, SDL2, FFmpeg and OpenSSL itself.
 $ErrorActionPreference = 'Continue'  # PS 5.1 makes native stderr fatal under Stop; exit codes are checked instead
@@ -28,8 +28,8 @@ foreach ($patch in $patches | Select-Object -Skip $applied) {
 }
 
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-$vs = & $vswhere -version '[17.0,18.0)' -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vs) { throw 'Visual Studio 2022 with the C++ workload is required.' }
+$vs = & $vswhere -version '[17.0,19.0)' -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+if (-not $vs) { throw 'Visual Studio 2022 or 2026 with the C++ workload is required.' }
 Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
 Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64' | Out-Null
 

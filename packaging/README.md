@@ -7,10 +7,19 @@ One program: the home screen (`uscl-shell`, what USCL opens to), the emulators, 
 |---|---|---|
 | Home screen, `uscl-bridge` | ✅ | ✅ |
 | PS3: our RPCS3 (`uscl-rpcs3`, with the **USCL > Online** panel), `uscl-rpcn`, `dw-server` (uscl-dw) | ✅ | ✅ |
-| PS4: our shadPS4 + shadNet (`uscl-shadps4`, `uscl-shadnet`) | not yet | when built with them (`USCL_SHADPS4_BUILD` / `USCL_SHADNET_BUILD`) |
-| Switch: our Eden core (`uscl-eden`) | not yet | not yet (build it with `tools/dev-scripts/build-switch-core.sh`) |
-| Wii / GameCube: our Dolphin (`uscl-dolphin`) | not yet (looks for `Dolphin\Dolphin.exe`) | when built with it (`USCL_DOLPHIN_BUILD`) |
-| 3DS, Wii U: Azahar, Cemu | not yet | no: USCL starts the player's Flathub apps |
+| PS4: our shadPS4 + shadNet (`uscl-shadps4`, `uscl-shadnet`) | ✅ `shadps4.exe`, `shadNet\` | ✅ |
+| Wii / GameCube: our Dolphin (`uscl-dolphin`) | ✅ `Dolphin\` | ✅ |
+| 3DS: our Azahar + room server (`uscl-3ds`) | ✅ `Azahar\` | ✅ |
+| Switch: our Eden (`uscl-eden`) | ✅ `Eden\` | ✅ |
+| Switch 2: our Eglantine (`uscl-eglantine`) | ✅ `Eglantine\` | ✅ |
+| DS: our melonDS (`uscl-melonds`) | ✅ `melonDS\` (the home screen doesn't start DS games yet) | ✅ |
+| Wii U: Cemu | no | no: USCL starts the player's Flathub app |
+
+Windows: `.github/workflows/windows-emulators.yml` builds each emulator (pinned base + our patches, table in
+`windows/emulators.sh`) once and keeps it on the `ci-cache` draft release; the installer workflow runs it first.
+Each Qt-based one gets its own folder so its Qt DLLs don't clash with RPCS3's. Linux: build each portable (no
+`-march=native`) and point `build-linux.sh` at it (`USCL_*_BUILD` / `USCL_*_BIN`, see the script's header); one
+missing is left out with a message.
 
 No games, console keys or firmware are ever packaged.
 
