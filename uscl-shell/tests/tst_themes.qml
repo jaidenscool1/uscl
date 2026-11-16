@@ -179,6 +179,7 @@ Item {
             return ["ps3", "ps4", "ps5", "x360classic", "x360", "xboxone", "switch", "switch2"].map(function(theme) { return {tag: theme, theme: theme} })
         }
         function test_launchScreen(data) {
+            failOnWarning(/Unable to assign|ReferenceError|TypeError/)
             launchScreen.theme = data.theme
             launchScreen.title = "A game title with <markup> shown literally"
             launchScreen.shown = true
@@ -192,8 +193,8 @@ Item {
             launchScreen.windowActive = true
             launchScreen.starting = false
             launchScreen.shown = false
-            tryCompare(launchScreen, "opacity", 0)
-            verify(!launchScreen.visible)
+            tryCompare(launchScreen, "visible", false)
+            compare(launchScreen.opacity, 0)
             verify(!launchScreen.animating)
         }
         function test_ps3() {
