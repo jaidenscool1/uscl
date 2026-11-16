@@ -1,7 +1,7 @@
-From 0d498004a42e5ca09aa39f260b13a36ae5f1c165 Mon Sep 17 00:00:00 2001
+From a3f07f4705e1f9a35127722a414f3b65194e8e00 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 12:33:48 -0700
-Subject: [PATCH 8/8] build: USCL_VIDEO_CORE_LTO, ThinLTO for video_core only
+Subject: [PATCH 8/9] build: USCL_VIDEO_CORE_LTO, ThinLTO for video_core only
 
 A whole-program ThinLTO build crashed Switch Sports Resort once on
 "this == GetCurrentThreadPointer(kernel)": the core's guest threads are

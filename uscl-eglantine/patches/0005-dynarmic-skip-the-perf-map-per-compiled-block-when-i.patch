@@ -1,7 +1,7 @@
-From 8d19ae190496b65b60e7370816760345579c3a61 Mon Sep 17 00:00:00 2001
+From 40d9f8e028fe49c5bdee10dbe980a75e33d91812 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 19:09:59 -0700
-Subject: [PATCH 5/8] dynarmic: skip the perf map per compiled block when it is
+Subject: [PATCH 5/9] dynarmic: skip the perf map per compiled block when it is
  off
 
 Without PERF_BUILDID_DIR every compiled block took a global lock, looked the

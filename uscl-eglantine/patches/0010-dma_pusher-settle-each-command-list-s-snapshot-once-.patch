@@ -1,0 +1,176 @@
+From 01959d14a2a38a3c40ee72b933e555949f1fe14a Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 17:22:07 -0700
+Subject: [PATCH 10/10] dma_pusher: settle each command list's snapshot once,
+ keep it after GPU releases
+
+Switch Sports Resort froze at its opening movie: channel 2 (compute) waited on
+the queue semaphore 2 frames ahead (want 0xfd9, now 0xfcd) while channel 1 (3D)
+waited on channel 2's release, until the present's 15 s timeout, every time.
+
+The words were the game's own: the submit-time copy matched memory. But that
+copy had been refreshed: every resume of a channel copied all queued lists
+again from memory, and channel 2 resumes ~4 times a frame inside one list
+while the game refills its 2-frame command ring. A probe logged the refresh at
+one resume changing the acquire in entry #14, ahead of the current entry #4,
+from this frame's value to the next-but-one's. Refreshing only at the first
+resume got past the movie but crashed later (garbage methods, invalid
+KeplerMemory registers): a 3D channel list refreshed at its first resume,
+released by the compute channel, already held the next frame.
+
+The refresh exists because games write lists after submitting them and then
+release the acquire they wait behind from the CPU (Mario Kart World,
+Pokopia, Hyrule Warriors: Age of Imprisonment). A release by another channel
+is not ordered with the game's writes: those lists were complete when
+submitted. Nx2SemaphoreWaiters latches a waiter only on GPU writes, so the
+resume knows which happened:
+- released by the GPU: keep the submit-time copy (deferred entries are still
+  copied after their map);
+- released by the CPU: copy once, as before;
+- either way the copy is final from then on.
+USCL_SNAPSHOT_REFRESH=once|never|every overrides it (every: as before).
+
+Switch Sports Resort now runs 320 s (island tour, customization, main sports
+menu) at 59.8 fps with no garbage method and no channel wait; before, it froze
+at ~52-63 s in every run. Mario Kart World race: same fps (49.4 vs 49.0
+mean on the plain build), no garbage method, rendering unchanged; all its
+resumes (15000 counted) follow GPU releases.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/dma_pusher.cpp     | 26 ++++++++++++++++++++-----
+ src/video_core/dma_pusher.h       | 32 +++++++++++++++++++++++++++++--
+ src/video_core/engines/puller.cpp |  2 ++
+ 3 files changed, 53 insertions(+), 7 deletions(-)
+
+diff --git a/src/video_core/dma_pusher.cpp b/src/video_core/dma_pusher.cpp
+index b5295b01b..8f7571116 100644
+--- a/src/video_core/dma_pusher.cpp
++++ b/src/video_core/dma_pusher.cpp
+@@ -105,8 +105,8 @@ bool DmaPusher::Step() {
+     if (ResnapshotEnabled() && suspensions.load(std::memory_order_relaxed) != suspensions_before) {
+         const u64 now = suspensions.load(std::memory_order_acquire);
+         for (CommandList& list : dma_pushbuffer) {
+-            if (!list.submitted_offsets.empty()) {
+-                RefreshSnapshot(list, now);
++            if (!list.submitted_offsets.empty() && !list.snapshot_final) {
++                ResumeSnapshot(list, now);
+             }
+         }
+     }
+@@ -260,9 +260,10 @@ bool DmaPusher::Step() {
+         // read: their words at submit time are an older frame's.
+         const bool submitted = command_resume_offset < header.size &&
+                                dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
+-                               (command_list.snapshot_suspensions & 1) == 0 &&
+-                               command_list.snapshot_suspensions ==
+-                                   suspensions.load(std::memory_order_acquire) &&
++                               (command_list.snapshot_final ||
++                                ((command_list.snapshot_suspensions & 1) == 0 &&
++                                 command_list.snapshot_suspensions ==
++                                     suspensions.load(std::memory_order_acquire))) &&
+                                !std::ranges::binary_search(
+                                    command_list.deferred_entries,
+                                    static_cast<u32>(dma_pushbuffer_subindex)) &&
+@@ -796,6 +797,21 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
+     }
+ }
+ 
++void DmaPusher::ResumeSnapshot(CommandList& list, u64 now) {
++    const RefreshMode mode = SnapshotRefresh();
++    // A release by another channel isn't ordered with the game's writes: the lists were written
++    // before they were submitted, and their memory may be refilled by now (Switch Sports Resort:
++    // a 3D channel list re-read after its compute channel's release held the next frame).
++    if (mode == RefreshMode::Never || (mode == RefreshMode::Auto && resumed_by_gpu)) {
++        list.snapshot_suspensions = now;
++        list.snapshot_final = true;
++        RefreshDeferredEntries(list);
++        return;
++    }
++    RefreshSnapshot(list, now);
++    list.snapshot_final = mode != RefreshMode::Every;
++}
++
+ void DmaPusher::RefreshSnapshot(CommandList& list, u64 now) {
+     list.snapshot_suspensions = now;
+     for (size_t i = 0; i < list.command_lists.size() && i < list.submitted_offsets.size(); ++i) {
+diff --git a/src/video_core/dma_pusher.h b/src/video_core/dma_pusher.h
+index 540757a9e..ec53d4625 100644
+--- a/src/video_core/dma_pusher.h
++++ b/src/video_core/dma_pusher.h
+@@ -14,6 +14,7 @@
+ #include <condition_variable>
+ #include <optional>
+ #include <span>
++#include <string_view>
+ #include <vector>
+ #include <boost/container/small_vector.hpp>
+ #include <deque>
+@@ -137,6 +138,11 @@ struct CommandList final {
+     /// that waited behind one, reads memory instead: games write the commands it runs before they
+     /// release the acquire.
+     u64 snapshot_suspensions = 0;
++    /// Settled after a resume (DmaPusher::ResumeSnapshot): final from then on. A later resume
++    /// must not read it again: by then the game may have refilled the memory for a later frame
++    /// (Switch Sports Resort reuses a 2-frame ring while its compute channel resumes ~4 times a
++    /// frame; a re-read acquire waited 2 frames ahead and deadlocked the channels).
++    bool snapshot_final = false;
+ };
+ 
+ /// FNV-1a over pushbuffer words (EDEN_NX2_PB_CHECK).
+@@ -166,8 +172,9 @@ public:
+         // Copied during a suspension, or behind one: copy again now, unless still suspended.
+         const u64 now = suspensions.load(std::memory_order_acquire);
+         if (!entries.submitted_offsets.empty() && (now & 1) == 0) {
+-            if (ResnapshotEnabled() && entries.snapshot_suspensions != now) {
+-                RefreshSnapshot(entries, now);
++            if (ResnapshotEnabled() && entries.snapshot_suspensions != now &&
++                !entries.snapshot_final) {
++                ResumeSnapshot(entries, now);
+             } else if (!entries.deferred_entries.empty()) {
+                 // Behind a GPU map when submitted: the map has run by now (GPU::MapInOrder).
+                 RefreshDeferredEntries(entries);
+@@ -228,6 +235,27 @@ public:
+     /// Copies the list's deferred entries (CommandList::deferred_entries) from memory.
+     void RefreshDeferredEntries(CommandList& list);
+ 
++    /// When a resumed channel copies the lists queued behind its acquire again
++    /// (USCL_SNAPSHOT_REFRESH): Auto, once and only if no GPU release met the acquire (the game's
++    /// CPU released it, after writing those lists); Once, once; Never, keep the submit-time
++    /// copies; Every, at every resume (before USCL).
++    enum class RefreshMode { Auto, Once, Never, Every };
++    static RefreshMode SnapshotRefresh() {
++        static const RefreshMode mode = [] {
++            const char* value = std::getenv("USCL_SNAPSHOT_REFRESH");
++            const std::string_view v = value != nullptr ? value : "";
++            return v == "once"    ? RefreshMode::Once
++                   : v == "never" ? RefreshMode::Never
++                   : v == "every" ? RefreshMode::Every
++                                  : RefreshMode::Auto;
++        }();
++        return mode;
++    }
++    /// Whether a GPU release met the acquire this channel last resumed from.
++    bool resumed_by_gpu = false;
++    /// Copies the list's words again after a resume, or keeps them (see SnapshotRefresh); final.
++    void ResumeSnapshot(CommandList& list, u64 now);
++
+     /// EDEN_NX2_RESNAPSHOT=0 turns snapshot refreshes off.
+     static bool ResnapshotEnabled() {
+         static const bool enabled = [] {
+diff --git a/src/video_core/engines/puller.cpp b/src/video_core/engines/puller.cpp
+index 70ebcabae..0112ede94 100644
+--- a/src/video_core/engines/puller.cpp
++++ b/src/video_core/engines/puller.cpp
+@@ -321,6 +321,8 @@ bool Puller::ResumeAcquire(DmaPusher& dma_pusher) {
+     // counting those made the count odd ("suspended") at random, so submit-time snapshots were
+     // thrown away for about half of all entries (CommandList::snapshot_suspensions).
+     if (pending_acquire) {
++        // Latched only by GPU writes (Nx2SemaphoreWaiters::OnWrite): the CPU released it otherwise.
++        dma_pusher.resumed_by_gpu = Nx2SemaphoreWaiters::Get().Latched(this);
+         pending_acquire.reset();
+         dma_pusher.suspensions.fetch_add(1, std::memory_order_release);
+         Nx2SemaphoreWaiters::Get().Remove(this);
+-- 
+2.56.0
+

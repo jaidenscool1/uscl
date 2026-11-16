@@ -41,7 +41,7 @@ conflict-free, needs a review or the owner's `--admin` merge). New work branches
 | Modern Warfare 2 (BLUS30377) | our Demonware (uscl-dw 0013, bit-packed MW2 lobby); two copies on one PC played one match | two-PC test (same tunnel path as BO2, which now works) |
 | Gotham City Impostors (NPUB30252) | boots with the full-game unlock; online is GameSpy (`sirenps3`) | `games/NPUB30252.md` |
 | USCL home screen (`uscl-shell`) | XMB, Add Games (finds decrypted folders, says when a game is still encrypted), per-game update check + install from Sony's update server (Game Updates), Friends tab drawn like the PS3's with Steam avatars/levels, Network column opens on RPCN / USCL status (no Host / Join: games go online when started), Party column drives the Discord app on the PC over its local RPC socket (`discordparty.cpp`): the voice chat you are in, who is there and talking, your servers and who is in their voice channels, join / disconnect / mute / deafen. Sign-in once via the Social SDK with the rpc scopes, which Discord grants only to the app owner and App Testers until it approves the app, starts Steam minimized; PS in a game shows the home screen while the game keeps running (Resume / Close Game, "close the running game?" when starting another; RPCS3 0008) | PS button still opens Steam Big Picture (Steam setting "Guide Button Focuses Steam"); two-PC test |
-| Switch 2 core (`uscl-eglantine`, patches 0001–0008) | Mario Kart World plays offline from the home screen (racing ~41–42 fps with the optimized build); Switch Sports Resort freezes (emulator deadlock) | non-blocking present (fixes the freeze); racing at 60 needs the GPU back thread faster; rooms (port uscl-eden 0003) |
+| Switch 2 core (`uscl-eglantine`, patches 0001–0011) | Mario Kart World plays offline from the home screen (racing ~47–48 fps with the optimized build); Switch Sports Resort loads a Tennis match at 60 fps (freeze fixed by 0010) | Switch Sports needs motion input (swings) from the pad; racing at 60 needs the GPU back thread faster; rooms (port uscl-eden 0003) |
 | Windows installer | Inno Setup, per user; offers Steam / Discord when missing; self-update signed with the offline key; RPCS3 patch 0007 removes the "unofficial build" warning and RPCS3's own updater | – |
 
 ### Black Ops II: read this before continuing
@@ -246,10 +246,11 @@ Branch `agent/jaiden-pc/latest-patch-online`.
   `git am`); `build-uscl` is the optimized build USCL launches (`~/.local/bin/eglantine` points at it), built with
   the PGO profile `~/.local/share/uscl/eglantine-pgo/eglantine.profdata`. Experiments: worktree
   `~/src/eglantine/.claude/worktrees/perf` (`build`, `build-pgo`, `build-pgogen`, `build-lto`); probe branches
-  `uscl-nsr` (Switch Sports freeze) and `uscl-perf3`.
+  `uscl-nsr`, `uscl-present` and `uscl-semprobe2` (Switch Sports freeze, fixed by 0010; `USCL_SEM_WRITE_WATCH=1` traces the queue semaphores and command-list refreshes), `uscl-chanprobe` (per-channel work), `uscl-perf3`.
 - **Test harness** (not in git, paths assume this PC): `~/.local/share/uscl/eglantine-bench/` — `runs.py` / `bench.py`
   drive a Mario Kart World Grand Prix through Eglantine's debug server (`EDEN_NX2_DEBUG_SERVER`), `nsr.py` boots Switch
   Sports, `prof_race.sh` + `stackcut.py` profile with `perf` (LBR call stacks; `PERF_BUILDID_DIR=/tmp` makes dynarmic
   write a JIT map). `launch.py` forks a watchdog: no new frame for 10 s (debug server answering) writes
-  `STUCK-<pid>.txt` and kills the emulator. The debug server serves one client at a time.
+  `STUCK-<pid>.txt` and kills the emulator; `nsr.py` also reports a crash. `mkw.sh <label> <binary>` boots Mario Kart World, runs
+  the race bench, screenshots the end and counts garbage-command errors. The debug server serves one client at a time.
 - **Don't** enable whole-program LTO (fiber/`thread_local` crash, patch 0008) or `EDEN_NX2_SPIKES` in normal runs.
