@@ -34,7 +34,7 @@ own = the publisher's own servers · GameSpy (revived by OpenSpy) · ? = not pro
 | Game | Title ID | Multiplayer route | Status | Next step |
 |---|---|---|---|---|
 | Mario Kart 8 Deluxe | [0100152000022000](games/0100152000022000.md) | Eden local wireless room over the Steam UDP tunnel | 🚧 two local instances: Wireless Play race and keyboard driving pass with 4.0.1 + firmware 22.5.0 | native route + identity injection + local adapter: the real Online Play menu authenticates (login ticket, secure connection, station registration); private-room create/join and race unsupported; two-PC relay and controllers unverified |
-| Mario Kart World (Switch 2) | 0400C3F00006E000 | none yet: Eglantine has no `--uscl-room` (port uscl-eden 0003) | 🟠 offline: plays from the home screen, controller auto-mapped; racing ~47 fps on an i5-10600K + RTX 4060 ([uscl-eglantine](uscl-eglantine/README.md)) | rooms over Steam; racing at 60 needs the GPU back thread faster |
+| Mario Kart World (Switch 2) | 0400C3F00006E000 | none yet: Eglantine has no `--uscl-room` (port uscl-eden 0003) | 🟠 offline: plays from the home screen, controller auto-mapped; racing ~47–48 fps on an i5-10600K + RTX 4060 ([uscl-eglantine](uscl-eglantine/README.md)) | rooms over Steam; racing at 60 needs the GPU back thread faster |
 | Nintendo Switch Sports Resort (Switch 2) | 04008E001F098000 | none yet | 🟠 offline: boots and plays through its intro movie, the island tour and the first customization to the main sports menu and into a Tennis match at 60 fps (10-minute run, no GPU error; fixed by 0010). The match waits at the serve: serving takes a motion swing, which button input doesn't give ([uscl-eglantine](uscl-eglantine/README.md)) | play the sports; rooms (port uscl-eden 0003) |
 
 ## Next up (PS3)
