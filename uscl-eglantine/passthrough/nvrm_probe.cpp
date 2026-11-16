@@ -3,7 +3,7 @@
 // Steps (argv[1]): "alloc" = objects only, "sem" = + one host semaphore release,
 // "compute <sass>" = + one compute launch writing a buffer, "clear <sass>" = + an ADA_A surface clear,
 // "mthd <offset> <value>" = sem, then one ADA_A method, "barrier <sass> [prog]" = compute, then an empty-grid
-// QMD that only releases a semaphore.
+// QMD that only releases a semaphore, "inline <sass>" = compute, then the same QMD as an inline QMD.
 // Safety: the root client is freed on every exit path (RM frees all children with it).
 #include "nvrm.h"
 
@@ -165,6 +165,25 @@ int main(int argc, char** argv) {
            bad || out[32] ? "FAIL" : "OK");
     if (bad || out[32]) return 4;
     if (!strcmp(step, "compute")) return 0;
+
+    // step "inline <sass>": the compute QMD again, delivered as an inline QMD (SET_INLINE_QMD_ADDRESS +
+    // LOAD_INLINE_QMD_DATA(0..63)) to an empty slot: is it written to memory, and does it run?
+    if (!strcmp(step, "inline")) {
+        const NvU64 SLOT = QMDO + 0x200;
+        auto* slot = (volatile NvU32*)(cpu + SLOT);
+        for (int i = 0; i < 64; i++) slot[i] = 0;
+        for (int i = 0; i < 64; i++) out[i] = 0;
+        NvU64 sva = gva + SLOT;
+        m(1, NVC9C0_SET_INLINE_QMD_ADDRESS_A, {(NvU32)(sva >> 40), (NvU32)(sva >> 8)});
+        q.push_back((1u << 29) | (64u << 16) | (1u << 13) | (NVC9C0_LOAD_INLINE_QMD_DATA(0) >> 2));
+        for (int i = 0; i < 64; i++) q.push_back(qmd[i]);
+        submit("inline");
+        int bad = 0, same = 0;
+        for (int i = 0; i < 32; i++) bad += out[i] != 0xA0000000u + i;
+        for (int i = 0; i < 64; i++) same += slot[i] == qmd[i];
+        printf("inline: %d/64 QMD words in memory, kernel %s\n", same, bad ? "did not run" : "ran (32/32 right)");
+        return 0;
+    }
 
     // step "barrier <sass> [prog]": an empty-grid QMD (no CTAs) that only releases a semaphore, like the
     // dependency barriers MKW chains; with "prog" it also names a valid program. Does SKED touch the

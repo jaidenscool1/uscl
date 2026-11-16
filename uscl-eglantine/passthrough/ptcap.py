@@ -4,6 +4,7 @@ usage: ptcap.py stats <capture dir>     methods the frame uses, per class, with 
        ptcap.py build <capture dir>     write <dir>/replay/{plan.txt,push.bin} for pt_replay
        ptcap.py dump <capture dir> <first entry> [count]   decoded methods of captured entries
        ptcap.py peek <capture dir> <gpu va hex> [bytes]   snapshot memory as words
+       ptcap.py qmds <capture dir> [entry] [host readback]   Eglantine's inline QMDs (vs. the host's)
        ptcap.py image <file> <width> <height> <format hex> <memory hex> <out.png>   a read-back color target
 """
 import collections, os, re, struct, sys
@@ -89,10 +90,10 @@ def read_states(d):
             pos3d = struct.unpack_from("<128I", b, off); off += 0x200
             posc = struct.unpack_from("<128I", b, off); off += 0x200
             dram = struct.unpack_from("<3072I", b, off); off += 0xC00 * 4
-            cbufs = None
-            if len(b) >= off + 5 * 18 * 16:
-                cbufs = [[struct.unpack_from("<IIQ", b, off + (s * 18 + i) * 16) for i in range(18)] for s in range(5)]
-            states[ch] = dict(engines=engines, regs={0xB197: regs3d, 0xB1C0: regsc}, mme=mme, pos3d=pos3d,
+            cbufs = [[struct.unpack_from("<IIQ", b, off + (s * 18 + i) * 16) for i in range(18)] for s in range(5)]
+            off += 5 * 18 * 16
+            mme_c = struct.unpack_from("<32768I", b, off)  # the compute engine's own MME code
+            states[ch] = dict(engines=engines, regs={0xB197: regs3d, 0xB1C0: regsc}, mme=mme, mme_c=mme_c, pos3d=pos3d,
                               posc=posc, dram=dram, cbufs=cbufs,
                               native_turing=struct.unpack_from("<I", b, 64)[0])
     return states
@@ -177,7 +178,7 @@ NEVER = re.compile(r"SET_FALCON\d+|SET_RESERVED_SW_METHOD\d+|SET_INSTRUMENTATION
 # Restored from the captured registers: plain state. Not: triggers named SET_*, local memory (rewritten),
 # the shader ISA version (the host keeps its own; guest SASS decodes as SM89, gate 3).
 NO_RESTORE = re.compile(r"SET_REPORT_SEMAPHORE_D|SET_MME_SHADOW_RAM_CONTROL|SET_SPA_VERSION|"
-                        r"SET_SHADER_LOCAL_MEMORY_([A-D]|NON_THROTTLED_[A-C]|THROTTLED_[A-C])|" + NEVER.pattern)
+                        r"SET_SHADER_LOCAL_MEMORY_[AB]|" + NEVER.pattern)  # local memory: address rewritten, sizes kept
 
 
 def restorable(name):
@@ -219,7 +220,7 @@ def data_chunks(d, cache):
         start = np.memmap(os.path.join(d, f), dtype=np.uint8, mode="r")
         endf = "end-" + f
         end = None
-        if os.path.exists(os.path.join(d, endf)) and os.path.getsize(os.path.join(d, endf)) == size:
+        if not os.environ.get("PT_NO_END") and os.path.exists(os.path.join(d, endf)) and os.path.getsize(os.path.join(d, endf)) == size:
             end = np.memmap(os.path.join(d, endf), dtype=np.uint8, mode="r")
         a = base
         while a < base + size:
@@ -265,7 +266,6 @@ def build(d):
     out_dir = os.path.join(d, "replay")
     os.makedirs(out_dir, exist_ok=True)
     states, stream, maps = read_states(d), read_stream(d), read_maps(d)
-    assert all(s["cbufs"] is not None for s in states.values()), "capture predates the cbuf bindings in state-*.bin"
     names = {e: Names(h) for e, (h, _) in ENGINES.items()}
     n3d, nc = names[0xB197], names[0xB1C0]
     chans = sorted(states)
@@ -331,14 +331,21 @@ def build(d):
         for sc, e in enumerate(engines):
             if e in ENGINES:
                 out.append((sc, 0, ENGINES[e][1]))
+        # Each class has its own MME program and start addresses (Eglantine keeps the compute ones apart
+        # once the guest uploads through the compute class): load each through its own subchannel.
+        for mme_sc, e in enumerate(engines):
+            if e not in (0xB197, 0xB1C0):
+                continue
+            code, pos = (s["mme"], s["pos3d"]) if e == 0xB197 else (s["mme_c"], s["posc"])
+            if not any(code):
+                continue
+            mme_n = names[e]
+            last = -(-(max(i for i, v in enumerate(code) if v) + 1) // 3) * 3  # whole 96-bit instructions
+            out.append((mme_sc, mme_n.off("LOAD_MME_INSTRUCTION_RAM_POINTER") // 4, 0))
+            out += [(mme_sc, mme_n.off("LOAD_MME_INSTRUCTION_RAM") // 4, v) for v in code[:last]]
+            out.append((mme_sc, mme_n.off("LOAD_MME_START_ADDRESS_RAM_POINTER") // 4, 0))
+            out += [(mme_sc, mme_n.off("LOAD_MME_START_ADDRESS_RAM") // 4, v) for v in pos]
         mme_sc = next(sc for sc, e in enumerate(engines) if e in (0xB197, 0xB1C0))
-        mme_n = names[engines[mme_sc]]
-        last = max(i for i, v in enumerate(s["mme"]) if v) + 1
-        last = -(-last // 3) * 3  # whole 96-bit instructions
-        out.append((mme_sc, mme_n.off("LOAD_MME_INSTRUCTION_RAM_POINTER") // 4, 0))
-        out += [(mme_sc, mme_n.off("LOAD_MME_INSTRUCTION_RAM") // 4, v) for v in s["mme"][:last]]
-        out.append((mme_sc, mme_n.off("LOAD_MME_START_ADDRESS_RAM_POINTER") // 4, 0))
-        out += [(mme_sc, mme_n.off("LOAD_MME_START_ADDRESS_RAM") // 4, v) for v in s["pos3d"]]
         if engines[mme_sc] == 0xB197:  # MME data RAM: DMA-read from a host copy (compute has no such method)
             dram_va = lm_va + lm_size + idx * CHUNK
             open(os.path.join(out_dir, f"dram-{ch}.bin"), "wb").write(struct.pack("<3072I", *s["dram"]))
@@ -550,6 +557,29 @@ def peek(d, va, size="0x100"):
         print(f"{va + i * 4:#x}: " + " ".join(f"{w:08x}" for w in words[i:i + 8]))
 
 
+def qmds(d, entry=None, host=None):
+    """Inline QMDs Eglantine wrote (qmds.bin); with an entry and a host readback of one QMD, the words
+    that differ from the last QMD Eglantine wrote at that address in that entry."""
+    b = open(os.path.join(d, "qmds.bin"), "rb").read()
+    rec = [(struct.unpack_from("<IQ", b, o), struct.unpack_from("<64I", b, o + 12)) for o in range(0, len(b), 268)]
+    if host is None:
+        for (k, addr), _ in rec:
+            if entry is None or k == int(entry):
+                print(k, hex(addr))
+        return
+    want = open(host, "rb").read(256)
+    hw = struct.unpack("<64I", want)
+    hits = [(addr, w) for (k, addr), w in rec if k == int(entry)]
+    for addr, w in hits:
+        diff = [i for i in range(64) if w[i] != hw[i]]
+        print(f"{addr:#x}: {len(diff)} words differ from the host's: {diff}")
+    if hits:
+        addr, w = hits[-1]
+        for i in range(0, 64, 8):
+            print(f"  eglantine w{i:2}: " + " ".join(f"{x:08x}" for x in w[i:i + 8]))
+            print(f"  host      w{i:2}: " + " ".join(f"{x:08x}" for x in hw[i:i + 8]))
+
+
 BPP = {0xD5: 4, 0xD6: 4, 0xCF: 4, 0xD0: 4, 0xD1: 4, 0xE0: 4, 0xCA: 8, 0xC6: 8}
 
 
@@ -598,4 +628,4 @@ def image(path, w, h, fmt, mem, out):
 
 
 if __name__ == "__main__":
-    {"stats": stats, "build": build, "dump": dump, "image": image, "peek": peek}[sys.argv[1]](*sys.argv[2:])
+    {"stats": stats, "build": build, "dump": dump, "image": image, "peek": peek, "qmds": qmds}[sys.argv[1]](*sys.argv[2:])
