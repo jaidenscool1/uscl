@@ -50,6 +50,7 @@ qt_add_qml_module(uscl
         qml/Notice.qml
         qml/ClockBox.qml
         qml/Boot.qml
+        qml/GameLaunch.qml
         qml/Setup.qml
         qml/TextPrompt.qml
     RESOURCES

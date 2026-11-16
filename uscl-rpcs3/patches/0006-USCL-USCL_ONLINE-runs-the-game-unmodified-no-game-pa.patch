@@ -1,7 +1,7 @@
-From 5d40305750cd8056656765cf589e51b2ef8a0863 Mon Sep 17 00:00:00 2001
+From 8007773ce12abdb0c6faab956a8e25a49ae605f8 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 16:10:28 -0700
-Subject: [PATCH 06/11] USCL: USCL_ONLINE runs the game unmodified (no game
+Subject: [PATCH 06/14] USCL: USCL_ONLINE runs the game unmodified (no game
  patches, GDB server or logpoints)
 
 USCL sets it for games started during an online session.
@@ -14,7 +14,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  3 files changed, 19 insertions(+)
 
 diff --git a/Utilities/bin_patch.cpp b/Utilities/bin_patch.cpp
-index 953d813..fab5c6a 100644
+index 953d8138c..fab5c6a46 100644
 --- a/Utilities/bin_patch.cpp
 +++ b/Utilities/bin_patch.cpp
 @@ -1480,6 +1480,13 @@ void patch_engine::apply(std::vector<u32>& applied_total, const std::string& nam
@@ -32,7 +32,7 @@ index 953d813..fab5c6a 100644
  	const std::string& serial = Emu.GetTitleID();
  	const std::string& app_version = Emu.GetAppVersion();
 diff --git a/rpcs3/Emu/Cell/PPUThread.cpp b/rpcs3/Emu/Cell/PPUThread.cpp
-index 4757d04..366e5e6 100644
+index 4757d04bb..366e5e678 100644
 --- a/rpcs3/Emu/Cell/PPUThread.cpp
 +++ b/rpcs3/Emu/Cell/PPUThread.cpp
 @@ -1320,6 +1320,11 @@ static void ppu_logpoint(ppu_thread& ppu, ppu_opcode_t op, be_t<u32>* this_op, p
@@ -48,7 +48,7 @@ index 4757d04..366e5e6 100644
  	{
  		if (path) ppu_log.error("USCL_LOGPOINTS needs the PPU interpreter");
 diff --git a/rpcs3/Emu/GDB.cpp b/rpcs3/Emu/GDB.cpp
-index 833ee73..969a22f 100644
+index 833ee7339..969a22fbc 100644
 --- a/rpcs3/Emu/GDB.cpp
 +++ b/rpcs3/Emu/GDB.cpp
 @@ -130,6 +130,13 @@ void gdb_thread::start_server()

@@ -5,7 +5,7 @@
 | **Console** | PlayStation 3 |
 | **Upstream** | [RPCS3/rpcs3](https://github.com/RPCS3/rpcs3) (GPL-2.0) |
 | **Pinned base** | `eee3f0f` (upstream 2026-11-05) |
-| **Our changes** | `patches/0001`–`0013`, applied with `git am` |
+| **Our changes** | `patches/0001`–`0014`, applied with `git am` |
 | **Ships in** | Windows installer and Linux AppImage (`packaging/`) |
 | **Online services it talks to** | [uscl-rpcn](../uscl-rpcn/) (PSN), [uscl-dw](../uscl-dw/) (Call of Duty), [uscl-blaze](../uscl-blaze/) (EA) |
 
@@ -75,3 +75,10 @@ Then build as in RPCS3's `BUILDING.md`. Things that bite:
   game state encodes alike (crossplay).
 - 0012: built-in NHL 15 patch (`PPU-04d55e4c…`), "dynamic messages with none to show": the OSDK message rotation
   (0x7f94e4) checks its list has a message before reading it; a community server may send none (`games/BLUS31436.md`).
+
+## Theme-aware loading UI
+
+Shell-launched games receive the selected USCL palette for their native loading UI. The new loading patch
+changes colors only: progress values, compilation, game artwork and the existing loading lifecycle stay
+under the emulator’s control. Standalone launches retain the upstream appearance. See
+[loading UI coverage and verification](../docs/LOADING-THEMES.md). Rebuild the patched core to use this feature.

@@ -15,6 +15,7 @@ Item {
     OptionsPanel { id: menu; anchors.fill: parent }
     Dialog { id: dialog; anchors.fill: parent }
     TextPrompt { id: prompt; anchors.fill: parent }
+    GameLaunch { id: launchScreen; anchors.fill: parent; shown: false }
     TestCase {
         name: "ConsoleThemes"
         when: windowShown
@@ -173,6 +174,27 @@ Item {
             verify(prompt.open); compare(prompt.error, "Too short")
             keyClick(Qt.Key_Escape)
             verify(!prompt.open)
+        }
+        function test_launchScreen_data() {
+            return ["ps3", "ps4", "ps5", "x360classic", "x360", "xboxone", "switch", "switch2"].map(function(theme) { return {tag: theme, theme: theme} })
+        }
+        function test_launchScreen(data) {
+            launchScreen.theme = data.theme
+            launchScreen.title = "A game title with <markup> shown literally"
+            launchScreen.shown = true
+            launchScreen.starting = true
+            launchScreen.windowActive = true
+            tryCompare(launchScreen, "opacity", 1)
+            verify(launchScreen.animating)
+            compare(launchScreen.theme, data.theme)
+            launchScreen.windowActive = false
+            verify(!launchScreen.animating) // no launch animation behind the emulator window
+            launchScreen.windowActive = true
+            launchScreen.starting = false
+            launchScreen.shown = false
+            tryCompare(launchScreen, "opacity", 0)
+            verify(!launchScreen.visible)
+            verify(!launchScreen.animating)
         }
         function test_ps3() {
             navigation.input("down"); compare(navigation.item, 1)

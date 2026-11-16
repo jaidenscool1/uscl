@@ -9,6 +9,7 @@ Item {
     Background { anchors.fill: parent; visible: home.theme === "ps3"; tint: "#3c6cd8"; running: false; shade: .15 }
     Xmb { id: nav; anchors.fill: parent; visible: home.theme === "ps3"; cat: 3 }
     ConsoleHome { visible: theme !== "ps3"; id: home; anchors.fill: parent; navigation: nav; animate: false; theme: "ps4" }
+    GameLaunch { id: launch; anchors.fill: parent; theme: home.theme; shown: false; starting: true; windowActive: false; title: "A New Adventure"; gameIcon: Qt.resolvedUrl("../xmb/icons/cat_ps3.png") }
     TestCase {
         name: "Capture"
         when: windowShown
@@ -27,6 +28,12 @@ Item {
                 home.theme = themes[t]
                 wait(400)
                 grabImage(gallery).save(directory + "/uscl-preview-" + themes[t] + ".png")
+                launch.shown = true
+                tryCompare(launch, "opacity", 1)
+                wait(100)
+                grabImage(gallery).save(directory + "/uscl-loading-preview-" + themes[t] + ".png")
+                launch.shown = false
+                wait(260)
             }
         }
     }

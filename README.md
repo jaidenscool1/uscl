@@ -166,7 +166,8 @@ rebuild installers or publish an update. Those steps need a reviewed change and 
 The home screen has eight selectable themes: PS3, PS4, PS5, Xbox 360 Classic, Xbox 360 2012, Xbox One,
 Switch and Switch 2. All share USCL's library, settings and update controls. A theme changes the interface;
 it does not add emulation of its console (there is no PS5 or Xbox One emulator integration here).
-See [theme behavior, checks and remaining manual verification](docs/CONSOLE-THEMES.md).
+See [theme behavior, checks and remaining manual verification](docs/CONSOLE-THEMES.md) and
+[emulator loading-screen coverage](docs/LOADING-THEMES.md).
 
 ## Repository map
 | Folder | What it is |

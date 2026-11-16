@@ -12,6 +12,13 @@ These changes are included in this development branch. They are not a list of pu
 - Improved selection restoration, mouse actions, long-dialog scrolling and layouts in 4:3 and ultrawide windows.
 - Show running games once in modern libraries, with a Resume action.
 
+### Emulator launch screens
+
+- Added a themed shell launch/return screen for every home-screen emulator path, with game artwork and title.
+- Added opt-in native loading colors for rebuilt RPCS3, Eden, Eglantine and Azahar cores.
+- Kept real progress, shader compilation, cancellation and native window handoff under emulator control.
+- Paused shell launch animation when the emulator has focus; no artificial loading delay is added.
+
 ### Theme audio
 
 - Added eight original sound palettes: navigation, category changes, confirm, back, cancel, errors, notifications and startup.

@@ -98,6 +98,13 @@ ultrawide windows, and rejects QML errors and missing packaged assets. See [them
   graphics card and the screen: integrated or under 3.5 GB 100%, under 6 GB 150%, under 10 GB 200%, else 300%,
   never sharper than the screen (1080p 150%, 1440p 200%, 4K 300%). `uscl --hardware` prints what it sees.
 
+## Emulator loading screens
+
+Game launches use a themed shell handoff with game artwork and title. Rebuilt RPCS3, Eden, Eglantine and
+Azahar cores also use the shell palette in native loading widgets; other native frontends keep their own UI.
+The shell stops its indicator when inactive and adds no loading delay. See
+[coverage, patch contract and verification](../docs/LOADING-THEMES.md).
+
 ## Changelog
 
 Settings → USCL Changelog reads the bundled root [CHANGELOG.md](../CHANGELOG.md) offline in every theme.

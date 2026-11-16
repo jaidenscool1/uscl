@@ -7,8 +7,9 @@ patching each game. Status: Steam bridge service working (see Phases).
 
 Eight selectable looks now share the launcher's game, friend, online, settings and update actions: PS3 XMB,
 PS4, PS5, Xbox 360 Classic/2012, Xbox One, Switch and Switch 2. Modern looks expose the game library directly;
-inner pages and modals follow the theme too. PS3-style menu cues are newly synthesized originals with a
-reproducible generator. See [console theme validation and limits](docs/CONSOLE-THEMES.md). Physical controller,
+inner pages and modals follow the theme too. All eight themes have original synthesized audio and a saved menu-volume setting.
+Game launch/return screens now follow the palette, with opt-in native loading patches for RPCS3, Eden,
+Eglantine and Azahar ([coverage and remaining game checks](docs/LOADING-THEMES.md)). See [console theme validation and limits](docs/CONSOLE-THEMES.md). Physical controller,
 Windows/macOS runtime and subjective visual/audio acceptance are not replaced by automated UI tests.
 
 ## How it works

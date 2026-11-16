@@ -139,6 +139,7 @@ Window {
         launchGame(g)
     }
     function launchGame(g) {
+        launcher.setLoadingTheme(activeTheme, themePalette.background, themePalette.text, themePalette.accent, themePalette.panel)
         if (prefs.autoControllers) launcher.prepareInput(gamepad.names, g.console)   // every console: pads -> players 1, 2...
         if (emuConsoles.indexOf(g.console) >= 0) {   // Wii -> Dolphin, 3DS -> Azahar
             // in a session: our Dolphin hosts or joins NetPlay (Wii), our Azahar joins the room (3DS), over the tunnel
@@ -1234,23 +1235,18 @@ Window {
                 onSound: function(name) { root.sound(name) }
             }
 
-            // while a game (or the classic window) is on screen
-            Rectangle {
+            // Under the emulator window: theme-aware handoff and return screen. Never steals game focus.
+            GameLaunch {
+                objectName: "gameLaunchScreen"
                 anchors.fill: parent
-                color: "black"
-                opacity: launcher.gameShown ? 0.92 : 0
-                visible: opacity > 0
-                Behavior on opacity { NumberAnimation { duration: 300 } }
-                Column {
-                    anchors.centerIn: parent
-                    spacing: 18
-                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: launcher.title; color: "white"; font.pixelSize: 44 }
-                    Text {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        text: root.xboxPad ? qsTr("Press the Guide button to come back here; the game keeps running") : qsTr("Press the PS button to come back here; the game keeps running")
-                        color: "#b0ffffff"; font.pixelSize: 25
-                    }
-                }
+                theme: root.activeTheme
+                shown: launcher.gameShown
+                starting: launcher.starting
+                title: launcher.title
+                gameIcon: runningGame ? runningGame.icon || "" : ""
+                windowActive: root.active
+                xboxPad: root.xboxPad
+                homeSupported: !!runningGame && (runningGame.console || "PS3") === "PS3"
             }
 
             // startup: the boot screen, then the crossbar

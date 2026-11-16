@@ -129,6 +129,27 @@ namespace
 		const QString rpcn = Online::setYamlValue("Version: 2\nNPID: old\n", {}, "NPID", "new_name");
 		check(Online::yamlValue(rpcn, {}, "NPID") == "new_name" && Online::yamlValue(rpcn, {}, "Version") == "2", "YAML top level");
 
+		check(Launcher::loadingStyle("not-a-color", "white", "red", "black").isEmpty(), "invalid loading palette rejected");
+		{
+			QTemporaryDir missing;
+			const QByteArray old = qgetenv("USCL_RPCS3");
+			const bool was_set = qEnvironmentVariableIsSet("USCL_RPCS3");
+			qputenv("USCL_RPCS3", missing.filePath("missing-core").toUtf8());
+			Launcher failed_launch;
+			QEventLoop loop;
+			bool failed_start = false, hidden = false;
+			QObject::connect(&failed_launch, &Launcher::gameShownChanged, &loop, [&] { hidden = !failed_launch.gameShown(); });
+			QObject::connect(&failed_launch, &Launcher::finished, &loop, [&](bool crashed, const QString&) { failed_start = crashed; loop.quit(); });
+			QTimer::singleShot(3000, &loop, &QEventLoop::quit);
+			check(failed_launch.startGame("unused", "Missing", false), "failed core launch can enter starting state");
+			loop.exec();
+			check(failed_start && hidden && !failed_launch.running() && !failed_launch.starting() && !failed_launch.gameShown(), "failed launch clears themed handoff state");
+			if (was_set) qputenv("USCL_RPCS3", old); else qunsetenv("USCL_RPCS3");
+		}
+		const QString style = Launcher::loadingStyle("#073ba0", "#ffffff", "#79c9ff", "#114ca9");
+		check(style.contains("#073ba0") && style.contains("#ffffff") && style.contains("#79c9ff") &&
+		      style.contains("#114ca9") && style.contains("QProgressBar::chunk"), "loading stylesheet uses validated palette colors");
+
 		check(System::cdnUrl("Dest=84;ImageVersion=1;CDN=http://x.y/a/PS3PATCH.PUP;\nDest=84;CDN=http://x.y/b/PS3UPDAT.PUP;CDN_Timeout=30;") ==
 		      "http://x.y/b/PS3UPDAT.PUP", "Sony update list");
 		check(GameModel::readGamesYml(GameModel::ymlLine("BLUS1", "/a/it's/b.iso").toUtf8()).value("BLUS1") == "/a/it's/b.iso", "games.yml write");
@@ -382,7 +403,7 @@ namespace
 			{
 				const QByteArray old_core = qgetenv("USCL_SWITCH_CORE");
 				const bool core_set = qEnvironmentVariableIsSet("USCL_SWITCH_CORE");
-				const QString program = write("fake-core", "#!/bin/sh\nprintf '%s\\n' \"$@\"\nprintf 'DATA=%s\\n' \"$XDG_DATA_HOME\"\nprintf 'ONLINE=%s\\n' \"$USCL_ONLINE\"\n");
+				const QString program = write("fake-core", "#!/bin/sh\nprintf '%s\\n' \"$@\"\nprintf 'DATA=%s\\n' \"$XDG_DATA_HOME\"\nprintf 'ONLINE=%s\\n' \"$USCL_ONLINE\"\nprintf 'THEME=%s\\n' \"$USCL_THEME\"\nprintf 'STYLE=%s\\n' \"$USCL_LOADING_STYLE\"\nprintf 'COLORS=%s\\n' \"$USCL_LOADING_COLORS\"\n");
 				QFile::setPermissions(program, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
 				qputenv("USCL_SWITCH_CORE", program.toUtf8());
 				const QString test_keys = write("test-prod.keys", "header_key = " + QByteArray(64, '0') + '\n');
@@ -430,17 +451,77 @@ namespace
 				if (display_set) qputenv("DISPLAY", old_display); else qunsetenv("DISPLAY");
 #endif
 				Launcher launcher;
+				launcher.setLoadingTheme("ps4", "#073ba0", "white", "#79c9ff", "#114ca9");
 				QEventLoop loop;
 				bool completed = false;
 				QObject::connect(&launcher, &Launcher::finished, &loop, [&](bool crashed, const QString& details) {
 					completed = !crashed && details.contains("--multiplayer") && details.contains("TestPlayer@127.0.0.1:24872") &&
-					            details.contains("DATA=" + SwitchCore::profileDir() + "data") && details.contains("ONLINE=") && !details.contains("--no-gui");
+					            details.contains("DATA=" + SwitchCore::profileDir() + "data") && details.contains("ONLINE=") &&
+					            details.contains("THEME=ps4") && details.contains("STYLE=QWidget") && details.contains("COLORS=073ba0,ffffff,79c9ff") && !details.contains("--no-gui");
 					loop.quit();
 				});
 				QTimer::singleShot(3000, &loop, &QEventLoop::quit);
 				check(launcher.startGame(homebrew, "Homebrew", true, "Switch", "TestPlayer"), "Switch core process starts");
 				loop.exec();
-				check(completed, "Switch core process receives isolated profile and room arguments");
+				check(completed && !launcher.running() && !launcher.starting(), "Switch core receives profile, room arguments and loading palette; process state resets");
+				// Other native launch routes use the same child-only theme contract without real emulators.
+				for (const auto& route : {qMakePair(QString("Wii"), QByteArray("USCL_DOLPHIN")),
+				                          qMakePair(QString("3DS"), QByteArray("USCL_AZAHAR")),
+				                          qMakePair(QString("DS"), QByteArray("USCL_MELONDS"))})
+				{
+					const bool set = qEnvironmentVariableIsSet(route.second.constData());
+					const QByteArray old = qgetenv(route.second.constData());
+					qputenv(route.second.constData(), program.toUtf8());
+					Launcher other;
+					other.setLoadingTheme("switch2", "#ebebeb", "#2a2d28", "#39e3d2", "white");
+					QEventLoop route_loop;
+					bool passed = false;
+					QObject::connect(&other, &Launcher::finished, &route_loop, [&](bool crashed, const QString& details) {
+						passed = !crashed && details.contains("THEME=switch2") && details.contains("COLORS=ebebeb,2a2d28,39e3d2");
+						route_loop.quit();
+					});
+					QTimer::singleShot(3000, &route_loop, &QEventLoop::quit);
+					check(other.startEmu("unused", "Fixture", route.first), "native fake core launch");
+					route_loop.exec();
+					check(passed && !other.gameShown(), "native routes receive theme and clear handoff on exit");
+					if (set) qputenv(route.second.constData(), old); else qunsetenv(route.second.constData());
+				}
+				{
+					const bool set = qEnvironmentVariableIsSet("USCL_RPCS3");
+					const QByteArray old = qgetenv("USCL_RPCS3");
+					qputenv("USCL_RPCS3", program.toUtf8());
+					Launcher classic;
+					classic.setLoadingTheme("ps4", "#073ba0", "white", "#79c9ff", "#114ca9");
+					QEventLoop classic_loop;
+					bool passed = false;
+					QObject::connect(&classic, &Launcher::finished, &classic_loop, [&](bool crashed, const QString& details) {
+						passed = !crashed && details.contains("THEME=\nSTYLE=\nCOLORS=");
+						classic_loop.quit();
+					});
+					QTimer::singleShot(3000, &classic_loop, &QEventLoop::quit);
+					check(classic.openClassic(), "classic fake core launch");
+					classic_loop.exec();
+					check(passed && !classic.running(), "classic tools do not receive native loading override");
+					for (const bool stopping : {false, true})
+					{
+						const QString fake = write(stopping ? "fake-stop" : "fake-crash", stopping ? "#!/bin/sh\nread line\n" : "#!/bin/sh\nexit 9\n");
+						QFile::setPermissions(fake, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+						qputenv("USCL_RPCS3", fake.toUtf8());
+						Launcher lifecycle;
+						QEventLoop life_loop;
+						bool finished = false;
+						QObject::connect(&lifecycle, &Launcher::finished, &life_loop, [&](bool crashed, const QString&) {
+							finished = crashed != stopping;
+							life_loop.quit();
+						});
+						QTimer::singleShot(3000, &life_loop, &QEventLoop::quit);
+						check(lifecycle.startGame("unused", "Fixture", false), "lifecycle fake core starts");
+						if (stopping) QTimer::singleShot(50, &lifecycle, &Launcher::stop);
+						life_loop.exec();
+						check(finished && !lifecycle.running() && !lifecycle.gameShown(), "crash/stop clears themed handoff with correct exit status");
+					}
+					if (set) qputenv("USCL_RPCS3", old); else qunsetenv("USCL_RPCS3");
+				}
 				if (core_set) qputenv("USCL_SWITCH_CORE", old_core); else qunsetenv("USCL_SWITCH_CORE");
 			}
 #endif

@@ -1,0 +1,158 @@
+From 38e7a3581ceb1241862487f311d35636fa8c228a Mon Sep 17 00:00:00 2001
+From: USCL <uscl@localhost>
+Date: Mon, 16 Nov 2026 12:51:30 -0700
+Subject: [PATCH 14/14] USCL: follow shell palette in boot and shader loading
+ UI
+
+Scope styling to opted-in shell games. Preserve real progress values, compiler work, guest rendering, input, cancellation and dialog lifetimes. Standalone launches and invalid palettes retain upstream styling.
+---
+ .../RSX/Overlays/overlay_message_dialog.cpp   | 23 ++++++++++
+ .../Emu/RSX/Overlays/overlay_progress_bar.hpp |  6 +++
+ rpcs3/Emu/RSX/Overlays/uscl_loading_theme.h   | 44 +++++++++++++++++++
+ rpcs3/rpcs3qt/msg_dialog_frame.cpp            |  5 +++
+ rpcs3/rpcs3qt/progress_dialog.cpp             |  6 +++
+ 5 files changed, 84 insertions(+)
+ create mode 100644 rpcs3/Emu/RSX/Overlays/uscl_loading_theme.h
+
+diff --git a/rpcs3/Emu/RSX/Overlays/overlay_message_dialog.cpp b/rpcs3/Emu/RSX/Overlays/overlay_message_dialog.cpp
+index b2a1849ea..d26d17dc5 100644
+--- a/rpcs3/Emu/RSX/Overlays/overlay_message_dialog.cpp
++++ b/rpcs3/Emu/RSX/Overlays/overlay_message_dialog.cpp
+@@ -1,4 +1,5 @@
+ #include "stdafx.h"
++#include "uscl_loading_theme.h"
+ #include "overlay_manager.h"
+ #include "overlay_message_dialog.h"
+ #include "Emu/emu_callbacks.h"
+@@ -291,6 +292,28 @@ namespace rsx
+ 		{
+ 			visible = false;
+ 			m_source = source;
++			// Only emulator-owned boot/cache dialogs follow the shell; guest message dialogs are unchanged.
++			if (source == msg_dialog_source::shader_loading || source == msg_dialog_source::sys_progress)
++			{
++				if (const auto colors = uscl::loading_colors())
++				{
++					const auto& bg = (*colors)[0];
++					const auto& fg = (*colors)[1];
++					const auto& accent = (*colors)[2];
++					background.back_color = color4f(bg[0], bg[1], bg[2], 0.94f);
++					text_display.fore_color = color4f(fg[0], fg[1], fg[2], 1.f);
++					btn_ok.fore_color = text_display.fore_color;
++					btn_cancel.fore_color = text_display.fore_color;
++					bottom_bar.back_color = color4f(accent[0], accent[1], accent[2], 1.f);
++					for (auto& bar : progress_bars)
++					{
++						bar.fore_color = bottom_bar.back_color;
++						bar.back_color = color4f(fg[0], fg[1], fg[2], 0.2f);
++						bar.set_text_color(text_display.fore_color);
++					}
++				}
++			}
++
+ 
+ 			num_progress_bars = type.progress_bar_count;
+ 			if (num_progress_bars)
+diff --git a/rpcs3/Emu/RSX/Overlays/overlay_progress_bar.hpp b/rpcs3/Emu/RSX/Overlays/overlay_progress_bar.hpp
+index d622796da..3d2189c9a 100644
+--- a/rpcs3/Emu/RSX/Overlays/overlay_progress_bar.hpp
++++ b/rpcs3/Emu/RSX/Overlays/overlay_progress_bar.hpp
+@@ -17,6 +17,12 @@ namespace rsx
+ 
+ 		public:
+ 			progress_bar();
++			void set_text_color(color4f color)
++			{
++				text_view.fore_color = color;
++				text_view.refresh();
++				m_is_compiled = false;
++			}
+ 			void inc(f32 value);
+ 			void dec(f32 value);
+ 			void set_limit(f32 limit);
+diff --git a/rpcs3/Emu/RSX/Overlays/uscl_loading_theme.h b/rpcs3/Emu/RSX/Overlays/uscl_loading_theme.h
+new file mode 100644
+index 000000000..4b62e9438
+--- /dev/null
++++ b/rpcs3/Emu/RSX/Overlays/uscl_loading_theme.h
+@@ -0,0 +1,44 @@
++#pragma once
++
++// USCL loading-only palette. GPL-2.0, like the RPCS3 code this accompanies.
++#include <array>
++#include <cstdlib>
++#include <optional>
++#include <string_view>
++
++namespace uscl
++{
++	using loading_palette = std::array<std::array<float, 3>, 3>;
++
++	inline std::optional<loading_palette> parse_loading_palette(std::string_view colors)
++	{
++		// Exactly three six-digit RGB values; invalid input leaves upstream rendering untouched.
++		if (colors.size() != 20 || colors[6] != ',' || colors[13] != ',') return {};
++		loading_palette result{};
++		for (unsigned color = 0; color < 3; color++)
++		{
++			for (unsigned channel = 0; channel < 3; channel++)
++			{
++				unsigned value = 0;
++				for (unsigned digit = 0; digit < 2; digit++)
++				{
++					const char c = colors[color * 7 + channel * 2 + digit];
++					const int n = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 :
++					    c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
++					if (n < 0) return {};
++					value = value * 16 + static_cast<unsigned>(n);
++				}
++				result[color][channel] = value / 255.f;
++			}
++		}
++		return result;
++	}
++
++	inline std::optional<loading_palette> loading_colors()
++	{
++		const char* shell = std::getenv("USCL_SHELL");
++		const char* colors = std::getenv("USCL_LOADING_COLORS");
++		if (!shell || std::string_view(shell) != "1" || !colors) return {};
++		return parse_loading_palette(colors);
++	}
++}
+diff --git a/rpcs3/rpcs3qt/msg_dialog_frame.cpp b/rpcs3/rpcs3qt/msg_dialog_frame.cpp
+index 59c3bd349..f28813488 100644
+--- a/rpcs3/rpcs3qt/msg_dialog_frame.cpp
++++ b/rpcs3/rpcs3qt/msg_dialog_frame.cpp
+@@ -14,6 +14,11 @@ void msg_dialog_frame::Create(const std::string& msg, const std::string& title)
+ 	Close(true);
+ 
+ 	m_dialog = new custom_dialog(type.disable_cancel);
++	if (type.progress_bar_count && qEnvironmentVariable("USCL_SHELL") == QStringLiteral("1"))
++	{
++		const auto style = qEnvironmentVariable("USCL_LOADING_STYLE");
++		if (!style.isEmpty()) m_dialog->setStyleSheet(style);
++	}
+ 	m_dialog->setWindowTitle(title.empty() ? (type.se_normal ? tr("Normal dialog") : tr("Error dialog")) : QString::fromStdString(title));
+ 	m_dialog->setWindowOpacity(type.bg_invisible ? 1. : 0.75);
+ 
+diff --git a/rpcs3/rpcs3qt/progress_dialog.cpp b/rpcs3/rpcs3qt/progress_dialog.cpp
+index 2244d265d..4642cd66d 100644
+--- a/rpcs3/rpcs3qt/progress_dialog.cpp
++++ b/rpcs3/rpcs3qt/progress_dialog.cpp
+@@ -6,6 +6,12 @@
+ progress_dialog::progress_dialog(const QString& windowTitle, const QString& labelText, const QString& cancelButtonText, int minimum, int maximum, bool delete_on_close, QWidget* parent, Qt::WindowFlags flags)
+ 	: QProgressDialog(labelText, cancelButtonText, minimum, maximum, parent, flags)
+ {
++	// Scoped to progress UI in shell-launched games; standalone RPCS3 keeps its own theme.
++	if (qEnvironmentVariable("USCL_SHELL") == QStringLiteral("1"))
++	{
++		const auto style = qEnvironmentVariable("USCL_LOADING_STYLE");
++		if (!style.isEmpty()) setStyleSheet(style);
++	}
+ 	setWindowTitle(windowTitle);
+ 	setMinimumSize(QLabel("This is the very length of the progressdialog due to hidpi reasons.").sizeHint().width(), sizeHint().height());
+ 	setWindowModality(Qt::WindowModal);
+-- 
+2.56.0
+

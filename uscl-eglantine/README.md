@@ -5,7 +5,7 @@
 | **Console** | Nintendo Switch 2 (USCL routes program IDs starting with `04` here; Switch games stay on [uscl-eden](../uscl-eden/README.md)) |
 | **Upstream** | [Eglantine-Community/Eglantine](https://github.com/Eglantine-Community/Eglantine), branch `nx2-experimental`, the line its daily builds ship (GPL-3.0-or-later; an Eden fork with NX2/Switch 2 support). `nx2`, the default branch, lags it by hundreds of commits |
 | **Pinned base** | `30181ba05` (`nx2-experimental`, 2026-11-15) |
-| **Our changes** | `patches/0001`–`0008`, applied with `git am`. We keep them on our fork only (no upstream PRs) |
+| **Our changes** | `patches/0001`–`0009`, applied with `git am`. We keep them on our fork only (no upstream PRs) |
 | **Ships in** | both installers (Windows: `Eglantine\`); the AppImage's is the optimized build without `-march=native` |
 | **Online** | offline only; Eglantine has no `--uscl-room` yet (port uscl-eden 0003 next) |
 | **Status** | Mario Kart World: boots from the USCL home screen, controller auto-mapped, Grand Prix races play; pre-race scenes 60 fps, racing ~41–42 fps with the optimized build (below). Nintendo Switch Sports Resort v1.1.0: boots and plays its intro at 60 fps, then freezes (a GPU/present deadlock, see Open issues) |
@@ -72,3 +72,10 @@ Tuned for the CPU it is built on (`-march=native`: don't copy the binary to an o
 4. Final build: the configure line above plus `-DUSCL_VIDEO_CORE_LTO=ON -DCMAKE_C_FLAGS="-march=native -fprofile-use=<path>/eglantine.profdata -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin"`, the same for `CMAKE_CXX_FLAGS`, and `-DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld -flto=thin -fprofile-use=<path>/eglantine.profdata"`. CMake's `ENABLE_LTO` is not used: it insists on `llvm-ar`, and it would put the core under LTO too (0008).
 
 A profile made before later source changes still applies to the unchanged code (clang warns about the rest, silenced above); retrain after large upstream merges.
+
+## Theme-aware loading UI
+
+Shell-launched games receive the selected USCL palette for their native loading UI. The new loading patch
+changes colors only: progress values, compilation, game artwork and the existing loading lifecycle stay
+under the emulator’s control. Standalone launches retain the upstream appearance. See
+[loading UI coverage and verification](../docs/LOADING-THEMES.md). Rebuild the patched core to use this feature.
