@@ -827,8 +827,9 @@ Window {
         // the game that keeps running behind the home screen, first, like the PS3's
         if (launcher.running && runningGame) {
             let g = runningGame
-            gameItems.push({ title: g.title, desc: qsTr("Running"), icon: g.icon || ic("it_games"), wide: !!g.icon && wideIcon(g), badge: qsTr("Running"),
+            gameItems.push({ title: g.title, desc: qsTr("Running"), icon: g.icon || ic("it_games"), wide: !!g.icon && wideIcon(g), badge: qsTr("Running"), running: true, console: g.console || "PS3",
                              pic: g.pic || "",
+                             info: function() { dialog.show(qsTr("Information"), gameInfo(g)) },
                              action: resumeGame,
                              options: function() { return [{ title: qsTr("Resume Game"), action: resumeGame },
                                                            { title: qsTr("Close Game"), action: closeGame }] } })
@@ -844,8 +845,12 @@ Window {
         // Modern dashboards show games directly in their software strip. The XMB
         // retains its original console folders; both paths use the same game actions.
         if (activeTheme !== "ps3") {
-            gameItems = gameItems.filter(function(item) { return item.badge === qsTr("Running") })
-            for (var gameIndex = 0; gameIndex < games.count; gameIndex++) gameItems.push(gameItem(games.get(gameIndex)))
+            gameItems = gameItems.filter(function(item) { return !!item.running })
+            for (var gameIndex = 0; gameIndex < games.count; gameIndex++) {
+                var listedGame = games.get(gameIndex)
+                if (launcher.running && runningGame && listedGame.serial === runningGame.serial) continue
+                gameItems.push(gameItem(listedGame))
+            }
         }
         var pending = Object.keys(gameUpdates.available).length
         // the library-wide items follow the consoles
@@ -1097,6 +1102,7 @@ Window {
         Item {
             id: stage
             objectName: "consoleStage"
+            clip: true
             readonly property real s: Math.min(root.width / 1920, root.height / 1080)
             width: 1920; height: 1080
             x: (root.width - width * s) / 2
@@ -1151,6 +1157,7 @@ Window {
                 id: dashboard
                 anchors.fill: parent
                 theme: root.activeTheme
+                animate: root.active && !launcher.running
                 userName: system.onlineName || online.steamName || qsTr("User")
                 avatar: root.avatarUrl(prefs.avatar)
                 navigation: xmb

@@ -118,6 +118,12 @@ Item {
                 verify(tile.border.width > 0)
                 verify(tile.border.color.toString() !== tile.color.toString())
             }
+            if (home.nintendo) {
+                var ring = findChild(home, "categoryFocusRing" + navigation.cat)
+                verify(ring !== null); compare(ring.border.width, 0)
+                home.input("up"); compare(ring.border.width, 4)
+                home.input("accept"); compare(ring.border.width, 0)
+            }
         }
         function test_mouse_data() { return test_themes_data() }
         function test_mouse(data) {

@@ -8,6 +8,7 @@ Item {
     required property var navigation
     property string userName: qsTr("User")
     property string avatar: ""
+    property bool animate: true
     signal navigate(string button)
     ThemePalette { id: themeStyle; theme: home.theme }
     readonly property bool nintendo: themeStyle.nintendo
@@ -76,9 +77,26 @@ Item {
     Rectangle {
         anchors.fill: parent; visible: themeStyle.ps4
         gradient: Gradient {
-            GradientStop { position: 0; color: "#062974" }
-            GradientStop { position: .65; color: "#0955c0" }
-            GradientStop { position: 1; color: "#062168" }
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0; color: "#15548d" }
+            GradientStop { position: .55; color: "#062972" }
+            GradientStop { position: 1; color: "#021647" }
+        }
+    }
+    Repeater {
+        model: themeStyle.ps4 ? 24 : 0
+        delegate: Rectangle {
+            id: bubble
+            required property int index
+            readonly property real baseY: (index * 197) % 1080
+            x: (index * 283) % 1920; y: baseY
+            width: 6 + index % 5 * 5; height: width; radius: width / 2
+            color: "#b5dfff"; opacity: .04 + .015 * (index % 5); antialiasing: true
+            SequentialAnimation on y {
+                running: home.visible && home.animate; loops: Animation.Infinite
+                NumberAnimation { from: bubble.baseY; to: bubble.baseY - 70; duration: 19000 + bubble.index * 173; easing.type: Easing.InOutSine }
+                NumberAnimation { from: bubble.baseY - 70; to: bubble.baseY; duration: 19000 + bubble.index * 173; easing.type: Easing.InOutSine }
+            }
         }
     }
     Image {
@@ -113,9 +131,10 @@ Item {
     Item {
         id: categories
         x: home.margin
-        y: home.nintendo ? 810 : themeStyle.ps5 ? 100 : 165
+        y: home.nintendo ? 810 : themeStyle.ps5 ? 100 : themeStyle.ps4 ? (home.categoryFocus ? 300 : 122) : 165
         width: home.width - 2 * home.margin
-        height: home.nintendo ? 118 : themeStyle.blades ? 746 : 74
+        height: home.nintendo ? 118 : themeStyle.blades ? 746 : themeStyle.ps4 && home.categoryFocus ? 150 : 74
+        Behavior on y { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
         Repeater {
             model: home.navigation.cats
             delegate: Rectangle {
@@ -135,7 +154,7 @@ Item {
                 Behavior on x { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
                 Image {
                     visible: themeStyle.ps4 || themeStyle.ps5
-                    anchors.horizontalCenter: parent.horizontalCenter; y: 0; width: 42; height: 42
+                    anchors.horizontalCenter: parent.horizontalCenter; y: 0; width: themeStyle.ps4 && home.categoryFocus && category.selected ? 80 : 42; height: width
                     source: category.modelData.icon || ""; fillMode: Image.PreserveAspectFit; mipmap: true
                     opacity: category.selected ? 1 : .65
                 }
@@ -145,9 +164,10 @@ Item {
                     color: category.selected ? themeStyle.accent : "transparent"
                 }
                 Rectangle {
+                    objectName: "categoryFocusRing" + category.index
                     visible: home.nintendo; anchors.horizontalCenter: parent.horizontalCenter
                     width: 84; height: 84; radius: 42
-                    color: themeStyle.lightSwitch ? "#777777" : "#414141"; border.width: category.selected ? 4 : 0; border.color: themeStyle.accent
+                    color: themeStyle.lightSwitch ? "#777777" : "#414141"; border.width: category.selected && home.categoryFocus ? 4 : 0; border.color: themeStyle.accent
                     Image { anchors.centerIn: parent; width: 48; height: 48; source: category.modelData.icon || ""; fillMode: Image.PreserveAspectFit; mipmap: true }
                 }
                 Text {
@@ -160,7 +180,7 @@ Item {
                     font.pixelSize: home.nintendo ? 23 : themeStyle.metro ? 34 : 28
                     y: home.nintendo ? 86 : 0
                     horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight
-                    anchors.verticalCenterOffset: home.nintendo ? 49 : themeStyle.ps4 || themeStyle.ps5 ? 27 : 0
+                    anchors.verticalCenterOffset: home.nintendo ? 49 : themeStyle.ps4 && home.categoryFocus ? 65 : themeStyle.ps4 || themeStyle.ps5 ? 27 : 0
                 }
                 MouseArea {
                     enabled: !themeStyle.blades || !category.selected
@@ -171,11 +191,12 @@ Item {
         }
     }
     Text {
-        x: themeStyle.blades ? home.margin + 330 : themeStyle.one ? home.margin + 230 : home.margin
-        y: themeStyle.ps5 ? 630 : home.nintendo ? 245 : themeStyle.blades ? 245 : 255
+        x: themeStyle.ps4 ? home.margin + 564 : themeStyle.blades ? home.margin + 330 : themeStyle.one ? home.margin + 230 : home.margin
+        y: themeStyle.ps5 ? 630 : themeStyle.ps4 ? 550 : home.nintendo ? 245 : themeStyle.blades ? 245 : 255
         width: home.width - x - home.margin - 80; height: themeStyle.ps5 ? 156 : 76
         text: themeStyle.blades && home.navigation.cats[home.navigation.cat] ? home.navigation.cats[home.navigation.cat].name : home.current ? home.current.title : qsTr("No items available")
-        color: themeStyle.text; font.pixelSize: themeStyle.ps5 ? 62 : themeStyle.blades ? 42 : 36
+        color: themeStyle.text; font.pixelSize: themeStyle.ps5 ? 62 : themeStyle.ps4 ? 52 : themeStyle.blades ? 42 : 36
+        visible: !themeStyle.ps4 || !home.categoryFocus
         font.weight: Font.Light; elide: Text.ElideRight
         maximumLineCount: themeStyle.ps5 ? 2 : 1; wrapMode: Text.Wrap
     }
@@ -183,10 +204,12 @@ Item {
         id: shelf
         objectName: "softwareShelf"
         x: themeStyle.blades ? home.margin + 330 : themeStyle.one ? home.margin + 230 : home.margin
-        y: themeStyle.ps5 ? 216 : home.nintendo ? 340 : 350
+        y: themeStyle.ps5 ? 216 : themeStyle.ps4 ? (home.categoryFocus ? 620 : 202) : home.nintendo ? 340 : 350
         width: themeStyle.blades ? 760 : home.width - x - home.margin
         height: themeStyle.ps5 ? 170 : home.nintendo ? 390 : themeStyle.one ? 605 : 530
         clip: true
+        opacity: themeStyle.ps4 && home.categoryFocus ? .55 : 1
+        Behavior on y { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
         WheelHandler {
             onWheel: function(event) {
                 home.categoryFocus = false
@@ -206,9 +229,9 @@ Item {
                 readonly property bool inView: home.grid ? Math.floor(index / home.groupSize) === Math.floor(home.selected / home.groupSize) : x + width > 0 && x < shelf.width && y + height > 0 && y < shelf.height
                 visible: inView
                 readonly property int delta: index - home.selected
-                width: themeStyle.blades ? shelf.width : home.grid ? metroRect.width : home.nintendo ? 362 : themeStyle.ps5 ? (selected ? 150 : 112) : (selected ? 380 : 290)
+                width: themeStyle.blades ? shelf.width : home.grid ? metroRect.width : home.nintendo ? 362 : themeStyle.ps5 ? (selected ? 150 : 112) : (selected && !home.categoryFocus ? 340 : 200)
                 height: themeStyle.blades ? 92 : home.grid ? metroRect.height : home.nintendo ? 362 : themeStyle.ps5 ? width : width
-                x: themeStyle.blades ? 0 : home.grid ? metroRect.x : themeStyle.ps5 ? (delta < 0 ? delta * 126 : delta === 0 ? 0 : 166 + (delta - 1) * 126) : home.nintendo ? delta * 386 : delta < 0 ? delta * 308 : delta === 0 ? 0 : 398 + (delta - 1) * 308
+                x: themeStyle.blades ? 0 : home.grid ? metroRect.x : themeStyle.ps5 ? (delta < 0 ? delta * 126 : delta === 0 ? 0 : 166 + (delta - 1) * 126) : home.nintendo ? delta * 386 : 200 + (delta < 0 ? delta * 216 : delta === 0 ? 0 : (home.categoryFocus ? 216 : 356) + (delta - 1) * 216)
                 y: themeStyle.blades ? delta * 100 : home.grid ? metroRect.y : 8
                 radius: themeStyle.ps5 ? 18 : themeStyle.blades ? 9 : 0
                 color: themeStyle.blades ? (selected ? "#5d9630" : "transparent") : themeStyle.xbox ? "#107c10" : home.nintendo ? (themeStyle.lightSwitch ? "#656565" : "#414141") : "#16223b"
@@ -267,19 +290,20 @@ Item {
         Text { x: 25; y: 375; width: parent.width - 50; height: 90; text: home.current ? (home.current.desc || "") : ""; color: themeStyle.muted; font.pixelSize: 23; wrapMode: Text.Wrap; maximumLineCount: 3; elide: Text.ElideRight }
     }
     Text {
-        x: themeStyle.blades ? home.margin + 330 : home.margin
-        visible: !themeStyle.blades
-        y: themeStyle.ps5 ? 800 : home.nintendo ? 730 : themeStyle.one ? 960 : 904
+        x: themeStyle.ps4 ? home.margin + 564 : themeStyle.blades ? home.margin + 330 : home.margin
+        visible: !themeStyle.blades && (!themeStyle.ps4 || !home.categoryFocus)
+        y: themeStyle.ps4 ? 650 : themeStyle.ps5 ? 800 : home.nintendo ? 730 : themeStyle.one ? 960 : 904
         width: home.width - x - home.margin; height: themeStyle.one ? 30 : 70
         text: home.current ? (home.current.desc || "") : ""
         color: themeStyle.muted; font.pixelSize: 26; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight
     }
     Rectangle {
-        visible: themeStyle.ps5 || themeStyle.ps4
-        x: home.margin; y: themeStyle.ps5 ? 910 : 780; width: themeStyle.ps5 ? 300 : 380; height: 66
+        visible: themeStyle.ps5 || (themeStyle.ps4 && !home.categoryFocus)
+        x: themeStyle.ps4 ? home.margin + 200 : home.margin; y: themeStyle.ps5 ? 910 : 550; width: themeStyle.ps5 ? 300 : 340; height: 66
         radius: themeStyle.ps5 ? 33 : 0
         color: themeStyle.ps5 ? "#ecffffff" : "#604ca0f0"
-        Text { anchors.centerIn: parent; text: home.current && home.current.console ? qsTr("Play Game") : qsTr("Open"); color: themeStyle.ps5 ? "#111820" : "white"; font.pixelSize: 29 }
+        border.width: themeStyle.ps4 ? 3 : 0; border.color: themeStyle.accent
+        Text { anchors.centerIn: parent; text: home.current && home.current.running ? qsTr("Resume Game") : home.current && home.current.console ? (themeStyle.ps4 ? qsTr("Start") : qsTr("Play Game")) : qsTr("Open"); color: themeStyle.ps5 ? "#111820" : "white"; font.pixelSize: 29 }
         MouseArea { anchors.fill: parent; enabled: !!home.current; onClicked: home.navigate("accept") }
     }
     Rectangle { x: home.margin; y: 990; width: home.width - home.margin * 2; height: 1; color: themeStyle.nintendo ? "#666666" : "#30757575" }

@@ -8,7 +8,7 @@ Item {
     width: 1920; height: 1080
     Background { anchors.fill: parent; visible: home.theme === "ps3"; tint: "#3c6cd8"; running: false; shade: .15 }
     Xmb { id: nav; anchors.fill: parent; visible: home.theme === "ps3"; cat: 3 }
-    ConsoleHome { visible: theme !== "ps3"; id: home; anchors.fill: parent; navigation: nav; theme: "ps4" }
+    ConsoleHome { visible: theme !== "ps3"; id: home; anchors.fill: parent; navigation: nav; animate: false; theme: "ps4" }
     TestCase {
         name: "Capture"
         when: windowShown

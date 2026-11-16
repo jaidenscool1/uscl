@@ -89,7 +89,7 @@ network sessions or update installation. Final visual matching, loudness/timbre 
 behaviour need in-person checks on the target display and OS. These are inspired implementations, not
 pixel-identical console system software.
 
-Visual references consulted: [PS3 XMB](https://www.xtremeps3.com/2007/11/07/ps3-firmware-20-available-to-download-tomorrow/),
+Visual references consulted: [PS4 system software 4.00 UI](https://blog.de.playstation.com/2016/09/12/ps4-systemsoftware-update-4-00-ab-morgen-verfgbar/), [PS3 XMB](https://www.xtremeps3.com/2007/11/07/ps3-firmware-20-available-to-download-tomorrow/),
 [Xbox 360 blades](https://digiex.net/threads/use-the-xbox-360-blades-dashboard-version-1888-on-a-jtag.6802/),
 [PS5 UI](https://blog.playstation.com/2020/10/15/first-look-playstation-5s-next-generation-user-experience/),
 and [Nintendo Switch 2 HOME/settings](https://support.nintendo.com/hk/switch2/mastery/accessibility/index.html).
