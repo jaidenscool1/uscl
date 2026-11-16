@@ -12,7 +12,7 @@ Host: driver 615.78.08 (open kernel module), Arch Linux.
 | Gate 1 (driver access) | **Pass** on hardware |
 | Gate 2 (method compatibility) | **Pass (real data)**: every 3D/compute/copy method in a captured MKW frame is a named Ampere method, plus three private 3D methods (0xF74/0xF7C/0xF80) that ADA_A accepts; only host-class changes needed (Tegra syncpoints 0x70/0x74 dropped) |
 | Gate 3 (shader compatibility) | **Pass (decode level)**; guest compute SASS has started to **execute** on the RTX 4060 (Phase 1), no per-instruction failure seen yet |
-| Phase 1 (capture + replay one frame) | **In progress**: capture probe done (`probes/0003`); replay runs the state restore, 57 frame entries and 15 of the 16 compute launches of entry 58 (guest macros, draws and compute kernels on the host); the 16th kernel raises TEX FORMAT (see Phase 1) |
+| Phase 1 (capture + replay one frame) | **Whole frame replays** (third pass): all 1216 entries of capture `mkw10` (3 channels, 2 presents) run on the RTX 4060 with no Xid, ~205 ms of GPU wait; the output target is a recognisable MKW course image (road, bridge, buildings) but hazy and without karts/HUD. Not yet compared pixel-for-pixel: Eglantine's end dump has no copy of the GPU-only targets (see "Third pass") |
 | New: texture formats | **Open, needs work**: 28% of MKW's texture headers are ASTC (8x8, 6x6, 4x4, 5x5); the RTX 4060 has no ASTC sampling (`textureCompressionASTC_LDR` false), so passthrough needs ASTC transcoding + header repointing |
 | Gates 4-6 | not started (Phase 1 uses pinned host memory at the guest's own VAs, pitch kind only: first evidence for gate 4) |
 
@@ -85,7 +85,7 @@ Measured:
 
 ## Phase 1: capture and replay one MKW frame (2026-11-16, in progress)
 
-### Capture: `probes/0003` (`EDEN_NX2_PT_CAPTURE=<dir>`, fork branch `uscl-ptcap`, commit eef4f7862)
+### Capture: `probes/0003` (`EDEN_NX2_PT_CAPTURE=<dir>`, fork branch `uscl-ptcap`, commit 9cc99e22d)
 Applies with `git am` on 0001-0013 (verified: same tree as the branch). Touch `<dir>/capture.now` in a race;
 recording starts at the next present and covers two presents. Writes (layouts in `nx2_pt_capture.cpp`):
 `maps.txt` + `dev-*.bin` (GPU VA map and device memory at the start, after flushing every GPU-dirty mapping
@@ -94,9 +94,13 @@ back to guest memory: without the flush, data the GPU wrote in earlier frames is
 Ampere registers (`native_registers`, not the Kepler-layout `regs`), MME code + start addresses for 3D and
 compute, MME data RAM, 3D cbuf bindings), `stream.bin` (every entry as executed, prefetched lists as address
 0, each entry once even when resumed after an acquire), `qmds.bin` (inline QMDs Eglantine writes) and
-`mme.txt` (compute macro trace: calls, register reads, emits). Run with `bench/runs.py` + a watcher that
+`mme.txt` (compute macro trace: calls, register reads, emits) and `kinds.txt` (third pass: the PTE kinds the
+guest asked for since boot, `gpu size kind fallback`, from nx2:gpu 212/216; 211 maps and 213 unmaps forget a
+range). Run with `bench/runs.py` + a watcher that
 touches the file 20 s into the race; `WATCH_STALL_S=300` (the dump stalls the GPU front ~8 s per dump).
-A capture is ~48 GB (24 GB per dump; 3.9 GB of it nonzero). Captures: `~/.local/share/uscl/ptcap/mkw8`.
+A capture is ~48 GB (24 GB per dump; 3.9 GB of it nonzero). Current capture: `~/.local/share/uscl/ptcap/mkw10`
+(third pass; mkw8 and mkw9 deleted: mkw8 had no kinds, mkw9 the wrong compute MME image on channels 2/3).
+Game path for `runs.py`: `USCL_GAME=".../GAME_DUMPS/Switch 2/Mario Kart World NS2/Mario Kart World/MKW [ROM]/base/exefs/main"`.
 
 ### Tools: `uscl-eglantine/passthrough/ptcap.py` (+ `pt_replay`)
 - `ptcap.py stats <cap>`: methods per class with mesa names. `dump <cap> <entry> [n]`: decoded methods.
@@ -105,7 +109,10 @@ A capture is ~48 GB (24 GB per dump; 3.9 GB of it nonzero). Captures: `~/.local/
 - `ptcap.py build <cap>` writes `<cap>/replay/{plan.txt,push.bin,targets.txt}`. `PT_SPLIT=<entry>` cuts that
   entry into one fenced sub-entry per macro call / launch (numbered entry*1000+n) to bisect a failure;
   `PT_NO_END=1` ignores the end-of-frame dump; `PT_MME=trace`, `PT_NODEP=1`, `PT_ASTC=dummy`, `PT_TSC_NODC`,
-  `PT_TIC_COPY`, `PT_DRAM_CHECK` are replay patches/checks explained below; `pt_replay` takes `PT_KIND=<hex>`.
+  `PT_TIC_COPY`, `PT_TIC_SET=<idx>:<FIELD>=<val>` (one texture header field, names from clc797tex.h),
+  `PT_KIND_RANGES=<va>:<size>:<kind>`, `PT_DRAM_CHECK` are replay patches/checks explained below; header and
+  sampler pool patches now compose (one copy per pool; before, `PT_ASTC=dummy` silently undid `PT_TIC_COPY`).
+  `pt_replay` takes `PT_KIND=<hex>` (all guest memory) and plan lines `mapk <va> <size> <block> <off> <kind>`.
 - `pt_replay <cap>/replay [entries] [va:size:file ...]`: maps the plan, runs entries one at a time, readbacks
   after the run or a timeout. Each failure so far killed only its own channel (Xid 11/13/31 on pt_replay's
   channel); the probe's `clear` test passes after every one and the desktop never noticed.
@@ -116,7 +123,8 @@ What the replay does (all in `ptcap.py build`, the C++ only executes the plan):
   VAs 0x114b01b000..0x86a91c6000, all < 1 TiB). Real backing for 2 MiB device chunks with data (~2200, 4.4 GB)
   plus every chunk the frame renders, copies or uploads into; one 64 MiB zero block aliased under all other
   mapped pages so nothing can fault. Host-owned buffers at 0xF0_0000_0000+ (local memory) and 0xF8_0000_0000+
-  (channels). All guest kinds are 0 (pitch, uncompressed). BAR1 is 256 MiB, hence host memory, not vidmem.
+  (channels). PTE kinds from `kinds.txt` (the incompressible fallback for compressible kinds; Turing+ kind numbers
+  are the same on T239 and Ada), pitch elsewhere. BAR1 is 256 MiB, hence host memory, not vidmem.
 - **Channels**: one TSG + SUBCONTEXT_SYNC ctxshare + GPFIFO per guest channel (3: one with 3D/compute/I2M/2D/
   copy, two compute-only), all on one VA space; entries run in recorded order, each fenced and waited for.
 - **State restore** per channel: SET_OBJECT with host classes, each class's MME program and start addresses,
@@ -143,30 +151,69 @@ Build flags used for the furthest run: `PT_NO_END=1 PT_MME=trace PT_NODEP=1 PT_A
    QMD one word late (word 0 = the `SET_INLINE_QMD_ADDRESS_B` value). Same macro code, parameters (53 words
    in the stream) and data RAM (round-tripped, `PT_DRAM_CHECK=1`); cause not found. `nvrm_probe macro` (the
    guest macro on a bare channel) launched but left its slot empty: inconclusive. **Workaround**
-   `PT_MME=trace`: calls of macro starts in `PT_MME_STARTS` (default 0x281) are replaced by the methods
-   Eglantine's MME emitted (`mme.txt`). Not for 0x2ca: Eglantine's JIT passes part of its upload straight
-   through without the emit hook (3 of 18 words traced). On the compute-only channels the traced starts don't
-   match the captured positions (the split front keeps its own): those keep the host MME.
+   `PT_MME=trace`: macro calls whose trace emits a whole inline QMD (64 `LOAD_INLINE_QMD_DATA` words) are
+   replaced by the methods Eglantine's MME emitted (`mme.txt`), on every channel (third pass: chosen by
+   content, not start address). Other macros keep the host MME: their traces can be incomplete (Eglantine's
+   JIT passes part of macro 0x2ca's upload straight through without the emit hook, 3 of 18 words traced).
 3. QMD dependencies: NVN counts finished compute work into a 16-slot ring of barrier QMDs (each QMD's
    `DEPENDENT_QMD0` decrements one, `SEND_SIGNALING_PCAS2_B` 0xC increments it). The ring's counters come from
    Eglantine's scheduler, not hardware state (SKEDCHECK36 underflow). `PT_NODEP=1` drops both (the entries run
-   serialized; the barriers only release semaphores whose waits are dropped anyway).
+   serialized; the barriers only release semaphores whose waits are dropped anyway). Third pass: also
+   DECREMENT_DEPENDENCE (action 7), and every QMD launched from memory (SEND_PCAS_A + a schedule action: NVN's
+   barrier QMDs, `DEPENDENCE_COUNTER` 2 in memory) gets `DEPENDENCE_COUNTER` and `DEPENDENT_QMD0/1_ENABLE`
+   cleared in the replay's copy (otherwise it waits forever: a hang with no Xid).
 4. **ASTC** (gate-level): `PT_ASTC=dummy` replaces each ASTC header with a copy of an A8B8G8R8 one (wrong image,
    valid memory). The real fix is transcoding (RGBA8 or BC7) into host memory and repointing the headers.
-5. **Current stop**: entry 58's last compute launch (program 0x114c476100, 7x `TEX.SCR.LZ ... 0x0, 0x14,
-   ARRAY_2D`: handle at `c[0][0x50]` = TIC 0x72b4 Z16 2D_ARRAY 512x512x101, TSC 0x1c7 with depth compare on)
-   raises Xid 13 TEX FORMAT; the 15 launches before it (2D G8R8 etc.) run. Ruled out: page kind (`PT_KIND=6`
-   GENERIC_MEMORY), sampler depth compare (`PT_TSC_NODC=all`), the Z16 header itself (`PT_TIC_COPY=72b4:6fb6`,
-   an R16 2D_ARRAY header: same error), `.SCR` (nvcc emits `TEX.SCR.LL/LZ` for sm_89 itself), the operand form
-   (`0x0, 0x14` = cbuf bank, word offset, as CUDA's `0x0, 0x58`). Next: a single-kernel harness in
-   `nvrm_probe` (this QMD, its cbufs from host readbacks, both pools, the texture memory) to vary one thing at a
-   time: 2D vs ARRAY_2D instruction, header fields (layer count, mip levels), QMD texture/sampler fields.
+5. Second pass stop, **solved** in the third pass: TEX FORMAT on a Z16 texture header (below).
+
+### Third pass (2026-11-16): the whole frame replays
+Same build flags (`PT_NO_END=1 PT_MME=trace PT_NODEP=1 PT_ASTC=dummy`), capture `mkw10`:
+`ran 1219 entries, ~205 ms GPU wait in total, slowest ~17 ms`, no Xid, `nvrm_probe clear` OK after every run.
+Each fix is emulator-wide (derived from the guest's own requests or the method stream), none per game:
+1. **TEX FORMAT = PTE kind.** Ada samples depth texture headers (Z16, Z24S8 family) only from pages mapped with
+   the matching depth kind (Z16 = 1, S8Z24 = 3, ZF32_X24S8 = 4, Z24S8 = 5); ZF32 has no kind of its own and works
+   on pitch memory; color headers work on depth-kind pages (an R16 header on the Z16 pages runs). Found with
+   `PT_TIC_SET` (COMPONENTS Z16 -> R16 runs; RESERVED_ADDRESS, TILE_WIDTH_IN_GOBS, DEPTH_TEXTURE don't matter)
+   and `PT_KIND_RANGES=<texture>:<size>:1` (runs). The second pass's "header ruled out" was wrong: `PT_ASTC=dummy`
+   overwrote the `PT_TIC_COPY` pool. NVK encodes D16 the same way as the guest (TIC Z16, UNORM, R001), so the
+   header itself is valid. Eglantine maps all NX2 memory as pitch (`nvhost_as_gpu::Nx2Map`), so the probe now
+   records the guest's kinds (nx2:gpu 212 `NormalModifyMemoryKind4K`: wanted + fallback kind; 216 sparse maps):
+   MKW asks for Z16 (compressible 0xb, fallback 1) on 516 ranges, S8Z24/ZF32_X24S8 on 3, generic on the rest.
+   **For Phase 2: the passthrough backend must map guest memory with the guest's (fallback) kinds.**
+2. **Per-channel compute MME image.** Eglantine keeps one process-wide `NativeMacroContext` with a 3D image and
+   a compute image; a channel's compute macros run the compute image once that channel uploaded through the
+   compute class (the two compute-only channels: macro 57 at 0x42), else the 3D image (channel 1: 0x281). The
+   probe wrote the 3D image for every channel, so the host ran the wrong macros on channels 2/3 (a hang).
+   Fixed in the probe (`KeplerCompute::PtNativeMacroCode/Positions` follow `FrontMacroEngine/Positions`).
+3. **Trace substitution by content.** A traced macro call is replaced when its trace is complete: every
+   inline-to-memory upload has all its data words and every inline QMD all 64 (300 calls in mkw10; macro 0x2ca's
+   partial upload still runs on the host MME). Traced methods now go through the same rewrite as the stream
+   (dependence filter, written-memory tracking). Calls pair up with `mme.txt` by count per entry, not start address.
+4. **Report releases to unmapped VAs dropped.** NVN's compute macro path emits `SET_REPORT_SEMAPHORE` A/B = 0,
+   D = release one word: GPU VA 0, which no guest mapping covers (harmless on the console); on the host it is
+   Xid 31 (HUBCLIENT_FE fault @ 0x0) or a stalled channel.
+5. **Macro calls cut by an entry boundary.** A method run can continue into the channel's next GPFIFO entry
+   (MKW: `CALL_MME_MACRO(40)` ends one entry, its data starts the next); the replay's per-entry fence cut it:
+   Xid 13 MISSING_MACRO_DATA. The trailing macro call is carried into the channel's next entry.
+
+The image: `out_host` (target 0x210c51a000, 2560x1440 A8B8G8R8_SRGB, last drawn in entries 1146-1214; the same
+picture is in 0x815f0d0000, A8B8G8R8) shows the course (road, arch bridge, crane, buildings) with a strong
+white haze and no karts or HUD. The HDR target 0x811e4ff000 stays zero (bound but not drawn). Suspects, in
+order: ASTC placeholders (`PT_ASTC=dummy` replaces 38k headers), history/exposure buffers from the start
+snapshot, the HUD and karts drawn into a target not read back yet. Eglantine's end dump holds zeros for these
+targets (GPU-only regions are not written back to guest memory), and `bench-<label>.png` is taken before the
+race, so there is no reference for the captured frame yet.
+
+Next:
+- A reference image: let the capture watcher take a debug-server screenshot (`tools/nx2/debug_mcp.py`
+  `screenshot`) right after touching `capture.now` (the dump stalls the game on the captured frame).
+- Read back the 640x360 targets and the frame's last targets in drawing order (`targets.txt`) to find where
+  karts/HUD go; then try `PT_ASTC` off on a few headers to see how much of the haze is ASTC.
+- ASTC transcoding plan (RGBA8 or BC7 into host memory, headers repointed).
 
 Also open:
 - Memory timing: the end dump poisons rings reused within the frame, so `PT_NO_END=1`; per-entry deltas for
   data the CPU writes during the frame are not built.
-- Then run to the end and compare the last color target in `targets.txt` (2560x1440 A8B8G8R8_SRGB) with
-  Eglantine's output (`ptcap.py image`).
 
 Facts learned on the way:
 - MKW frame: ~1100 entries over 2 presents, ~100k words; 3D draws to 2560x1440 (HDR BF10GF11RF11 scene, sRGB

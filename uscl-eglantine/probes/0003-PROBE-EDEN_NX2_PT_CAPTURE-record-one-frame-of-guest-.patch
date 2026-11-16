@@ -1,4 +1,4 @@
-From eef4f78628a3c421d3789e02e30cafcc2b19264f Mon Sep 17 00:00:00 2001
+From 9cc99e22dbc785f11f30bcc6ca6b6e87621f9628 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 14:42:31 -0700
 Subject: [PATCH] PROBE: EDEN_NX2_PT_CAPTURE, record one frame of guest GPU
@@ -9,25 +9,31 @@ registers, MME code/start addresses/data RAM, 3D constant buffer bindings), the 
 memory at the start (after flushing GPU-dirty mappings) and at the end, and the inline QMDs the compute
 engine writes. Touch <dir>/capture.now in game: records from the next present for two presents.
 
+Also records the PTE kinds the guest asks for (nx2:gpu 212 modify, 216 sparse map; 211 maps and 213
+unmaps forget them) as kinds.txt: Eglantine maps everything as pitch, but the host GPU samples depth
+texture headers only from pages of the matching depth kind. Each channel's compute MME code and start
+addresses are the image its macros run (the compute one once the channel uploaded through the compute
+class, else the 3D one), not always the 3D image.
+
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- src/core/hle/service/nx2_gsv.h            |   2 +
+ src/core/hle/service/nx2_gsv.h            |  10 +
  src/video_core/CMakeLists.txt             |   2 +
  src/video_core/dma_pusher.cpp             |   8 +
  src/video_core/dma_pusher.h               |   2 +
- src/video_core/engines/kepler_compute.cpp |  32 +-
+ src/video_core/engines/kepler_compute.cpp |  52 ++-
  src/video_core/engines/kepler_compute.h   |   8 +
  src/video_core/engines/puller.h           |   2 +
  src/video_core/memory_manager.cpp         |   4 +
  src/video_core/memory_manager.h           |   2 +
- src/video_core/nx2_pt_capture.cpp         | 360 ++++++++++++++++++++++
- src/video_core/nx2_pt_capture.h           |  27 ++
- 11 files changed, 446 insertions(+), 3 deletions(-)
+ src/video_core/nx2_pt_capture.cpp         | 380 ++++++++++++++++++++++
+ src/video_core/nx2_pt_capture.h           |  30 ++
+ 11 files changed, 497 insertions(+), 3 deletions(-)
  create mode 100644 src/video_core/nx2_pt_capture.cpp
  create mode 100644 src/video_core/nx2_pt_capture.h
 
 diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
-index 8f7384405..515ed56ab 100644
+index 8f7384405..96a570692 100644
 --- a/src/core/hle/service/nx2_gsv.h
 +++ b/src/core/hle/service/nx2_gsv.h
 @@ -36,6 +36,7 @@
@@ -38,7 +44,43 @@ index 8f7384405..515ed56ab 100644
  #include "core/core.h"
  #include "core/device_memory.h"
  #include "video_core/nx2_diag.h"
-@@ -1813,6 +1814,7 @@ private:
+@@ -544,6 +545,7 @@ private:
+             // made there.
+             const u64 cpu = it->second.address + c;
+             Nvidia::Devices::Nx2GpuMemoryRegistry::Get().MapAt(a, cpu, b - a + 1);
++            Tegra::PtCapture::NoteGuestKind(a, b - a + 1, 0xff, 0xff);
+         } else {
+             LOG_WARNING(Service, "nx2:gpu 211 map of unknown handle {}", handle);
+         }
+@@ -563,6 +565,9 @@ private:
+         const u32 kind = w[7] & 0xff;
+         LOG_DEBUG(Service, "nx2:gpu 212 modify [{:#x}, {:#x}] kind={:#x} fallback={:#x} slot={}",
+                   first, last, kind, w[8] & 0xff, w[10]);
++        if (last > first) {
++            Tegra::PtCapture::NoteGuestKind(first, last - first + 1, kind, w[8] & 0xff);
++        }
+         EventFor(w[10])->Signal(system.Kernel());
+         TipcReplyWords(ctx, {kind});
+     }
+@@ -576,6 +581,7 @@ private:
+         LOG_DEBUG(Service, "nx2:gpu 213 unmap [{:#x}, {:#x}] slot={}", first, last, w[8]);
+         if (last > first) {
+             Nvidia::Devices::Nx2GpuMemoryRegistry::Get().Unmap(first, last - first + 1);
++            Tegra::PtCapture::NoteGuestKind(first, last - first + 1, 0xff, 0xff);
+         }
+         SignalAfterGpu(w[8]);
+         IPC::ResponseBuilder rb{ctx, 2};
+@@ -762,6 +768,9 @@ private:
+                 SparseMapRequest request;
+                 std::memcpy(&request, data.data() + i * sizeof(SparseMapRequest), sizeof(request));
+                 kinds[i] = request.kind;
++                Tegra::PtCapture::NoteGuestKind(request.gpu_address, request.size,
++                                                request.memory_handle ? request.kind : 0xff,
++                                                request.fallback_kind);
+                 ApplySparseMapRequest(request);
+             }
+             // The first request, then at most every 30 s.
+@@ -1813,6 +1822,7 @@ private:
          ++m_presents;
          VideoCommon::Nx2GpuLatency::NotePresent();
          Core::g_nx2_present_count.fetch_add(1, std::memory_order_relaxed);
@@ -106,7 +148,7 @@ index ec53d4625..6d7f294b5 100644
      bool IsGpuWrittenCommands(GPUVAddr address, size_t size);
      /// Copies the list's words from memory again, as of suspension count `now`.
 diff --git a/src/video_core/engines/kepler_compute.cpp b/src/video_core/engines/kepler_compute.cpp
-index 53e7e324d..eb9d9028a 100644
+index 53e7e324d..afd5e529e 100644
 --- a/src/video_core/engines/kepler_compute.cpp
 +++ b/src/video_core/engines/kepler_compute.cpp
 @@ -33,6 +33,7 @@
@@ -155,7 +197,34 @@ index 53e7e324d..eb9d9028a 100644
          rasterizer->AccelerateInlineToMemory(address, 256,
              std::span<const u8>{reinterpret_cast<const u8*>(native_registers.data() + 0xc8), 256});
          if ((control & (1U << 24)) || !(native_registers[0xcc] & (1U << 12))) {
-@@ -2145,10 +2160,21 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
+@@ -2028,6 +2043,26 @@ void KeplerCompute::FrontApply(FrontState& fs, u32 method, u32 argument) {
+     }
+ }
+ 
++// PROBE (EDEN_NX2_PT_CAPTURE): as FrontMacroEngine / FrontMacroPositions choose.
++std::span<const u32> KeplerCompute::PtNativeMacroPositions() const {
++    const bool uploaded = front ? front->compute_uploaded : native_compute_uploaded;
++    if (native_context) {
++        return uploaded ? std::span<const u32>{native_context->compute_positions}
++                        : std::span<const u32>{native_context->positions};
++    }
++    return native_macro_positions;
++}
++
++std::span<const u32> KeplerCompute::PtNativeMacroCode() const {
++    const bool uploaded = front ? front->compute_uploaded : native_compute_uploaded;
++    if (native_context) {
++        return uploaded ? std::span<const u32>{native_context->compute_engine.native_code}
++                        : std::span<const u32>{native_context->engine.native_code};
++    }
++    const MacroEngine* macro = front ? front->macro : native_macro;
++    return macro ? std::span<const u32>{macro->native_code} : std::span<const u32>{};
++}
++
+ MacroEngine& KeplerCompute::FrontMacroEngine(FrontState& fs) {
+     if (native_context) {
+         return fs.compute_uploaded ? native_context->compute_engine : native_context->engine;
+@@ -2145,10 +2180,21 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
          macro.native_interpreter.active_dram = native_data_ram;
      }
      VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Macro};
@@ -180,21 +249,21 @@ index 53e7e324d..eb9d9028a 100644
              return false;
          }
 diff --git a/src/video_core/engines/kepler_compute.h b/src/video_core/engines/kepler_compute.h
-index 5e438a477..91b32a0c4 100644
+index 5e438a477..6508f3357 100644
 --- a/src/video_core/engines/kepler_compute.h
 +++ b/src/video_core/engines/kepler_compute.h
 @@ -404,6 +404,14 @@ private:
      bool native_mode{};
  
  public:
-+    /// PROBE (EDEN_NX2_PT_CAPTURE): the compute macros' start addresses.
-+    std::span<const u32> PtNativeMacroPositions() const { return native_macro_positions; }
++    /// PROBE (EDEN_NX2_PT_CAPTURE): the compute macros' start addresses, as the macros run them (the
++    /// split front's choice when it is active: the compute image once this channel uploaded through the
++    /// compute class, else the 3D one).
++    std::span<const u32> PtNativeMacroPositions() const;
 +    /// PROBE (EDEN_NX2_PT_CAPTURE): the native (Ampere compute class) method registers.
 +    const std::array<u32, 0x1000>& PtNativeRegisters() const { return native_registers; }
 +    /// PROBE (EDEN_NX2_PT_CAPTURE): the MME code the compute macros run (their own once uploaded).
-+    std::span<const u32> PtNativeMacroCode() const {
-+        return native_macro ? std::span<const u32>{native_macro->native_code} : std::span<const u32>{};
-+    }
++    std::span<const u32> PtNativeMacroCode() const;
      /// Whether this method may write guest memory: dispatches, uploads and reports. Plain native
      /// state does not.
      [[nodiscard]] bool MayWriteMemory(u32 method) const {
@@ -262,15 +331,16 @@ index 9e208af29..9559603af 100644
                             u64 page_bits_ = 12);
 diff --git a/src/video_core/nx2_pt_capture.cpp b/src/video_core/nx2_pt_capture.cpp
 new file mode 100644
-index 000000000..10b70d147
+index 000000000..3d07e0ff1
 --- /dev/null
 +++ b/src/video_core/nx2_pt_capture.cpp
-@@ -0,0 +1,360 @@
+@@ -0,0 +1,380 @@
 +// SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
 +// PROBE: see nx2_pt_capture.h. Files in <dir>:
 +//   maps.txt        "mm gpu dev size kind sparse" (hex) for every GPU mapping when recording starts
++//   kinds.txt       "gpu size kind fallback_kind" (hex): the PTE kinds the guest asked for (NoteGuestKind)
 +//   dev-<addr>.bin  device memory, one file per coalesced device range of those mappings
 +//   state-<ch>.bin  per channel, when its first entry is recorded (layout in WriteState)
 +//   stream.bin      entries in execution order: u32 'PTE1', s32 channel, u64 gpu address,
@@ -320,6 +390,7 @@ index 000000000..10b70d147
 +    std::mutex mutex;
 +    std::filesystem::path dir;
 +    std::map<const void*, std::map<u64, Range>> maps;
++    std::map<u64, Range> guest_kinds; // dev = the fallback kind
 +    std::atomic<Phase> phase{Phase::Idle};
 +    u64 presents = 0, first_present = 0;
 +    std::FILE* stream = nullptr;
@@ -405,6 +476,12 @@ index 000000000..10b70d147
 +    if (maps_file) {
 +        std::fclose(maps_file);
 +    }
++    if (std::FILE* f = std::fopen((s.dir / fmt::format("{}kinds.txt", prefix)).string().c_str(), "w")) {
++        for (const auto& [gpu, r] : s.guest_kinds) {
++            fmt::print(f, "{:x} {:x} {:x} {:x}\n", gpu, r.size, r.kind, r.dev);
++        }
++        std::fclose(f);
++    }
 +    std::sort(dev.begin(), dev.end());
 +    std::vector<std::pair<u64, u64>> merged;
 +    for (const auto& d : dev) {
@@ -461,6 +538,18 @@ index 000000000..10b70d147
 +    State& s = Get();
 +    std::scoped_lock lk{s.mutex};
 +    EraseRange(s.maps[memory_manager], gpu_addr, size);
++}
++
++void NoteGuestKind(u64 gpu_addr, u64 size, u32 kind, u32 fallback_kind) {
++    if (!Enabled() || size == 0) {
++        return;
++    }
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    EraseRange(s.guest_kinds, gpu_addr, size);
++    if (kind != 0xff) {
++        s.guest_kinds.emplace(gpu_addr, Range{size, fallback_kind, kind, false});
++    }
 +}
 +
 +void NotePresent() {
@@ -628,10 +717,10 @@ index 000000000..10b70d147
 +} // namespace Tegra
 diff --git a/src/video_core/nx2_pt_capture.h b/src/video_core/nx2_pt_capture.h
 new file mode 100644
-index 000000000..590e63268
+index 000000000..9b0c4d27f
 --- /dev/null
 +++ b/src/video_core/nx2_pt_capture.h
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,30 @@
 +// SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
@@ -649,6 +738,9 @@ index 000000000..590e63268
 +bool Enabled();
 +void NoteMap(const void* memory_manager, u64 gpu_addr, u64 dev_addr, u64 size, u32 kind, bool sparse);
 +void NoteUnmap(const void* memory_manager, u64 gpu_addr, u64 size);
++/// The PTE kinds the guest asks for (nx2:gpu 212, 216; Eglantine maps everything as pitch), from boot:
++/// written as kinds.txt with the capture. 0xff/0xff forgets the range (a plain map or an unmap).
++void NoteGuestKind(u64 gpu_addr, u64 size, u32 kind, u32 fallback_kind);
 +/// Guest CPU side, once per present.
 +void NotePresent();
 +/// The inline QMD the compute engine writes to memory (LOAD_INLINE_QMD_DATA(63)), while recording.

@@ -173,6 +173,11 @@ TIC_FORMATS = {m[1]: int(m[2], 16) for l in open(os.environ.get("TEX_HEADER", os
     "~/src/ext/open-gpu-doc/classes/3d/clc797tex.h")))
     if (m := re.match(r"#define NVC797_TEXHEAD_BL_COMPONENTS_SIZES_(\w+)\s+0x([0-9a-fA-F]+)", l))}
 
+# Texture header fields: name -> (high bit, low bit).
+TIC_FIELDS = {m[1]: (int(m[2]), int(m[3])) for l in open(os.environ.get("TEX_HEADER", os.path.expanduser(
+    "~/src/ext/open-gpu-doc/classes/3d/clc797tex.h")))
+    if (m := re.match(r"#define NVC797_TEXHEAD_BL_(\w+)\s+MW\((\d+):(\d+)\)", l))}
+
 CHUNK = 1 << 21
 HOST_BASE = 0xF0_0000_0000  # host-owned buffers: above every guest mapping, inside the 1 TiB window
 ZERO_SIZE = BLOCK_SIZE = 64 << 20
@@ -413,19 +418,40 @@ def build(d):
                 traced[int(k_)].append((int(a_, 16), []))
             elif kind == "E":
                 traced[int(k_)][-1][1].append((int(a_, 16), int(v_, 16)))
-    # Only entries whose traced calls match the stream's (start addresses, in order): on the compute-only
-    # channels the front's macro positions differ from the captured state, so those keep the host MME.
+    # Only entries whose traced calls match the stream's in number (calls pair up in order). Start addresses
+    # are not compared: each channel's front uploads the same macros at its own positions (macro 57 is 0x281
+    # on the 3D channel, 0x42 on a compute-only one), which the captured engine state does not show.
     # PT_NODEP=1: no QMD dependencies. NVN counts finished compute work into a ring of barrier QMDs (each
     # QMD decrements one, SEND_SIGNALING_PCAS2_B INCREMENT_DEPENDENCE raises it); the ring's counters come
     # from Eglantine's scheduler, not the hardware. Entries run serialized, so the barriers (releases whose
     # waits are dropped anyway) are left out: DEPENDENT_QMD0_ENABLE/ACTION (QMD word 16, bits 0-3) cleared
     # in inline QMDs, INCREMENT_DEPENDENCE launches dropped.
     nodep = bool(os.environ.get("PT_NODEP"))
-    # Only macros whose trace is complete: Eglantine's JIT passes some parameters straight to the output
-    # without the emit hook (macro 0x2ca's inline upload shows 3 of 18 words), so those run on the host MME.
-    mme_starts = {int(x, 16) for x in os.environ.get("PT_MME_STARTS", "281").split(",") if x}
+    # Only calls whose trace emits a whole inline QMD (64 LOAD_INLINE_QMD_DATA words: the output the host
+    # MME gets wrong, one word late). Other traces can be incomplete (Eglantine's JIT passes some parameters
+    # straight to the output without the emit hook: macro 0x2ca's inline upload shows 3 of 18 words), so
+    # those run on the host MME.
+    # Complete: every inline-to-memory upload has all its data words, every inline QMD all 64 (the JIT's
+    # pass-through shows as missing words); then any macro is replaced, not only the QMD ones.
     substitute = False
-    QMD16 = names[0xB1C0].off("LOAD_INLINE_QMD_DATA", 16) // 4
+    QMD0, QMD16 = (names[0xB1C0].off("LOAD_INLINE_QMD_DATA", i) // 4 for i in (0, 16))
+    I2M = {x: nc.off(x) // 4 for x in ("LINE_LENGTH_IN", "LINE_COUNT", "LAUNCH_DMA", "LOAD_INLINE_DATA")}
+    launched_qmds = set()  # PT_NODEP: QMDs launched from memory (their dependence fields are cleared)
+
+    def trace_complete(emits, regs):
+        if sum(QMD0 <= em < QMD0 + 64 for em, _ in emits) % 64 or any(em >= 0xE00 for em, _ in emits):
+            return False
+        r, need = dict(regs), 0
+        for em, ev in emits:
+            if (em == I2M["LOAD_INLINE_DATA"]) != (need > 0):
+                return False
+            if need:
+                need -= 1
+                continue
+            r[em] = ev
+            if em == I2M["LAUNCH_DMA"]:
+                need = -(-r.get(I2M["LINE_LENGTH_IN"], 0) * max(1, r.get(I2M["LINE_COUNT"], 1)) // 4)
+        return need == 0
 
     def nodep_word(m, v):
         return v & ~0xF if nodep and m == QMD16 else v
@@ -436,7 +462,7 @@ def build(d):
             starts = [states[ch]["posc"][int(nm[15:-1])] for sc, m, a, _ in decode(words, st0[ch])
                       if m >= 0x40 and states[ch]["engines"][sc] == 0xB1C0
                       and (nm := names[0xB1C0](m * 4) or "").startswith("CALL_MME_MACRO(")]
-            if starts and starts == [c[0] for c in traced.get(k, ())]:
+            if starts and len(starts) == len(traced.get(k, ())):
                 trace_ok.add(k)
         print(f"PT_MME=trace: {len(trace_ok)} entries use Eglantine's compute macro output")
     names_of = {}
@@ -445,10 +471,26 @@ def build(d):
             names_of[(ch, sc)] = (lambda e: (lambda m: names[e](m * 4) if m >= 0x40 else None) if e in names else (lambda m: None))(states[ch]["engines"][sc])
     st = {ch: [0, 0, 0, 0] for ch in chans}
     bound = {ch: list(states[ch]["engines"]) for ch in chans}
+    import bisect
+    map_starts = [m[0] for m in maps]
+
+    def mapped(va):
+        i = bisect.bisect_right(map_starts, va) - 1
+        return i >= 0 and va < maps[i][0] + maps[i][2] and not maps[i][4]
     triggers3d = {n3d.off("CLEAR_SURFACE") // 4} | {m // 4 for m in range(n3d.off("CALL_MME_MACRO", 0), n3d.off("CALL_MME_MACRO", 0) + 0x100, 8)}
+    carry = {ch: [] for ch in chans}  # a macro call whose parameters continue in the channel's next entry
     for k, (ch, addr, *_rest, words) in enumerate(stream):
-        out = []
-        for sc, m, a, _ in decode(words, st[ch]):
+        out, carry[ch] = carry[ch], []
+        src, spliced = decode(words, st[ch]), collections.deque()  # spliced: a replaced macro's traced methods
+        while True:
+            if spliced:
+                sc, m, a = spliced.popleft()
+                from_trace = True
+            elif (nxt := next(src, None)) is not None:
+                sc, m, a, _ = nxt
+                from_trace = False
+            else:
+                break
             if m < 0x40:
                 hs = host_shadow[ch]
                 hs[m] = a
@@ -475,17 +517,15 @@ def build(d):
                 raise ValueError(f"entry {k}: {e:#x} method {m * 4:#x} not in the class header")
             regs = shadow[(ch, e)]
             regs[m] = a
-            if e == 0xB1C0 and k in trace_ok and n.startswith(("CALL_MME_MACRO(", "CALL_MME_DATA(")):
+            if e == 0xB1C0 and k in trace_ok and not from_trace and n.startswith(("CALL_MME_MACRO(", "CALL_MME_DATA(")):
                 if n.startswith("CALL_MME_MACRO("):
                     j = int(n[15:-1])
                     if not traced[k]:
                         raise ValueError(f"entry {k}: compute macro {j} not in mme.txt")
                     start, emits = traced[k].popleft()
-                    if start != states[ch]["posc"][j]:
-                        raise ValueError(f"entry {k}: macro {j} starts at {states[ch]['posc'][j]:#x}, mme.txt has {start:#x}")
-                    substitute = start in mme_starts
+                    substitute = trace_complete(emits, regs)
                     if substitute:
-                        out += [(sc, em, nodep_word(em, ev)) for em, ev in emits]
+                        spliced.extend((sc, em, ev) for em, ev in emits)
                         stats["compute macro calls replaced"] += 1
                 if substitute:
                     continue
@@ -496,11 +536,18 @@ def build(d):
                 if a & 3 in (1, 3):  # acquire, trap
                     stats["drop report acquire/trap"] += 1
                     continue
-                written.add((a64(e, regs, "SET_REPORT_SEMAPHORE_A", "SET_REPORT_SEMAPHORE_B"), 32))
-            if e == 0xB1C0 and nodep:
-                if n == "SEND_SIGNALING_PCAS2_B" and a & 0xF == 0xC:
-                    stats["drop INCREMENT_DEPENDENCE"] += 1
+                sem = a64(e, regs, "SET_REPORT_SEMAPHORE_A", "SET_REPORT_SEMAPHORE_B")
+                if not mapped(sem):  # NVN releases to GPU VA 0 (unmapped: nothing on the console; the host stalls)
+                    stats["drop report release to unmapped VA"] += 1
                     continue
+                written.add((sem, 32))
+            if e == 0xB1C0 and nodep:
+                if n == "SEND_SIGNALING_PCAS2_B":
+                    if a & 0xF in (0x7, 0xC):
+                        stats["drop DECREMENT/INCREMENT_DEPENDENCE"] += 1
+                        continue
+                    if a & 0xF:  # invalidate / schedule / prefetch a QMD in memory: patched below
+                        launched_qmds.add(rmw(e, regs, "SEND_PCAS_A") << 8)
                 a = nodep_word(m, a)
             if e in lm_methods and m in lm_methods[e]:
                 a = lm_va >> 32 if m == lm_methods[e][0] else lm_va & 0xFFFFFFFF
@@ -510,7 +557,7 @@ def build(d):
                 elif n.startswith("LOAD_CONSTANT_BUFFER("):
                     written.add((a64(e, regs, "SET_CONSTANT_BUFFER_SELECTOR_B", "SET_CONSTANT_BUFFER_SELECTOR_C"),
                                  rmw(e, regs, "SET_CONSTANT_BUFFER_SELECTOR_A")))
-            if n == "LAUNCH_DMA" and e in (0xB197, 0xA140, 0xB0B5):
+            if n == "LAUNCH_DMA" and e in (0xB197, 0xB1C0, 0xA140, 0xB0B5):
                 dst = a64(e, regs, "OFFSET_OUT_UPPER", "OFFSET_OUT_LOWER" if e == 0xB0B5 else "OFFSET_OUT")
                 size = rmw(e, regs, "LINE_LENGTH_IN") * max(1, rmw(e, regs, "LINE_COUNT"))
                 if e == 0xB0B5:
@@ -518,6 +565,13 @@ def build(d):
                                rmw(e, regs, "SET_DST_WIDTH") * rmw(e, regs, "SET_DST_HEIGHT") * max(1, rmw(e, regs, "SET_DST_DEPTH")))
                 written.add((dst, size + CHUNK))
             out.append((sc, m, a))
+        if st[ch][2]:  # a method run continues into the next entry: keep the macro call with its data (the
+            # fence between entries would cut it: MISSING_MACRO_DATA)
+            nm = names_of
+            i = next((i for i in range(len(out) - 1, -1, -1) if (nm[(ch, out[i][0])](out[i][1]) or "").startswith("CALL_MME_MACRO(")), None)
+            if i is not None and all((nm[(ch, sc_)](m_) or "").startswith("CALL_MME_DATA(") for sc_, m_, _ in out[i + 1:]):
+                out, carry[ch] = out[:i], out[i:]
+                stats["macro calls carried into the next entry"] += 1
         if k in trace_ok and traced[k]:
             raise ValueError(f"entry {k}: {len(traced[k])} traced compute macro calls left over")
         if k in split:  # bisecting: one fenced sub-entry per macro call / launch, numbered k * 1000 + n
@@ -528,6 +582,9 @@ def build(d):
             continue
         entries.append((chans.index(ch), k, encode(out)))
 
+    for ch in chans:
+        if carry[ch]:
+            entries.append((chans.index(ch), len(stream), encode(carry[ch])))
     # Memory plan: real backing for device chunks with data or written by the frame, one shared zero block
     # under every other mapped page (so no access faults; writes there alias, reads of untouched pages are 0).
     chunks = data_chunks(d, os.path.join(out_dir, "chunks.txt"))
@@ -577,14 +634,42 @@ def build(d):
             else:
                 pieces.append(piece)
             d0 = e
+    # PTE kinds: Ada samples depth texture headers (Z16, Z24S8, ...) only from pages of the matching depth
+    # kind (TEX FORMAT otherwise; color views of those pages are fine). Kinds come from the guest's own
+    # requests (kinds.txt, capture probe NoteGuestKind; Turing+ numbering, the same on T239 and Ada), the
+    # incompressible fallback for compressible kinds (no compression tags here). PT_KIND_RANGES=<va>:<size>:<kind>[,...]
+    # (hex) overrides.
+    kranges = []
+    if os.path.exists(os.path.join(d, "kinds.txt")):
+        for line in open(os.path.join(d, "kinds.txt")):
+            ka, ks, kw, kf = (int(x, 16) for x in line.split())
+            k_ = kf if 0x8 <= kw <= 0xE else kw
+            if k_ not in (0, 7):  # pitch is the default; 7 = invalid
+                kranges.append((ka, ks, k_))
+    env_k = [tuple(int(x, 16) for x in r.split(":")) for r in os.environ.get("PT_KIND_RANGES", "").split(",") if r]
+    kranges = sorted([r for r in kranges if not any(r[0] < ea + es and ea < r[0] + r[1] for ea, es, _ in env_k)] + env_k)
+    kstarts = [r[0] for r in kranges]
+    nkind = collections.Counter()
     for va, size, b, o in pieces:
-        lines.append(f"map {va:x} {size:x} {b} {o:x}")
+        near = kranges[max(0, bisect.bisect_right(kstarts, va) - 1):bisect.bisect_left(kstarts, va + size)]
+        near = [r for r in near if r[0] + r[1] > va]
+        cuts = sorted({va, va + size} | {x for ka, ks, _ in near for x in (ka, ka + ks) if va < x < va + size})
+        for lo, hi in zip(cuts, cuts[1:]):
+            kind = next((k_ for ka, ks, k_ in near if ka <= lo < ka + ks), None)
+            if kind is not None:
+                nkind[kind] += hi - lo
+            lines.append(f"map {lo:x} {hi - lo:x} {b} {o + lo - va:x}" if kind is None else
+                         f"mapk {lo:x} {hi - lo:x} {b} {o + lo - va:x} {kind:x}")
     lines.append(f"map {lm_va:x} {lm_size:x} {LMB} 0")
-    # PT_ASTC=dummy: the host samples no ASTC (RTX 40: textureCompressionASTC_LDR false; 28% of MKW's texture
-    # headers): every ASTC header in the texture header pools becomes a copy of an A8B8G8R8 header of the same
-    # pool (wrong image, valid memory). shortcut: transcode ASTC (to RGBA8/BC7) and repoint the headers instead.
-    def patch_pool(pool, count, fix, tag):
-        """Read a 32-byte-entry pool from the chunks' data, let fix(raw) edit it, add fill lines over it."""
+    if nkind:
+        print("PTE kinds: " + ", ".join(f"{k:#x} {v >> 20} MiB" for k, v in sorted(nkind.items())))
+    # Texture header / sampler pool patches (bisecting, ASTC stopgap). Every patch edits one copy of each pool
+    # (read once from the chunks' data); the copies become fill lines at the end, so patches compose.
+    pool_copies = {}  # pool va -> (count, bytearray)
+
+    def pool_raw(pool, count):
+        if pool in pool_copies:
+            return pool_copies[pool][1]
         gpu, dev, msize, _, _ = next(m for m in maps if m[0] <= pool < m[0] + m[2])
         assert pool + count * 32 <= gpu + msize, "pool spans mappings"
         da = dev + pool - gpu
@@ -596,13 +681,8 @@ def build(d):
                     with open(os.path.join(d, f), "rb") as fh:
                         fh.seek(fo + lo - (c * CHUNK + co))
                         raw[lo - da:hi - da] = fh.read(hi - lo)
-        fix(raw)
-        path = f"replay/{tag}-{pool:x}.bin"
-        open(os.path.join(d, path), "wb").write(raw)
-        for c in range(da // CHUNK, (da + count * 32 - 1) // CHUNK + 1):
-            lo, hi = max(c * CHUNK, da), min((c + 1) * CHUNK, da + count * 32)
-            b, o = divmod(slot[c], per_block)
-            lines.append(f"fill {b} {o * CHUNK + lo % CHUNK:x} {path} {lo - da:x} {hi - lo:x}")
+        pool_copies[pool] = (count, raw)
+        return raw
 
     def pools_of(kind):
         out = set()
@@ -613,64 +693,70 @@ def build(d):
                          r[names[e].off(f"SET_TEX_{kind}_POOL_C") // 4] + 1))
         return sorted(p for p in out if p[0])
 
-    # PT_TSC_NODC=<hex indices|all>: clear DEPTH_COMPARE (TEXSAMP0 bit 9) in those samplers. NVN pairs
-    # compare samplers with plain (non-.DC) TEX on depth textures; the T239 tolerates it, Ada raises
-    # TEX FORMAT (MKW entry 58: Z16 2D_ARRAY with sampler 0x1c7).
-    nodc = os.environ.get("PT_TSC_NODC")
-    if nodc:
-        for pool, count in pools_of("SAMPLER"):
-            which = range(count) if nodc == "all" else [int(x, 16) for x in nodc.split(",")]
-
-            def fix(raw, which=which):
-                n = 0
-                for i in which:
-                    w0 = struct.unpack_from("<I", raw, i * 32)[0]
-                    if w0 & 0x200:
-                        struct.pack_into("<I", raw, i * 32, w0 & ~0x200)
-                        n += 1
-                print(f"PT_TSC_NODC: pool {pool:x}: depth compare cleared in {n} samplers")
-            patch_pool(pool, count, fix, "tsc")
-    # PT_TIC_COPY=<dst>:<src>[,...] (hex): texture header dst becomes a copy of src (bisecting header issues).
-    tic_copy = [tuple(int(x, 16) for x in p.split(":")) for p in os.environ.get("PT_TIC_COPY", "").split(",") if p]
-    if tic_copy:
-        for pool, count in pools_of("HEADER"):
-            def fix(raw):
-                for dst, src in tic_copy:
-                    raw[dst * 32:dst * 32 + 32] = raw[src * 32:src * 32 + 32]
-                print(f"PT_TIC_COPY: pool {pool:x}: {len(tic_copy)} headers replaced")
-            patch_pool(pool, count, fix, "ticcopy")
+    # PT_ASTC=dummy: the host samples no ASTC (RTX 40: textureCompressionASTC_LDR false; 28% of MKW's texture
+    # headers): every ASTC header in the texture header pools becomes a copy of an A8B8G8R8 header of the same
+    # pool (wrong image, valid memory). shortcut: transcode ASTC (to RGBA8/BC7) and repoint the headers instead.
     if os.environ.get("PT_ASTC") == "dummy":
-        pools = set()
-        for s_ in states.values():
-            for e in (0xB197, 0xB1C0):
-                r = s_["regs"][e]
-                pools.add((((r[names[e].off("SET_TEX_HEADER_POOL_A") // 4] & 0xFF) << 32) | r[names[e].off("SET_TEX_HEADER_POOL_B") // 4],
-                           r[names[e].off("SET_TEX_HEADER_POOL_C") // 4] + 1))
-        for pool, count in sorted(p for p in pools if p[0]):
-            gpu, dev, msize, _, _ = next(m for m in maps if m[0] <= pool < m[0] + m[2])
-            assert pool + count * 32 <= gpu + msize, "pool spans mappings"
-            da = dev + pool - gpu
-            raw = bytearray(count * 32)
-            for c in range(da // CHUNK, (da + count * 32 - 1) // CHUNK + 1):  # from the chunks' own data
-                for f, fo, co, n in chunks.get(c, ()):
-                    lo, hi = max(c * CHUNK + co, da), min(c * CHUNK + co + n, da + count * 32)
-                    if lo < hi:
-                        with open(os.path.join(d, f), "rb") as fh:
-                            fh.seek(fo + lo - (c * CHUNK + co))
-                            raw[lo - da:hi - da] = fh.read(hi - lo)
+        astc_codes = {v for k, v in TIC_FORMATS.items() if k.startswith("ASTC")}
+        for pool, count in pools_of("HEADER"):
+            raw = pool_raw(pool, count)
             fmt = [raw[i * 32] & 0x7F for i in range(count)]
             rgba = next(i for i in range(count) if fmt[i] == TIC_FORMATS["A8B8G8R8"] and any(raw[i * 32:i * 32 + 32]))
-            astc_codes = {v for k, v in TIC_FORMATS.items() if k.startswith("ASTC")}
             astc = [i for i in range(count) if fmt[i] in astc_codes and any(raw[i * 32:i * 32 + 32])]
             for i in astc:
                 raw[i * 32:i * 32 + 32] = raw[rgba * 32:rgba * 32 + 32]
-            path = f"replay/tic-{pool:x}.bin"
-            open(os.path.join(d, path), "wb").write(raw)
-            for c in range(da // CHUNK, (da + count * 32 - 1) // CHUNK + 1):
-                lo, hi = max(c * CHUNK, da), min((c + 1) * CHUNK, da + count * 32)
-                b, o = divmod(slot[c], per_block)
-                lines.append(f"fill {b} {o * CHUNK + lo % CHUNK:x} {path} {lo - da:x} {hi - lo:x}")
             print(f"PT_ASTC=dummy: pool {pool:x}: {len(astc)} ASTC headers -> header {rgba:#x} (A8B8G8R8)")
+    # PT_TSC_NODC=<hex indices|all>: clear DEPTH_COMPARE (TEXSAMP0 bit 9) in those samplers.
+    nodc = os.environ.get("PT_TSC_NODC")
+    if nodc:
+        for pool, count in pools_of("SAMPLER"):
+            raw = pool_raw(pool, count)
+            n = 0
+            for i in (range(count) if nodc == "all" else [int(x, 16) for x in nodc.split(",")]):
+                w0 = struct.unpack_from("<I", raw, i * 32)[0]
+                if w0 & 0x200:
+                    struct.pack_into("<I", raw, i * 32, w0 & ~0x200)
+                    n += 1
+            print(f"PT_TSC_NODC: pool {pool:x}: depth compare cleared in {n} samplers")
+    # PT_TIC_COPY=<dst>:<src>[,...] (hex): texture header dst becomes a copy of src (bisecting header issues).
+    tic_copy = [tuple(int(x, 16) for x in p.split(":")) for p in os.environ.get("PT_TIC_COPY", "").split(",") if p]
+    # PT_TIC_SET=<idx>:<FIELD>=<value>[,...] (hex idx/value; FIELD as in clc797tex.h NVC797_TEXHEAD_BL_<FIELD>):
+    # set one field of a texture header, e.g. PT_TIC_SET=72b4:RESERVED_ADDRESS=0.
+    tic_set = [(int(i, 16), f, int(v, 16)) for i, f, v in
+               (re.fullmatch(r"(\w+):(\w+)=(\w+)", p).groups() for p in os.environ.get("PT_TIC_SET", "").split(",") if p)]
+    if tic_copy or tic_set:
+        for pool, count in pools_of("HEADER"):
+            raw = pool_raw(pool, count)
+            for dst, src in tic_copy:
+                raw[dst * 32:dst * 32 + 32] = raw[src * 32:src * 32 + 32]
+            for i, f, v in tic_set:
+                hi, lo = TIC_FIELDS[f]
+                h = int.from_bytes(raw[i * 32:i * 32 + 32], "little")
+                h = h & ~(((1 << (hi - lo + 1)) - 1) << lo) | (v << lo)
+                raw[i * 32:i * 32 + 32] = h.to_bytes(32, "little")
+            print(f"PT_TIC_COPY/SET: pool {pool:x}: {len(tic_copy)} copies, {len(tic_set)} fields")
+    # PT_NODEP: QMDs launched from memory (NVN's barrier ring) wait for no dependence and signal none.
+    patched = 0
+    for qva in sorted(launched_qmds):
+        m_ = next((m for m in maps if m[0] <= qva < m[0] + m[2] and not m[4]), None)
+        if m_ is None or any(c not in slot for c in range((m_[1] + qva - m_[0]) // CHUNK, (m_[1] + qva - m_[0] + 255) // CHUNK + 1)):
+            continue  # unbacked: reads zero, nothing to clear
+        raw = pool_raw(qva, 8)
+        w4, w16 = struct.unpack_from("<I", raw, 16)[0], struct.unpack_from("<I", raw, 64)[0]
+        struct.pack_into("<I", raw, 16, w4 & ~(0xFFFF << 14))  # DEPENDENCE_COUNTER (157:142)
+        struct.pack_into("<I", raw, 64, w16 & ~((1 << 0) | (1 << 5)))  # DEPENDENT_QMD0/1_ENABLE (512, 517)
+        patched += 1
+    if launched_qmds:
+        print(f"PT_NODEP: dependence cleared in {patched} of {len(launched_qmds)} QMDs launched from memory")
+    for pool, (count, raw) in sorted(pool_copies.items()):
+        gpu, dev, _, _, _ = next(m for m in maps if m[0] <= pool < m[0] + m[2])
+        da = dev + pool - gpu
+        path = f"replay/pool-{pool:x}.bin"
+        open(os.path.join(d, path), "wb").write(raw)
+        for c in range(da // CHUNK, (da + count * 32 - 1) // CHUNK + 1):
+            lo, hi = max(c * CHUNK, da), min((c + 1) * CHUNK, da + count * 32)
+            b, o = divmod(slot[c], per_block)
+            lines.append(f"fill {b} {o * CHUNK + lo % CHUNK:x} {path} {lo - da:x} {hi - lo:x}")
     for idx, ch, va in drams:
         lines += [f"block {LMB + 1 + idx} {CHUNK:x}", f"fill {LMB + 1 + idx} 0 replay/dram-{ch}.bin 0 3000",
                   f"map {va:x} {CHUNK:x} {LMB + 1 + idx} 0"]

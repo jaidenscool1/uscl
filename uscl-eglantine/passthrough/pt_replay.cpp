@@ -60,13 +60,15 @@ int main(int argc, char** argv) {
             }
             close(fd);
             filled += n;
-        } else if (k == "map") {
+        } else if (k == "map" || k == "mapk") { // mapk: one more field, the PTE kind of this mapping
             Piece p; unsigned long long va, size, off;
+            int kind = guest_kind;
             if (fscanf(plan, "%llx %llx %d %llx", &va, &size, &p.block, &off) != 4) die("plan: map", 0);
+            if (k == "mapk" && fscanf(plan, "%x", &kind) != 1) die("plan: mapk", 0);
             p.va = va; p.size = size; p.off = off;
             Block& b = blocks.at(p.block);
             if (p.off + p.size > b.size || p.va + p.size > (1ull << 40)) die("plan: map out of range", 0);
-            map_gpu(b.h, p.size, p.va, p.off, guest_kind);
+            map_gpu(b.h, p.size, p.va, p.off, kind);
             pieces.push_back(p);
         } else if (k == "channel") {
             int idx; unsigned c[8];
