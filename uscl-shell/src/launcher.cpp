@@ -185,7 +185,7 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 	QString program = "flatpak";
 	QStringList args;
 	QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-	if (console == "Wii" && !ownDolphin().isEmpty())
+	if ((console == "Wii" || console == "GameCube") && !ownDolphin().isEmpty())
 	{
 		program = ownDolphin();
 		args = {"-u", QDir(dolphinConfigDir()).absoluteFilePath(".."), "-C", "Dolphin.Analytics.PermissionAsked=True"};
@@ -207,8 +207,22 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 			env.insert("USCL_NETPLAY_PLAYERS", QString::number(std::max(2, players)));
 		}
 	}
-	else if (console == "Wii")
+	else if (console == "Wii" || console == "GameCube")
 		args = QStringList{"run", "org.DolphinEmu.dolphin-emu"} + dolphinOptions() + QStringList{"-b", "-e", path};
+	else if (console == "DS")
+	{
+		// our melonDS (uscl-melonds) next to uscl, else the Flathub app
+#ifdef _WIN32
+		const QString melon = QCoreApplication::applicationDirPath() + "/melonDS/melonDS.exe";
+#else
+		const QString melon = QCoreApplication::applicationDirPath() + "/melonDS";
+#endif
+		const QString own = qEnvironmentVariable("USCL_MELONDS", melon);
+		if (QFileInfo(own).isExecutable())
+			program = own, args = {path};
+		else
+			args = {"run", "net.kuribo64.melonDS", path};
+	}
 	else if (console == "3DS" && !ownAzahar().isEmpty())
 	{
 		program = ownAzahar();
@@ -292,6 +306,7 @@ QString Launcher::switchStatus(const QString& path) { return SwitchCore::prerequ
 QString Launcher::switchProfile() { return SwitchCore::dataDir(); }
 QString Launcher::importSwitchKeys(const QString& path) { return SwitchCore::importKeys(QUrl(path).isLocalFile() ? QUrl(path).toLocalFile() : path); }
 QString Launcher::importSwitchFirmware(const QString& path) { return SwitchCore::importFirmware(QUrl(path).isLocalFile() ? QUrl(path).toLocalFile() : path); }
+QVariantMap Launcher::switchFiles() { return SwitchCore::installedConsoleFiles(); }
 
 QString Launcher::configureSwitchTool(const QString& kind, const QString& path)
 {

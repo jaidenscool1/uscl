@@ -1,6 +1,7 @@
 import QtQuick
 
-// First start: online name (Steam's by default), PS3 system software, games. Controller only.
+// First start: online name (Steam's by default), PS3 system software, Switch keys + system software (found on the PC),
+// games. Controller only.
 Item {
     id: setup
     property bool open: false
@@ -12,11 +13,33 @@ Item {
     signal typeName()
     signal browse()
 
-    readonly property var steps: ["welcome", "name", "firmware", "games", "done"]
+    readonly property var steps: ["welcome", "name", "firmware", "switch", "games", "done"]
     readonly property string stepName: steps[step]
 
     function start() { step = 0; current = 0; note = ""; open = true }
-    function next() { if (step < steps.length - 1) { step++; current = 0; note = "" } }
+    function next() {
+        if (step < steps.length - 1) { step++; current = 0; note = "" }
+        if (stepName === "switch" && switchState === "") lookForSwitchFiles()
+    }
+    // Switch: keys and system software are looked for on the PC (Downloads, Desktop, Documents, other emulators)
+    property string switchState: ""   // "", "looking", "done"
+    property string switchResult: ""
+    function lookForSwitchFiles() { switchState = "looking"; games.setupSwitchFiles() }
+    Connections {
+        target: games
+        function onSwitchFilesDone(installed, tooNew, error) {
+            if (setup.switchState !== "looking") return
+            var have = launcher.switchFiles(), text = ""
+            if (installed) text = qsTr("Installed: %1.").arg(installed)
+            else if (have.master >= 0) text = qsTr("Already installed: console keys up to master key %1%2.").arg(("0" + have.master.toString(16)).slice(-2))
+                                              .arg(have.version ? qsTr(", system software %1").arg(have.version) : "")
+            else text = qsTr("No Switch console keys found. Switch games need prod.keys dumped from your own Switch: put it, and the system software, in Downloads and USCL picks them up when it starts. Or import them in Settings → Switch Emulation.")
+            if (tooNew.length) text += "\n" + qsTr("System software %1 is here too, but it needs newer keys than yours.").arg(tooNew.join(", "))
+            if (error) text += "\n" + error
+            setup.switchResult = text
+            setup.switchState = "done"
+        }
+    }
     function pickName(n) {
         if (online.setup(n)) { system.refresh(); next() }
         else { note = qsTr("Couldn't save the online name."); sound("error") }
@@ -24,7 +47,7 @@ Item {
 
     // re-evaluated as the firmware install, the game scan or the name change
     readonly property var opts: {
-        system.firmwareInstalled; system.firmwareBusy; games.scanning; games.count; system.onlineName
+        system.firmwareInstalled; system.firmwareBusy; games.scanning; games.count; system.onlineName; switchState
         switch (stepName) {
         case "welcome":
             return [{ title: qsTr("Start"), action: next }]
@@ -47,9 +70,13 @@ Item {
             f.push({ title: qsTr("Skip for now"), subtitle: qsTr("Games won't start until it's installed"), action: next })
             return f
         }
+        case "switch":
+            if (switchState !== "done") return []
+            return [{ title: qsTr("Continue"), action: next },
+                    { title: qsTr("Look again"), subtitle: qsTr("After putting prod.keys or system software on this PC"), action: lookForSwitchFiles }]
         case "games":
             if (games.scanning) return []
-            return [{ title: qsTr("Find my games"), subtitle: qsTr("Pick the folder your PS3 games are in"), action: function() { browse() } },
+            return [{ title: qsTr("Find my games"), subtitle: qsTr("Pick the folder your games are in"), action: function() { browse() } },
                     { title: games.count ? qsTr("Continue") : qsTr("Skip for now"), action: next }]
         default:
             return [{ title: qsTr("Go to the home screen"), action: function() { open = false; finished() } }]
@@ -58,22 +85,25 @@ Item {
 
     readonly property string heading: ({
         welcome: qsTr("Welcome to USCL"), name: qsTr("Your online name"), firmware: qsTr("PS3 system software"),
+        switch: qsTr("Switch keys and system software"),
         games: qsTr("Your games"), done: qsTr("You're all set")
     })[stepName]
 
     readonly property string body: {
         switch (stepName) {
         case "welcome":
-            return qsTr("Play your PS3 and Switch games with your Steam friends.\n\n") +
+            return qsTr("Play your games online with your Steam friends.\n\n") +
                    (gamepad.count ? qsTr("Controller: %1").arg(gamepad.name) : qsTr("No controller found. The keyboard works too: arrows, Enter, Esc."))
         case "name":
             return qsTr("This is the name other players see in games. You can change it later in Settings.")
         case "firmware":
             if (system.firmwareBusy || system.firmwareStatus) return system.firmwareStatus
-            return system.firmwareInstalled ? qsTr("Already installed.") : qsTr("PS3 games need the PS3 system software. For Switch games, skip this step and use Settings → Switch Emulation.")
+            return system.firmwareInstalled ? qsTr("Already installed.") : qsTr("PS3 games need the PS3 system software.")
+        case "switch":
+            return switchState === "done" ? switchResult : qsTr("Looking for Switch console keys and system software on this PC...")
         case "games":
             if (games.scanning) return qsTr("Looking for games...")
-            return games.count ? qsTr("%n game(s) in your library.", "", games.count) : qsTr("Choose your games folder. USCL finds PS3 games and extracted Switch .nsp, .xci and .nro files. Switch setup is in Settings → Switch Emulation.")
+            return games.count ? qsTr("%n game(s) in your library.", "", games.count) : qsTr("Choose your games folder. USCL finds the games of every console it plays, in every folder inside it: PS3, PS4, Switch, Switch 2, Wii, GameCube, Wii U, 3DS, DS and Xbox 360.")
         default:
             return qsTr("Everything else is in Settings. Online play is under Network, and your Steam friends are under Friends.")
         }

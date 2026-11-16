@@ -12,6 +12,14 @@ public:
 	static QString profileDir();
 	static QString dataDir();
 	static bool isSwitch2(const QString& path);
+	static bool needsEglantine(const QString& path);   // Switch 2 games, and .nsz/.xcz, which Eden can't open
+	// Console keys and system software: the best ones in these folders, or with none, on this PC (Downloads, Desktop,
+	// Documents, other Switch emulators). {keys, master, titleKeys, firmware, version, skipped}
+	static QVariantMap findConsoleFiles(const QStringList& folders = {});
+	static QVariantMap installedConsoleFiles();
+	// Installs what findConsoleFiles found where it beats what's installed, for Eden and Eglantine. Returns what
+	// it did ("" when nothing was newer); a failure goes to *error.
+	static QString installConsoleFiles(const QVariantMap& found, QString* error = nullptr);
 	static QString executable(bool settings = false, const QString& game = {});
 	static QString roomExecutable();
 	static QProcessEnvironment environment();

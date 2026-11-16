@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the XMB category icons for each console USCL supports (PS3, PS4, Wii, 3DS), in the same style as the
+"""Render the XMB category icons for each console USCL supports (PS3, PS4, Wii, GameCube, Wii U, 3DS, DS, Switch, Switch 2, Xbox 360), in the same style as the
 JStationX Material-Icon glyphs in xmb_assets.py: a white silhouette with the XMB soft glow, 256x256 RGBA, on
 transparent. Standalone (PIL only, no kodi-xmb) so it can regenerate just these; the shapes are simple, recognizable
 console silhouettes drawn geometrically (same approach as uscl_logo). Output: uscl-shell/xmb/icons/cat_<console>.png
@@ -116,10 +116,48 @@ def switch(d, S):
     d.ellipse([int(S*0.14)-r, int(S*0.42)-r, int(S*0.14)+r, int(S*0.42)+r], fill=255)  # stick
     d.ellipse([int(S*0.86)-r, int(S*0.56)-r, int(S*0.86)+r, int(S*0.56)+r], fill=255)  # buttons
 
+# --- GameCube: the cube with its round disc lid and carry handle ---
+def gamecube(d, S):
+    t = int(S * 0.05)
+    rrect(d, [int(S*0.16), int(S*0.22), int(S*0.84), int(S*0.86)], int(S*0.08), outline_w=t)   # body
+    r = int(S*0.17)
+    cx, cy = int(S*0.50), int(S*0.50)
+    d.ellipse([cx-r, cy-r, cx+r, cy+r], outline=255, width=t)                                   # disc lid
+    d.line([int(S*0.26), int(S*0.14), int(S*0.74), int(S*0.14)], fill=255, width=t)              # handle
+    d.line([int(S*0.26), int(S*0.12), int(S*0.26), int(S*0.24)], fill=255, width=t)
+    d.line([int(S*0.74), int(S*0.12), int(S*0.74), int(S*0.24)], fill=255, width=t)
+
+# --- DS: the clamshell open, equal screens, d-pad left and buttons right of the lower one ---
+def nds(d, S):
+    t = int(S * 0.045)
+    rrect(d, [int(S*0.10), int(S*0.08), int(S*0.90), int(S*0.47)], int(S*0.05), outline_w=t)     # top half
+    rrect(d, [int(S*0.32), int(S*0.15), int(S*0.68), int(S*0.40)], int(S*0.02), fill=255)        # top screen
+    rrect(d, [int(S*0.10), int(S*0.53), int(S*0.90), int(S*0.92)], int(S*0.05), outline_w=t)     # bottom half
+    rrect(d, [int(S*0.32), int(S*0.60), int(S*0.68), int(S*0.85)], int(S*0.02), outline_w=t)     # touch screen
+    c, a = int(S*0.21), int(S*0.045)
+    d.rectangle([c-a, int(S*0.725)-a//3, c+a, int(S*0.725)+a//3], fill=255)                       # d-pad
+    d.rectangle([c-a//3, int(S*0.725)-a, c+a//3, int(S*0.725)+a], fill=255)
+    r = int(S*0.022)
+    for x, y in [(0.79, 0.69), (0.79, 0.76), (0.75, 0.725), (0.83, 0.725)]:
+        d.ellipse([int(S*x)-r, int(S*y)-r, int(S*x)+r, int(S*y)+r], fill=255)                    # buttons
+
+# --- Switch 2: the Switch silhouette, larger screen, a "2" on it ---
+def switch2(d, S):
+    from PIL import ImageFont
+    t = int(S * 0.05)
+    y0, y1 = int(S*0.26), int(S*0.74)
+    rrect(d, [int(S*0.24), y0, int(S*0.76), y1], int(S*0.03), outline_w=t)
+    rrect(d, [int(S*0.05), y0, int(S*0.20), y1], int(S*0.07), outline_w=t)
+    rrect(d, [int(S*0.80), y0, int(S*0.95), y1], int(S*0.07), outline_w=t)
+    font = ImageFont.truetype(os.path.join(os.path.dirname(OUT), "..", "fonts", "Exo2-Variable.ttf"), int(S*0.34))
+    font.set_variation_by_axes([900])
+    d.text((int(S*0.50), int(S*0.50)), "2", font=font, fill=255, anchor="mm")
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     for name, fn in [("cat_ps3", ps3), ("cat_ps4", ps4), ("cat_wii", wii), ("cat_wiiu", wiiu),
-                     ("cat_3ds", nds3), ("cat_x360", x360), ("cat_switch", switch)]:
+                     ("cat_3ds", nds3), ("cat_x360", x360), ("cat_switch", switch),
+                     ("cat_gamecube", gamecube), ("cat_ds", nds), ("cat_switch2", switch2)]:
         render(fn).save(os.path.join(OUT, name + ".png"))
         print("wrote", name + ".png")
 

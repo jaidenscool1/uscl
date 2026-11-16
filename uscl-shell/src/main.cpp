@@ -293,6 +293,22 @@ namespace
 			const auto found = GameModel::findGames(root.filePath("games"));
 			check(found.size() == 2 && found.value("0100152000022000") == kart, "Switch scan excludes archives, updates, DLC and truncated containers");
 			check(SwitchCore::describe(kart).value("console") == "Switch" && SwitchCore::describe(kart).value("title") == "Mario Kart 8 Deluxe", "Switch description");
+			{
+				// the other consoles, from their headers: a Wii disc and a DS cartridge
+				QByteArray wii(0x60, '\0');
+				wii.replace(0, 6, "RSPE01");
+				wii.replace(0x18, 4, QByteArray("\x5D\x1C\x9E\xA3", 4));
+				wii.replace(0x20, 10, "Wii Sports");
+				QByteArray nds(0x200, '\0');
+				nds.replace(0xC, 4, "AMCE");
+				nds.replace(0x15C, 2, QByteArray("\x56\xCF", 2));
+				const QVariantMap disc = GameModel::emuGame(write("emu/wii sports (USA) [!].iso", wii));
+				const QVariantMap cart = GameModel::emuGame(write("emu/Mario Kart DS (USA).nds", nds));
+				check(disc.value("console") == "Wii" && disc.value("serial") == "Wii-RSPE01" && disc.value("title") == "Wii Sports", "Wii disc from its header");
+				check(cart.value("console") == "DS" && cart.value("serial") == "DS-AMCE" && cart.value("title") == "Mario Kart DS", "DS cartridge from its header");
+				check(GameModel::emuGame(kart).isEmpty() && GameModel::isEmuSerial("3DS-CTRPAMKE") && !GameModel::isEmuSerial("BLUS31011"), "emulator game ids");
+				QDir(root.filePath("games/emu")).removeRecursively();
+			}
 			check(SwitchCore::isSerial("0100152000022000") && !SwitchCore::isSerial("BLUS31426"), "console ID separation");
 			check(Online::supports("0100152000022000") && !Online::supports("0400C3F00006E000"), "Switch games (not Switch 2) support automatic USCL session hosting");
 			{
@@ -368,6 +384,27 @@ namespace
 				const QString test_keys = write("test-prod.keys", "header_key = " + QByteArray(64, '0') + '\n');
 				check(SwitchCore::importKeys(test_keys).isEmpty() && SwitchCore::prerequisiteError(kart).isEmpty(),
 				      "Switch games can reach the core without a blanket firmware requirement");
+				// a game whose ticket asks for master key 0c (rights ID ends in key generation 0d), keys up to 0b
+				QByteArray future(16 + 24 + 40, '\0');
+				future.replace(0, 4, "PFS0");
+				put32(future, 4, 1);
+				put32(future, 8, 40);
+				future.replace(16 + 24, 36, "0100a00000000000000000000000000d.tik");
+				const QString needs = write("Future Game [0100A00000000000].nsp", future);
+				QByteArray keys;
+				for (int i = 0; i <= 0x0b; i++)
+					keys += QString("master_key_%1 = %2\n").arg(i, 2, 16, QChar('0')).arg(QString(32, '1')).toLatin1();
+				check(SwitchCore::importKeys(write("old-prod.keys", keys)).isEmpty() && SwitchCore::prerequisiteError(needs).contains("master key 0c") &&
+				      SwitchCore::prerequisiteError(needs).contains("13.0.0"), "Switch says which newer keys a game needs");
+				keys += "master_key_0c = " + QByteArray(32, '2') + '\n';
+				QFile version(SwitchCore::dataDir() + "firmware-version.txt");
+				check(version.open(QIODevice::WriteOnly) && version.write("12.1.0") == 6, "Switch firmware version fixture");
+				version.close();
+				check(SwitchCore::importKeys(write("new-prod.keys", keys)).isEmpty() &&
+				      SwitchCore::prerequisiteError(needs).contains("13.0.0 or newer; 12.1.0 is installed"), "Switch says which firmware a game needs");
+				QFile::remove(version.fileName());
+				QFile::remove(needs);
+				check(SwitchCore::importKeys(test_keys).isEmpty(), "Switch test keys restored");
 #ifdef __linux__
 				const QByteArray old_driver = qgetenv("SDL_VIDEODRIVER"), old_display = qgetenv("DISPLAY");
 				const bool driver_set = qEnvironmentVariableIsSet("SDL_VIDEODRIVER"), display_set = qEnvironmentVariableIsSet("DISPLAY");
@@ -463,15 +500,23 @@ int main(int argc, char* argv[])
 		GameModel model;
 		QEventLoop loop;
 		QString problem;
-		int added = 0, known = 0, encrypted = 0;
-		QObject::connect(&model, &GameModel::scanFinished, &loop, [&](int a, int k, int e) { added = a; known = k; encrypted = e; loop.quit(); });
+		int added = 0, known = 0, encrypted = 0, archives = 0;
+		QString switch_installed, switch_error;
+		QStringList switch_too_new;
+		QObject::connect(&model, &GameModel::scanFinished, &loop, [&](int a, int k, int e, int z) { added = a; known = k; encrypted = e; archives = z; });
+		// the scan ends with the Switch keys / system software search; done once that reports
+		QObject::connect(&model, &GameModel::switchFilesDone, &loop, [&](const QString& did, const QStringList& tooNew, const QString& error) {
+			switch_installed = did, switch_too_new = tooNew, switch_error = error;
+			loop.quit();
+		});
 		QObject::connect(&model, &GameModel::scanFailed, &loop, [&](const QString& error) { problem = error; });
 		model.scanFolder(app.arguments()[option + 1]);
 		loop.exec();
 		QJsonArray games;
 		for (int row = 0; row < model.rowCount(); ++row)
 			games << QJsonObject::fromVariantMap(model.get(row));
-		const QByteArray result = QJsonDocument(QJsonObject{{"added", added}, {"known", known}, {"encrypted", encrypted}, {"error", problem}, {"games", games}}).toJson();
+		const QByteArray result = QJsonDocument(QJsonObject{{"added", added}, {"known", known}, {"encrypted", encrypted}, {"archives", archives}, {"error", problem}, {"games", games},
+		    {"switchInstalled", switch_installed}, {"switchTooNew", QJsonArray::fromStringList(switch_too_new)}, {"switchError", switch_error}}).toJson();
 		std::fwrite(result.constData(), 1, result.size(), stdout);
 		return problem.isEmpty() ? 0 : 1;
 	}

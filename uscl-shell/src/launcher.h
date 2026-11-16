@@ -34,6 +34,8 @@ public:
 	Q_INVOKABLE static QString switchStatus(const QString& path = {});
 	Q_INVOKABLE static QString importSwitchKeys(const QString& path);
 	Q_INVOKABLE static QString importSwitchFirmware(const QString& path);
+	// installed Switch keys / system software: {master: highest master key or -1, version, firmware, titleKeys}
+	Q_INVOKABLE static QVariantMap switchFiles();
 	Q_INVOKABLE static QString switchProfile();
 	Q_INVOKABLE static QString configureSwitchTool(const QString& kind, const QString& path);
 	Q_INVOKABLE bool openClassic();
