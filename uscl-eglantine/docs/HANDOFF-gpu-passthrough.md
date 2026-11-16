@@ -11,7 +11,7 @@ Host: driver 615.78.08 (open kernel module), Arch Linux.
 | Phase 0 (standalone RM tool) | **GO**: own channel, semaphore release, compute launch, ADA_A clear all verified on hardware, 10/10 runs, no Xid, no VRAM leak |
 | Gate 1 (driver access) | **Pass** on hardware |
 | Gate 2 (method compatibility) | **Pass (static)**: guest and host class headers identical field for field; MKW's real method use still to check from a capture (Phase 1) |
-| Gate 3 (shader compatibility) | see below |
+| Gate 3 (shader compatibility) | **Pass (decode level)**: all 1106 MKW programs (643k instructions) decode identically as SM86/SM87/SM89; not yet executed on the host (Phase 1) |
 | Gates 4-6 | not started |
 
 ## Phase 0 tool: `uscl-eglantine/passthrough/nvrm_probe.cpp`
@@ -62,3 +62,35 @@ Measured:
   `vulkan.mythos.bin` holds the lowered copy, not the guest code.
 - Raw guest programs: `EDEN_NX2_SHADER_DUMP=<dir>` (shader_environment.cpp) writes every program the cache
   meets for the first time; boot with an empty `XDG_CACHE_HOME` to catch all of them.
+- Dump of MKW (2026-11-16): boot with an empty cache dir, ~150 s to the title screen, SIGTERM (clean exit
+  in 4 s, no Xid): 1106 programs, ~980 graphics, ~100 compute, 13 MB. The dump holds the instructions
+  only (the graphics SPH, `source_header_size`, is skipped).
+- `nvdisasm -b SM86|SM87|SM89` on all of them: 0 errors, 0 unknown ops; SM86 and SM87 text identical,
+  SM89 differs in 4 programs only by spelling `F2FP.PACK_AB` as `F2FP.F16.F32.PACK_AB` (same default
+  conversion). So the host decodes every guest instruction the same way; matches CUDA's rule that sm_8x
+  binaries run on later sm_8y parts.
+- Guest conventions seen (example program): global loads through a uniform descriptor from `c[0x0][0x540]`,
+  NVN constant banks `c[0x7]`, `c[0xb]`. Passthrough keeps the guest's own constant buffer bindings, so these
+  need no translation; what remains is the guest's driver-reserved cbuf0 contents (local/shared windows,
+  stack top) matching the host's windows, set by the guest's own SET_SHADER_*_WINDOW methods.
+- Open: SPH (graphics program header) format is shared by Turing..Ada per mesa (`nak` writes one format
+  for SM75+); confirm by replaying a guest draw (Phase 1). Shader-visible SM/warp IDs and SM counts differ
+  (T239 vs AD107): only matters to programs that index by SM ID.
+
+## Next: Phase 1 (capture and replay one MKW frame)
+
+What exists: `EDEN_NX2_SHADER_DUMP` (programs), `EDEN_NX2_PB_DUMP` (one command list, only on a pushbuffer
+error), `EDEN_NX2_FRAME_DUMP` (Vulkan-level images/samplers, not guest commands). None captures a frame's
+guest command stream with the memory it references, so Phase 1 needs a new probe patch:
+
+1. In `dma_pusher.cpp` (where command lists are fetched), on a trigger file, write every command list of the
+   next N GPFIFO submissions for each channel (address, size, words, channel id, bound classes).
+2. At the start of the capture, snapshot the guest GPU VA map from `memory_manager` (mapped ranges, page
+   kind) and the contents of every mapped range the frame touches (first pass: all mapped GPU memory; it
+   is bounded by the game's GPU heap).
+3. Replay in `nvrm_probe`: map the snapshot at the **same** GPU VAs (`NVOS46_FLAGS_DMA_OFFSET_FIXED`,
+   pitch/uncompressed kinds first; check every VA < 1 TiB for semaphores), rewrite SET_OBJECT 0xC797→0xC997
+   and 0xC7C0→0xC9C0, submit, then read the guest's render target back and compare with Eglantine's Vulkan
+   output for the same frame (`EDEN_NX2_FRAME_DUMP`).
+4. Record which methods the frame really uses (Gate 2 on real data) and which memory kinds / compression
+   the guest asks for (Gate 4).
