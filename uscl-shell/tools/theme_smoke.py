@@ -19,7 +19,7 @@ def main():
         run = subprocess.run([binary, "--windowed", "--qml-smoke-test", "--theme", theme], env=env, capture_output=True, text=True, timeout=30)
         log = run.stdout + run.stderr
         errors = [line for line in log.splitlines() if any(marker in line for marker in ERRORS)]
-        ok = run.returncode == 0 and not errors and "qml-smoke-test: loaded " + theme in log and "keyboard flow passed" in log
+        ok = run.returncode == 0 and not errors and "qml-smoke-test: loaded " + theme in log and "keyboard flow passed" in log and "offline changelog passed" in log
         print(f"{theme}: {'PASS' if ok else 'FAIL'}")
         if not ok:
             print(log)

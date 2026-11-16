@@ -98,6 +98,12 @@ ultrawide windows, and rejects QML errors and missing packaged assets. See [them
   graphics card and the screen: integrated or under 3.5 GB 100%, under 6 GB 150%, under 10 GB 200%, else 300%,
   never sharper than the screen (1080p 150%, 1440p 200%, 4K 300%). `uscl --hardware` prints what it sees.
 
+## Changelog
+
+Settings → USCL Changelog reads the bundled root [CHANGELOG.md](../CHANGELOG.md) offline in every theme.
+Scroll with Up/Down, L1/R1 or the mouse wheel; Back closes it. Update that file when changes ship; keep
+development changes under Unreleased until a release is assigned.
+
 ## Assets
 Personal sounds: WAVs in `<settings folder>/sounds/` (cursor, select, category, back, error, notify, startup)
 replace the built-in ones on that PC only; they are never packaged. Theme-specific files in

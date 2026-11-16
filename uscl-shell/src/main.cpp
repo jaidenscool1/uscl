@@ -728,6 +728,30 @@ int main(int argc, char* argv[])
 			if (root->property("activeTheme").toString() != active) { fail("original theme was not restored"); return; }
 			key(Qt::Key_Escape);
             if (!soundBindingsOk()) { fail("restored sound palette"); return; }
+            // The changelog is a main Settings entry in every theme and must work offline.
+            navigation->setProperty("cat", 1);
+            if (!QMetaObject::invokeMethod(navigation, "setItem", Q_ARG(QVariant, QVariant(10))))
+            { fail("changelog selection"); return; }
+            key(Qt::Key_Return);
+            auto* log = root->findChild<QQuickItem*>("mainDialog");
+            if (!log || !log->property("open").toBool() || !log->property("markdown").toBool() ||
+                !log->property("text").toString().contains("## Unreleased"))
+            { fail("offline changelog did not open"); return; }
+            QTimer::singleShot(100, &app, [log, window, &app] {
+                const auto sendKey = [window](int code) {
+                    QKeyEvent press(QEvent::KeyPress, code, Qt::NoModifier);
+                    QKeyEvent release(QEvent::KeyRelease, code, Qt::NoModifier);
+                    QCoreApplication::sendEvent(window, &press);
+                    QCoreApplication::sendEvent(window, &release);
+                };
+                sendKey(Qt::Key_Down);
+                if (!log->property("scrollable").toBool() || log->property("scrollPosition").toDouble() <= 0)
+                { std::fprintf(stderr, "qml-smoke-test: changelog did not scroll\n"); app.exit(1); return; }
+                sendKey(Qt::Key_Escape);
+                if (log->property("open").toBool())
+                { std::fprintf(stderr, "qml-smoke-test: changelog did not close\n"); app.exit(1); return; }
+                std::fprintf(stderr, "qml-smoke-test: offline changelog passed\n");
+            });
 			std::fprintf(stderr, "qml-smoke-test: keyboard flow passed\n");
 		});
 		QTimer::singleShot(1500, &app, &QCoreApplication::quit);

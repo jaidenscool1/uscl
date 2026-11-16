@@ -66,6 +66,13 @@ qt_add_qml_module(uscl
         ${XMB_ASSETS}
 )
 
+# One source for repository and offline in-app release notes.
+qt_add_resources(uscl "uscl_changelog"
+    PREFIX "/uscl"
+    BASE "${CMAKE_CURRENT_SOURCE_DIR}/.."
+    FILES "${CMAKE_CURRENT_SOURCE_DIR}/../CHANGELOG.md"
+)
+
 # the release tag sets the version (CI: -DUSCL_VERSION=${tag}); updates come from the public releases repo
 set(USCL_VERSION "0.3.0" CACHE STRING "USCL version")
 set(USCL_RELEASES "jaidenscool1/uscl" CACHE STRING "GitHub repo USCL updates come from")

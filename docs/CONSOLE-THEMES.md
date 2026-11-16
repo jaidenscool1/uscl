@@ -115,3 +115,10 @@ Visual references consulted: [PS4 system software 4.00 UI](https://blog.de.plays
 [PS5 UI](https://blog.playstation.com/2020/10/15/first-look-playstation-5s-next-generation-user-experience/),
 and [Nintendo Switch 2 HOME/settings](https://support.nintendo.com/hk/switch2/mastery/accessibility/index.html).
 Reference screenshots and console audio are not included in the implementation.
+
+## In-app changelog
+
+Every theme exposes Settings → USCL Changelog. The app bundles the root `CHANGELOG.md`, renders its
+Markdown locally and supports controller and mouse scrolling. Development changes remain under Unreleased;
+the dialog heading separately shows the installed USCL version. The full-app smoke suite opens, scrolls and
+closes this menu entry in all eight themes.

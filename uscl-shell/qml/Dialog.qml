@@ -10,6 +10,7 @@ Item {
     enabled: open
     property string heading: ""
     property string text: ""
+    property bool markdown: false
     property var live: null          // function returning the message, re-read as what it uses changes
     property var progress: null      // function returning 0..1, or -1 for no bar
     property var buttons: []         // [{ title, action }]; empty: ✕ / ○ just close
@@ -18,9 +19,10 @@ Item {
     readonly property bool scrollable: messageViewport.contentHeight > messageViewport.height
     signal sound(string name)
 
-    // opts: { buttons, live, progress, start }
+    // opts: { buttons, live, progress, start, markdown }
     function show(h, t, opts) {
         heading = h || ""; text = t || ""
+        markdown = !!(opts && opts.markdown)
         buttons = opts && opts.buttons ? opts.buttons : []
         live = opts && opts.live ? opts.live : null
         progress = opts && opts.progress ? opts.progress : null
@@ -77,8 +79,9 @@ Item {
                 id: msg
                 width: messageViewport.width - 28
                 y: implicitHeight < messageViewport.height ? (messageViewport.height - implicitHeight) / 2 : 0
-                horizontalAlignment: Text.AlignHCenter
+                horizontalAlignment: dlg.markdown ? Text.AlignLeft : Text.AlignHCenter
                 text: dlg.live ? dlg.live() : dlg.text
+                textFormat: dlg.markdown ? Text.MarkdownText : Text.AutoText
                 color: dlg.theme === "ps3" ? "white" : themeStyle.text; font.pixelSize: 29
                 wrapMode: Text.Wrap; lineHeight: 1.2
             }

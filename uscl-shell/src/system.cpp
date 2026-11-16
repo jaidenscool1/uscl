@@ -96,6 +96,11 @@ int System::scaleFor(bool discrete, int vram_mb, int screen_height)
 	return std::min(gpu, screen);
 }
 
+QString System::changelog() const
+{
+	return readText(":/uscl/CHANGELOG.md");
+}
+
 QString System::soundUrl(const QString& name, const QString& theme) const
 {
 	static const QStringList themes = {"ps3", "ps4", "ps5", "x360classic", "x360", "xboxone", "switch", "switch2"};

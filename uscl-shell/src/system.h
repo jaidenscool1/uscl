@@ -46,6 +46,8 @@ public:
 	// Resolution Scale (%) for this PC: what the graphics card can carry, no sharper than the screen shows
 	Q_INVOKABLE int recommendedScale(int screenHeight) const { return scaleFor(m_discrete, m_vram_mb, screenHeight); }
 	static int scaleFor(bool discrete, int vram_mb, int screen_height);
+	// Offline release notes bundled from the repository changelog.
+	Q_INVOKABLE QString changelog() const;
 	// Theme-specific override, global override, then the original built-in theme palette.
 	Q_INVOKABLE QString soundUrl(const QString& name, const QString& theme = "ps3") const;
 

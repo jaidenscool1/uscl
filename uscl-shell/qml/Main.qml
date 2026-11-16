@@ -938,7 +938,9 @@ Window {
                 settingsItem(qsTr("Date and Time Settings"), qsTr("How the date and time are shown"), "it_clock", dateTimePage),
                 settingsItem(qsTr("Accessory Settings"), qsTr("Controllers and button assignments"), "it_gamepad", accessoryPage),
                 settingsItem(qsTr("Network Settings"), qsTr("Online ID and the connection test"), "it_network", networkSettingsPage),
-                settingsItem(qsTr("System Settings"), qsTr("Language, system information and setup"), "it_system", systemSettingsPage) ] },
+                settingsItem(qsTr("System Settings"), qsTr("Language, system information and setup"), "it_system", systemSettingsPage),
+                { title: qsTr("USCL Changelog"), icon: ic("it_system"), desc: qsTr("Read what changed in this build, available offline"),
+                  action: function() { dialog.show(qsTr("USCL Changelog — %1").arg(system.version), system.changelog(), { markdown: true }) } } ] },
             { name: qsTr("Online"), icon: ic("cat_network"), items: network },
             { name: qsTr("Game"), icon: ic("cat_game"), items: gameItems.concat(util) },
             { name: qsTr("Party"), icon: ic("cat_party"), items: partyItems() },
@@ -1220,6 +1222,7 @@ Window {
 
             Dialog {
                 id: dialog
+                objectName: "mainDialog"
                 theme: root.activeTheme
                 onSound: function(name) { root.sound(name) }
             }

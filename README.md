@@ -138,6 +138,9 @@ Old console games expect servers that are gone. USCL uses one of two ways, depen
 Either way, [`uscl-bridge`](uscl-bridge/) carries the traffic between the host's PC and their friends' over a Steam
 connection. The servers only listen on your own PC, and nothing leaves Steam's network except the game itself.
 
+Read the bundled [changelog](CHANGELOG.md) in **Settings → USCL Changelog** in any theme, even offline.
+Development entries are marked Unreleased until assigned to a release.
+
 ## Fork maintenance
 
 This branch contains build recipes and patch sets for the following emulator bases. These are the revisions
