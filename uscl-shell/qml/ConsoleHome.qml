@@ -41,6 +41,8 @@ Item {
             var candidate = xboxRect(i)
             var dy = candidate.y + candidate.height / 2 - rect.y - rect.height / 2
             if (dy * direction <= 1) continue
+            if (direction < 0 && candidate.y >= rect.y - 1) continue
+            if (direction > 0 && candidate.y + candidate.height <= rect.y + rect.height + 1) continue
             var dx = Math.abs(candidate.x + candidate.width / 2 - rect.x - rect.width / 2)
             var distance = Math.abs(dy) + dx * 3
             if (distance < score) { score = distance; best = i }

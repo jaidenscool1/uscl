@@ -118,6 +118,14 @@ Item {
                 verify(tile.border.width > 0)
                 verify(tile.border.color.toString() !== tile.color.toString())
             }
+            if (data.theme !== "x360classic") {
+                navigation.setItem(0)
+                home.input("up"); verify(home.categoryFocus)
+                home.input("right"); compare(navigation.cat, 1)
+                home.input("accept"); verify(!home.categoryFocus)
+                home.input("accept"); compare(launches, 1)
+                navigation.cat = 0
+            }
             if (home.nintendo) {
                 var ring = findChild(home, "categoryFocusRing" + navigation.cat)
                 verify(ring !== null); compare(ring.border.width, 0)
