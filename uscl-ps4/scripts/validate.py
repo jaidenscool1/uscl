@@ -31,6 +31,23 @@ def sfo_entries(data):
             raise ValueError("Invalid SFO value")
     return entries
 
+def pkg_entry(data, wanted):
+    if len(data) < 32 or data[:4] != b"\x7fCNT":
+        raise ValueError("Invalid PKG header")
+    count = struct.unpack_from(">I", data, 0x10)[0]
+    table = struct.unpack_from(">I", data, 0x18)[0]
+    if table > len(data) or count > (len(data) - table) // 32:
+        raise ValueError("Invalid PKG entry table")
+    for i in range(count):
+        identity, _, flags, _, offset, size = struct.unpack_from(">6I", data, table + i * 32)
+        if offset > len(data) or size > len(data) - offset:
+            raise ValueError("Invalid PKG entry bounds")
+        if identity == wanted:
+            if flags & 0x80000000:
+                raise ValueError("Expected unencrypted metadata")
+            return data[offset:offset + size]
+    raise ValueError("Missing PKG metadata entry")
+
 def validate(pkg, sfo, elf):
     data = pkg.read_bytes()
     if len(data) < 0x200 or data[:4] != b"\x7fCNT":
@@ -38,6 +55,10 @@ def validate(pkg, sfo, elf):
     if b"IV0000-USCL00001_00-USCLNATIVEPS4001" not in data[:0x100]:
         raise ValueError("PKG content ID mismatch")
     info = sfo_entries(sfo.read_bytes())
+    packaged_info = sfo_entries(pkg_entry(data, 0x1000))
+    # The publisher adds PUBTOOLINFO/PUBTOOLVER; user-supplied fields must survive exactly.
+    assert all(packaged_info.get(key) == value for key, value in info.items())
+    assert pkg_entry(data, 0x1200) == (sfo.parent / "icon0.png").read_bytes()
     assert info["TITLE_ID"] == "USCL00001" and info["CATEGORY"] == "gd"
     assert info["CONTENT_ID"] == "IV0000-USCL00001_00-USCLNATIVEPS4001"
     raw = elf.read_bytes()
