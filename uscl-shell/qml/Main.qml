@@ -447,7 +447,10 @@ Window {
     function offerUpdate() {
         offeredVersion = updater.latest
         sound("notify")
-        var notes = updater.notes ? "\n\n" + updater.notes.split("\n").slice(0, 6).join("\n") : ""
+        // the release notes' first paragraph as plain text, short enough to fit above the buttons
+        var summary = (updater.notes || "").split(/\n\s*\n/)[0].replace(/[*_`#>]/g, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").trim()
+        if (summary.length > 220) summary = summary.substring(0, 217).replace(/\s+\S*$/, "") + "..."
+        var notes = summary ? "\n\n" + summary : ""
         dialog.show(qsTr("USCL Update"), qsTr("Version %1 is available. You have %2.").arg(updater.latest).arg(system.version) + notes,
                     { buttons: [{ title: qsTr("Update Now"), action: startUpdate }, { title: qsTr("Later") }] })
     }
