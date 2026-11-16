@@ -31,9 +31,16 @@ jobs:
           curl.exe -fsSLo sdl3.zip https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-devel-3.4.18-VC.zip
           Expand-Archive sdl3.zip -DestinationPath sdl3
           $sdl = (Get-ChildItem sdl3 -Directory | Select-Object -First 1).FullName
-          cmake -S uscl-shell -B shell-build -A x64 "-DSDL3_DIR=$sdl/cmake"
+          cmake -S uscl-shell -B shell-build -A x64 "-DSDL3_DIR=$sdl/cmake" -DUSCL_UI_TESTS=ON
           cmake --build shell-build --config Release
           Copy-Item "$sdl/lib/x64/SDL3.dll" shell-build/Release/
           $t = Start-Process shell-build/Release/uscl.exe -ArgumentList "--self-test" -Wait -PassThru -NoNewWindow -RedirectStandardError selftest.txt
           Get-Content selftest.txt
           if ($t.ExitCode -ne 0) { Write-Error "uscl self-test failed"; exit 1 }
+      - name: Console theme interactions and packaged QML
+        shell: pwsh
+        run: |
+          ctest --test-dir shell-build -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python uscl-shell/tools/theme_smoke.py shell-build/Release/uscl.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

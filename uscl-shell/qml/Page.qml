@@ -5,6 +5,9 @@ import QtQuick
 // values in a grey column on the right, the focused row's help under its name.
 Item {
     id: page
+    property string theme: "ps3"
+    property string heading: ""
+    readonly property bool modernSoftware: theme !== "ps3" && rows.some(function(row) { return !!row.console })
     property string catIcon: ""
     property string parentIcon: ""
     property var rows: []           // [{ title, value, help, icon, disabled, action }]
@@ -20,7 +23,16 @@ Item {
     readonly property int focH: 150
     readonly property var cur: rows[current]
 
+    onRowsChanged: { if (current >= rows.length) current = Math.max(0, rows.length - 1) }
+
     function input(b) {
+        if (modernSoftware && (b === "left" || b === "right")) {
+            var next = current + (b === "right" ? 1 : -1)
+            if (next >= 0 && next < rows.length) { current = next; sound("cursor") }
+            return
+        }
+        if (b === "info" && cur && cur.info) { sound("select"); cur.info(); return }
+
         if ((b === "back" || b === "left")) { sound("back"); back() }
         else if (b === "up" && current > 0) { current--; sound("cursor") }
         else if (b === "down" && current < rows.length - 1) { current++; sound("cursor") }
@@ -38,6 +50,7 @@ Item {
     // ---- breadcrumb ----
     Item {
         id: crumb
+        visible: page.theme === "ps3"
         width: page.width; height: page.height
         transform: Translate { id: crumbShift }
         Image {
@@ -56,6 +69,7 @@ Item {
     // ---- rows ----
     Item {
         id: list
+        visible: page.theme === "ps3"
         width: page.width; height: page.height
         transform: Translate { id: listShift }
 
@@ -66,7 +80,7 @@ Item {
             visible: page.rows.length > 0
             SequentialAnimation on opacity {
                 loops: Animation.Infinite
-                running: halo.Window.active // see Xmb.qml: no redraws while a game has focus
+                running: page.visible && page.theme === "ps3" && halo.Window.active // see Xmb.qml: no redraws while a game has focus
                 NumberAnimation { from: 0.09; to: 0.25; duration: 1700; easing.type: Easing.InOutSine }
                 NumberAnimation { to: 0.09; duration: 1700; easing.type: Easing.InOutSine }
             }
@@ -86,6 +100,18 @@ Item {
                 visible: y > -page.rowH && y < page.height
                 opacity: modelData.disabled ? 0.45 : 1
                 Behavior on y { NumberAnimation { duration: 180; easing.type: Easing.OutSine } }
+
+                MouseArea {
+                    anchors.fill: parent; enabled: page.theme === "ps3"
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onClicked: function(mouse) {
+                        var wasSelected = row.sel
+                        page.current = index
+                        if (mouse.button === Qt.RightButton) page.input("options")
+                        else if (wasSelected) page.input("accept")
+                        else page.sound("cursor")
+                    }
+                }
 
                 // wide: a PS3 game icon (320x176), right-aligned to the same edge so titles line up
                 Image {
@@ -127,6 +153,14 @@ Item {
                 }
             }
         }
+    }
+
+    ConsolePage {
+        anchors.fill: parent
+        visible: page.theme !== "ps3"
+        controller: page
+        theme: page.theme
+        heading: page.heading
     }
 
     // ---- open / close: rows slide in from the right; from the crossbar the breadcrumb shrinks into place ----

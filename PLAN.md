@@ -3,6 +3,14 @@
 Goal: PS3 games (your own dumps) running in RPCS3 use Steam for friends, invites, lobbies and P2P, without
 patching each game. Status: Steam bridge service working (see Phases).
 
+## Home screen themes (2026-11-16)
+
+Eight selectable looks now share the launcher's game, friend, online, settings and update actions: PS3 XMB,
+PS4, PS5, Xbox 360 Classic/2012, Xbox One, Switch and Switch 2. Modern looks expose the game library directly;
+inner pages and modals follow the theme too. PS3-style menu cues are newly synthesized originals with a
+reproducible generator. See [console theme validation and limits](docs/CONSOLE-THEMES.md). Physical controller,
+Windows/macOS runtime and subjective visual/audio acceptance are not replaced by automated UI tests.
+
 ## How it works
 PS3 games never talk to PSN directly. They call Sony's libraries (`sceNp*`). RPCS3 already answers those
 calls itself, backed by RPCN (its PSN replacement). USCL makes Steam the network between players:

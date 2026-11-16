@@ -37,6 +37,9 @@ qt_add_qml_module(uscl
     QML_FILES
         qml/Main.qml
         qml/Background.qml
+        qml/ConsolePage.qml
+        qml/ThemePalette.qml
+        qml/ConsoleHome.qml
         qml/Xmb.qml
         qml/Page.qml
         qml/OptionsPanel.qml
@@ -103,3 +106,21 @@ if(WIN32)
     target_sources(uscl PRIVATE uscl.rc)   # uscl.exe's icon: the USCL orb (icons/uscl.ico)
 endif()
 install(TARGETS uscl RUNTIME DESTINATION bin)
+
+# Opt-in UI regression tests include the same artwork as the installed shell.
+option(USCL_UI_TESTS "Build console theme interaction tests" OFF)
+if(USCL_UI_TESTS)
+    find_package(Qt6 REQUIRED COMPONENTS QuickTest)
+    enable_testing()
+    qt_add_executable(uscl-ui-tests tests/quicktest.cpp)
+    target_link_libraries(uscl-ui-tests PRIVATE Qt6::QuickTest Qt6::Quick)
+    qt_add_resources(uscl-ui-tests theme_test_assets
+        PREFIX "/qt/qml/Uscl"
+        BASE "${CMAKE_CURRENT_SOURCE_DIR}"
+        FILES ${XMB_ASSETS} shaders/tint.frag.qsb
+            fonts/NotoSans-Regular.ttf fonts/NotoSans-Light.ttf fonts/Roboto-Thin.ttf
+    )
+    add_test(NAME console-theme-interactions COMMAND uscl-ui-tests -input "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    set_tests_properties(console-theme-interactions PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_FORCE_STDERR_LOGGING=1")
+endif()

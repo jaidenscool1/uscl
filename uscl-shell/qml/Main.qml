@@ -13,6 +13,8 @@ Window {
     color: "black"
     title: "USCL"
 
+    ThemePalette { id: themePalette; theme: root.activeTheme }
+
     readonly property bool xboxPad: gamepad.name.indexOf("Xbox") >= 0
 
     // PS3 month colours (kodi-xmb gen_skin.py), Jan..Dec, then Black; they multiply bg_base.png
@@ -26,6 +28,7 @@ Window {
 
     Settings {
         id: prefs
+        property string theme: "ps3"
         property int bgColor: 0          // 0 automatic (month), 1..13 fixed
         property bool nightShade: true
         property bool sounds: true
@@ -40,6 +43,11 @@ Window {
         property bool autoUpdate: true
         property bool testingUpdates: true   // pre-releases too (USCL is in testing)
     }
+
+    readonly property var themeChoices: [["PlayStation 3 (XMB)", "ps3"], ["PlayStation 4", "ps4"],
+        ["Xbox 360 Classic", "x360classic"], ["Xbox 360 (2012)", "x360"], ["Xbox One", "xboxone"],
+        ["PlayStation 5", "ps5"], ["Nintendo Switch", "switch"], ["Nintendo Switch 2", "switch2"]]
+    readonly property string activeTheme: themeChoices.some(function(t) { return t[1] === prefs.theme }) ? prefs.theme : "ps3"
 
     // re-read RPCS3's config after a change (the rows read it through this)
     property int cfgTick: 0
@@ -420,9 +428,10 @@ Window {
         }
     }
     function guide() {
-        dialog.show(qsTr("User's Guide"), xboxPad
+        var navigationHelp = activeTheme === "ps3" ? "" : qsTr("\nHome screen: L1 / R1 changes categories. Esc / Back focuses the category shortcuts. On Xbox 360 Classic, left / right changes blades and up / down selects items. Mouse: click to focus, click again to open; right-click for options.")
+        dialog.show(qsTr("User's Guide"), (xboxPad
             ? qsTr("D-pad or left stick: move     A: select     B: back     Y: options\nLB / RB: jump through long lists\nGuide button in a game: back here while the game keeps running. To close it: Y on the game → Close Game.\nOnline: start a game and it goes online by itself; friends join you from Friends.")
-            : qsTr("D-pad or left stick: move     ✕: select     ○: back     △: options\nL1 / R1: jump through long lists\nPS button in a game: back here while the game keeps running. To close it: △ on the game → Close Game.\nOnline: start a game and it goes online by itself; friends join you from Friends."))
+            : qsTr("D-pad or left stick: move     ✕: select     ○: back     △: options\nL1 / R1: jump through long lists\nPS button in a game: back here while the game keeps running. To close it: △ on the game → Close Game.\nOnline: start a game and it goes online by itself; friends join you from Friends.")) + navigationHelp)
     }
 
     // ---------------------------------------------------------------- USCL updates (like RPCS3's updater: ask, download, restart)
@@ -554,19 +563,17 @@ Window {
     function themeSettingsPage() {
         var colors = [[qsTr("Automatic (changes every month)"), 0]].concat(colorNames.map(function(n, i) { return [n, i + 1] }))
         return [
-            { title: qsTr("Theme"), value: "PlayStation 3 (XMB)", help: qsTr("More console looks (PS4, Xbox 360) are coming."), choices: true,
-              action: function() { options.show([{ title: "PlayStation 3 (XMB)", checked: true }, { title: "PlayStation 4", disabled: true },
-                                                 { title: "Xbox 360 Classic", disabled: true }, { title: "Xbox 360 (2012)", disabled: true }]) } },
-            prefRow("bgColor", qsTr("Background Color"), qsTr("Automatic follows the month, like the PS3."), colors),
+            choiceRow(qsTr("Theme"), qsTr("All themes share your games, friends, settings and updates."), themeChoices, function() { return activeTheme }, function(value) { prefs.theme = value }),
+            activeTheme === "ps3" ? prefRow("bgColor", qsTr("Background Color"), qsTr("Automatic follows the month, like the PS3."), colors) : null,
             prefRow("bootScreen", qsTr("Boot Screen"), qsTr("The USCL logo and health warning when USCL starts (✕ skips it)."), [[qsTr("On"), true], [qsTr("Off"), false]]),
-            prefRow("nightShade", qsTr("Darker at Night"), qsTr("The background dims in the evening and at night."), [[qsTr("On"), true], [qsTr("Off"), false]])
-        ]
+            activeTheme === "ps3" ? prefRow("nightShade", qsTr("Darker at Night"), qsTr("The background dims in the evening and at night."), [[qsTr("On"), true], [qsTr("Off"), false]]) : null
+        ].filter(Boolean)
     }
     function dateTimePage() {
         return [
             prefRow("clock24", qsTr("Time Format"), qsTr("How the clock shows the time."), [[qsTr("12-Hour Clock"), false], [qsTr("24-Hour Clock"), true]]),
-            prefRow("dateFormat", qsTr("Date Format"), qsTr("How the date is shown."), [["MM/DD/YY", "MM/dd/yy"], ["DD/MM/YY", "dd/MM/yy"], ["YY/MM/DD", "yy/MM/dd"]])
-        ]
+            activeTheme === "ps3" ? prefRow("dateFormat", qsTr("Date Format"), qsTr("How the date is shown."), [["MM/DD/YY", "MM/dd/yy"], ["DD/MM/YY", "dd/MM/yy"], ["YY/MM/DD", "yy/MM/dd"]]) : null
+        ].filter(Boolean)
     }
     function accessoryPage() {
         return [
@@ -593,7 +600,7 @@ Window {
             { title: qsTr("Run Setup Again"), help: qsTr("Online ID, system software and games"), action: function() { setup.start() } },
             { title: qsTr("Restore Default Settings"), help: qsTr("Menu settings back to how they started (games and online ID stay)"),
               action: function() { dialog.confirm(qsTr("Restore Default Settings"), qsTr("Restore the menu settings to their defaults?"), function() {
-                  prefs.bgColor = 0; prefs.nightShade = true; prefs.sounds = true; prefs.clock24 = false; prefs.dateFormat = "MM/dd/yy"
+                  prefs.theme = "ps3"; prefs.bgColor = 0; prefs.nightShade = true; prefs.sounds = true; prefs.clock24 = false; prefs.dateFormat = "MM/dd/yy"
                   notice.show(qsTr("Settings restored"), ic("it_system"))
               }) } },
             allSettingsRow()
@@ -714,13 +721,25 @@ Window {
     property var pageStack: []        // [{ rows: fn, parentIcon, catIcon, back: fn }]
     readonly property var topPage: pageStack.length ? pageStack[pageStack.length - 1] : null
     function openPage(rowsFn, parentIcon, catIndex, backFn) {
+        var heading = topPage && page.cur ? page.cur.title : xmb.current ? xmb.current.title : "USCL"
+        if (pageStack.length) {
+            var stack = pageStack.slice()
+            stack[stack.length - 1].selected = page.current
+            pageStack = stack
+        }
         var catIcon = cats[catIndex !== undefined ? catIndex : xmb.cat].icon
-        pageStack = pageStack.concat([{ rows: rowsFn, parentIcon: parentIcon, catIcon: catIcon, back: backFn || null }])
+        pageStack = pageStack.concat([{ rows: rowsFn, parentIcon: parentIcon, catIcon: catIcon, title: heading, selected: 0, back: backFn || null }])
         page.current = 0
         page.fromHome = pageStack.length === 1
         page.open()
     }
-    function popPage() { pageStack = pageStack.slice(0, -1); if (pageStack.length) page.open() }
+    function popPage() {
+        pageStack = pageStack.slice(0, -1)
+        if (pageStack.length) {
+            page.current = Math.min(topPage.selected || 0, Math.max(0, page.rows.length - 1))
+            page.open()
+        }
+    }
     function closePages() { pageStack = [] }
 
     // ---------------------------------------------------------------- the crossbar
@@ -771,6 +790,7 @@ Window {
                 pic: g.pic || "", console: g.console || "PS3",
                 badge: badge, value: badge,
                 action: function() { play(g) },
+                info: function() { dialog.show(qsTr("Information"), gameInfo(g)) },
                 options: function() {
                     return [{ title: qsTr("Start"), action: function() { play(g) } },
                             g.console === "Switch"
@@ -821,6 +841,12 @@ Window {
             gameItems.push({ title: meta[0], icon: ic(meta[1]), desc: titles.length === 1 ? qsTr("1 game") : qsTr("%1 games").arg(titles.length), preview: titles,
                              action: function() { openPage(function() { return consoleGamesPage(c) }, ic(meta[1]), gamesCat) } })
         })
+        // Modern dashboards show games directly in their software strip. The XMB
+        // retains its original console folders; both paths use the same game actions.
+        if (activeTheme !== "ps3") {
+            gameItems = gameItems.filter(function(item) { return item.badge === qsTr("Running") })
+            for (var gameIndex = 0; gameIndex < games.count; gameIndex++) gameItems.push(gameItem(games.get(gameIndex)))
+        }
         var pending = Object.keys(gameUpdates.available).length
         // the library-wide items follow the consoles
         var util = [
@@ -936,7 +962,8 @@ Window {
         else if (options.open) options.input(b)
         else if (topPage) page.input(b)
         else if (setup.open) setup.input(b)
-        else xmb.input(b)
+        else if (activeTheme === "ps3") xmb.input(b)
+        else dashboard.input(b)
     }
 
     Connections {
@@ -1054,6 +1081,7 @@ Window {
     }
 
     Item {
+        id: mainInput
         anchors.fill: parent
         focus: true
         Keys.onPressed: function(e) {
@@ -1068,16 +1096,25 @@ Window {
         // everything is laid out on a 1920x1080 stage (the kodi-xmb numbers), scaled to the window
         Item {
             id: stage
-            readonly property real s: root.height / 1080
-            width: root.width / s; height: 1080
+            objectName: "consoleStage"
+            readonly property real s: Math.min(root.width / 1920, root.height / 1080)
+            width: 1920; height: 1080
+            x: (root.width - width * s) / 2
+            y: (root.height - height * s) / 2
             scale: s
             transformOrigin: Item.TopLeft
 
             Background {
+                visible: root.activeTheme === "ps3"
                 anchors.fill: parent
                 tint: root.tint
                 shade: root.shade
-                running: !launcher.running
+                running: !launcher.running && root.activeTheme === "ps3"
+            }
+            Rectangle {
+                anchors.fill: parent
+                visible: root.activeTheme !== "ps3"
+                color: themePalette.background
             }
 
             // the focused game's picture (PIC1.PNG, or downloaded art) behind the menus, like the PS3's
@@ -1092,11 +1129,13 @@ Window {
 
             Xmb {
                 id: xmb
+                objectName: "homeNavigation"
+                visible: root.activeTheme === "ps3" && opacity > 0
                 anchors.fill: parent
                 cats: root.cats
                 cat: Math.min(prefs.xmbColumn, root.friendsCat) // an older layout had a column per console
                 // the crossbar slides out to the left while an inner screen is open
-                opacity: root.topPage || setup.open || boot.running ? 0 : 1
+                opacity: root.activeTheme !== "ps3" || root.topPage || setup.open || boot.running ? 0 : 1
                 transform: Translate { x: root.topPage ? -120 : 0; Behavior on x { NumberAnimation { duration: 200; easing.type: Easing.OutSine } } }
                 Behavior on opacity { NumberAnimation { duration: 200 } }
                 onCatChanged: {
@@ -1106,6 +1145,17 @@ Window {
                 }
                 onSound: function(name) { root.sound(name) }
                 onShowOptions: function(e) { options.show(e.options(), 0) }
+            }
+
+            ConsoleHome {
+                id: dashboard
+                anchors.fill: parent
+                theme: root.activeTheme
+                userName: system.onlineName || online.steamName || qsTr("User")
+                avatar: root.avatarUrl(prefs.avatar)
+                navigation: xmb
+                visible: root.activeTheme !== "ps3" && !root.topPage && !setup.open && !boot.running
+                onNavigate: function(button) { root.input(button) }
             }
 
             Setup {
@@ -1119,6 +1169,9 @@ Window {
 
             Page {
                 id: page
+                objectName: "settingsPage"
+                theme: root.activeTheme
+                heading: root.topPage ? root.topPage.title : ""
                 anchors.fill: parent
                 visible: !!root.topPage
                 rows: root.topPage ? root.topPage.rows() : []
@@ -1130,6 +1183,7 @@ Window {
             }
 
             ClockBox {
+                theme: root.activeTheme
                 x: stage.width - 40 - width; y: 44
                 avatar: root.avatarUrl(prefs.avatar)
                 internet: system.internet
@@ -1143,20 +1197,25 @@ Window {
                 Behavior on opacity { NumberAnimation { duration: 400 } }
             }
 
-            Notice { id: notice; x: stage.width - 40 - width; y: 124 }
+            Notice { id: notice; theme: root.activeTheme; x: stage.width - 40 - width; y: 124 }
 
             OptionsPanel {
                 id: options
+                objectName: "themeOptions"
+                theme: root.activeTheme
                 onSound: function(name) { root.sound(name) }
             }
 
             Dialog {
                 id: dialog
+                theme: root.activeTheme
                 onSound: function(name) { root.sound(name) }
             }
 
             TextPrompt {
                 id: prompt
+                theme: root.activeTheme
+                onClosed: mainInput.forceActiveFocus()
                 onSound: function(name) { root.sound(name) }
             }
 

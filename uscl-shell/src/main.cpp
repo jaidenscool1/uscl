@@ -18,6 +18,9 @@
 #include <QSettings>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQuickItem>
+#include <QQuickWindow>
+#include <QKeyEvent>
 #include <QBuffer>
 #include <QCryptographicHash>
 #include <QDir>
@@ -31,6 +34,7 @@
 #include <QtEndian>
 
 #include <cstdio>
+#include <memory>
 
 namespace
 {
@@ -555,6 +559,28 @@ int main(int argc, char* argv[])
 		return 0;
 	}
 
+	const bool smoke_test = app.arguments().contains("--qml-smoke-test");
+	std::unique_ptr<QTemporaryDir> smoke_dir;
+	QString smoke_theme = "ps3";
+	if (smoke_test)
+	{
+		// QML smoke tests must never alter a player's preferences or library.
+		smoke_dir = std::make_unique<QTemporaryDir>();
+		if (!smoke_dir->isValid()) return 1;
+		qputenv("XDG_CONFIG_HOME", smoke_dir->path().toUtf8());
+		QSettings::setDefaultFormat(QSettings::IniFormat);
+		QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, smoke_dir->path());
+		const int theme_arg = app.arguments().indexOf("--theme");
+		if (theme_arg >= 0 && theme_arg + 1 < app.arguments().size()) smoke_theme = app.arguments()[theme_arg + 1];
+		QSettings settings;
+		settings.setValue("theme", smoke_theme);
+		settings.setValue("setupDone", true);
+		settings.setValue("bootScreen", false);
+		settings.setValue("autoUpdate", false);
+		settings.setValue("sounds", false);
+		settings.sync();
+	}
+
 	for (const char* font : {"MaterialDesignIcons.ttf", "NotoSans-Regular.ttf", "NotoSans-Light.ttf", "Roboto-Thin.ttf"})
 		QFontDatabase::addApplicationFont(QString(":/qt/qml/Uscl/fonts/") + font);
 	QGuiApplication::setFont(QFont("Noto Sans"));
@@ -566,6 +592,9 @@ int main(int argc, char* argv[])
 	Online online;
 	Updater updater;
 
+	GameUpdates gameUpdates;
+	Dlc dlc;
+	DiscordParty party;
 	QQmlApplicationEngine engine;
 	engine.rootContext()->setContextProperty("games", &games);
 	engine.rootContext()->setContextProperty("gamepad", &gamepad);
@@ -573,18 +602,80 @@ int main(int argc, char* argv[])
 	engine.rootContext()->setContextProperty("system", &system);
 	engine.rootContext()->setContextProperty("online", &online);
 	engine.rootContext()->setContextProperty("updater", &updater);
-	GameUpdates gameUpdates;
 	engine.rootContext()->setContextProperty("gameUpdates", &gameUpdates);
-	Dlc dlc;
 	engine.rootContext()->setContextProperty("dlc", &dlc);
-	DiscordParty party;
 	engine.rootContext()->setContextProperty("party", &party);
 	engine.rootContext()->setContextProperty("windowed", app.arguments().contains("--windowed"));
-	const bool smoke_test = app.arguments().contains("--qml-smoke-test");
 	engine.rootContext()->setContextProperty("smokeTest", smoke_test);
 	QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
 	engine.loadFromModule("Uscl", "Main");
-	if (smoke_test)
+	if (smoke_test && !engine.rootObjects().isEmpty())
+	{
+		const QString active = engine.rootObjects().first()->property("activeTheme").toString();
+		if (active != smoke_theme)
+		{
+			std::fprintf(stderr, "qml-smoke-test: requested %s, loaded %s\n", qPrintable(smoke_theme), qPrintable(active));
+			return 1;
+		}
+		auto* root = engine.rootObjects().first();
+		auto* stage = root->findChild<QQuickItem*>("consoleStage");
+		if (!stage) return 1;
+		for (const QSize size : {QSize(1280, 720), QSize(800, 600), QSize(2560, 1080)})
+		{
+			root->setProperty("width", size.width());
+			root->setProperty("height", size.height());
+			QCoreApplication::processEvents();
+			if (stage->x() < -0.1 || stage->y() < -0.1 || stage->width() * stage->scale() > size.width() + 0.1 || stage->height() * stage->scale() > size.height() + 0.1)
+			{
+				std::fprintf(stderr, "qml-smoke-test: clipped stage at %dx%d (root %dx%d, stage %.1f,%.1f %.1fx%.1f scale %.4f)\n", size.width(), size.height(), root->property("width").toInt(), root->property("height").toInt(), stage->x(), stage->y(), stage->width(), stage->height(), stage->scale());
+				return 1;
+			}
+		}
+		root->setProperty("width", 1280);
+		root->setProperty("height", 720);
+		std::fprintf(stderr, "qml-smoke-test: loaded %s\n", qPrintable(active));
+		QTimer::singleShot(800, &app, [root, active, &app] {
+			auto* navigation = root->findChild<QQuickItem*>("homeNavigation");
+			auto* page = root->findChild<QQuickItem*>("settingsPage");
+			auto* options = root->findChild<QQuickItem*>("themeOptions");
+			auto* window = qobject_cast<QQuickWindow*>(root);
+			const auto fail = [&app](const char* reason) {
+				std::fprintf(stderr, "qml-smoke-test: keyboard flow failed: %s\n", reason);
+				app.exit(1);
+			};
+			if (!navigation || !page || !options || !window) { fail("missing control"); return; }
+			const auto key = [window](int code) {
+				QKeyEvent press(QEvent::KeyPress, code, Qt::NoModifier);
+				QKeyEvent release(QEvent::KeyRelease, code, Qt::NoModifier);
+				QCoreApplication::sendEvent(window, &press);
+				QCoreApplication::sendEvent(window, &release);
+			};
+			navigation->setProperty("cat", 1); // Settings; no external/network action.
+			if (!QMetaObject::invokeMethod(navigation, "setItem", Q_ARG(QVariant, QVariant(5))) || navigation->property("item").toInt() != 5)
+			{ fail("theme settings selection was not applied"); return; }
+			key(Qt::Key_Return);
+			if (!page->isVisible()) { fail("theme page did not open"); return; }
+			key(Qt::Key_Return);
+			if (!options->property("open").toBool()) { fail("theme choices did not open"); return; }
+			const int original_option = options->property("current").toInt();
+			const int direction = original_option == 0 ? Qt::Key_Down : Qt::Key_Up;
+			key(direction);
+			key(Qt::Key_Return); // Switch looks while the theme page is open.
+			if (options->property("open").toBool()) { fail("theme choice did not close"); return; }
+			if (root->property("activeTheme").toString() == active) { fail("theme did not change"); return; }
+			key(Qt::Key_Escape);
+			if (page->isVisible()) { fail("back did not return home"); return; }
+			key(Qt::Key_Return); // Remembered Theme Settings selection.
+			if (!page->isVisible()) { fail("home selection was lost after changing themes"); return; }
+			key(Qt::Key_Return);
+			if (!options->property("open").toBool()) { fail("theme choices did not reopen"); return; }
+			key(direction == Qt::Key_Up ? Qt::Key_Down : Qt::Key_Up);
+			key(Qt::Key_Return);
+			if (root->property("activeTheme").toString() != active) { fail("original theme was not restored"); return; }
+			key(Qt::Key_Escape);
+			std::fprintf(stderr, "qml-smoke-test: keyboard flow passed\n");
+		});
 		QTimer::singleShot(1500, &app, &QCoreApplication::quit);
+	}
 	return app.exec();
 }

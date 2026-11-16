@@ -9,10 +9,20 @@ Item {
     property real shade: 0          // 0..1 black on top (evening / night)
     property bool running: true
 
+    readonly property bool softwareRenderer: GraphicsInfo.api === GraphicsInfo.Software
     readonly property string media: "qrc:/qt/qml/Uscl/xmb/"
 
     Image { id: base; source: bg.media + "bg_base.png"; visible: false }
+    Rectangle {
+        anchors.fill: parent; visible: bg.softwareRenderer
+        gradient: Gradient {
+            GradientStop { position: 0; color: Qt.darker(bg.tint, 1.6) }
+            GradientStop { position: .6; color: bg.tint }
+            GradientStop { position: 1; color: Qt.darker(bg.tint, 2.8) }
+        }
+    }
     ShaderEffect {
+        visible: !bg.softwareRenderer
         anchors.fill: parent
         property var source: base
         property color tint: bg.tint

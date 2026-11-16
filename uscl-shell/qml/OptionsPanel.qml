@@ -5,15 +5,19 @@ import QtQuick
 // setting's value (the current one is marked with a dot).
 Item {
     id: panel
+    property string theme: "ps3"
+    ThemePalette { id: themeStyle; theme: panel.theme }
     property bool open: false
+    enabled: open
     property var options: []       // [{ title, action, checked, disabled }]
     property int current: 0
     signal sound(string name)
 
     function show(opts, start) {
         options = opts || []
-        current = start !== undefined ? start : Math.max(0, options.findIndex(function(o) { return o.checked }))
+        current = Math.max(0, Math.min(options.length - 1, start !== undefined ? start : Math.max(0, options.findIndex(function(o) { return o.checked }))))
         open = true
+        list.positionViewAtIndex(current, ListView.Contain)
     }
     function close() { open = false }
     function input(b) {
@@ -34,15 +38,18 @@ Item {
     Rectangle {
         id: dim
         anchors.fill: parent; color: "black"
-        opacity: panel.open ? 0.4 : 0
+        opacity: panel.open ? 0.55 : 0
         Behavior on opacity { NumberAnimation { duration: panel.open ? 220 : 160 } }
     }
+    MouseArea { anchors.fill: parent; onClicked: panel.input("back"); onWheel: function(wheel) { wheel.accepted = true } }
     Item {
         id: side
         width: 700; height: parent.height
         x: parent.width - 700 + (panel.open ? 0 : 640)
         Behavior on x { NumberAnimation { duration: panel.open ? 240 : 180; easing.type: panel.open ? Easing.OutSine : Easing.InSine } }
-        Image { anchors.fill: parent; source: "qrc:/qt/qml/Uscl/xmb/ui/options_panel.png" }
+        MouseArea { anchors.fill: parent }
+        Rectangle { anchors.fill: parent; visible: panel.theme !== "ps3"; color: themeStyle.panel }
+        Image { visible: panel.theme === "ps3"; anchors.fill: parent; source: "qrc:/qt/qml/Uscl/xmb/ui/options_panel.png" }
         ListView {
             id: list
             x: 110; width: 560
@@ -51,7 +58,7 @@ Item {
             clip: true
             model: panel.options
             currentIndex: panel.current
-            interactive: false
+            interactive: true
             highlightMoveDuration: 120
             preferredHighlightBegin: height / 2 - 32
             preferredHighlightEnd: height / 2 + 32
@@ -64,22 +71,31 @@ Item {
                 width: 560; height: 64
                 opacity: modelData.disabled ? 0.45 : 1
                 BorderImage {
-                    anchors.fill: parent; visible: opt.sel
+                    anchors.fill: parent; visible: opt.sel && panel.theme === "ps3"
                     source: "qrc:/qt/qml/Uscl/xmb/ui/focus_bar.png"
                     border { left: 40; right: 120 }
                 }
+                Rectangle {
+                    anchors.fill: parent; visible: opt.sel && panel.theme !== "ps3"
+                    color: themeStyle.focusFill; border.width: themeStyle.nintendo ? 3 : 1; border.color: themeStyle.accent
+                }
                 Image {
-                    visible: !!opt.modelData.checked
+                    visible: panel.theme === "ps3" && !!opt.modelData.checked
                     x: 18; y: 18; width: 28; height: 28
                     source: "qrc:/qt/qml/Uscl/xmb/ui/setting_dot.png"; mipmap: true
                 }
+                Text { visible: panel.theme !== "ps3" && !!opt.modelData.checked; x: 22; height: 64; verticalAlignment: Text.AlignVCenter; text: "●"; color: opt.sel ? themeStyle.focusText : themeStyle.text; font.pixelSize: 23 }
                 Text {
                     x: 60; width: 480; height: 64
                     verticalAlignment: Text.AlignVCenter
                     text: opt.modelData.title
-                    color: opt.sel ? "white" : "#b4ffffff"
+                    color: panel.theme === "ps3" ? (opt.sel ? "white" : "#b4ffffff") : opt.sel ? themeStyle.focusText : themeStyle.text
                     font.pixelSize: 29
                     elide: Text.ElideRight
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: { panel.current = index; panel.input("accept") }
                 }
             }
         }
