@@ -3,7 +3,7 @@
 // Steps (argv[1]): "alloc" = objects only, "sem" = + one host semaphore release,
 // "compute <sass>" = + one compute launch writing a buffer, "clear <sass>" = + an ADA_A surface clear,
 // "mthd <offset> <value>" = sem, then one ADA_A method, "barrier <sass> [prog]" = compute, then an empty-grid
-// QMD that only releases a semaphore, "inline <sass>" = compute, then the same QMD as an inline QMD.
+// QMD that only releases a semaphore, "inline <sass> [sys]" = compute, then the same QMD as an inline QMD (slot in host memory with sys).
 // Safety: the root client is freed on every exit path (RM frees all children with it).
 #include "nvrm.h"
 
@@ -56,6 +56,7 @@ int main(int argc, char** argv) {
     auto m = [&](NvU32 subc, NvU32 mthd, std::initializer_list<NvU32> v) {
         q.push_back(hdr(subc, mthd, (NvU32)v.size())); q.insert(q.end(), v);
     };
+    bool timeout_ok = false; // the "macro" step reads its slot even when the work it launched fails
     auto submit = [&](const char* what) {
         NvU64 sa = gva + DATA;
         m(0, NVC56F_SEM_ADDR_LO, {(NvU32)sa, (NvU32)(sa >> 32), ++fence + 0xC0FFEE00, 0,
@@ -76,6 +77,7 @@ int main(int argc, char** argv) {
             clock_gettime(CLOCK_MONOTONIC, &t);
             if (t.tv_sec - t0.tv_sec > 2) {
                 printf("%s: TIMEOUT, sem 0x%x GPGet %u\n", what, *sem, userd->GPGet);
+                if (timeout_ok) return;
                 exit(3);
             }
         }
@@ -166,22 +168,96 @@ int main(int argc, char** argv) {
     if (bad || out[32]) return 4;
     if (!strcmp(step, "compute")) return 0;
 
+    // step "macro <sass> <macro file> <qmd file>": the guest's MME program and start addresses (macro file:
+    // u32 code words, u32 start entries, u32 params, code, starts, params; ptcap-extracted), then one call
+    // of compute macro 57 with the captured parameters, its QMD address moved to a probe slot and the QMD's
+    // word 4 bit 12 set (no launch). Prints how the written QMD lines up with Eglantine's (qmd file).
+    if (!strcmp(step, "macro")) {
+        if (argc < 5) { fprintf(stderr, "macro needs <sass> <macro file> <qmd file>\n"); return 1; }
+        std::vector<NvU32> f, eg(64);
+        { FILE* mf = fopen(argv[3], "rb"); if (!mf) die("open macro file", 0); NvU32 v; while (fread(&v, 4, 1, mf) == 1) f.push_back(v); fclose(mf); }
+        { FILE* qf = fopen(argv[4], "rb"); if (!qf || fread(eg.data(), 4, 64, qf) != 64) die("read qmd file", 0); fclose(qf); }
+        NvU32 ncode = f[0], nstart = f[1], nparam = f[2];
+        const NvU32* code = &f[3]; const NvU32* starts = code + ncode; std::vector<NvU32> params(starts + nstart, starts + nstart + nparam);
+        const NvU64 SLOT = QMDO + 0x400;
+        auto* slot = (volatile NvU32*)(cpu + SLOT);
+        for (int i = 0; i < 64; i++) slot[i] = 0;
+        NvU64 sva = gva + SLOT;
+        params[0] = (NvU32)(sva >> 8);
+        // Guest addresses the macro's work touches (its QMD's release, cbufs): zeroed scratch at the same VAs.
+        for (NvU64 va : {0x2104e00000ull, 0x2109800000ull}) {
+            NvHandle sm = alloc_mem(2 << 20, true);
+            map_gpu(sm, 2 << 20, va);
+        }
+        for (auto& p : params) if (p == 0x5f) { p |= 0x1000; break; } // QMD word 4: write, don't launch
+        eg[4] |= 0x1000;
+        m(1, NVC9C0_SET_OBJECT, {ADA_COMPUTE_A});
+        m(1, NVC9C0_LOAD_MME_INSTRUCTION_RAM_POINTER, {0});
+        for (NvU32 i = 0; i < ncode; i += 0x1000) {
+            NvU32 n = std::min<NvU32>(0x1000, ncode - i);
+            q.push_back((3u << 29) | (n << 16) | (1u << 13) | (NVC9C0_LOAD_MME_INSTRUCTION_RAM >> 2));
+            q.insert(q.end(), code + i, code + i + n);
+        }
+        m(1, NVC9C0_LOAD_MME_START_ADDRESS_RAM_POINTER, {0});
+        q.push_back((3u << 29) | (nstart << 16) | (1u << 13) | (NVC9C0_LOAD_MME_START_ADDRESS_RAM >> 2));
+        q.insert(q.end(), starts, starts + nstart);
+        m(1, NVC9C0_CALL_MME_MACRO(57), {params[0]});
+        q.push_back((3u << 29) | ((nparam - 1) << 16) | (1u << 13) | (NVC9C0_CALL_MME_DATA(57) >> 2));
+        q.insert(q.end(), params.begin() + 1, params.end());
+        timeout_ok = true;
+        submit("macro");
+        for (int k = -4; k <= 4; k++) {
+            int same = 0;
+            for (int i = 0; i < 64; i++) if (i + k >= 0 && i + k < 64) same += slot[i + k] == eg[i];
+            if (same >= 56) printf("macro: slot matches Eglantine's QMD shifted by %d words (%d/64 equal)\n", k, same);
+        }
+        printf("macro: slot w0..7: %08x %08x %08x %08x %08x %08x %08x %08x\n", slot[0], slot[1], slot[2], slot[3], slot[4], slot[5], slot[6], slot[7]);
+        return 0;
+    }
+
     // step "inline <sass>": the compute QMD again, delivered as an inline QMD (SET_INLINE_QMD_ADDRESS +
     // LOAD_INLINE_QMD_DATA(0..63)) to an empty slot: is it written to memory, and does it run?
     if (!strcmp(step, "inline")) {
-        const NvU64 SLOT = QMDO + 0x200;
-        auto* slot = (volatile NvU32*)(cpu + SLOT);
+        const NvU64 SLOT = QMDO + 0x400; // past cbuf0 (QMDO + 0x100, 0x200 bytes)
+        volatile NvU32* slot = (volatile NvU32*)(cpu + SLOT);
+        NvU64 sva = gva + SLOT;
+        if (argc > 3 && !strcmp(argv[3], "sys")) { // the slot in pinned host memory, as pt_replay maps guest memory
+            NvU8* host;
+            NvHandle h = alloc_host(1 << 16, &host);
+            sva = map_gpu(h, 1 << 16);
+            slot = (volatile NvU32*)host;
+        }
         for (int i = 0; i < 64; i++) slot[i] = 0;
         for (int i = 0; i < 64; i++) out[i] = 0;
-        NvU64 sva = gva + SLOT;
-        m(1, NVC9C0_SET_INLINE_QMD_ADDRESS_A, {(NvU32)(sva >> 40), (NvU32)(sva >> 8)});
-        q.push_back((1u << 29) | (64u << 16) | (1u << 13) | (NVC9C0_LOAD_INLINE_QMD_DATA(0) >> 2));
-        for (int i = 0; i < 64; i++) q.push_back(qmd[i]);
+        // order (argv[4]): "ab" = A, B, data (default); "b" = B only, data (what NVN's macro emits);
+        // "bb" = a lone B first (as a state restore would), then B, data.
+        const char* order = argc > 4 ? argv[4] : "ab";
+        if (!strcmp(order, "ab")) m(1, NVC9C0_SET_INLINE_QMD_ADDRESS_A, {(NvU32)(sva >> 40), (NvU32)(sva >> 8)});
+        else if (!strcmp(order, "b1")) { // B and the 64 words in one incrementing run, as NVN's macro emits them
+            q.push_back((1u << 29) | (65u << 16) | (1u << 13) | (NVC9C0_SET_INLINE_QMD_ADDRESS_B >> 2));
+            q.push_back((NvU32)(sva >> 8));
+            for (int i = 0; i < 64; i++) q.push_back(qmd[i]);
+        } else {
+            if (!strcmp(order, "bb")) m(1, NVC9C0_SET_INLINE_QMD_ADDRESS_B, {(NvU32)(sva >> 8)});
+            m(1, NVC9C0_SET_INLINE_QMD_ADDRESS_B, {(NvU32)(sva >> 8)});
+        }
+        if (strcmp(order, "b1")) {
+            q.push_back((1u << 29) | (64u << 16) | (1u << 13) | (NVC9C0_LOAD_INLINE_QMD_DATA(0) >> 2));
+            for (int i = 0; i < 64; i++) q.push_back(qmd[i]);
+        }
+        timeout_ok = true;
         submit("inline");
         int bad = 0, same = 0;
         for (int i = 0; i < 32; i++) bad += out[i] != 0xA0000000u + i;
         for (int i = 0; i < 64; i++) same += slot[i] == qmd[i];
-        printf("inline: %d/64 QMD words in memory, kernel %s\n", same, bad ? "did not run" : "ran (32/32 right)");
+        int shift = -1;
+        for (int k = 0; k < 4 && shift < 0; k++) {
+            bool ok = true;
+            for (int i = 0; i + k < 64; i++) ok = ok && slot[i + k] == qmd[i];
+            if (ok) shift = k;
+        }
+        printf("inline (%s): %d/64 QMD words in memory (shift %d), kernel %s\n", order, same, shift,
+               bad ? "did not run" : "ran (32/32 right)");
         return 0;
     }
 

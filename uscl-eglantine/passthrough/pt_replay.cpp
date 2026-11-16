@@ -29,6 +29,8 @@ int main(int argc, char** argv) {
     timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
+    // PT_KIND=<hex>: PTE kind for guest memory (default: the allocation's, pitch).
+    const int guest_kind = getenv("PT_KIND") ? (int)strtol(getenv("PT_KIND"), nullptr, 16) : -1;
     std::map<int, Block> blocks;
     std::vector<Piece> pieces;
     std::map<int, Chan> chans;
@@ -64,7 +66,7 @@ int main(int argc, char** argv) {
             p.va = va; p.size = size; p.off = off;
             Block& b = blocks.at(p.block);
             if (p.off + p.size > b.size || p.va + p.size > (1ull << 40)) die("plan: map out of range", 0);
-            map_gpu(b.h, p.size, p.va, p.off);
+            map_gpu(b.h, p.size, p.va, p.off, guest_kind);
             pieces.push_back(p);
         } else if (k == "channel") {
             int idx; unsigned c[8];

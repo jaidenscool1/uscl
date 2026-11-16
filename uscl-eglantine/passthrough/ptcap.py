@@ -168,6 +168,11 @@ def stats(d):
         print("== not in the mesa headers:", ", ".join(f"{c} {m:#x} x{v}" for (c, m), v in unknown.most_common()))
 
 
+# Texture header (TIC) component formats, from NVIDIA's open-gpu-doc (mesa has no clc797tex.h).
+TIC_FORMATS = {m[1]: int(m[2], 16) for l in open(os.environ.get("TEX_HEADER", os.path.expanduser(
+    "~/src/ext/open-gpu-doc/classes/3d/clc797tex.h")))
+    if (m := re.match(r"#define NVC797_TEXHEAD_BL_COMPONENTS_SIZES_(\w+)\s+0x([0-9a-fA-F]+)", l))}
+
 CHUNK = 1 << 21
 HOST_BASE = 0xF0_0000_0000  # host-owned buffers: above every guest mapping, inside the 1 TiB window
 ZERO_SIZE = BLOCK_SIZE = 64 << 20
@@ -181,14 +186,19 @@ NO_RESTORE = re.compile(r"SET_REPORT_SEMAPHORE_D|SET_MME_SHADOW_RAM_CONTROL|SET_
                         r"SET_SHADER_LOCAL_MEMORY_[AB]|" + NEVER.pattern)  # local memory: address rewritten, sizes kept
 
 
+# Restored even when 0: the host context's default differs from the guest's (bound texture handles are
+# read from cbuf slot SET_BINDLESS_TEXTURE; the guest leaves it 0).
+ALWAYS = {"SET_BINDLESS_TEXTURE"}
+
+
 def restorable(name):
     if name is None:
         return False
     base = re.sub(r"\(\d+\)$", "", name)
-    # The inline QMD registers: macros rewrite some words and the rest keep the guest's template. Word 63
-    # writes the QMD out (and may launch it): never restored.
+    # LOAD_INLINE_QMD_DATA is a sequential buffer on the hardware (the 64th word writes the QMD out and
+    # launches it), not 64 registers: never restored (macro 0x281 writes all 64 words each time).
     if base == "LOAD_INLINE_QMD_DATA":
-        return name != "LOAD_INLINE_QMD_DATA(63)"
+        return False
     return (base.startswith(("SET_", "OGL_SET_")) or base == "LOAD_CONSTANT_BUFFER_OFFSET") and not NO_RESTORE.fullmatch(base)
 
 
@@ -355,13 +365,20 @@ def build(d):
                     (mme_sc, n3d.off("SET_MME_DATA_RAM_ADDRESS") // 4, 0),
                     (mme_sc, n3d.off("MME_DMA_READ") // 4, len(s["dram"])),
                     (0, 0x78 // 4, 0)]  # host WFI: the read is done before the registers below
+            if os.environ.get("PT_DRAM_CHECK"):  # copy the data RAM back out to dram_va + 1 MiB
+                out += [(mme_sc, n3d.off("SET_MME_MEM_ADDRESS_A") // 4, (dram_va + (1 << 20)) >> 32),
+                        (mme_sc, n3d.off("SET_MME_MEM_ADDRESS_B") // 4, (dram_va + (1 << 20)) & 0xFFFFFFFF),
+                        (mme_sc, n3d.off("SET_MME_DATA_RAM_ADDRESS") // 4, 0),
+                        (mme_sc, n3d.off("MME_DMA_WRITE") // 4, len(s["dram"])),
+                        (0, 0x78 // 4, 0)]
+                print(f"PT_DRAM_CHECK: channel {ch} data RAM copy at {dram_va + (1 << 20):x}")
         for sc, e in enumerate(engines):
             if e not in (0xB197, 0xB1C0):
                 continue
             n, regs = names[e], s["regs"][e]
             out.append((sc, n.off("SET_MME_SHADOW_RAM_CONTROL") // 4, 0))  # track while restoring
             for m, v in enumerate(regs):
-                if m >= 0x40 and v and restorable(n(m * 4)):
+                if m >= 0x40 and (v or n(m * 4) in ALWAYS) and restorable(n(m * 4)):
                     out.append((sc, m, v))
                     stats[e] += 1
             if e == 0xB197:
@@ -386,6 +403,42 @@ def build(d):
 
     # The frame, rewritten for the host.
     split = {int(x) for x in os.environ.get("PT_SPLIT", "").split(",") if x}
+    # PT_MME=trace: compute macro calls become the methods Eglantine's MME emitted for them (mme.txt), so
+    # the host MME does not run compute macros (Eglantine's output is what the game ran).
+    traced = collections.defaultdict(collections.deque)  # entry -> deque of (start, [(method, value)])
+    if os.environ.get("PT_MME") == "trace":
+        for line in open(os.path.join(d, "mme.txt")):
+            k_, kind, a_, v_ = line.split()
+            if kind == "C":
+                traced[int(k_)].append((int(a_, 16), []))
+            elif kind == "E":
+                traced[int(k_)][-1][1].append((int(a_, 16), int(v_, 16)))
+    # Only entries whose traced calls match the stream's (start addresses, in order): on the compute-only
+    # channels the front's macro positions differ from the captured state, so those keep the host MME.
+    # PT_NODEP=1: no QMD dependencies. NVN counts finished compute work into a ring of barrier QMDs (each
+    # QMD decrements one, SEND_SIGNALING_PCAS2_B INCREMENT_DEPENDENCE raises it); the ring's counters come
+    # from Eglantine's scheduler, not the hardware. Entries run serialized, so the barriers (releases whose
+    # waits are dropped anyway) are left out: DEPENDENT_QMD0_ENABLE/ACTION (QMD word 16, bits 0-3) cleared
+    # in inline QMDs, INCREMENT_DEPENDENCE launches dropped.
+    nodep = bool(os.environ.get("PT_NODEP"))
+    # Only macros whose trace is complete: Eglantine's JIT passes some parameters straight to the output
+    # without the emit hook (macro 0x2ca's inline upload shows 3 of 18 words), so those run on the host MME.
+    mme_starts = {int(x, 16) for x in os.environ.get("PT_MME_STARTS", "281").split(",") if x}
+    substitute = False
+    QMD16 = names[0xB1C0].off("LOAD_INLINE_QMD_DATA", 16) // 4
+
+    def nodep_word(m, v):
+        return v & ~0xF if nodep and m == QMD16 else v
+    trace_ok = set()
+    if traced:
+        st0 = {ch: [0, 0, 0, 0] for ch in chans}
+        for k, (ch, addr, *_rest, words) in enumerate(stream):
+            starts = [states[ch]["posc"][int(nm[15:-1])] for sc, m, a, _ in decode(words, st0[ch])
+                      if m >= 0x40 and states[ch]["engines"][sc] == 0xB1C0
+                      and (nm := names[0xB1C0](m * 4) or "").startswith("CALL_MME_MACRO(")]
+            if starts and starts == [c[0] for c in traced.get(k, ())]:
+                trace_ok.add(k)
+        print(f"PT_MME=trace: {len(trace_ok)} entries use Eglantine's compute macro output")
     names_of = {}
     for ch in chans:
         for sc in range(8):
@@ -422,6 +475,20 @@ def build(d):
                 raise ValueError(f"entry {k}: {e:#x} method {m * 4:#x} not in the class header")
             regs = shadow[(ch, e)]
             regs[m] = a
+            if e == 0xB1C0 and k in trace_ok and n.startswith(("CALL_MME_MACRO(", "CALL_MME_DATA(")):
+                if n.startswith("CALL_MME_MACRO("):
+                    j = int(n[15:-1])
+                    if not traced[k]:
+                        raise ValueError(f"entry {k}: compute macro {j} not in mme.txt")
+                    start, emits = traced[k].popleft()
+                    if start != states[ch]["posc"][j]:
+                        raise ValueError(f"entry {k}: macro {j} starts at {states[ch]['posc'][j]:#x}, mme.txt has {start:#x}")
+                    substitute = start in mme_starts
+                    if substitute:
+                        out += [(sc, em, nodep_word(em, ev)) for em, ev in emits]
+                        stats["compute macro calls replaced"] += 1
+                if substitute:
+                    continue
             if NEVER.fullmatch(n):
                 stats[f"drop {n}"] += 1
                 continue
@@ -430,6 +497,11 @@ def build(d):
                     stats["drop report acquire/trap"] += 1
                     continue
                 written.add((a64(e, regs, "SET_REPORT_SEMAPHORE_A", "SET_REPORT_SEMAPHORE_B"), 32))
+            if e == 0xB1C0 and nodep:
+                if n == "SEND_SIGNALING_PCAS2_B" and a & 0xF == 0xC:
+                    stats["drop INCREMENT_DEPENDENCE"] += 1
+                    continue
+                a = nodep_word(m, a)
             if e in lm_methods and m in lm_methods[e]:
                 a = lm_va >> 32 if m == lm_methods[e][0] else lm_va & 0xFFFFFFFF
             if e == 0xB197:
@@ -446,6 +518,8 @@ def build(d):
                                rmw(e, regs, "SET_DST_WIDTH") * rmw(e, regs, "SET_DST_HEIGHT") * max(1, rmw(e, regs, "SET_DST_DEPTH")))
                 written.add((dst, size + CHUNK))
             out.append((sc, m, a))
+        if k in trace_ok and traced[k]:
+            raise ValueError(f"entry {k}: {len(traced[k])} traced compute macro calls left over")
         if k in split:  # bisecting: one fenced sub-entry per macro call / launch, numbered k * 1000 + n
             cuts = [i for i, (sc, m, _) in enumerate(out) if i and (names_of[(ch, sc)](m) or "").startswith(("CALL_MME_MACRO", "SEND_PCAS_A"))]
             for n, (i, j) in enumerate(zip([0] + cuts, cuts + [len(out)])):
@@ -506,6 +580,97 @@ def build(d):
     for va, size, b, o in pieces:
         lines.append(f"map {va:x} {size:x} {b} {o:x}")
     lines.append(f"map {lm_va:x} {lm_size:x} {LMB} 0")
+    # PT_ASTC=dummy: the host samples no ASTC (RTX 40: textureCompressionASTC_LDR false; 28% of MKW's texture
+    # headers): every ASTC header in the texture header pools becomes a copy of an A8B8G8R8 header of the same
+    # pool (wrong image, valid memory). shortcut: transcode ASTC (to RGBA8/BC7) and repoint the headers instead.
+    def patch_pool(pool, count, fix, tag):
+        """Read a 32-byte-entry pool from the chunks' data, let fix(raw) edit it, add fill lines over it."""
+        gpu, dev, msize, _, _ = next(m for m in maps if m[0] <= pool < m[0] + m[2])
+        assert pool + count * 32 <= gpu + msize, "pool spans mappings"
+        da = dev + pool - gpu
+        raw = bytearray(count * 32)
+        for c in range(da // CHUNK, (da + count * 32 - 1) // CHUNK + 1):
+            for f, fo, co, n in chunks.get(c, ()):
+                lo, hi = max(c * CHUNK + co, da), min(c * CHUNK + co + n, da + count * 32)
+                if lo < hi:
+                    with open(os.path.join(d, f), "rb") as fh:
+                        fh.seek(fo + lo - (c * CHUNK + co))
+                        raw[lo - da:hi - da] = fh.read(hi - lo)
+        fix(raw)
+        path = f"replay/{tag}-{pool:x}.bin"
+        open(os.path.join(d, path), "wb").write(raw)
+        for c in range(da // CHUNK, (da + count * 32 - 1) // CHUNK + 1):
+            lo, hi = max(c * CHUNK, da), min((c + 1) * CHUNK, da + count * 32)
+            b, o = divmod(slot[c], per_block)
+            lines.append(f"fill {b} {o * CHUNK + lo % CHUNK:x} {path} {lo - da:x} {hi - lo:x}")
+
+    def pools_of(kind):
+        out = set()
+        for s_ in states.values():
+            for e in (0xB197, 0xB1C0):
+                r = s_["regs"][e]
+                out.add((((r[names[e].off(f"SET_TEX_{kind}_POOL_A") // 4] & 0xFF) << 32) | r[names[e].off(f"SET_TEX_{kind}_POOL_B") // 4],
+                         r[names[e].off(f"SET_TEX_{kind}_POOL_C") // 4] + 1))
+        return sorted(p for p in out if p[0])
+
+    # PT_TSC_NODC=<hex indices|all>: clear DEPTH_COMPARE (TEXSAMP0 bit 9) in those samplers. NVN pairs
+    # compare samplers with plain (non-.DC) TEX on depth textures; the T239 tolerates it, Ada raises
+    # TEX FORMAT (MKW entry 58: Z16 2D_ARRAY with sampler 0x1c7).
+    nodc = os.environ.get("PT_TSC_NODC")
+    if nodc:
+        for pool, count in pools_of("SAMPLER"):
+            which = range(count) if nodc == "all" else [int(x, 16) for x in nodc.split(",")]
+
+            def fix(raw, which=which):
+                n = 0
+                for i in which:
+                    w0 = struct.unpack_from("<I", raw, i * 32)[0]
+                    if w0 & 0x200:
+                        struct.pack_into("<I", raw, i * 32, w0 & ~0x200)
+                        n += 1
+                print(f"PT_TSC_NODC: pool {pool:x}: depth compare cleared in {n} samplers")
+            patch_pool(pool, count, fix, "tsc")
+    # PT_TIC_COPY=<dst>:<src>[,...] (hex): texture header dst becomes a copy of src (bisecting header issues).
+    tic_copy = [tuple(int(x, 16) for x in p.split(":")) for p in os.environ.get("PT_TIC_COPY", "").split(",") if p]
+    if tic_copy:
+        for pool, count in pools_of("HEADER"):
+            def fix(raw):
+                for dst, src in tic_copy:
+                    raw[dst * 32:dst * 32 + 32] = raw[src * 32:src * 32 + 32]
+                print(f"PT_TIC_COPY: pool {pool:x}: {len(tic_copy)} headers replaced")
+            patch_pool(pool, count, fix, "ticcopy")
+    if os.environ.get("PT_ASTC") == "dummy":
+        pools = set()
+        for s_ in states.values():
+            for e in (0xB197, 0xB1C0):
+                r = s_["regs"][e]
+                pools.add((((r[names[e].off("SET_TEX_HEADER_POOL_A") // 4] & 0xFF) << 32) | r[names[e].off("SET_TEX_HEADER_POOL_B") // 4],
+                           r[names[e].off("SET_TEX_HEADER_POOL_C") // 4] + 1))
+        for pool, count in sorted(p for p in pools if p[0]):
+            gpu, dev, msize, _, _ = next(m for m in maps if m[0] <= pool < m[0] + m[2])
+            assert pool + count * 32 <= gpu + msize, "pool spans mappings"
+            da = dev + pool - gpu
+            raw = bytearray(count * 32)
+            for c in range(da // CHUNK, (da + count * 32 - 1) // CHUNK + 1):  # from the chunks' own data
+                for f, fo, co, n in chunks.get(c, ()):
+                    lo, hi = max(c * CHUNK + co, da), min(c * CHUNK + co + n, da + count * 32)
+                    if lo < hi:
+                        with open(os.path.join(d, f), "rb") as fh:
+                            fh.seek(fo + lo - (c * CHUNK + co))
+                            raw[lo - da:hi - da] = fh.read(hi - lo)
+            fmt = [raw[i * 32] & 0x7F for i in range(count)]
+            rgba = next(i for i in range(count) if fmt[i] == TIC_FORMATS["A8B8G8R8"] and any(raw[i * 32:i * 32 + 32]))
+            astc_codes = {v for k, v in TIC_FORMATS.items() if k.startswith("ASTC")}
+            astc = [i for i in range(count) if fmt[i] in astc_codes and any(raw[i * 32:i * 32 + 32])]
+            for i in astc:
+                raw[i * 32:i * 32 + 32] = raw[rgba * 32:rgba * 32 + 32]
+            path = f"replay/tic-{pool:x}.bin"
+            open(os.path.join(d, path), "wb").write(raw)
+            for c in range(da // CHUNK, (da + count * 32 - 1) // CHUNK + 1):
+                lo, hi = max(c * CHUNK, da), min((c + 1) * CHUNK, da + count * 32)
+                b, o = divmod(slot[c], per_block)
+                lines.append(f"fill {b} {o * CHUNK + lo % CHUNK:x} {path} {lo - da:x} {hi - lo:x}")
+            print(f"PT_ASTC=dummy: pool {pool:x}: {len(astc)} ASTC headers -> header {rgba:#x} (A8B8G8R8)")
     for idx, ch, va in drams:
         lines += [f"block {LMB + 1 + idx} {CHUNK:x}", f"fill {LMB + 1 + idx} 0 replay/dram-{ch}.bin 0 3000",
                   f"map {va:x} {CHUNK:x} {LMB + 1 + idx} 0"]

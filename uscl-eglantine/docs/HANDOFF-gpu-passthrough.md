@@ -12,7 +12,8 @@ Host: driver 615.78.08 (open kernel module), Arch Linux.
 | Gate 1 (driver access) | **Pass** on hardware |
 | Gate 2 (method compatibility) | **Pass (real data)**: every 3D/compute/copy method in a captured MKW frame is a named Ampere method, plus three private 3D methods (0xF74/0xF7C/0xF80) that ADA_A accepts; only host-class changes needed (Tegra syncpoints 0x70/0x74 dropped) |
 | Gate 3 (shader compatibility) | **Pass (decode level)**; guest compute SASS has started to **execute** on the RTX 4060 (Phase 1), no per-instruction failure seen yet |
-| Phase 1 (capture + replay one frame) | **In progress**: capture probe done (`probes/0003`); replay runs the state restore and the first 58 frame entries (guest MME macros, draws and compute) on the host, then stops at an inline-QMD launch (see Phase 1 below) |
+| Phase 1 (capture + replay one frame) | **In progress**: capture probe done (`probes/0003`); replay runs the state restore, 57 frame entries and 15 of the 16 compute launches of entry 58 (guest macros, draws and compute kernels on the host); the 16th kernel raises TEX FORMAT (see Phase 1) |
+| New: texture formats | **Open, needs work**: 28% of MKW's texture headers are ASTC (8x8, 6x6, 4x4, 5x5); the RTX 4060 has no ASTC sampling (`textureCompressionASTC_LDR` false), so passthrough needs ASTC transcoding + header repointing |
 | Gates 4-6 | not started (Phase 1 uses pinned host memory at the guest's own VAs, pitch kind only: first evidence for gate 4) |
 
 ## Phase 0 tool: `uscl-eglantine/passthrough/nvrm_probe.cpp`
@@ -23,8 +24,9 @@ mesa class/QMD headers from `~/src/ext/mesa-nouveau/src/nouveau/headers/nvidia/c
 with `NV_SRC` / `MESA_CLASSES`).
 
 Run: `nvrm_probe alloc|sem|compute <sass>|clear <sass>` (each step includes the ones before it); experiments:
-`mthd <offset> <value>` (one ADA_A method), `barrier <sass> [prog]` (empty-grid QMD, release only), `inline <sass>`
-(the compute QMD as an inline QMD; currently faults, see Phase 1). `<sass>` is the
+`mthd <offset> <value>` (one ADA_A method), `barrier <sass> [prog]` (empty-grid QMD, release only),
+`inline <sass> [vid|sys] [ab|b|bb|b1]` (the compute QMD as an inline QMD), `macro <sass> <macro file> <qmd file>`
+(a guest compute macro on a bare channel). `<sass>` is the
 raw `.text` of an sm_89 cubin of `extern "C" __global__ void k(unsigned* p) { p[threadIdx.x] = 0xA0000000u + threadIdx.x; }`
 (`nvcc -arch=sm_89 -cubin`, then `dd` the `.text.k` section; param at `c[0][0x160]`, 8 registers).
 
@@ -83,7 +85,7 @@ Measured:
 
 ## Phase 1: capture and replay one MKW frame (2026-11-16, in progress)
 
-### Capture: `probes/0003` (`EDEN_NX2_PT_CAPTURE=<dir>`, fork branch `uscl-ptcap`, commit 467ad5b6c)
+### Capture: `probes/0003` (`EDEN_NX2_PT_CAPTURE=<dir>`, fork branch `uscl-ptcap`, commit eef4f7862)
 Applies with `git am` on 0001-0013 (verified: same tree as the branch). Touch `<dir>/capture.now` in a race;
 recording starts at the next present and covers two presents. Writes (layouts in `nx2_pt_capture.cpp`):
 `maps.txt` + `dev-*.bin` (GPU VA map and device memory at the start, after flushing every GPU-dirty mapping
@@ -102,7 +104,8 @@ A capture is ~48 GB (24 GB per dump; 3.9 GB of it nonzero). Captures: `~/.local/
   `image <file> <w> <h> <fmt> <mem> <png>`: de-tile a read-back color target (block linear GOBs).
 - `ptcap.py build <cap>` writes `<cap>/replay/{plan.txt,push.bin,targets.txt}`. `PT_SPLIT=<entry>` cuts that
   entry into one fenced sub-entry per macro call / launch (numbered entry*1000+n) to bisect a failure;
-  `PT_NO_END=1` ignores the end-of-frame dump.
+  `PT_NO_END=1` ignores the end-of-frame dump; `PT_MME=trace`, `PT_NODEP=1`, `PT_ASTC=dummy`, `PT_TSC_NODC`,
+  `PT_TIC_COPY`, `PT_DRAM_CHECK` are replay patches/checks explained below; `pt_replay` takes `PT_KIND=<hex>`.
 - `pt_replay <cap>/replay [entries] [va:size:file ...]`: maps the plan, runs entries one at a time, readbacks
   after the run or a timeout. Each failure so far killed only its own channel (Xid 11/13/31 on pt_replay's
   channel); the probe's `clear` test passes after every one and the desktop never noticed.
@@ -119,35 +122,51 @@ What the replay does (all in `ptcap.py build`, the C++ only executes the plan):
 - **State restore** per channel: SET_OBJECT with host classes, each class's MME program and start addresses,
   MME data RAM (3D only: `SET_MME_MEM_ADDRESS` + `MME_DMA_READ` from a host copy; without it the first
   entry trips Xid 13 "Const out of Bound", CCACHE LDCONST_OOB), every nonzero register whose name is plain
-  state (`SET_*`, `OGL_SET_*`, `LOAD_CONSTANT_BUFFER_OFFSET`, `LOAD_INLINE_QMD_DATA(0..62)`: macros rewrite part
-  of the inline QMD and the rest is the guest's template), cbuf bindings, local memory moved to a host buffer
-  sized for AD107's 72 TPC slots (the guest sized its own for T239; sizes kept), zcull off, shadow RAM mode 1.
+  state (`SET_*`, `OGL_SET_*`, `LOAD_CONSTANT_BUFFER_OFFSET`; `SET_BINDLESS_TEXTURE` even when 0), cbuf bindings, local memory moved to a host buffer
+  sized for AD107's 72 TPC slots (the guest sized its own for T239; sizes kept: an earlier restore dropped them), zcull off, shadow RAM mode 1.
   Never sent: `SET_FALCON*`, `SET_RESERVED_SW_METHOD*`, `SET_INSTRUMENTATION_*`, `SET_SPA_VERSION` (host keeps 8.9).
   Array lengths are not in the mesa headers: an array ends at the next unrelated method (an unbounded guess
   once sent a non-method, Xid 11).
 - **Stream rewrite**: semaphore acquires (`SEMAPHORED` ACQ*, report acquire/trap) dropped (entries are
   serialized), Tegra syncpoints dropped, local memory addresses rewritten, re-encoded.
 
-### Where it stops: inline QMDs (next step)
-NVN builds compute work with macro 0x281 (`CALL_MME_MACRO(57)`): `SET_INLINE_QMD_ADDRESS_B` then 64
-`LOAD_INLINE_QMD_DATA` writes (Eglantine's trace, `mme.txt`; the macro reads no registers). Eglantine writes
-those 256 bytes to memory and launches; the QMD it records is a valid QMD v3 (1x1x1 x 32 threads, program
-0x114c475d00) whose dependent pointer chains into a 16-slot ring of barrier QMDs. On the host the same entry
-fails with SKEDCHECK16 CTA_THREAD_DIMENSION_ZERO for that QMD address (ESR 0x40702c): SKED reads the slot's
-**old** memory, not the inline data. `nvrm_probe inline` (Phase 0's working compute QMD sent as an inline QMD)
-also launches but the kernel writes to VA 0 (Xid 31, write): so Ada's inline-QMD path is not the plain "write to
-memory, then launch" Eglantine models. Next:
-1. Pin down inline-QMD semantics on Ada with `nvrm_probe inline`: read the slot back before and after; try
-   `SEND_PCAS_A` on the slot after the inline writes; check the field Eglantine tests for launching
-   (`regs[0xa7]` bit 24, QMD word 4 bit 12). If Ada differs, the replay rewrites inline QMDs into plain memory
-   QMDs: emulate the 64 inline words in the pushbuffer as an I2M (`LAUNCH_DMA`) to the slot followed by
-   `SEND_PCAS_A` (macros emit them, so the cheapest form is patching macro 0x281's last emits or running it
-   in a host MME with `LOAD_INLINE_QMD_DATA` remapped).
-2. Memory timing: the end-of-frame dump poisons rings reused within the frame (QMD/parameter rings); use the
-   start dump (`PT_NO_END=1`) and, where the CPU writes during the frame, per-entry deltas (not built).
-3. Then run to the end, read back the last color target in `targets.txt` (2560x1440 A8B8G8R8_SRGB, last
-   drawn at the final entries) with `pt_replay ... va:size:file` (size: `ptcap.size_of`), `ptcap.py image`, and
-   compare with Eglantine's output (bench screenshot of the same moment, or `EDEN_NX2_FRAME_DUMP`).
+### Where it stops (2026-11-16, second pass)
+Build flags used for the furthest run: `PT_NO_END=1 PT_MME=trace PT_NODEP=1 PT_ASTC=dummy ptcap.py build <cap>`.
+
+1. **Inline QMDs work on Ada exactly as Eglantine models them** (`nvrm_probe inline <sass> [vid|sys] [ab|b|bb|b1]`:
+   64/64 words written to memory and the kernel launched, slot in vidmem or host memory, with any order of the
+   address methods). The first pass's "Ada differs" came from a probe bug (the slot overlapped cbuf0).
+   `LOAD_INLINE_QMD_DATA` is a **sequential 64-word buffer**, not 64 registers: the 64th word writes the QMD out
+   and launches it. So the restore must never write it (the old restore's 30 nonzero words shifted every QMD by
+   30 words: SKEDCHECK02/03/05/11/14/16 failures).
+2. With that fixed, the host MME running NVN's compute macro 0x281 (`CALL_MME_MACRO(57)`) still writes its
+   QMD one word late (word 0 = the `SET_INLINE_QMD_ADDRESS_B` value). Same macro code, parameters (53 words
+   in the stream) and data RAM (round-tripped, `PT_DRAM_CHECK=1`); cause not found. `nvrm_probe macro` (the
+   guest macro on a bare channel) launched but left its slot empty: inconclusive. **Workaround**
+   `PT_MME=trace`: calls of macro starts in `PT_MME_STARTS` (default 0x281) are replaced by the methods
+   Eglantine's MME emitted (`mme.txt`). Not for 0x2ca: Eglantine's JIT passes part of its upload straight
+   through without the emit hook (3 of 18 words traced). On the compute-only channels the traced starts don't
+   match the captured positions (the split front keeps its own): those keep the host MME.
+3. QMD dependencies: NVN counts finished compute work into a 16-slot ring of barrier QMDs (each QMD's
+   `DEPENDENT_QMD0` decrements one, `SEND_SIGNALING_PCAS2_B` 0xC increments it). The ring's counters come from
+   Eglantine's scheduler, not hardware state (SKEDCHECK36 underflow). `PT_NODEP=1` drops both (the entries run
+   serialized; the barriers only release semaphores whose waits are dropped anyway).
+4. **ASTC** (gate-level): `PT_ASTC=dummy` replaces each ASTC header with a copy of an A8B8G8R8 one (wrong image,
+   valid memory). The real fix is transcoding (RGBA8 or BC7) into host memory and repointing the headers.
+5. **Current stop**: entry 58's last compute launch (program 0x114c476100, 7x `TEX.SCR.LZ ... 0x0, 0x14,
+   ARRAY_2D`: handle at `c[0][0x50]` = TIC 0x72b4 Z16 2D_ARRAY 512x512x101, TSC 0x1c7 with depth compare on)
+   raises Xid 13 TEX FORMAT; the 15 launches before it (2D G8R8 etc.) run. Ruled out: page kind (`PT_KIND=6`
+   GENERIC_MEMORY), sampler depth compare (`PT_TSC_NODC=all`), the Z16 header itself (`PT_TIC_COPY=72b4:6fb6`,
+   an R16 2D_ARRAY header: same error), `.SCR` (nvcc emits `TEX.SCR.LL/LZ` for sm_89 itself), the operand form
+   (`0x0, 0x14` = cbuf bank, word offset, as CUDA's `0x0, 0x58`). Next: a single-kernel harness in
+   `nvrm_probe` (this QMD, its cbufs from host readbacks, both pools, the texture memory) to vary one thing at a
+   time: 2D vs ARRAY_2D instruction, header fields (layer count, mip levels), QMD texture/sampler fields.
+
+Also open:
+- Memory timing: the end dump poisons rings reused within the frame, so `PT_NO_END=1`; per-entry deltas for
+  data the CPU writes during the frame are not built.
+- Then run to the end and compare the last color target in `targets.txt` (2560x1440 A8B8G8R8_SRGB) with
+  Eglantine's output (`ptcap.py image`).
 
 Facts learned on the way:
 - MKW frame: ~1100 entries over 2 presents, ~100k words; 3D draws to 2560x1440 (HDR BF10GF11RF11 scene, sRGB
