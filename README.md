@@ -10,6 +10,10 @@ PS3 came first. USCL now also runs PS4, Switch, Wii, GameCube, 3DS, Wii U and Xb
 > **Status: early testing.** Several games already play online in tests; playing between two PCs over Steam is
 > being tested now. Expect bugs.
 
+**Native PS4 preview:** [`uscl-ps4`](uscl-ps4/) adds a separate native launcher and
+PKG build targeting 9.00/GoldHEN. Hardware execution is unverified; it uses separate
+experimental PS3/Switch emulator applications and does not yet provide PC feature parity.
+
 **Contents:** [What you get](#what-you-get) · [Platforms](#platforms) · [Get it](#get-it) ·
 [Controllers](#controllers) · [Games](#games) · [How online works](#how-online-works) ·
 [Repository map](#repository-map) · [Branches](#branches) · [Safety](#safety) · [Credits](#credits)

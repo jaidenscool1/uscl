@@ -1,0 +1,36 @@
+name: Native PS4 preview
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'uscl-ps4/**'
+      - 'uscl-shell/fonts/**'
+      - 'uscl-shell/xmb/icons/**'
+      - '.github/workflows/ps4-native.yml'
+permissions:
+  contents: read
+jobs:
+  native-package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang lld make g++ libsdl2-dev libfreetype-dev
+      - name: Bootstrap pinned open toolchain
+        working-directory: uscl-ps4
+        run: bash scripts/bootstrap.sh
+      - name: Native build and package
+        working-directory: uscl-ps4
+        run: make -j4 PKGTOOL="$HOME/ps4dev/pkgtool8/PkgTool.Core" package
+      - name: Package and sanitizer checks
+        working-directory: uscl-ps4
+        run: make PKGTOOL="$HOME/ps4dev/pkgtool8/PkgTool.Core" validate test
+      - name: Desktop UI smoke test
+        working-directory: uscl-ps4
+        run: |
+          make build/uscl-ps4-preview
+          SDL_VIDEODRIVER=dummy ./build/uscl-ps4-preview --capture build/preview.ppm
+      # No public binary upload: libjbc redistribution licensing is unresolved.

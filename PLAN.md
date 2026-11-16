@@ -1,5 +1,15 @@
 # USCL: The Ultimate Steam Compatibility Layer
 
+**Native PS4 target (2026-11-15, in progress):** `uscl-ps4` builds an independent
+OpenOrbis launcher PKG targeting 9.00/GoldHEN. It discovers installed applications
+and local PS3/Switch games, and writes the existing native emulator handoffs for
+RPCS3 PORT FOR PS4 v0.40 and NX on Orbis v0.1.0. Native build, sanitized metadata/
+discovery tests, desktop rendering and package structure/hash/signature/import checks
+pass locally. Installation, display/input, app switching, handoffs and gameplay
+remain untested on PS4. Steam/USCL multiplayer services and PC feature parity are
+not ported. This is a preview, not completion of a native PC-equivalent application.
+See `uscl-ps4/README.md` and `uscl-ps4/CONSOLE-TEST.md`.
+
 Goal: PS3 games (your own dumps) running in RPCS3 use Steam for friends, invites, lobbies and P2P, without
 patching each game. Status: Steam bridge service working (see Phases).
 
