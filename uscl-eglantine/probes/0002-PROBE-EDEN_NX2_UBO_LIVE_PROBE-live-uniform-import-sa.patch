@@ -1,0 +1,297 @@
+From 41145edaece785486b148037c84f8bb9c00907fa Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 11:44:22 -0700
+Subject: [PATCH 2/2] PROBE: EDEN_NX2_UBO_LIVE_PROBE (live uniform import
+ safety), EDEN_NX2_AB in-race switch A/B
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../buffer_cache/uniform_stream_reuse.h       | 63 ++++++++++++++
+ src/video_core/memory_manager.cpp             | 11 +++
+ src/video_core/nx2_draw_stats.h               | 87 +++++++++++++++++++
+ .../renderer_vulkan/vk_buffer_cache.cpp       |  4 +
+ .../renderer_vulkan/vk_buffer_cache.h         |  3 +
+ .../renderer_vulkan/vk_rasterizer.cpp         |  1 +
+ 6 files changed, 169 insertions(+)
+
+diff --git a/src/video_core/buffer_cache/uniform_stream_reuse.h b/src/video_core/buffer_cache/uniform_stream_reuse.h
+index a5f8ce4b3..617a1eb83 100644
+--- a/src/video_core/buffer_cache/uniform_stream_reuse.h
++++ b/src/video_core/buffer_cache/uniform_stream_reuse.h
+@@ -15,6 +15,7 @@
+ #include <type_traits>
+ 
+ #include "common/common_types.h"
++#include "common/logging.h"
+ #include "video_core/nx2_draw_stats.h"
+ 
+ namespace VideoCommon {
+@@ -95,6 +96,67 @@ inline void ResetUniformStreamReuse() noexcept {
+ /// buffer, reusing the slot's previous allocation when the bytes and the command buffer are the
+ /// same. Returns false (nothing bound) when the buffer does not qualify, so the caller binds it
+ /// the classic way.
++/// PROBE EDEN_NX2_UBO_LIVE_PROBE=1: would binding small uniforms straight from guest memory (no
++/// copy, the host GPU reads it when it runs) see the bytes the copy took? Each bind's bytes are
++/// hashed and checked again once the GPU has finished its tick; logs the share that changed (an
++/// upper bound: a legitimate rewrite right after the GPU finished also counts) and how many host
++/// pointers meet the uniform offset alignment.
++template <class Runtime, class DeviceMemory>
++inline void UniformLiveProbe(Runtime& runtime, DeviceMemory& device_memory, u64 device_addr,
++                             const u8* bytes, u32 size) {
++    // =1: check once the GPU finished the tick; =2: once the tick was submitted (a lower bound);
++    // =3: as 1, reading the GPU tick at every bind (completion seen within one bind).
++    static const char mode = [] {
++        const char* value = std::getenv("EDEN_NX2_UBO_LIVE_PROBE");
++        return value != nullptr ? value[0] : '0';
++    }();
++    if (mode == '0') {
++        return;
++    }
++    struct Entry {
++        u64 addr, hash, tick;
++        u32 size;
++    };
++    static std::array<Entry, 1u << 16> ring;
++    static u64 head = 0, tail = 0, checked = 0, changed = 0, aligned = 0, binds = 0;
++    static u64 inline_binds = 0, changed_inline = 0;
++    static std::array<u8, 4096> again;
++    ++binds;
++    const u8* const host = device_memory.GetSpan(device_addr, size);
++    aligned += host != nullptr && (reinterpret_cast<uintptr_t>(host) & 0xff) == 0 ? 1 : 0;
++    inline_binds += Nx2DrawStats::InlineWritten(device_addr, size) ? 1 : 0;
++    if (head - tail < ring.size()) {
++        ring[head++ % ring.size()] =
++            Entry{device_addr, Nx2DrawStats::HashBytes(bytes, size), runtime.CurrentTick(), size};
++    }
++    if (mode == '3') {
++        runtime.RefreshGpuTick();
++    }
++    const u64 current = runtime.CurrentTick();
++    while (tail != head && (mode == '2' ? ring[tail % ring.size()].tick < current
++                                        : runtime.IsFree(ring[tail % ring.size()].tick))) {
++        const Entry& entry = ring[tail++ % ring.size()];
++        device_memory.ReadBlockUnsafe(entry.addr, again.data(), entry.size);
++        ++checked;
++        if (Nx2DrawStats::HashBytes(again.data(), entry.size) != entry.hash) {
++            ++changed;
++            changed_inline += Nx2DrawStats::InlineWritten(entry.addr, entry.size) ? 1 : 0;
++        }
++        if (checked % 500000 == 0) {
++            LOG_INFO(HW_GPU,
++                     "nx2 ubo live probe: {} binds, {:.1f}% host pointer 256-aligned; {} checked "
++                     "after their tick, {:.3f}% changed; on inline-written pages: {:.1f}% of "
++                     "binds, {:.1f}% of the changed",
++                     binds, 100.0 * static_cast<double>(aligned) / static_cast<double>(binds),
++                     checked, 100.0 * static_cast<double>(changed) / static_cast<double>(checked),
++                     100.0 * static_cast<double>(inline_binds) / static_cast<double>(binds),
++                     changed == 0 ? 0.0
++                                  : 100.0 * static_cast<double>(changed_inline) /
++                                        static_cast<double>(changed));
++        }
++    }
++}
++
+ template <class Runtime, class DeviceMemory>
+ [[nodiscard]] bool BindSmallUniformReusing(Runtime& runtime, DeviceMemory& device_memory,
+                                            size_t stage, u32 index, u32 binding_index,
+@@ -108,6 +170,7 @@ template <class Runtime, class DeviceMemory>
+     typename Reuse::Slot& slot = reuse.slots[stage][index];
+     u8* const scratch = reuse.scratch.data();
+     device_memory.ReadBlockUnsafe(device_addr, scratch, size);
++    UniformLiveProbe(runtime, device_memory, device_addr, scratch, size);
+ 
+     const bool same_bytes =
+         slot.size == size && std::memcmp(slot.bytes.data(), scratch, size) == 0;
+diff --git a/src/video_core/memory_manager.cpp b/src/video_core/memory_manager.cpp
+index 85199b5be..c6a18cc39 100644
+--- a/src/video_core/memory_manager.cpp
++++ b/src/video_core/memory_manager.cpp
+@@ -25,6 +25,7 @@
+ #include "video_core/host1x/host1x.h"
+ #include "video_core/invalidation_accumulator.h"
+ #include "video_core/memory_manager.h"
++#include "video_core/nx2_draw_stats.h"
+ #include "video_core/rasterizer_interface.h"
+ #include "video_core/renderer_base.h"
+ #include "video_core/texture_cache/util.h"
+@@ -661,6 +662,11 @@ void MemoryManager::NoteDeferredCodeWrite(GPUVAddr gpu_addr, std::size_t size) c
+ }
+ 
+ void MemoryManager::WriteBlockCached(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size) {
++    if (VideoCommon::Nx2DrawStats::LiveProbeOn() && size != 0) [[unlikely]] {
++        if (const auto device = GpuToCpuAddress(gpu_dest_addr)) {
++            VideoCommon::Nx2DrawStats::NoteInlineWrite(*device, size);
++        }
++    }
+     WriteBlockImpl(gpu_dest_addr, src_buffer, size, VideoCommon::CacheType::None, true);
+     NoteDeferredCodeWrite(gpu_dest_addr, size);
+     accumulator.Add(gpu_dest_addr, size);
+@@ -676,6 +682,11 @@ void MemoryManager::WriteWordsCached(GPUVAddr gpu_dest_addr, const u32* words, s
+         }
+         return;
+     }
++    if (VideoCommon::Nx2DrawStats::LiveProbeOn() && size != 0) [[unlikely]] {
++        if (const auto device = GpuToCpuAddress(gpu_dest_addr)) {
++            VideoCommon::Nx2DrawStats::NoteInlineWrite(*device, size);
++        }
++    }
+     WriteBlockImpl(gpu_dest_addr, words, size, VideoCommon::CacheType::None, true);
+     NoteDeferredCodeWrite(gpu_dest_addr, size);
+     // The accumulator merges word by word differently from one range: keep its ranges.
+diff --git a/src/video_core/nx2_draw_stats.h b/src/video_core/nx2_draw_stats.h
+index ec91d7eed..44b21e418 100644
+--- a/src/video_core/nx2_draw_stats.h
++++ b/src/video_core/nx2_draw_stats.h
+@@ -11,7 +11,9 @@
+ #include <chrono>
+ #include <cstdlib>
+ #include <cstring>
++#include <mutex>
+ #include <string>
++#include <unordered_set>
+ 
+ #ifdef _MSC_VER
+ #include <intrin.h>
+@@ -19,6 +21,7 @@
+ 
+ #include "common/common_types.h"
+ #include "common/logging.h"
++#include "video_core/nx2_perf.h"
+ 
+ namespace VideoCommon::Nx2DrawStats {
+ 
+@@ -238,6 +241,90 @@ inline bool NoteSame(Site site, u64 key, u64 value, bool feeds_draw = true) {
+     return same;
+ }
+ 
++/// EDEN_NX2_AB=<Nx2Perf switch name>: flips that switch every 20,000 draws and logs the cycles
++/// per draw spent in RasterizerVulkan::Draw with it on and off: an A/B inside one race, where both
++/// sides see the same scenes (fps A/Bs between runs carry +-6% of noise). Only for switches read
++/// through Nx2Perf::On at each use.
++[[nodiscard]] inline int AbSwitch() {
++    static const int index = [] {
++        const char* const name = std::getenv("EDEN_NX2_AB");
++        if (name == nullptr) {
++            return -1;
++        }
++        for (size_t i = 0; i < Nx2Perf::opt_names.size(); ++i) {
++            if (Nx2Perf::opt_names[i] == name) {
++                (void)Nx2Perf::On(static_cast<Nx2Perf::Opt>(i)); // initializes the live mask
++                return static_cast<int>(i);
++            }
++        }
++        LOG_WARNING(HW_GPU, "EDEN_NX2_AB: unknown switch {}", name);
++        return -1;
++    }();
++    return index;
++}
++
++class AbTimer {
++public:
++    AbTimer() : index{AbSwitch()} {
++        if (index >= 0) [[unlikely]] {
++            start = Cycles();
++        }
++    }
++    ~AbTimer() {
++        if (index < 0) [[likely]] {
++            return;
++        }
++        const u64 elapsed = Cycles() - start;
++        auto& mask = Nx2Perf::detail::live_off_mask;
++        const u64 bit = u64{1} << index;
++        const bool on = (mask.load(std::memory_order_relaxed) & bit) == 0;
++        static std::array<u64, 2> cycles{}, draws{};
++        static u64 total{};
++        cycles[on] += elapsed;
++        ++draws[on];
++        if (++total % 20000 != 0) {
++            return;
++        }
++        mask.fetch_xor(bit, std::memory_order_relaxed);
++        if (total % 400000 == 0) {
++            const double off_cpd = static_cast<double>(cycles[0]) / static_cast<double>(draws[0]);
++            const double on_cpd = static_cast<double>(cycles[1]) / static_cast<double>(draws[1]);
++            LOG_INFO(HW_GPU, "nx2 A/B {}: on {:.0f} cycles/draw, off {:.0f} ({} draws): {:+.2f}%",
++                     Nx2Perf::opt_names[index], on_cpd, off_cpd, total,
++                     100.0 * (on_cpd - off_cpd) / off_cpd);
++        }
++    }
++    AbTimer(const AbTimer&) = delete;
++    AbTimer& operator=(const AbTimer&) = delete;
++
++private:
++    int index;
++    u64 start{};
++};
++
++/// PROBE EDEN_NX2_UBO_LIVE_PROBE: device pages written by inline GPU writes (WriteBlockCached).
++inline std::mutex g_inline_pages_mutex;
++inline std::unordered_set<u64> g_inline_pages;
++[[nodiscard]] inline bool LiveProbeOn() {
++    static const bool on = std::getenv("EDEN_NX2_UBO_LIVE_PROBE") != nullptr;
++    return on;
++}
++inline void NoteInlineWrite(u64 device_addr, u64 size) {
++    std::scoped_lock lock{g_inline_pages_mutex};
++    for (u64 page = device_addr >> 12; page <= (device_addr + size - 1) >> 12; ++page) {
++        g_inline_pages.insert(page);
++    }
++}
++[[nodiscard]] inline bool InlineWritten(u64 device_addr, u64 size) {
++    std::scoped_lock lock{g_inline_pages_mutex};
++    for (u64 page = device_addr >> 12; page <= (device_addr + size - 1) >> 12; ++page) {
++        if (g_inline_pages.contains(page)) {
++            return true;
++        }
++    }
++    return false;
++}
++
+ /// Called once per draw: logs and restarts the window every 20,000 draws.
+ inline void OnDraw() {
+     if (!Enabled()) {
+diff --git a/src/video_core/renderer_vulkan/vk_buffer_cache.cpp b/src/video_core/renderer_vulkan/vk_buffer_cache.cpp
+index 7a37eb5af..3569a3d9e 100644
+--- a/src/video_core/renderer_vulkan/vk_buffer_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_buffer_cache.cpp
+@@ -480,6 +480,10 @@ u64 BufferCacheRuntime::CurrentTick() {
+     return scheduler.CurrentTick();
+ }
+ 
++void BufferCacheRuntime::RefreshGpuTick() {
++    (void)scheduler.GpuCaughtUp();
++}
++
+ bool BufferCacheRuntime::IsFree(u64 tick) {
+     return scheduler.IsFree(tick);
+ }
+diff --git a/src/video_core/renderer_vulkan/vk_buffer_cache.h b/src/video_core/renderer_vulkan/vk_buffer_cache.h
+index e9c96720a..5642a414d 100644
+--- a/src/video_core/renderer_vulkan/vk_buffer_cache.h
++++ b/src/video_core/renderer_vulkan/vk_buffer_cache.h
+@@ -222,6 +222,9 @@ public:
+         return true;
+     }
+ 
++    /// PROBE (EDEN_NX2_UBO_LIVE_PROBE=3): reads the GPU's tick now.
++    void RefreshGpuTick();
++
+     /// The allocation of the latest BindMappedUniformBuffer call.
+     [[nodiscard]] StreamUniformRef LastStreamUniformRef() const noexcept {
+         return last_stream_uniform;
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index e7843469d..c6f8f8cfc 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -1261,6 +1261,7 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
+ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
+     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
+     VideoCommon::Nx2DrawStats::OnDraw();
++    VideoCommon::Nx2DrawStats::AbTimer ab_timer;
+     {
+         // A draw's first and count can come from memory a skipped (rejected) compute program
+         // should have written. Past 16M vertices they are garbage: building the quad index
+-- 
+2.56.0
+

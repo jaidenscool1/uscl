@@ -1,0 +1,201 @@
+From 8e5280daa46cfb3144419737be39954523b18c5c Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 10:49:04 -0700
+Subject: [PATCH 1/2] PROBE: per-draw binding change probes
+ (EDEN_NX2_BIND_STATS), EDEN_NX2_PROFILE_FAST
+
+OnDraw() hooked into RasterizerVulkan::Draw; StageBind{Uniform,Storage,Texture} timed with
+hit = bindings equal the previous draw's; StageHandles(+Pipe), PipelineSame, DrawAllSame.
+EDEN_NX2_PROFILE_FAST=1 keeps the fast method path with EDEN_NX2_GPU_PROFILE (the slow path
+crashes in QueryCacheBase::CounterReport).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/buffer_cache/buffer_cache.h    | 34 +++++++++++++++++--
+ src/video_core/engines/maxwell_3d.cpp         |  4 ++-
+ src/video_core/nx2_draw_stats.h               | 31 +++++++++++++++++
+ .../renderer_vulkan/vk_graphics_pipeline.cpp  | 19 +++++++++++
+ .../renderer_vulkan/vk_rasterizer.cpp         |  1 +
+ 5 files changed, 85 insertions(+), 4 deletions(-)
+
+diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_cache/buffer_cache.h
+index bddc7b7f5..32db410e1 100644
+--- a/src/video_core/buffer_cache/buffer_cache.h
++++ b/src/video_core/buffer_cache/buffer_cache.h
+@@ -656,13 +656,41 @@ void BufferCache<P>::BindHostStageBuffers(size_t stage) {
+         ++native_indirect_uniform_draw_ticket;
+         last_synced_count = 0;
+     }
+-    if (channel_state->enabled_uniform_buffer_masks[stage] != 0) {
++    namespace Stats = VideoCommon::Nx2DrawStats;
++    // EDEN_NX2_BIND_STATS: time each kind and ask whether its resolved bindings (address, size)
++    // equal the previous draw's for this stage.
++    const auto same_bindings = [&](Stats::Site site, u64 mask, const auto& slots) {
++        u64 hash = Stats::Mix(0, mask);
++        ForEachEnabledBit(mask, [&](u32 index) {
++            hash = Stats::Mix(Stats::Mix(hash, slots[index].device_addr), slots[index].size);
++        });
++        const u64 key = 0xB16D000000000000ULL | (u64{static_cast<u32>(site)} << 8) | stage;
++        const bool same = Stats::SameAsLast(key, hash);
++        Stats::t_draw_same &= same;
++        return same;
++    };
++    if (const u64 mask = channel_state->enabled_uniform_buffer_masks[stage]; mask != 0) {
++        Stats::Timer probe{Stats::Site::StageBindUniform};
++        if (Stats::Enabled()) [[unlikely]] {
++            probe.hit = same_bindings(Stats::Site::StageBindUniform, mask,
++                                      channel_state->uniform_buffers[stage]);
++        }
+         BindHostGraphicsUniformBuffers(stage);
+     }
+-    if (channel_state->enabled_storage_buffers[stage] != 0) {
++    if (const u64 mask = channel_state->enabled_storage_buffers[stage]; mask != 0) {
++        Stats::Timer probe{Stats::Site::StageBindStorage};
++        if (Stats::Enabled()) [[unlikely]] {
++            probe.hit = same_bindings(Stats::Site::StageBindStorage, mask,
++                                      channel_state->storage_buffers[stage]);
++        }
+         BindHostGraphicsStorageBuffers(stage);
+     }
+-    if (channel_state->enabled_texture_buffers[stage] != 0) {
++    if (const u64 mask = channel_state->enabled_texture_buffers[stage]; mask != 0) {
++        Stats::Timer probe{Stats::Site::StageBindTexture};
++        if (Stats::Enabled()) [[unlikely]] {
++            probe.hit = same_bindings(Stats::Site::StageBindTexture, mask,
++                                      channel_state->texture_buffers[stage]);
++        }
+         BindHostGraphicsTextureBuffers(stage);
+     }
+ }
+diff --git a/src/video_core/engines/maxwell_3d.cpp b/src/video_core/engines/maxwell_3d.cpp
+index 4d5f92089..3a7b4615a 100644
+--- a/src/video_core/engines/maxwell_3d.cpp
++++ b/src/video_core/engines/maxwell_3d.cpp
+@@ -61,7 +61,9 @@ Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
+     for (size_t i = 0; i < execution_mask.size(); i++)
+         execution_mask[i] = IsMethodExecutable(u32(i));
+     fast_maxwell3d = VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::Method) && !record_write_history &&
+-                     !g_trace_first_method_writes && !VideoCommon::Nx2Profile::Enabled();
++                     !g_trace_first_method_writes &&
++                     (!VideoCommon::Nx2Profile::Enabled() ||
++                      std::getenv("EDEN_NX2_PROFILE_FAST") != nullptr); // PROBE: profile zones only
+ }
+ 
+ Maxwell3D::~Maxwell3D() = default;
+diff --git a/src/video_core/nx2_draw_stats.h b/src/video_core/nx2_draw_stats.h
+index f2bf4fb57..ec91d7eed 100644
+--- a/src/video_core/nx2_draw_stats.h
++++ b/src/video_core/nx2_draw_stats.h
+@@ -45,6 +45,10 @@ enum class Site : u32 {
+     StageBindUniform,  ///< BindHostGraphicsUniformBuffers; hit: the stage's bindings equal the last draw's
+     StageBindStorage,
+     StageBindTexture,
++    StageHandles,      ///< a stage's texture/image handles and samplers; hit: equal the last draw's
++    StageHandlesPipe,  ///< the same; hit: equal this pipeline's previous use
++    PipelineSame,      ///< hit: the draw uses the previous draw's pipeline
++    DrawAllSame,       ///< hit: pipeline and every stage probe above equal the previous draw's
+     LockPrepareDraw,   ///< lock acquisition; hit: acquired without waiting
+     LockInlineMemory,
+     LockInvalidation,
+@@ -59,6 +63,8 @@ inline constexpr std::array<const char*, static_cast<size_t>(Site::Count)> SiteN
+     "uniform bind <= 4 KiB",  "small binds: reused (tick)", "equal bytes, other tick",
+     "uniform bind 4-64 KiB", "uniform bind 64 KiB bank",
+     "stage bind: uniform",    "stage bind: storage",  "stage bind: texture",
++    "stage handles (= last)", "stage handles (= pipe)", "pipeline = last draw's",
++    "draw: all bindings same",
+     "lock: PrepareDraw",      "lock: inline memory",  "lock: invalidation",
+     "lock: CPU write fault"};
+ 
+@@ -211,6 +217,27 @@ inline void Note(Site site, bool hit) {
+     return hash;
+ }
+ 
++/// Hash step for the same-as-last probes.
++[[nodiscard]] inline u64 Mix(u64 hash, u64 value) {
++    return (hash ^ value) * 0x100000001b3ULL;
++}
++
++/// False once any same-as-last probe of the current draw missed (DrawAllSame).
++inline thread_local bool t_draw_same = true;
++
++/// A same-as-last probe for consecutive draws: counts, and feeds DrawAllSame.
++inline bool NoteSame(Site site, u64 key, u64 value, bool feeds_draw = true) {
++    if (!Enabled()) {
++        return false;
++    }
++    const bool same = SameAsLast(key, value);
++    Note(site, same);
++    if (feeds_draw) {
++        t_draw_same &= same;
++    }
++    return same;
++}
++
+ /// Called once per draw: logs and restarts the window every 20,000 draws.
+ inline void OnDraw() {
+     if (!Enabled()) {
+@@ -221,6 +248,10 @@ inline void OnDraw() {
+     static std::atomic<u64> window_cycles{0};
+     static std::atomic<std::chrono::steady_clock::rep> window_time{0};
+     const u64 draws = g_draws.fetch_add(1, std::memory_order_relaxed) + 1;
++    if (draws > 1) {
++        Note(Site::DrawAllSame, t_draw_same); // the previous draw's verdict
++    }
++    t_draw_same = true;
+     if (draws % 20000 != 0) {
+         return;
+     }
+diff --git a/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp b/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
+index 91d27274f..b7e194440 100644
+--- a/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
++++ b/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
+@@ -546,8 +546,12 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
+     const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
+     u32 last_sampler_handle = ~0U;
+     VideoCommon::SamplerId last_sampler{};
++    namespace Stats = VideoCommon::Nx2DrawStats;
++    Stats::NoteSame(Stats::Site::PipelineSame, 0xB16F000000000000ULL, reinterpret_cast<u64>(this));
+     const auto config_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
+         const Shader::Info& info{stage_infos[stage]};
++        const size_t views_begin{views.size()};
++        const size_t samplers_begin{samplers.size()};
+         buffer_cache.UnbindGraphicsStorageBuffers(stage);
+         if constexpr (Spec::has_storage_buffers) {
+             size_t ssbo_index{};
+@@ -649,6 +653,21 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
+                 add_image(desc, desc.is_written);
+             }
+         }
++        // EDEN_NX2_BIND_STATS: did this stage's handles change since the last draw / this
++        // pipeline's last use?
++        if (Stats::Enabled() && (views.size() != views_begin || samplers.size() != samplers_begin))
++            [[unlikely]] {
++            u64 hash{};
++            for (size_t i = views_begin; i < views.size(); ++i) {
++                hash = Stats::Mix(hash, views[i].index);
++            }
++            for (size_t i = samplers_begin; i < samplers.size(); ++i) {
++                hash = Stats::Mix(hash, samplers[i].index);
++            }
++            Stats::NoteSame(Stats::Site::StageHandles, 0xB16E000000000000ULL | stage, hash);
++            Stats::NoteSame(Stats::Site::StageHandlesPipe,
++                            reinterpret_cast<u64>(this) ^ (u64{stage} << 56), hash, false);
++        }
+ 
+         return true;
+     }};
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 9fd00f4ff..e7843469d 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -1260,6 +1260,7 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
+ 
+ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
+     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
++    VideoCommon::Nx2DrawStats::OnDraw();
+     {
+         // A draw's first and count can come from memory a skipped (rejected) compute program
+         // should have written. Past 16M vertices they are garbage: building the quad index
+-- 
+2.56.0
+

@@ -1,0 +1,126 @@
+From 7560932f392074e3678060349e1682046c39d85b Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 04:02:59 -0700
+Subject: [PATCH 12/13] Linux: the GPU back and front threads get physical
+ cores of their own (USCL_BACK_CORE)
+
+The GPU back thread is the frame's critical path in NX2 titles. USCL_BACK_CORE=2 (default) pins
+it to the highest physical core and the GPU front thread to the next one; every other thread gets
+the remaining cores (needs >= 4 logical CPUs left, else nothing changes). A helper thread
+re-applies the masks every second. =1 places only the back thread, =0 turns it off.
+
+Mario Kart World, PGO build, 6000-frame races interleaved: off 48.5 / 48.8 fps racing (min 39.2 /
+38.2), =2 49.7 / 49.7 (min 41.2 / 41.4).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/thread.cpp | 83 +++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 83 insertions(+)
+
+diff --git a/src/common/thread.cpp b/src/common/thread.cpp
+index d1ecc6e14..a5d189b37 100644
+--- a/src/common/thread.cpp
++++ b/src/common/thread.cpp
+@@ -54,9 +54,88 @@
+ #ifdef __linux__
+ #include <sys/resource.h>
+ #include <algorithm>
++#include <filesystem>
+ #include <fstream>
+ 
+ namespace {
++// USCL_BACK_CORE: the GPU back thread (the frame's critical path in NX2 titles) gets a physical
++// core of its own, the GPU front thread the next one, and every other thread the rest: sharing a
++// core with a busy guest core slowed them (Mario Kart World racing, PGO build: 48.5/48.8 fps off,
++// 49.7/49.7 with both, minimums 38-39 -> 41). 1 places only the back thread (no gain measured);
++// 0 turns it off. Like the Windows NX2 layout, a helper re-applies the masks every second.
++void StartLinuxBackCore() {
++    const char* const env = std::getenv("USCL_BACK_CORE");
++    const char mode = env != nullptr ? env[0] : '2';
++    if (mode == '0') {
++        return;
++    }
++    cpu_set_t allowed;
++    if (sched_getaffinity(getpid(), sizeof(allowed), &allowed) != 0) {
++        return;
++    }
++    const auto siblings = [](int cpu) {
++        cpu_set_t set;
++        CPU_ZERO(&set);
++        std::ifstream file("/sys/devices/system/cpu/cpu" + std::to_string(cpu) +
++                           "/topology/thread_siblings_list");
++        std::string item;
++        while (std::getline(file, item, ',')) {
++            const size_t dash = item.find('-');
++            const int first = std::atoi(item.c_str());
++            const int last = dash == std::string::npos ? first : std::atoi(item.c_str() + dash + 1);
++            for (int i = first; i <= last && i < CPU_SETSIZE; ++i) {
++                CPU_SET(i, &set);
++            }
++        }
++        if (CPU_COUNT(&set) == 0) {
++            CPU_SET(cpu, &set);
++        }
++        return set;
++    };
++    // The highest allowed CPU's core for the back, the next core down for the front (mode 2).
++    const auto take_core = [&](cpu_set_t& pool, cpu_set_t& core) {
++        for (int cpu = CPU_SETSIZE - 1; cpu >= 0; --cpu) {
++            if (CPU_ISSET(cpu, &pool)) {
++                CPU_ZERO(&core);
++                CPU_SET(cpu, &core); // the thread runs on this logical CPU; its siblings stay idle
++                const cpu_set_t whole = siblings(cpu);
++                for (int i = 0; i < CPU_SETSIZE; ++i) {
++                    if (CPU_ISSET(i, &whole)) {
++                        CPU_CLR(i, &pool);
++                    }
++                }
++                return true;
++            }
++        }
++        return false;
++    };
++    cpu_set_t others = allowed, back{}, front{};
++    const bool has_front = mode == '2';
++    if (!take_core(others, back) || (has_front && !take_core(others, front)) ||
++        CPU_COUNT(&others) < 4) {
++        return;
++    }
++    static std::jthread worker([=](std::stop_token stop) {
++        pthread_setname_np(pthread_self(), "CPUPlacement");
++        while (!stop.stop_requested()) {
++            std::error_code ec;
++            for (const auto& task : std::filesystem::directory_iterator("/proc/self/task", ec)) {
++                const pid_t tid = std::atoi(task.path().filename().c_str());
++                std::string name;
++                std::getline(std::ifstream(task.path() / "comm"), name);
++                const cpu_set_t& mask = name == "GPUBack"              ? back
++                                        : has_front && name == "GPU" ? front
++                                                                     : others;
++                cpu_set_t current;
++                if (sched_getaffinity(tid, sizeof(current), &current) == 0 &&
++                    !CPU_EQUAL(&current, &mask)) {
++                    sched_setaffinity(tid, sizeof(mask), &mask);
++                }
++            }
++            std::this_thread::sleep_for(std::chrono::seconds{1});
++        }
++    });
++}
+ constexpr int NICE_AUDIO = -16;
+ constexpr int NICE_URGENT_DISPLAY = -8;
+ constexpr int NICE_DISPLAY = -4;
+@@ -962,6 +1041,10 @@ void SetCurrentThreadName(const char* name) {
+     if (std::strcmp(name, "GPUBack") == 0) {
+         Windows::StartNx2CpuLayout();
+     }
++#elif defined(__linux__) && !defined(__ANDROID__)
++    if (std::strcmp(name, "GPUBack") == 0) {
++        StartLinuxBackCore();
++    }
+ #endif
+ }
+ 
+-- 
+2.56.0
+
