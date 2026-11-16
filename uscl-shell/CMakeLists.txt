@@ -32,6 +32,8 @@ qt_add_executable(uscl
 # the JStationX XMB artwork (tools/xmb_assets.py)
 file(GLOB_RECURSE XMB_ASSETS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS xmb/*.png)
 
+file(GLOB_RECURSE MENU_SOUNDS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS sounds/*.wav)
+
 qt_add_qml_module(uscl
     URI Uscl
     QML_FILES
@@ -51,18 +53,11 @@ qt_add_qml_module(uscl
         qml/Setup.qml
         qml/TextPrompt.qml
     RESOURCES
+        ${MENU_SOUNDS}
         fonts/MaterialDesignIcons.ttf
         fonts/NotoSans-Regular.ttf
         fonts/NotoSans-Light.ttf
         fonts/Roboto-Thin.ttf
-        sounds/xmb/back.wav
-        sounds/xmb/cancel.wav
-        sounds/xmb/category.wav
-        sounds/xmb/cursor.wav
-        sounds/xmb/error.wav
-        sounds/xmb/notify.wav
-        sounds/xmb/select.wav
-        sounds/xmb/startup.wav
         # compiled from tint.frag, so builds don't need Qt Shader Tools:
         # qsb --glsl "100es,120,150" --hlsl 50 --msl 12 -o shaders/tint.frag.qsb shaders/tint.frag
         shaders/tint.frag.qsb

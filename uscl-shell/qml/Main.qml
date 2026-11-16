@@ -28,10 +28,12 @@ Window {
 
     Settings {
         id: prefs
+        objectName: "preferences"
         property string theme: "ps3"
         property int bgColor: 0          // 0 automatic (month), 1..13 fixed
         property bool nightShade: true
         property bool sounds: true
+        property int menuVolume: 100
         property bool setupDone: false
         property int xmbColumn: 3 // Games
         property bool clock24: false
@@ -557,6 +559,8 @@ Window {
             rpcs3Row("Audio", "Renderer", qsTr("Audio Output"), qsTr("The sound system games play through."),
                      Qt.platform.os === "windows" ? [["XAudio2", "XAudio2"], ["Cubeb", "Cubeb"], ["FAudio", "FAudio"]] : [["Cubeb", "Cubeb"], ["FAudio", "FAudio"]]),
             prefRow("sounds", qsTr("Menu Sounds"), qsTr("Sounds when you move through the menus."), [[qsTr("On"), true], [qsTr("Off"), false]]),
+            prefRow("menuVolume", qsTr("Menu Sound Volume"), qsTr("Volume of theme effects and startup, independent of game volume."),
+                    [["100%", 100], ["75%", 75], ["50%", 50], ["25%", 25], [qsTr("Mute"), 0]]),
             allSettingsRow()
         ]
     }
@@ -600,7 +604,7 @@ Window {
             { title: qsTr("Run Setup Again"), help: qsTr("Online ID, system software and games"), action: function() { setup.start() } },
             { title: qsTr("Restore Default Settings"), help: qsTr("Menu settings back to how they started (games and online ID stay)"),
               action: function() { dialog.confirm(qsTr("Restore Default Settings"), qsTr("Restore the menu settings to their defaults?"), function() {
-                  prefs.theme = "ps3"; prefs.bgColor = 0; prefs.nightShade = true; prefs.sounds = true; prefs.clock24 = false; prefs.dateFormat = "MM/dd/yy"
+                  prefs.theme = "ps3"; prefs.bgColor = 0; prefs.nightShade = true; prefs.sounds = true; prefs.menuVolume = 100; prefs.clock24 = false; prefs.dateFormat = "MM/dd/yy"
                   notice.show(qsTr("Settings restored"), ic("it_system"))
               }) } },
             allSettingsRow()
@@ -945,14 +949,15 @@ Window {
     // ---------------------------------------------------------------- sounds
 
     readonly property var sounds: ({ cursor: sCursor, category: sCategory, select: sSelect, back: sBack, error: sError, notify: sNotify, startup: sStartup })
+    readonly property real menuSoundGain: !prefs.sounds ? 0 : Math.pow(Math.max(0, Math.min(100, prefs.menuVolume)) / 100, 2)
     function sound(name) { if (prefs.sounds && sounds[name]) sounds[name].play() }
-    SoundEffect { id: sCursor; source: system.soundUrl("cursor") }
-    SoundEffect { id: sCategory; source: system.soundUrl("category") }
-    SoundEffect { id: sSelect; source: system.soundUrl("select") }
-    SoundEffect { id: sBack; source: system.soundUrl("back") }
-    SoundEffect { id: sError; source: system.soundUrl("error") }
-    SoundEffect { id: sNotify; source: system.soundUrl("notify") }
-    SoundEffect { id: sStartup; source: system.soundUrl("startup") }
+    SoundEffect { id: sCursor; objectName: "sCursor"; volume: root.menuSoundGain; source: system.soundUrl("cursor", root.activeTheme) }
+    SoundEffect { id: sCategory; objectName: "sCategory"; volume: root.menuSoundGain; source: system.soundUrl("category", root.activeTheme) }
+    SoundEffect { id: sSelect; objectName: "sSelect"; volume: root.menuSoundGain; source: system.soundUrl("select", root.activeTheme) }
+    SoundEffect { id: sBack; objectName: "sBack"; volume: root.menuSoundGain; source: system.soundUrl("back", root.activeTheme) }
+    SoundEffect { id: sError; objectName: "sError"; volume: root.menuSoundGain; source: system.soundUrl("error", root.activeTheme) }
+    SoundEffect { id: sNotify; objectName: "sNotify"; volume: root.menuSoundGain; source: system.soundUrl("notify", root.activeTheme) }
+    SoundEffect { id: sStartup; objectName: "sStartup"; volume: root.menuSoundGain; source: system.soundUrl("startup", root.activeTheme) }
 
     // ---------------------------------------------------------------- input: whatever is on top gets it
 

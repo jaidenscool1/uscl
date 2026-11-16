@@ -46,8 +46,8 @@ public:
 	// Resolution Scale (%) for this PC: what the graphics card can carry, no sharper than the screen shows
 	Q_INVOKABLE int recommendedScale(int screenHeight) const { return scaleFor(m_discrete, m_vram_mb, screenHeight); }
 	static int scaleFor(bool discrete, int vram_mb, int screen_height);
-	// menu sound: the player's own WAV in <settings>/sounds/ when there is one, else the built-in one
-	Q_INVOKABLE QString soundUrl(const QString& name) const;
+	// Theme-specific override, global override, then the original built-in theme palette.
+	Q_INVOKABLE QString soundUrl(const QString& name, const QString& theme = "ps3") const;
 
 	// RPCS3's config.yml, one key of a top-level section (Video, Audio, System, ...)
 	Q_INVOKABLE QString rpcs3Value(const QString& section, const QString& key) const;

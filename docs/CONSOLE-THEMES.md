@@ -52,10 +52,31 @@ axes, with margins on other aspect ratios. Hidden/off-screen home icons do not d
 ## Original audio
 
 `uscl-shell/tools/menu_sounds.py` creates every built-in WAV from oscillators, deterministic noise,
-envelopes and stereo echoes. Cursor/category cues are brief, quiet ticks; confirm/back have different
-pitch contours; startup uses a slowly detuned ensemble-style swell. There are no copied console recordings
-or audio samples. Personal `<settings>/sounds/<cue>.wav` overrides continue to take precedence.
+envelopes and stereo echoes. Each theme selects its own complete eight-cue set immediately when changed:
 
+| Theme | Original sound character |
+|---|---|
+| PS3 | Airy high ticks and a slow ensemble startup swell |
+| PS4 | Lower, softer glass tones with a spacious tail |
+| PS5 | Rounded, layered tones with wider stereo echoes |
+| Xbox 360 Classic | Deep, resonant electronic pulses with falling pitch |
+| Xbox 360 2012 | Tighter electronic taps and rising accents |
+| Xbox One | Subdued low tones and restrained echoes |
+| Switch | Very short, bright percussive clicks |
+| Switch 2 | Fuller bright clicks with an extra upper partial |
+
+These are original compositions, not transcriptions or console recordings. All menu actions, dialogs,
+notifications and startup use the selected palette. Switching themes reloads the cues; startup plays on boot,
+not on each theme change. Settings → Sound Settings → Menu Sound Volume applies a saved 0/25/50/75/100% control to every set,
+including custom WAVs, independently of game volume. Menu Sounds Off also mutes currently playing cues.
+The original mix targets active-window RMS of −32 dBFS for cursor, −30 for category, −26 for confirm/notify,
+−29 for back/cancel/startup and −25 for error, with a 0.28 full-scale peak ceiling (about −11 dBFS).
+This balances UI cues; these are design targets, not measured console output calibration. Actual listening
+volume also depends on the OS mixer, output device and speakers. Console-level perceptual similarity still
+needs listening comparison; automated checks cannot certify an exact sound match.
+Custom `<settings>/sounds/<theme>/<cue>.wav` files take precedence, followed by global
+`<settings>/sounds/<cue>.wav` overrides, then the built-in set. Theme folder IDs are `ps3`, `ps4`, `ps5`,
+`x360classic`, `x360`, `xboxone`, `switch` and `switch2`.
 Regenerate from the repo root with `python uscl-shell/tools/menu_sounds.py`. Generated audio is 48 kHz,
 16-bit stereo, with headroom and a final fade to zero.
 

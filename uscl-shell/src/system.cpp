@@ -96,10 +96,18 @@ int System::scaleFor(bool discrete, int vram_mb, int screen_height)
 	return std::min(gpu, screen);
 }
 
-QString System::soundUrl(const QString& name) const
+QString System::soundUrl(const QString& name, const QString& theme) const
 {
-	const QString own = GameModel::rpcs3ConfigDir() + "sounds/" + name + ".wav";
-	return QFileInfo::exists(own) ? QUrl::fromLocalFile(own).toString() : "qrc:/qt/qml/Uscl/sounds/xmb/" + name + ".wav";
+	static const QStringList themes = {"ps3", "ps4", "ps5", "x360classic", "x360", "xboxone", "switch", "switch2"};
+	static const QStringList cues = {"cursor", "category", "select", "back", "cancel", "error", "notify", "startup"};
+	if (!cues.contains(name))
+		return {};
+	const QString selected = themes.contains(theme) ? theme : QStringLiteral("ps3");
+	const QString folder = GameModel::rpcs3ConfigDir() + "sounds/";
+	for (const QString& own : {folder + selected + "/" + name + ".wav", folder + name + ".wav"})
+		if (QFileInfo::exists(own))
+			return QUrl::fromLocalFile(own).toString();
+	return "qrc:/qt/qml/Uscl/sounds/" + (selected == "ps3" ? "xmb" : selected) + "/" + name + ".wav";
 }
 
 QString System::version()

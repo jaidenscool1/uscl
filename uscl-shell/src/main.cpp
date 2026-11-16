@@ -611,6 +611,30 @@ int main(int argc, char* argv[])
 	engine.loadFromModule("Uscl", "Main");
 	if (smoke_test && !engine.rootObjects().isEmpty())
 	{
+        const QString soundTheme = smoke_theme == "ps3" ? "xmb" : smoke_theme;
+        for (const QString& cue : {"cursor", "category", "select", "back", "cancel", "error", "notify", "startup"})
+        {
+            const QString resource = ":/qt/qml/Uscl/sounds/" + soundTheme + "/" + cue + ".wav";
+            if (!QFile::exists(resource) || system.soundUrl(cue, smoke_theme) != "qrc" + resource)
+            {
+                std::fprintf(stderr, "qml-smoke-test: missing or incorrect themed sound\n");
+                return 1;
+            }
+        }
+        // Isolated smoke profile: test global and per-theme override priority without player files.
+        const QString sounds = GameModel::rpcs3ConfigDir() + "sounds/";
+        QDir().mkpath(sounds + smoke_theme);
+        const QString global = sounds + "cursor.wav", themed = sounds + smoke_theme + "/cursor.wav";
+        QFile globalFile(global), themeFile(themed);
+        if (!globalFile.open(QIODevice::WriteOnly)) return 1;
+        globalFile.close();
+        if (system.soundUrl("cursor", smoke_theme) != QUrl::fromLocalFile(global).toString()) return 1;
+        if (!themeFile.open(QIODevice::WriteOnly)) return 1;
+        themeFile.close();
+        if (system.soundUrl("cursor", smoke_theme) != QUrl::fromLocalFile(themed).toString()) return 1;
+        QFile::remove(global); QFile::remove(themed);
+        if (system.soundUrl("cursor", "unknown") != "qrc:/qt/qml/Uscl/sounds/xmb/cursor.wav" ||
+            !system.soundUrl("../cursor", smoke_theme).isEmpty()) return 1;
 		const QString active = engine.rootObjects().first()->property("activeTheme").toString();
 		if (active != smoke_theme)
 		{
@@ -644,6 +668,35 @@ int main(int argc, char* argv[])
 				app.exit(1);
 			};
 			if (!navigation || !page || !options || !window) { fail("missing control"); return; }
+            const auto soundBindingsOk = [root]() {
+                const QString theme = root->property("activeTheme").toString();
+                const QString folder = theme == "ps3" ? "xmb" : theme;
+                const QStringList ids = {"sCursor", "sCategory", "sSelect", "sBack", "sError", "sNotify", "sStartup"};
+                const QStringList cues = {"cursor", "category", "select", "back", "error", "notify", "startup"};
+                for (int i = 0; i < ids.size(); ++i)
+                {
+                    auto* effect = root->findChild<QObject*>(ids[i]);
+                    if (!effect || effect->property("source").toUrl().toString() !=
+                        "qrc:/qt/qml/Uscl/sounds/" + folder + "/" + cues[i] + ".wav" ||
+                        effect->property("volume").toDouble() != root->property("menuSoundGain").toDouble()) return false;
+                }
+                return true;
+            };
+            if (!soundBindingsOk()) { fail("initial sound palette or volume"); return; }
+            auto* prefs = root->findChild<QObject*>("preferences");
+            if (!prefs) { fail("missing sound preferences"); return; }
+            prefs->setProperty("sounds", true);
+            for (const int volume : {0, 25, 50, 75, 100})
+            {
+                prefs->setProperty("menuVolume", volume);
+                const double expected = (volume / 100.0) * (volume / 100.0);
+                if (root->property("menuSoundGain").toDouble() != expected || !soundBindingsOk())
+                { fail("menu volume adjustment"); return; }
+            }
+            prefs->setProperty("sounds", false);
+            if (root->property("menuSoundGain").toDouble() != 0 || !soundBindingsOk())
+            { fail("menu mute"); return; }
+
 			const auto key = [window](int code) {
 				QKeyEvent press(QEvent::KeyPress, code, Qt::NoModifier);
 				QKeyEvent release(QEvent::KeyRelease, code, Qt::NoModifier);
@@ -663,6 +716,7 @@ int main(int argc, char* argv[])
 			key(Qt::Key_Return); // Switch looks while the theme page is open.
 			if (options->property("open").toBool()) { fail("theme choice did not close"); return; }
 			if (root->property("activeTheme").toString() == active) { fail("theme did not change"); return; }
+            if (!soundBindingsOk()) { fail("sound palette did not follow theme switch"); return; }
 			key(Qt::Key_Escape);
 			if (page->isVisible()) { fail("back did not return home"); return; }
 			key(Qt::Key_Return); // Remembered Theme Settings selection.
@@ -673,6 +727,7 @@ int main(int argc, char* argv[])
 			key(Qt::Key_Return);
 			if (root->property("activeTheme").toString() != active) { fail("original theme was not restored"); return; }
 			key(Qt::Key_Escape);
+            if (!soundBindingsOk()) { fail("restored sound palette"); return; }
 			std::fprintf(stderr, "qml-smoke-test: keyboard flow passed\n");
 		});
 		QTimer::singleShot(1500, &app, &QCoreApplication::quit);

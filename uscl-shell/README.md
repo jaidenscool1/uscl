@@ -100,7 +100,10 @@ ultrawide windows, and rejects QML errors and missing packaged assets. See [them
 
 ## Assets
 Personal sounds: WAVs in `<settings folder>/sounds/` (cursor, select, category, back, error, notify, startup)
-replace the built-in ones on that PC only; they are never packaged.
+replace the built-in ones on that PC only; they are never packaged. Theme-specific files in
+`<settings folder>/sounds/<theme>/` take priority over these global overrides. Each of the eight themes has
+its own original built-in sound palette, selected automatically when the theme changes
+([palette descriptions and folder IDs](../docs/CONSOLE-THEMES.md#original-audio)).
 
 Built-in sounds: original stereo synthesis from `tools/menu_sounds.py` (no console recordings or sampled console audio). Run `python uscl-shell/tools/menu_sounds.py` from the repo root to regenerate them. Fonts: Noto Sans,
 Roboto Thin (licences in `fonts/`), Material Design Icons (Pictogrammers, free licence). The background is drawn
