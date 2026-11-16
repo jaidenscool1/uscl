@@ -140,11 +140,12 @@ jobs:
         env:
           USCL_EDEN_SOURCE: ${{ github.workspace }}\src
         run: |
+          # the script throws on failure; $LASTEXITCODE afterwards is robocopy's (1 = files copied)
           ./uscl/tools/dev-scripts/build-switch-core.ps1
-          if ($LASTEXITCODE) { exit 1 }
           New-Item -ItemType Directory -Force out | Out-Null
           Copy-Item -Recurse uscl/build/switch-core/bin out/Eden
-          if (-not (Test-Path out/Eden/eden-cli.exe)) { throw 'eden-cli.exe was not built' }
+          foreach ($exe in 'eden.exe', 'eden-cli.exe') { if (-not (Test-Path out/Eden/$exe)) { throw "$exe was not built" } }
+          $global:LASTEXITCODE = 0
 
       - name: Build Eglantine
         if: env.SKIP != '1' && matrix.emu == 'eglantine'
