@@ -437,6 +437,9 @@ def build(d):
             layers = max(1, rmw(0xB197, regs, "SET_ZT_SIZE_C") & 0xFFFF)
             pitch = rmw(0xB197, regs, "SET_ZT_ARRAY_PITCH") * 4
             written.add((addr, max(pitch * layers, w * h * 8) + CHUNK))
+            if k >= 0:  # depth targets too (zeta formats do not collide with color format codes)
+                t = targets.setdefault(addr, [w, h, rmw(0xB197, regs, "SET_ZT_FORMAT"), rmw(0xB197, regs, "SET_ZT_BLOCK_SIZE"), k, k])
+                t[5] = k
 
     shadow = {}  # (channel, engine) -> {method: value}
     for ch, s in states.items():
@@ -499,6 +502,10 @@ def build(d):
                     stats[e] += 1
             if e == 0xB197:
                 out.append((sc, n.off("SET_ZCULL") // 4, 0))
+                # bisecting: PT_SETR=<3D method name>:<hex value>[,...] sets that register after the restore
+                for nm, v in (x.rsplit(":", 1) for x in os.environ.get("PT_SETR", "").split(",") if x):
+                    base, _, i = nm.rstrip(")").partition("(")
+                    out.append((sc, n.off(base, int(i or 0)) // 4, int(v, 16)))
             out.append((sc, lm_methods[e][0], lm_va >> 32))
             out.append((sc, lm_methods[e][1], lm_va & 0xFFFFFFFF))
             if e == 0xB197:
@@ -1020,6 +1027,8 @@ def build(d):
                     raw[i * 32:i * 32 + 32] = raw[fallback * 32:fallback * 32 + 32]
                     continue
                 h = tic(h, "COMPONENTS", TIC_FORMATS["A8B8G8R8"])
+                if os.environ.get("PT_ASTC_SRGB") == "0":  # bisecting: decoded textures sampled as linear
+                    h = tic(h, "S_R_G_B_CONVERSION", 0)
                 h = tic(tic(h, "ADDRESS_BITS31TO9", done[key] >> 9), "ADDRESS_BITS48TO32", done[key] >> 32)
                 raw[i * 32:i * 32 + 32] = h.to_bytes(32, "little")
                 nhdr += 1
@@ -1175,6 +1184,26 @@ def build(d):
             ab = LMB + 1 + len(chans)
             lines += [f"block {ab} {CHUNK:x}", f"fill {ab} 0 replay/helper-arena.bin 0 {len(arena):x}", f"map {arena_va:x} {CHUNK:x} {ab} 0"]
     lines += astc_lines  # last: guest blocks and the helper arena get video memory first
+    # bisecting: PT_INJECT=<capture entry>:<va>:<size>[,...] (hex va/size) writes Eglantine's end-of-frame bytes
+    # (end-dev-*: its own result, GPU-written images included) at va right before that entry, to tell
+    # whether a pass's output explains a difference further down.
+    for spec in os.environ.get("PT_INJECT", "").split(","):
+        if spec:
+            k_, iva, isz = spec.split(":")
+            iva, isz = int(iva, 16), int(isz, 16)
+            gpu, dev, msize, _, _ = next(m for m in maps if m[0] <= iva < m[0] + m[2])
+            assert iva + isz <= gpu + msize, "PT_INJECT spans mappings"
+            da, data = dev + iva - gpu, bytearray(isz)
+            for f in os.listdir(d):
+                if f.startswith("end-dev-"):
+                    base, fs = int(f[8:-4], 16), os.path.getsize(os.path.join(d, f))
+                    lo, hi = max(da, base), min(da + isz, base + fs)
+                    if lo < hi:
+                        with open(os.path.join(d, f), "rb") as fh:
+                            fh.seek(lo - base)
+                            data[lo - da:hi - da] = fh.read(hi - lo)
+            deltas.append((int(k_), da, bytes(data)))
+            print(f"PT_INJECT: {isz:#x} bytes at {iva:x} before entry {k_}")
     # PT_NODEP: QMDs launched from memory (NVN's barrier ring) wait for no dependence and signal none.
     patched = 0
     for qva in sorted(launched_qmds):
@@ -1215,7 +1244,7 @@ def build(d):
     if deltas:
         print(f"deltas: {len(deltas)} records, {n_d >> 10} KiB of mid-frame guest data")
     with open(os.path.join(out_dir, "targets.txt"), "w") as f:
-        f.write("# address width height format memory first_entry last_entry (color targets drawn to)\n")
+        f.write("# address width height format memory first_entry last_entry (color and depth targets drawn to)\n")
         for addr, (w, h, fmt, mem, k0, k1) in sorted(targets.items(), key=lambda t: t[1][5]):
             f.write(f"{addr:x} {w} {h} {fmt:x} {mem:x} {k0} {k1}\n")
     with open(os.path.join(out_dir, "push.bin"), "wb") as f:
@@ -1332,6 +1361,28 @@ def image(path, w, h, fmt, mem, out):
     print(f"{out}: {w}x{h}")
 
 
+def endread(d, va, size, out):
+    """Eglantine's own end-of-frame bytes at a GPU VA (end-dev-*.bin: the capture probe flushes GPU-written
+    images there) -> file, laid out like a pt_replay readback: the reference for `image` and byte diffs.
+    Depth images and aliased transient memory are not reliable there (see the handoff, eighth pass)."""
+    va, size = int(va, 16), int(size, 16)
+    data = bytearray(size)
+    for gpu, dev, msize, _, sparse in read_maps(d):
+        v0, v1 = max(va, gpu), min(va + size, gpu + msize)
+        if v0 >= v1 or sparse:
+            continue
+        da = dev + v0 - gpu
+        for f in os.listdir(d):
+            if f.startswith("end-dev-"):
+                base, fs = int(f[8:-4], 16), os.path.getsize(os.path.join(d, f))
+                lo, hi = max(da, base), min(da + v1 - v0, base + fs)
+                if lo < hi:
+                    with open(os.path.join(d, f), "rb") as fh:
+                        fh.seek(lo - base)
+                        data[v0 - va + lo - da:v0 - va + hi - da] = fh.read(hi - lo)
+    open(out, "wb").write(data)
+
+
 def selftest():
     """Block-linear layout helpers (PT_ASTC=decode) against hand-checked sizes and the readback layout of image()."""
     import numpy as np
@@ -1344,4 +1395,4 @@ def selftest():
 
 
 if __name__ == "__main__":
-    {"stats": stats, "build": build, "selftest": selftest, "dump": dump, "image": image, "peek": peek, "qmds": qmds}[sys.argv[1]](*sys.argv[2:])
+    {"stats": stats, "build": build, "selftest": selftest, "endread": endread, "dump": dump, "image": image, "peek": peek, "qmds": qmds}[sys.argv[1]](*sys.argv[2:])

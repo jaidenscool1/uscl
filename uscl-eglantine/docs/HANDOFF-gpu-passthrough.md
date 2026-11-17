@@ -455,3 +455,35 @@ Facts and open items:
   RGBA8 costs 16x the ASTC 8x8 size (10.5 GB here, host memory; BC1/BC3 re-encode would fit VRAM); 2 textures
   crossing mappings were the sparse arrays above, now handled.
 - Captures: `mkw15` is the current one (48 GB); mkw14's device dumps deleted (metadata kept).
+
+### Eighth pass, continued (2026-11-17): hunting the missing light
+Lit surfaces are a near-uniform **0.40x** (shadowed and mid-tones) to 0.58x (brightest) of Eglantine's linear
+brightness; the untextured sky is 1.00x. Tools added (`ptcap.py`): `endread <capture> <va> <size> <out>` (Eglantine's
+end-of-frame bytes at a VA, the reference for `image` and byte diffs; mkw15's final image:
+`endread <cap> 210bb1a000 f00000 ref.bin`, `image ref.bin 2560 1440 d6 40 ref.png`), depth targets in `targets.txt`,
+and bisecting knobs `PT_SETR=<3D method>:<hex>` (set a register after the restore), `PT_INJECT=<entry>:<va>:<size>`
+(Eglantine's end bytes written right before an entry; verified to land), `PT_ASTC_SRGB=0` (decoded ASTC sampled linear).
+
+Measured:
+- **`SET_SRGB_WRITE` = 1 (restored from the guest) makes the RTX 4060 sRGB-encode clears into plain A8B8G8R8
+  (0xD5) targets**: entry 5021 clears `8117e42000` to (1, 0.5, 0.5, 1) with macro 5 (`CLEAR_SURFACE 0x3c`); the
+  replay stored G = 188 = sRGB(0.5), and with clear value 0.25 G = 137 = sRGB(0.25). `PT_SETR=SET_SRGB_WRITE:0` gives
+  127 like Eglantine, and the downstream 5021 targets (`811934e000`, `8118203000`) then match Eglantine (means equal);
+  the final sRGB output stays right (0xD6 encodes by format). It does **not** change the final brightness (16.4 vs
+  16.7 dB). Which behaviour the guest GPU has is open (Eglantine is not hardware); not made a default.
+- Not the cause (each measured on the final image): the bloom/downsample chain of entry 7747 (its seven outputs
+  injected from Eglantine after 7747: final unchanged), the 128x128 HDR probes of entries 164-574 (within 5%), the
+  candidate exposure target `8111802000` injected at frame start, missed ASTC textures (white fallback: 48 pixels),
+  end-of-frame data instead of `PT_NO_END`. `PT_ASTC_SRGB=0` brightens to 18.0 dB but desaturates (the arch turns
+  pink), so sRGB sampling is right and the gap is a light/exposure factor, not texture data.
+- **The end dump is not a per-pass reference for transient memory.** The render-target heap is aliased six times
+  (e.g. `2143484000` = `8103be0000` = ... = `8151de0000`: the third shadow cascade and the main depth buffer); depth
+  images are not flushed faithfully (main depth reads 0 / 1.0). Only non-aliased outputs (the final image) compare
+  reliably. Byte diffs of everything Eglantine changed in the frame (2137 64 KiB blocks, 142 ranges) are dominated
+  by this heap.
+
+Next: per-pass references from Eglantine. Probe idea: `EDEN_NX2_PT_CAPTURE_SNAP=<entry>:<va>:<size>[,...]` flushes
+and writes those ranges right after that entry while recording (the dump flush path, `Dumping()` true), so the main
+view's HDR target before entry 7540 (where it is cleared for a second view), the composite inputs and the light-grid
+outputs can be compared pass by pass. Then bisect the 2.5x with `PT_INJECT` at the first pass that differs. The next
+capture also tells whether the mkw15 hang was the screenshot (take none) or the descriptor hook.
