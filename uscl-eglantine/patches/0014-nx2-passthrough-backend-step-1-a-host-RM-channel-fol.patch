@@ -1,0 +1,550 @@
+From 5e536b6a49724c2b70bdd7ca51b00e49428c2223 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 15:21:42 -0700
+Subject: [PATCH] nx2: passthrough backend step 1, a host RM channel following
+ one guest channel
+
+EDEN_NX2_PASSTHROUGH=1 (Linux, NVIDIA open kernel driver; build with
+EDEN_NX2_PASSTHROUGH_SDK=<driver src dir>): an RM client, VA space, TSG and
+AMPERE_CHANNEL_GPFIFO_A channel with ADA_A, ADA_COMPUTE_A and
+AMPERE_DMA_COPY_B, set up as the USCL passthrough tools do. Each GPFIFO entry
+of the first guest channel becomes one serialized host submission (a semaphore
+release the CPU waits for). The guest's own methods are not submitted yet:
+that needs the guest VA space mirrored (step 2). Any failure logs and leaves
+the backend off; the RM client is freed at shutdown and at exit.
+
+MKW racing: 15.45M entries, mean 3-8 us per submission, worst ~3 ms, no Xid;
+racing fps 37-43 -> 13-21 with the per-entry wait, so later steps must not
+wait per entry.
+---
+ src/video_core/CMakeLists.txt      |  11 +
+ src/video_core/dma_pusher.cpp      |   7 +
+ src/video_core/gpu.cpp             |   2 +
+ src/video_core/nx2_passthrough.cpp | 402 +++++++++++++++++++++++++++++
+ src/video_core/nx2_passthrough.h   |  24 ++
+ 5 files changed, 446 insertions(+)
+ create mode 100644 src/video_core/nx2_passthrough.cpp
+ create mode 100644 src/video_core/nx2_passthrough.h
+
+diff --git a/src/video_core/CMakeLists.txt b/src/video_core/CMakeLists.txt
+index 1668ae51b..7fcd20895 100644
+--- a/src/video_core/CMakeLists.txt
++++ b/src/video_core/CMakeLists.txt
+@@ -41,6 +41,8 @@ add_library(video_core STATIC
+     dirty_flags.cpp
+     dirty_flags.h
+     dma_pusher.cpp
++    nx2_passthrough.cpp
++    nx2_passthrough.h
+     dma_pusher.h
+     engines/sw_blitter/blitter.cpp
+     engines/sw_blitter/blitter.h
+@@ -509,6 +511,15 @@ if (ENABLE_NSIGHT_AFTERMATH)
+     target_include_directories(video_core PRIVATE "$ENV{NSIGHT_AFTERMATH_SDK}/include")
+ endif()
+ 
++# EDEN_NX2_PASSTHROUGH_SDK=<NVIDIA open kernel module src dir, e.g. /usr/src/nvidia-615.78.08/src>: build the
++# passthrough backend (nx2_passthrough.cpp, Linux) against the driver's RM headers.
++set(EDEN_NX2_PASSTHROUGH_SDK "" CACHE PATH "NVIDIA open kernel module sources for the NX2 passthrough backend")
++if (EDEN_NX2_PASSTHROUGH_SDK AND LINUX)
++    set_source_files_properties(nx2_passthrough.cpp PROPERTIES
++        COMPILE_DEFINITIONS NX2_PASSTHROUGH
++        COMPILE_OPTIONS "-isystem;${EDEN_NX2_PASSTHROUGH_SDK}/common/sdk/nvidia/inc;-isystem;${EDEN_NX2_PASSTHROUGH_SDK}/nvidia/arch/nvalloc/unix/include;-isystem;${EDEN_NX2_PASSTHROUGH_SDK}/common/inc;-Wno-conversion")
++endif()
++
+ if (MSVC)
+     target_compile_options(video_core PRIVATE
+         /we4242 # 'identifier': conversion from 'type1' to 'type2', possible loss of data
+diff --git a/src/video_core/dma_pusher.cpp b/src/video_core/dma_pusher.cpp
+index 8f7571116..cb226aae3 100644
+--- a/src/video_core/dma_pusher.cpp
++++ b/src/video_core/dma_pusher.cpp
+@@ -29,6 +29,7 @@
+ #include "video_core/memory_manager.h"
+ #include "video_core/nx2.h"
+ #include "video_core/nx2_perf.h"
++#include "video_core/nx2_passthrough.h"
+ #include "video_core/rasterizer_interface.h"
+ 
+ namespace Tegra {
+@@ -124,6 +125,9 @@ bool DmaPusher::Step() {
+ 
+     if (prefetch_size > 0) {
+         const std::span<const CommandHeader> commands{command_list.prefetch_command_list};
++        if (command_resume_offset == 0) {
++            Nx2Passthrough::OnEntry(channel_state.bind_id, 0, commands);
++        }
+         command_resume_offset +=
+             ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
+         if (puller.HasPendingAcquire()) {
+@@ -979,6 +983,9 @@ void DmaPusher::CheckSubmitHash(const CommandListHeader& header, u64 submit_hash
+ 
+ void DmaPusher::RecordParsedEntry(const CommandListHeader& header,
+                                   std::span<const CommandHeader> commands) {
++    if (command_resume_offset == 0) {
++        Nx2Passthrough::OnEntry(channel_state.bind_id, header.addr, commands);
++    }
+     if (!g_record_parsed_entries) {
+         return;
+     }
+diff --git a/src/video_core/gpu.cpp b/src/video_core/gpu.cpp
+index 6c123574a..ce2c22e46 100644
+--- a/src/video_core/gpu.cpp
++++ b/src/video_core/gpu.cpp
+@@ -38,6 +38,7 @@
+ #include "video_core/engines/maxwell_3d.h"
+ #include "video_core/engines/maxwell_dma.h"
+ #include "video_core/gpu.h"
++#include "video_core/nx2_passthrough.h"
+ #include "video_core/gpu_thread.h"
+ #include "video_core/gpu_timestamp.h"
+ #include "video_core/host1x/host1x.h"
+@@ -610,6 +611,7 @@ void GPU::Start() {
+ 
+ void GPU::NotifyShutdown() {
+     impl->NotifyShutdown();
++    Tegra::Nx2Passthrough::Shutdown();
+ }
+ 
+ void GPU::WaitForIdle() {
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+new file mode 100644
+index 000000000..d69dfe99a
+--- /dev/null
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -0,0 +1,402 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++// Step 1 of the passthrough backend (see nx2_passthrough.h). The RM setup is the one the USCL passthrough tools
++// verified on an RTX 4060 (uscl-eglantine/passthrough: nvrm_probe, pt_replay): root client, device, subdevice,
++// an RM-owned VA space, a TSG with a context share and an AMPERE_CHANNEL_GPFIFO_A channel holding the guest's
++// engine classes (ADA_A, ADA_COMPUTE_A, AMPERE_DMA_COPY_B), work submission through the usermode doorbell.
++// Only RM ioctls: no register access. Every failure logs, frees the RM client and leaves the backend off.
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstdlib>
++#include <memory>
++#include <mutex>
++#include <stdexcept>
++#include <string>
++#include <vector>
++
++#include "common/logging.h"
++#include "video_core/nx2_passthrough.h"
++
++#if defined(NX2_PASSTHROUGH) && defined(__linux__)
++
++#include <fcntl.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include "nvtypes.h"
++#include "nvmisc.h"
++#include "nvos.h"
++#include "nvstatus.h"
++#include "nv_escape.h"
++#include "nv-ioctl.h"
++#include "nv-ioctl-numbers.h"
++#include "nv-unix-nvos-params-wrappers.h"
++#include "class/cl0000.h"
++#include "class/cl0040.h"
++#include "class/cl0070.h"
++#include "class/cl0080.h"
++#include "class/cl2080.h"
++#include "class/cl2080_notification.h"
++#include "class/cl9067.h"
++#include "class/cl90f1.h"
++#include "class/cla06c.h"
++#include "class/clc361.h"
++#include "class/clc561.h"
++#include "class/clc56f.h"
++#include "class/clc7b5.h"
++#include "class/clc997.h"
++#include "class/clc9c0.h"
++#include "alloc/alloc_channel.h"
++#include "ctrl/ctrl0000/ctrl0000gpu.h"
++#include "ctrl/ctrla06c.h"
++#include "ctrl/ctrlc36f.h"
++
++namespace Tegra::Nx2Passthrough {
++namespace {
++
++#ifndef NV01_ROOT_CLIENT
++#define NV01_ROOT_CLIENT 0x41
++#endif
++#ifndef NV01_MEMORY_SYSTEM
++#define NV01_MEMORY_SYSTEM 0x3e
++#endif
++
++// Channel memory (video memory, CPU-mapped write-combined): GPFIFO ring, USERD, semaphore, pushbuffer.
++constexpr NvU64 CH_SZ = 4 << 20, RING = 0, USERD = 0x2000, SEM = 0x3000, PB = 0x10000;
++constexpr NvU32 ENTRIES = 0x400;
++constexpr auto WAIT_LIMIT = std::chrono::seconds(2);
++
++struct Error : std::runtime_error {
++    NvU32 status;
++    Error(const char* what, NvU32 status_) : std::runtime_error(what), status(status_) {}
++};
++
++NvU32 Hdr(NvU32 subc, NvU32 mthd, NvU32 n) {
++    return (1u << 29) | (n << 16) | (subc << 13) | (mthd >> 2);
++}
++
++class Host {
++public:
++    ~Host() { Close(); }
++
++    void Open() {
++        ctl = open("/dev/nvidiactl", O_RDWR | O_CLOEXEC);
++        if (ctl < 0) throw Error("open /dev/nvidiactl", 0);
++        nv_ioctl_card_info_t cards[16]{};
++        Ioctl(ctl, NV_ESC_CARD_INFO, &cards, "card info");
++        if (!cards[0].valid) throw Error("no NVIDIA GPU", 0);
++        dev_minor = cards[0].minor_number;
++        NVOS21_PARAMETERS r{};
++        r.hClass = NV01_ROOT_CLIENT;
++        Ioctl(ctl, NV_ESC_RM_ALLOC, &r, "root client");
++        if (r.status != NV_OK) throw Error("root client", r.status);
++        root = r.hObjectNew;
++        OpenDevFd(); // the device fd RM expects next to the control fd
++
++        NV0000_CTRL_GPU_GET_ID_INFO_V2_PARAMS id{};
++        id.gpuId = cards[0].gpu_id;
++        Control(root, NV0000_CTRL_CMD_GPU_GET_ID_INFO_V2, &id, "gpu id info");
++        NV0080_ALLOC_PARAMETERS dp{};
++        dp.deviceId = id.deviceInstance;
++        dp.hClientShare = root;
++        dp.vaMode = NV_DEVICE_ALLOCATION_VAMODE_OPTIONAL_MULTIPLE_VASPACES;
++        device = Alloc(root, NV01_DEVICE_0, &dp, "device");
++        NV2080_ALLOC_PARAMETERS sp{};
++        subdevice = Alloc(device, NV20_SUBDEVICE_0, &sp, "subdevice");
++        NV_VASPACE_ALLOCATION_PARAMETERS vp{};
++        vaspace = Alloc(device, FERMI_VASPACE_A, &vp, "vaspace");
++        NV_MEMORY_VIRTUAL_ALLOCATION_PARAMS mv{};
++        mv.limit = (1ull << 40) - 1;
++        mv.hVASpace = vaspace;
++        virtmem = Alloc(device, NV01_MEMORY_VIRTUAL, &mv, "virtual memory");
++        const NvHandle usermode = Alloc(subdevice, AMPERE_USERMODE_A, nullptr, "usermode");
++        mmio = static_cast<volatile NvU32*>(MapCpu(usermode, 0x10000, 0));
++
++        const NvHandle mem = AllocVidmem(CH_SZ);
++        cpu = static_cast<volatile NvU8*>(
++            MapCpu(mem, CH_SZ, DRF_DEF(OS33, _FLAGS, _CACHING_TYPE, _WRITECOMBINED)));
++        gva = MapGpu(mem, CH_SZ);
++        const NvHandle notifier = AllocSysmem(64 << 10);
++        NV_CHANNEL_GROUP_ALLOCATION_PARAMETERS tp{};
++        tp.engineType = NV2080_ENGINE_TYPE_GRAPHICS;
++        tp.hVASpace = vaspace;
++        const NvHandle tsg = Alloc(device, KEPLER_CHANNEL_GROUP_A, &tp, "channel group");
++        NV_CTXSHARE_ALLOCATION_PARAMETERS cp{};
++        cp.hVASpace = vaspace;
++        cp.flags = NV_CTXSHARE_ALLOCATION_FLAGS_SUBCONTEXT_SYNC;
++        const NvHandle ctxshare = Alloc(tsg, FERMI_CONTEXT_SHARE_A, &cp, "context share");
++        NV_CHANNEL_ALLOC_PARAMS ch{};
++        ch.hObjectError = notifier;
++        ch.hObjectBuffer = mem;
++        ch.gpFifoOffset = gva + RING;
++        ch.gpFifoEntries = ENTRIES;
++        ch.hContextShare = ctxshare;
++        ch.hUserdMemory[0] = mem;
++        ch.userdOffset[0] = USERD;
++        const NvHandle chan = Alloc(tsg, AMPERE_CHANNEL_GPFIFO_A, &ch, "channel");
++        for (const NvU32 cls : {ADA_A, ADA_COMPUTE_A, AMPERE_DMA_COPY_B}) {
++            Alloc(chan, cls, nullptr, "engine object");
++        }
++        NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS sch{};
++        sch.bEnable = NV_TRUE;
++        Control(tsg, NVA06C_CTRL_CMD_GPFIFO_SCHEDULE, &sch, "schedule");
++        NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS tok{};
++        tok.workSubmitToken = ~0u;
++        Control(chan, NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN, &tok, "work submit token");
++        token = tok.workSubmitToken;
++        *reinterpret_cast<volatile NvU32*>(cpu + SEM) = 0;
++    }
++
++    /// Submits `words` (host pushbuffer) plus a semaphore release and waits for it. False on timeout.
++    bool Submit(std::span<const NvU32> words) {
++        const NvU64 sem = gva + SEM;
++        const NvU32 tail[6] = {Hdr(0, NVC56F_SEM_ADDR_LO, 5), static_cast<NvU32>(sem),
++                               static_cast<NvU32>(sem >> 32), ++fence, 0,
++                               DRF_DEF(C56F, _SEM_EXECUTE, _OPERATION, _RELEASE) |
++                                   DRF_DEF(C56F, _SEM_EXECUTE, _RELEASE_WFI, _EN) |
++                                   DRF_DEF(C56F, _SEM_EXECUTE, _PAYLOAD_SIZE, _32BIT)};
++        const NvU64 n = words.size() + 6, cap = (CH_SZ - PB) / 4;
++        if (n > cap) return false;
++        if (pbn + n > cap) pbn = 0; // serialized: the previous submission has completed
++        auto* pb = reinterpret_cast<volatile NvU32*>(cpu + PB) + pbn;
++        for (size_t i = 0; i < words.size(); ++i) pb[i] = words[i];
++        for (size_t i = 0; i < 6; ++i) pb[words.size() + i] = tail[i];
++        const NvU64 pa = gva + PB + pbn * 4;
++        pbn += n;
++        reinterpret_cast<volatile NvU64*>(cpu + RING)[gpput % ENTRIES] = pa | (n << 42);
++        __sync_synchronize();
++        reinterpret_cast<volatile AmpereAControlGPFifo*>(cpu + USERD)->GPPut = ++gpput % ENTRIES;
++        __sync_synchronize();
++        mmio[NVC361_NOTIFY_CHANNEL_PENDING / 4] = token;
++        const auto start = std::chrono::steady_clock::now();
++        while (*reinterpret_cast<volatile NvU32*>(cpu + SEM) != fence) {
++            if (std::chrono::steady_clock::now() - start > WAIT_LIMIT) return false;
++        }
++        return true;
++    }
++
++    void Close() {
++        for (auto& [ptr, size] : maps) munmap(ptr, size);
++        maps.clear();
++        if (root != 0) {
++            NVOS00_PARAMETERS p{};
++            p.hRoot = root;
++            p.hObjectOld = root;
++            ioctl(ctl, _IOC(_IOC_READ | _IOC_WRITE, NV_IOCTL_MAGIC, NV_ESC_RM_FREE, sizeof(p)), &p);
++            LOG_INFO(HW_GPU, "Nx2 passthrough: RM client freed (status {:#x})", p.status);
++            root = 0;
++        }
++        for (const int fd : fds) close(fd);
++        fds.clear();
++        if (ctl >= 0) close(ctl);
++        ctl = -1;
++    }
++
++private:
++    template <class T>
++    void Ioctl(int fd, int nr, T* p, const char* what) {
++        if (ioctl(fd, _IOC(_IOC_READ | _IOC_WRITE, NV_IOCTL_MAGIC, nr, sizeof(T)), p) < 0) {
++            throw Error(what, 0);
++        }
++    }
++
++    NvHandle Alloc(NvHandle parent, NvU32 cls, void* params, const char* what) {
++        NVOS21_PARAMETERS p{};
++        p.hRoot = root;
++        p.hObjectParent = parent;
++        p.hClass = cls;
++        p.pAllocParms = params;
++        Ioctl(ctl, NV_ESC_RM_ALLOC, &p, what);
++        if (p.status != NV_OK) throw Error(what, p.status);
++        return p.hObjectNew;
++    }
++
++    template <class T>
++    void Control(NvHandle obj, NvU32 cmd, T* params, const char* what) {
++        NVOS54_PARAMETERS p{};
++        p.hClient = root;
++        p.hObject = obj;
++        p.cmd = cmd;
++        p.params = params;
++        p.paramsSize = sizeof(T);
++        Ioctl(ctl, NV_ESC_RM_CONTROL, &p, what);
++        if (p.status != NV_OK) throw Error(what, p.status);
++    }
++
++    int OpenDevFd() {
++        const std::string path = "/dev/nvidia" + std::to_string(dev_minor);
++        const int fd = open(path.c_str(), O_RDWR | O_CLOEXEC);
++        if (fd < 0) throw Error("open /dev/nvidiaN", 0);
++        fds.push_back(fd);
++        nv_ioctl_register_fd_t r{ctl};
++        Ioctl(fd, NV_ESC_REGISTER_FD, &r, "register fd");
++        return fd;
++    }
++
++    void* MapCpu(NvHandle mem, NvU64 size, NvU32 flags) {
++        nv_ioctl_nvos33_parameters_with_fd m{};
++        m.fd = OpenDevFd();
++        m.params.hClient = root;
++        m.params.hDevice = device;
++        m.params.hMemory = mem;
++        m.params.length = size;
++        m.params.flags = flags;
++        Ioctl(ctl, NV_ESC_RM_MAP_MEMORY, &m, "map memory");
++        if (m.params.status != NV_OK) throw Error("map memory", m.params.status);
++        void* p = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, m.fd, 0);
++        if (p == MAP_FAILED) throw Error("mmap", 0);
++        maps.emplace_back(p, size);
++        return p;
++    }
++
++    NvU64 MapGpu(NvHandle mem, NvU64 size) {
++        NVOS46_PARAMETERS p{};
++        p.hClient = root;
++        p.hDevice = device;
++        p.hDma = virtmem;
++        p.hMemory = mem;
++        p.length = size;
++        Ioctl(ctl, NV_ESC_RM_MAP_MEMORY_DMA, &p, "map dma");
++        if (p.status != NV_OK) throw Error("map dma", p.status);
++        return p.dmaOffset;
++    }
++
++    NvHandle AllocVidmem(NvU64 size) {
++        NV_MEMORY_ALLOCATION_PARAMS a{};
++        a.owner = root;
++        a.size = size;
++        a.alignment = 4096;
++        a.limit = size - 1;
++        a.format = 6;
++        a.type = NVOS32_TYPE_IMAGE;
++        a.attr = DRF_DEF(OS32, _ATTR, _PHYSICALITY, _CONTIGUOUS) | DRF_DEF(OS32, _ATTR, _LOCATION, _VIDMEM);
++        a.attr2 = DRF_DEF(OS32, _ATTR2, _GPU_CACHEABLE, _YES) | DRF_DEF(OS32, _ATTR2, _ZBC, _PREFER_NO_ZBC);
++        a.flags = NVOS32_ALLOC_FLAGS_MAP_NOT_REQUIRED | NVOS32_ALLOC_FLAGS_ALIGNMENT_FORCE |
++                  NVOS32_ALLOC_FLAGS_IGNORE_BANK_PLACEMENT | NVOS32_ALLOC_FLAGS_PERSISTENT_VIDMEM;
++        return Alloc(device, NV1_MEMORY_USER, &a, "alloc vidmem");
++    }
++
++    NvHandle AllocSysmem(NvU64 size) {
++        NV_MEMORY_ALLOCATION_PARAMS a{};
++        a.owner = root;
++        a.size = size;
++        a.alignment = 4096;
++        a.limit = size - 1;
++        a.format = 6;
++        a.type = NVOS32_TYPE_NOTIFIER;
++        a.attr = DRF_DEF(OS32, _ATTR, _PHYSICALITY, _NONCONTIGUOUS) | DRF_DEF(OS32, _ATTR, _LOCATION, _PCI);
++        a.attr2 = DRF_DEF(OS32, _ATTR2, _GPU_CACHEABLE, _NO) | DRF_DEF(OS32, _ATTR2, _ZBC, _PREFER_NO_ZBC);
++        a.flags = NVOS32_ALLOC_FLAGS_MAP_NOT_REQUIRED | NVOS32_ALLOC_FLAGS_ALIGNMENT_FORCE |
++                  NVOS32_ALLOC_FLAGS_IGNORE_BANK_PLACEMENT;
++        return Alloc(device, NV01_MEMORY_SYSTEM, &a, "alloc sysmem");
++    }
++
++    int ctl = -1;
++    NvU32 dev_minor = 0, token = 0, fence = 0;
++    NvHandle root = 0, device = 0, subdevice = 0, vaspace = 0, virtmem = 0;
++    volatile NvU32* mmio = nullptr;
++    volatile NvU8* cpu = nullptr;
++    NvU64 gva = 0, gpput = 0, pbn = 0;
++    std::vector<int> fds;
++    std::vector<std::pair<void*, size_t>> maps;
++};
++
++struct State {
++    std::mutex mutex;
++    std::unique_ptr<Host> host;
++    bool tried = false;
++    s32 channel = -1; // the guest channel the host channel follows (step 1: one)
++    u64 entries = 0, words = 0;
++    std::chrono::nanoseconds busy{}, worst{};
++};
++
++State& Get() {
++    static State state;
++    return state;
++}
++
++bool Requested() {
++    static const bool on = [] {
++        const char* v = std::getenv("EDEN_NX2_PASSTHROUGH");
++        return v != nullptr && v[0] == '1';
++    }();
++    return on;
++}
++
++} // Anonymous namespace
++
++void OnEntry(s32 channel, GPUVAddr address, std::span<const CommandHeader> commands) {
++    if (!Requested()) [[likely]] {
++        return;
++    }
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    if (!s.tried) {
++        s.tried = true;
++        std::atexit(Shutdown);
++        auto host = std::make_unique<Host>();
++        try {
++            host->Open();
++            s.host = std::move(host);
++            s.channel = channel;
++            LOG_INFO(HW_GPU, "Nx2 passthrough: host channel up, following guest channel {}", channel);
++        } catch (const Error& e) {
++            LOG_ERROR(HW_GPU, "Nx2 passthrough off: {} failed (status {:#x}, errno {})", e.what(), e.status, errno);
++        }
++    }
++    if (!s.host || channel != s.channel) {
++        return;
++    }
++    // Step 1: the entry's place in the guest's order is kept by one marker submission per entry; the guest's
++    // own words follow in step 2, once the guest VA space is mirrored.
++    const auto start = std::chrono::steady_clock::now();
++    if (!s.host->Submit({})) {
++        LOG_ERROR(HW_GPU, "Nx2 passthrough off: entry {:#x} not done within 2 s", address);
++        s.host.reset();
++        return;
++    }
++    const auto took = std::chrono::steady_clock::now() - start;
++    s.busy += took;
++    s.worst = std::max<std::chrono::nanoseconds>(s.worst, took);
++    s.words += commands.size();
++    if (++s.entries % 50000 == 0) {
++        LOG_INFO(HW_GPU, "Nx2 passthrough: {} entries ({} guest words) submitted, mean {:.1f} us, worst {} us",
++                 s.entries, s.words, std::chrono::duration<double, std::micro>(s.busy).count() / 50000.0,
++                 std::chrono::duration_cast<std::chrono::microseconds>(s.worst).count());
++        s.busy = {};
++        s.worst = {};
++    }
++}
++
++void Shutdown() {
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    if (s.host) {
++        LOG_INFO(HW_GPU, "Nx2 passthrough: shutting down after {} entries", s.entries);
++        s.host.reset();
++    }
++}
++
++} // namespace Tegra::Nx2Passthrough
++
++#else
++
++namespace Tegra::Nx2Passthrough {
++
++void OnEntry(s32, GPUVAddr, std::span<const CommandHeader>) {
++    static std::atomic<bool> warned{false};
++    static const bool on = std::getenv("EDEN_NX2_PASSTHROUGH") != nullptr;
++    if (on && !warned.exchange(true)) {
++        LOG_WARNING(HW_GPU, "Nx2 passthrough: not built in (EDEN_NX2_PASSTHROUGH_SDK, Linux only)");
++    }
++}
++
++void Shutdown() {}
++
++} // namespace Tegra::Nx2Passthrough
++
++#endif
+diff --git a/src/video_core/nx2_passthrough.h b/src/video_core/nx2_passthrough.h
+new file mode 100644
+index 000000000..690bd8973
+--- /dev/null
++++ b/src/video_core/nx2_passthrough.h
+@@ -0,0 +1,24 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#pragma once
++
++#include <span>
++
++#include "common/common_types.h"
++#include "video_core/dma_pusher.h"
++
++// NVIDIA GPU passthrough backend (EDEN_NX2_PASSTHROUGH=1, Linux, NVIDIA open kernel driver, built with
++// EDEN_NX2_PASSTHROUGH_SDK): the guest's channels run on the host GPU through the driver's RM ioctls.
++// Step 1 (channels and submission): one host channel follows the first guest channel; each of its GPFIFO
++// entries becomes one serialized host submission (a semaphore release the CPU waits for). The guest's own
++// methods are not submitted yet (they need the guest VA space mirrored, step 2); Vulkan still renders.
++namespace Tegra::Nx2Passthrough {
++
++/// Called for every guest command list as the DMA pusher parses it (once per entry).
++void OnEntry(s32 channel, GPUVAddr address, std::span<const CommandHeader> commands);
++
++/// Frees the host channel and RM client (also done at process exit).
++void Shutdown();
++
++} // namespace Tegra::Nx2Passthrough
+-- 
+2.56.0
+

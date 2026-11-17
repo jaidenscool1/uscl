@@ -4,7 +4,7 @@ Goal and plan: `PROMPT-gpu-passthrough-continue.md`. Hand the game's own NVIDIA 
 shaders to the host RTX 4060 (AD107) through the RM ioctls, instead of translating every draw to Vulkan.
 Host: driver 615.78.08 (open kernel module), Arch Linux.
 
-## Status (2026-11-17, ninth pass)
+## Status (2026-11-17, tenth pass)
 
 | Gate / phase | Result |
 |---|---|
@@ -12,8 +12,9 @@ Host: driver 615.78.08 (open kernel module), Arch Linux.
 | Gate 1 (driver access) | **Pass** on hardware |
 | Gate 2 (method compatibility) | **Pass (real data)**: every 3D/compute/copy method in a captured MKW frame is a named Ampere method, plus three private 3D methods (0xF74/0xF7C/0xF80) that ADA_A accepts; only host-class changes needed (Tegra syncpoints 0x70/0x74 dropped) |
 | Gate 3 (shader compatibility) | **Pass (decode level)**; guest compute SASS has started to **execute** on the RTX 4060 (Phase 1), no per-instruction failure seen yet |
-| Phase 1 (capture + replay one frame) | **Exit check done, helper-lane fix** (ninth pass, 2026-11-17): the `PT_HELPER_LOADS` trampoline zeroed global loads in *covered* pixels (PIXLD.COVMASK's predicate is no helper test); with `SR_THREAD_KILL` the race-start frames replay lit: `mkw17` 9.6 -> **13.9 dB** (brightness 0.38 -> 0.89x), `mkw19` **17.6 dB** (1.03x), no Xid. Left: the shadow mask (cached shadow atlas tiles), gantry darker, foliage. Earlier in the pass: the replay matches Eglantine wherever the capture holds the frame's inputs (`mkw16`: 22.6 dB, HDR main view 1.00-1.05x of Eglantine's per-pass snapshots); the remaining mismatches are inputs Eglantine keeps only in host images it never writes back to guest memory (superseded: the zero virtual-texture samples were the trampoline bug, see "Ninth pass, continued"). Phase 2 plan written (see "Phase 2 plan"). Before: **Close to Eglantine** (eighth pass, 2026-11-17): capture `mkw16` replays to Eglantine's own render within **PSNR 22.6 dB, mean abs 9.1, brightness ratio 1.04**, HUD identical; left: Toad heads dark, terrain dirt paler, foliage differs (see "mkw16" below). Before: **Textured racing frame, exact reference**: capture `mkw15` replays with every sampled ASTC texture decoded (`PT_ASTC=decode`) to the right image: arch, signs, track, karts, HUD all match Eglantine's own render of the same frame (taken from the capture's end dump), aligned to the pixel; lit surfaces are 0.33-0.65x as bright as the reference (sky 1.00x): a missing light contribution, the next Phase 1 item. Before: **Lit racing frame** (seventh pass, 2026-11-17): capture `mkw14` (probe 0003 now flushes GPU-written images) replays to the lit scene; only ASTC (white stand-in) is left between it and the reference. Before: **Whole racing frame replays** (sixth pass, 2026-11-17): all 7757 entries of capture `mkw13` (racing, 3 channels) run on the RTX 4060 with no Xid, **~36 ms of GPU wait in total** (slowest entry 0.7 ms) with guest memory in VRAM. The fix was emulator-wide: Ada does not perform global loads in pixel-shader helper lanes, so `PT_HELPER_LOADS=1` routes every LDG of every pixel program through a trampoline that zeroes the destination in helper lanes. Output not yet right: the HUD layer matches the reference, the G-buffer shows the right scene (karts, track), but the lit scene composited under the HUD is black (next: find the lighting/composite passes). Earlier: the intro-flyover frame `mkw10` replays to a recognisable course image (third pass) |
+| Phase 1 (capture + replay one frame) | **Shadow mask fixed, open course checked** (tenth pass): the race-start slabs were the cached Z16 atlas read in the depth GOB arrangement (guest depth PTE kinds; the capture holds Eglantine's colour-arrangement download): depth twins in `ptcap.py build` take `mkw19`'s shadow mask from 17.8 to **28.0 dB** vs Eglantine; `SET_SRGB_WRITE` forced to 0; the 3D macro trace is paired by call order (21 pixel programs the helper-lane patch had missed). `mkw19` 17.6 dB, 1.015x; open-course `mkw20` **22.9 dB world, 0.986x**, dirt 30.6 dB. Left, localized to entries: mkw19 near road / pylon / top beam / Mario's shadow; mkw20 post-chain wedges and seams (entry 2926). Before: **Exit check done, helper-lane fix** (ninth pass, 2026-11-17): the `PT_HELPER_LOADS` trampoline zeroed global loads in *covered* pixels (PIXLD.COVMASK's predicate is no helper test); with `SR_THREAD_KILL` the race-start frames replay lit: `mkw17` 9.6 -> **13.9 dB** (brightness 0.38 -> 0.89x), `mkw19` **17.6 dB** (1.03x), no Xid. Left: the shadow mask (cached shadow atlas tiles), gantry darker, foliage. Earlier in the pass: the replay matches Eglantine wherever the capture holds the frame's inputs (`mkw16`: 22.6 dB, HDR main view 1.00-1.05x of Eglantine's per-pass snapshots); the remaining mismatches are inputs Eglantine keeps only in host images it never writes back to guest memory (superseded: the zero virtual-texture samples were the trampoline bug, see "Ninth pass, continued"). Phase 2 plan written (see "Phase 2 plan"). Before: **Close to Eglantine** (eighth pass, 2026-11-17): capture `mkw16` replays to Eglantine's own render within **PSNR 22.6 dB, mean abs 9.1, brightness ratio 1.04**, HUD identical; left: Toad heads dark, terrain dirt paler, foliage differs (see "mkw16" below). Before: **Textured racing frame, exact reference**: capture `mkw15` replays with every sampled ASTC texture decoded (`PT_ASTC=decode`) to the right image: arch, signs, track, karts, HUD all match Eglantine's own render of the same frame (taken from the capture's end dump), aligned to the pixel; lit surfaces are 0.33-0.65x as bright as the reference (sky 1.00x): a missing light contribution, the next Phase 1 item. Before: **Lit racing frame** (seventh pass, 2026-11-17): capture `mkw14` (probe 0003 now flushes GPU-written images) replays to the lit scene; only ASTC (white stand-in) is left between it and the reference. Before: **Whole racing frame replays** (sixth pass, 2026-11-17): all 7757 entries of capture `mkw13` (racing, 3 channels) run on the RTX 4060 with no Xid, **~36 ms of GPU wait in total** (slowest entry 0.7 ms) with guest memory in VRAM. The fix was emulator-wide: Ada does not perform global loads in pixel-shader helper lanes, so `PT_HELPER_LOADS=1` routes every LDG of every pixel program through a trampoline that zeroes the destination in helper lanes. Output not yet right: the HUD layer matches the reference, the G-buffer shows the right scene (karts, track), but the lit scene composited under the HUD is black (next: find the lighting/composite passes). Earlier: the intro-flyover frame `mkw10` replays to a recognisable course image (third pass) |
 | New: texture formats | **ASTC done for replay** (eighth pass; Phase 2: transcode on upload to BC7/BC3, see "Phase 2 plan"): the frame's 1455 sampled ASTC textures are decoded with Eglantine's own decoder to A8B8G8R8 in a host arena and their headers repointed. 28% of MKW's texture headers are ASTC (8x8, 6x6, 4x4, 5x5); the RTX 4060 has no ASTC sampling. Phase 2 needs the same on upload, and a smaller target (BC1/BC3) for VRAM |
+| Phase 2 | **Step 1 done** (tenth pass): an RM channel follows guest channel 1 inside Eglantine (`EDEN_NX2_PASSTHROUGH=1`, fork `uscl-passthrough-ship` / `patches/0014`), 15.45M serialized submissions in an MKW race, no Xid; the per-entry wait costs 37-43 -> 13-21 fps, so later steps submit asynchronously. Next: step 2 (guest VA space) |
 | Gates 4-6 | not started (Phase 1 uses pinned host memory at the guest's own VAs, pitch kind only: first evidence for gate 4) |
 
 ## Phase 0 tool: `uscl-eglantine/passthrough/nvrm_probe.cpp`
@@ -634,6 +635,112 @@ test of whether a trampoline changes a draw.
 Captures: **`mkw19`** is the one full capture (49 GB + 10 GB arena; output `210b01a000`, replay count for entry 7767);
 mkw17's and mkw16's dumps deleted (metadata, snapshots and images kept); mkw18 kept only for its run log.
 
+### Tenth pass (2026-11-17): the shadow mask, depth kinds, the 3D macro trace
+**Result:** the race-start shadow slabs are fixed. The shadow mask's tile selection was right all along; the
+cached Z16 shadow atlas was read in the wrong GOB arrangement. `mkw19` shadow mask (`811844e000` layer 0, entry
+4910) **17.8 -> 28.0 dB vs Eglantine (mean abs 0.4)**; final image 17.56 -> **17.60 dB, brightness 1.032 -> 1.015x**;
+no Xid in any of the ~15 runs this pass, health check OK after each. Code: USCL `bb2c73c`. Images (in
+`~/.local/share/uscl/ptcap/mkw19`): `shadowmask-tenth.png` (G channel: before | after | Eglantine),
+`compare-tenth.png` (before | after / Eglantine), `mask-ref-sample-diff.png`, `shadow-atlas-b0000.png`.
+
+1. **The 3D macro trace was misnumbered, and the tools trusted the numbers.** Eglantine's front runs 3D macros out
+   of step with the probe's entry counter: mkw19's mask entry 4910 (2292 macro calls) had its 2134 traced calls
+   logged as entry 4936 (offset 26; offsets 0/26/31 across the frame). `drawstate.py` and `pixel_programs()`
+   paired trace records by entry number, so the mask's draw (and its bindings) were invisible. New
+   `ptcap.macro3d_calls()`: each stream call (every `CALL_MME_MACRO(n)` write starts one; NVN batches 1-parameter
+   calls as non-incrementing runs, `CALL_MME_DATA(n)` adds parameters) pairs with the next trace record of the same
+   start address and parameter count (55756 calls, 50972 paired, 4 s). `pixel_programs()` now finds **307 pixel
+   programs (was 286)**: `PT_HELPER_LOADS` had missed 21, one of them with 12 LDGs (`114cc5f900`, 63 draws in
+   4910). `drawstate.py` uses it and takes `PS=<program>` (state at the last draw with that pixel program).
+   `PT_MME3D=trace` (bisecting only) still pairs by entry number.
+2. **The mask shader** (`114caed000`, one draw in 4910, rt0 `811844e000`): R = cascaded shadow (handle 0xc,
+   layer = cascade index from the depth splits `c3[0x220/0x224]`, 3x3 PCF for cascade 0); **G = a tiled shadow
+   cache**: world XZ -> a 10x10 grid (`c5[0x640..0x66c]`), the cell's layer from a table at `c5[cell*4]` (a
+   permutation of 0..100), `TEX.LZ ARRAY_2D` on handle 0xe = TIC `0x72b4` = the 512x512x101 Z16 atlas
+   `81605f0000`, then an exponential (ESM) compare with per-cell planes (`c5[0x670+cell*16]`, scale
+   `c5[0x1f70+cell*4]`). Measured in the shader: the GPU picks cell 55 / layer 58 for the near road, as the table
+   says; the reference depth (from the scene depth buffer) is smooth; the atlas **sample** carried a small regular
+   checker that ESM amplifies into the slabs (`mask-ref-sample-diff.png`: reference | sample | difference x 64).
+3. **Cause: depth PTE kinds.** The guest maps the atlas with kind 0x0b (Z16, fallback 0x01); on Ada the texture
+   unit uses the depth GOB arrangement (mesa nil's `FermiZS`, "grab-bag", undocumented) for depth-kind pages, while
+   the capture's bytes are Eglantine's download in the colour arrangement (its texture cache writes every format
+   that way). Measured: atlas on a colour kind (6) + header as R16 -> mask 28.0 dB. Ruled out on the way, each by a
+   run: layer stride (the RTX samples layers 0xB0000 apart, as Eglantine lays them out; 0xAA000 gives 10.1 dB),
+   the header format alone (R16 on the Z16 pages: identical result), the sampler's depth-compare bit (TSC `0x1c8`
+   has it set and the fetch is non-`.DC`; clearing it changes nothing), re-uploading the atlas through the guest's
+   Z16 mapping with the copy engine (a third arrangement, 16.0 dB; re-uploading *all* depth-kind mappings that way
+   wrecks the frame, 6.3 dB: MKW's 250 MB kind-0x0b heaps hold colour data too).
+   **Fix (ptcap build, emulator-wide, default on, `PT_DEPTH_TWIN=0` off):** every sampled depth header whose memory
+   the frame never draws becomes its bit-identical colour twin (Z16 -> R16, ZF32 -> R32) on a colour kind (6). Other
+   depth formats are counted and left alone (mkw19: 4 S8Z24 headers, all drawn in the frame). Kind overrides now
+   cut guest kind ranges instead of dropping them (`override_ranges`, in `selftest`). **Phase 2 does not need it**:
+   the guest's own depth writes land in the depth arrangement.
+4. **`SET_SRGB_WRITE` is now forced to 0** (`PT_SRGB_WRITE=guest` keeps the guest's 1): instrumenting the mask
+   shader showed the RTX sRGB-encodes the *shader outputs* into the UNORM mask (59/255 stored as 132), not just
+   clears; sRGB-format targets encode by format either way (eighth pass). NVN sets 1 and keeps data in UNORM
+   targets, so the guest GPU does not encode them; Eglantine's Vulkan backend and NVK ignore the method. Phase 2:
+   the same host rewrite.
+
+Per-pass HDR (`8110901000`) after the fix vs Eglantine's snapshots: median ratio 0.997-1.016 at every 50-entry
+point, but a minority of pixels is brighter (mean +28% after 6600). Localized windows for the next per-draw pass:
+near road darker in ours from 6200-6250 (0.180 vs 0.265), left gantry pylon 1.36x in 6350-6400 and 2x in
+6500-6550, the top beam 1.18x in 6500-6550; Mario's kart shadow is right through 6600 and lost later.
+
+Tools: `ptcap.macro3d_calls`, `drawstate.py PS=`, `PT_DEPTH_TWIN`, `PT_SRGB_WRITE`. Shader instrumentation
+encodings added (SM86, checked with nvdisasm): `FFMA.FTZ Rd, Ra, imm, Rc` = `0x7823 | Rd<<16 | Ra<<24 | imm<<32`,
+high `Rc | 0x10000`; `MOV Rd, imm` = `0x7802 | Rd<<16 | imm<<32`, high `0xF00`; `MOV Rd, c[b][o]` = `0x7a02 |
+Rd<<16 | (o/4)<<40 | b<<54`, `0xF` at byte 9; `FRND.FLOOR Rd, Rb` = low `0x7307 | Rd<<16 | Rb<<32`, high `0x205000`.
+The mask target writes R, G, B only (A is not written).
+
+### Tenth pass, continued: open-course capture `mkw20`
+**Result:** open-course racing replays at **22.9 dB in the world area (HUD excluded), brightness 0.986x**; the
+banked dirt matches Eglantine (**30.6 dB, 0.999x**). mkw16's "pale dirt" does not reproduce. What is left is
+local and starts in the post chain, not in lighting. Images in `~/.local/share/uscl/ptcap/mkw20`: `compare.png`
+(ours / Eglantine), `post-wedge-2926.png` (the composite target after 2926, 2927, 2928 / Eglantine's final).
+
+- Capture: `capture20.sh` (capture19.sh, touched 110 s after the menu screenshot, `BENCH_FRAMES=7200`, extra
+  shadow-mask snapshots). The menu screenshot now lands on "Start Grand Prix?" and the race starts ~25 s later, so
+  the frame is lap 1 on the banked dirt turn (Mario, mushrooms, a coin; the pack, KTV trucks and Toads are **not
+  in view**, so those mkw16 items stay unchecked). It is a **3037-entry frame** (mkw19: 7854): the passes run
+  ~3000 entries earlier (HDR main view `8110901000` at 359-2926, composite `811e4ff000` 2926-3001, output
+  `210bb1a000` sRGB at 2933-3000), so the 4900+ snapshots never fired: **no per-pass reference**. Next capture:
+  take snapshots relative to the frame (e.g. `0-8000/50`), or detect the HDR target's range first.
+- Final vs Eglantine's end dump: 19.4 dB overall; the HUD differs because the end dump is taken after the next
+  present (item box, place and lap text in ours, a later HUD state in Eglantine's). Not a replay difference.
+- **Dark wedges** (shaped like the shadows of the chevron signs above the track; Eglantine has no such shadows)
+  and **dashed seams** along triangle edges (top-left wall; the same seams show on mkw19's road). Localized with
+  per-entry readbacks: the affected pixels are not dark in the HDR main view through 2900 (mean 0.91); they appear
+  at **entry 2926**, the composite into `811e4ff000` (pixel programs `114ba6ad00`, `114ba6b900` = 648
+  instructions, ~50 `TEX.LZ` taps: a wide post filter, and the composite `114ba6e600`); 2927 adds 4.6% of the
+  screen. Next: name 2926's inputs (`drawstate.py . 2926`, then instrument `114ba6e600` as in the tenth pass).
+- Disk: mkw20's dumps were **deleted after the analysis and mkw19 kept** (the rule says keep the newest, but mkw20
+  has no per-pass snapshots, and mkw19's open windows need them). mkw20 keeps metadata, `replay/` (minus the
+  arena) and images.
+
+## Phase 2, step 1: channels and submission (2026-11-17)
+**Result:** the RM channel runs inside Eglantine. Fork branch `uscl-passthrough-ship` (`5e536b6a4`, on
+`uscl-gpurw-ship`), USCL `patches/0014`. The same commit sits on top of the probe as `uscl-passthrough`
+(`5436bc860`, built in the `ptcap` worktree: `-DEDEN_NX2_PASSTHROUGH_SDK=/usr/src/nvidia-615.78.08/src`).
+`git am` of 0001-0014 onto the pinned base gives that branch's tree (0 lines of diff).
+
+- `src/video_core/nx2_passthrough.{h,cpp}`: `EDEN_NX2_PASSTHROUGH=1` opens an RM client, an RM-owned VA space, a TSG
+  and context share, and an `AMPERE_CHANNEL_GPFIFO_A` channel with `ADA_A`, `ADA_COMPUTE_A` and
+  `AMPERE_DMA_COPY_B` (pt_replay's setup, errors as exceptions caught in one place: log, free, backend off; never
+  `exit`). It follows the first guest channel that submits. Hook: `DmaPusher` (prefetched lists and
+  `RecordParsedEntry`, once per entry: `command_resume_offset == 0`). Each entry becomes one serialized submission
+  (a semaphore release with WFI, CPU waits, 2 s limit). The guest's words are counted, **not submitted** (they
+  reference guest VAs: step 2). The RM client is freed in `GPU::NotifyShutdown` and at exit. Without the SDK path it
+  compiles to a stub that warns once.
+- MKW, same binary, `runs.py pt2on:EDEN_NX2_PASSTHROUGH=1 pt2off` (`BENCH_FRAMES=3000`): **15.45M entries (860M
+  guest words) submitted, mean 3-8 us per submission, worst ~3 ms, no Xid**, health check OK, VRAM back to the
+  desktop's 764 MiB after exit. **Racing fps 37-43 -> 13-21** with the per-entry wait (guest channel 1: ~125k
+  entries/s). So no step may wait per entry: submit asynchronously and wait only where the guest waits (step 5's
+  guest fences); the ~1-3 ms worst cases are our channel time-slicing against Eglantine's own Vulkan context.
+- Not verified: the shutdown log line (runs.py copies the log before SIGTERM). Next, step 2: mirror the guest VA
+  space (probe `NoteMap`/`NoteUnmap`/`NoteGuestKind` events, guest memory as an RM OS descriptor over Eglantine's
+  host mapping), then submit the guest's own words with the host-class rewrites (syncpoints dropped,
+  `SET_SRGB_WRITE` 0), asynchronously.
+
 ## Phase 1 exit check (2026-11-17)
 | Capture | Frame | PSNR vs Eglantine | Mean abs (0-255) | Brightness | Notes |
 |---|---|---|---|---|---|
@@ -641,6 +748,8 @@ mkw17's and mkw16's dumps deleted (metadata, snapshots and images kept); mkw18 k
 | `mkw17` | race start under the gantry | 9.6 dB | 70.1 | 0.38x | before the helper-lane fix: covered pixels' global loads zeroed |
 | `mkw17` + fix | same | **13.9 dB** | 33.9 | 0.89x | lit; HDR main view 1.00-1.08x of Eglantine's snapshots to entry 7100; shadow slab on the near road (atlas tiles), gantry darker |
 | `mkw19` + fix | race start (same procedure, new probe) | **17.6 dB** | 21.9 | 1.03x | lit; gantry darker, Mario's shadow missing, one bush only in ours |
+| `mkw19`, tenth pass | same | **17.6 dB** | 21.4 | 1.015x | shadow mask 28.0 dB vs Eglantine (depth twins, sRGB write off); near road, pylon, top beam and Mario's shadow localized to entry windows |
+| `mkw20` | racing, open course (dirt turn) | 19.4 dB (**22.9 dB world, HUD excluded**) | 8.6 | 0.973x (world 0.986x) | dirt 30.6 dB; dark wedges and dashed seams from the post chain (entry 2926); HUD differs (end-dump timing) |
 
 Runs: no Xid in any replay this pass, `nvrm_probe clear` health check OK after each; ~51 ms GPU wait per frame
 (slowest entry 8.2 ms, the road), guest memory 6.2 GB in VRAM, ASTC arena in pinned host memory.
@@ -657,8 +766,10 @@ Stopgaps still in the Phase 1 replay (none is meant for Phase 2):
 - `PT_HELPER_LOADS=1`: every pixel-shader LDG goes through a trampoline that zeroes it in helper lanes (Ada skips
   global loads in helper lanes; helper = `SR_THREAD_KILL` != 0, read once per program in an entry trampoline). Needed
   in Phase 2 too (patch programs when they are uploaded).
-- `SET_SRGB_WRITE` kept at the guest value (the 4060 sRGB-encodes clears into plain RGBA8 targets with it set;
-  console behaviour unknown).
+- `SET_SRGB_WRITE` forced to 0 (tenth pass; `PT_SRGB_WRITE=guest` keeps the guest's 1): with it set the 4060
+  sRGB-encodes clears and shader outputs into plain RGBA8 targets. Phase 2 needs the same rewrite.
+- Depth twins (tenth pass): sampled depth images the frame never draws are read as their colour twin on a colour
+  kind (the capture holds Eglantine's colour-arrangement download). Phase 1 only.
 - Data Eglantine never writes back is missing from the capture: measured (mkw19 inventory), only the two
   sparse-tiled lighting clipmaps `8171190000`/`817a190000` (GPU-modified, unbacked).
 
