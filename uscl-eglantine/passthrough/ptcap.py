@@ -331,6 +331,63 @@ def sass_mov_rz_unless(p, r, wait):  # @!P<p> MOV R<r>, RZ
     return sass_ctl(0x0202 | (8 | p) << 12 | r << 16 | 0xF << 72 | 0xFF << 32, wait=wait)
 
 
+def bl_layout(w, h, d, levels, tile, bpb_log2, block, tws):
+    """One layer of a block-linear image: [(byte offset, block height, block depth, GOBs in x, size)] per mip level,
+    and the layer stride. w/h/d in texels, tile = the format's block size in texels (ASTC), block = log2 GOBs
+    per block (w, h, d), tws = TILE_WIDTH_IN_GOBS. Port of Eglantine's texture_cache/util.cpp
+    (CalculateLevelSizes, AlignLayerSize, AdjustMipBlockSize), which matches the guest's own layout."""
+    def adj_tile(shift, unit, dim):  # AdjustTileSize
+        if shift and unit << (shift - 1) >= dim:
+            x, shift = unit << (shift - 1), shift - 1
+            while shift:
+                x >>= 1
+                if x < dim:
+                    break
+                shift -= 1
+        return shift
+
+    out, off = [], 0
+    for lv in range(levels):
+        tx, ty, dz = -(-max(w >> lv, 1) // tile[0]), -(-max(h >> lv, 1) // tile[1]), max(d >> lv, 1)
+        bx = tx << bpb_log2  # NumLevelBlocks: width in bytes
+        ts = block if lv == 0 and levels == 1 else (adj_tile(block[0], 64, bx), adj_tile(block[1], 8, ty), adj_tile(block[2], 1, dz))
+        small = bx <= 1 << (6 - bpb_log2 + tws) or ty <= 1 << (3 + block[1]) or dz < 1 << block[2]  # NumGobs
+        al = 0 if small else tws
+        gx, gy = -(-(-(-bx >> 6)) >> al) << al, -(-ty >> 3)
+        size = (-(-gx >> ts[0])) * (-(-gy >> ts[1])) * (-(-dz >> ts[2])) << (9 + sum(ts))
+        mb = []  # AdjustMipBlockSize: the block shrinks while the level fits in half of it
+        for b_, n, unit in ((block[1], ty, 8), (block[2], dz, 1)):
+            while b_ > 0 and n <= (1 << (b_ - 1)) * unit and not (unit == 1 and lv == 0 and levels == 1):
+                b_ -= 1
+            mb.append(b_)
+        out.append((off, mb[0], mb[1], gx, size))
+        off += size
+    if tws:  # AlignLayerSize
+        al = 9 + tws + block[1] + block[2]
+    else:
+        bh, bd, ah = block[1], block[2], -(-h // tile[1]) * tile[1]
+        while bh and ah <= (1 << (bh - 1)) * 8:
+            bh -= 1
+        while bd and d <= 1 << (bd - 1):
+            bd -= 1
+        al = 9 + bh + bd
+    return out, -(-off >> al) << al
+
+
+def bl_runs(row_bytes, rows, depth, bh, bd, gx):
+    """Byte offset of every 16-byte run of a block-linear level, in linear order (depth, rows, row_bytes / 16).
+    The GOB is the 'native' one (Eglantine's NX2 tiling: the legacy yuzu GOB with offset bits 5 and 6
+    exchanged), which is the layout of both the guest's memory and the RTX 4060's."""
+    import numpy as np
+    z, y, x = (a.astype(np.int64) for a in np.ogrid[0:depth, 0:rows, 0:row_bytes:16])
+    blk = gx << (9 + bh + bd)
+    off = ((z >> bd) * (-(-rows >> (bh + 3)) * blk) + ((z & ((1 << bd) - 1)) << (9 + bh)) +
+           ((y >> 3) >> bh) * blk + (((y >> 3) & ((1 << bh) - 1)) << 9) + ((x >> 6) << (9 + bh + bd)) +
+           ((x & 32) << 3) + ((y & 6) << 5) + ((x & 16) << 1) + ((y & 1) << 4))  # SWIZZLE_X/Y_BITS 0x12F/0xD0
+    t = ((off >> 5) ^ (off >> 6)) & 1
+    return (off ^ (t << 5) ^ (t << 6)).reshape(-1)
+
+
 def build(d):
     out_dir = os.path.join(d, "replay")
     os.makedirs(out_dir, exist_ok=True)
@@ -810,22 +867,27 @@ def build(d):
     # (read once from the chunks' data); the copies become fill lines at the end, so patches compose.
     pool_copies = {}  # pool va -> (count, bytearray)
 
-    def pool_raw(pool, count):
-        if pool in pool_copies:
-            return pool_copies[pool][1]
-        gpu, dev, msize, _, _ = next(m for m in maps if m[0] <= pool < m[0] + m[2])
-        assert pool + count * 32 <= gpu + msize, "pool spans mappings"
-        da = dev + pool - gpu
-        raw = bytearray(count * 32)
-        for c in range(da // CHUNK, (da + count * 32 - 1) // CHUNK + 1):
-            for f, fo, co, n in chunks.get(c, ()):
-                lo, hi = max(c * CHUNK + co, da), min(c * CHUNK + co + n, da + count * 32)
-                if lo < hi:
-                    with open(os.path.join(d, f), "rb") as fh:
-                        fh.seek(fo + lo - (c * CHUNK + co))
-                        raw[lo - da:hi - da] = fh.read(hi - lo)
-        pool_copies[pool] = (count, raw)
+
+    def guest_read(va, size):  # guest memory at the frame's start (as replayed); unmapped, sparse, unbacked: zero
+        raw = bytearray(size)
+        for gpu, dev, msize, _, sparse in maps[max(0, bisect.bisect_right(map_starts, va) - 1):bisect.bisect_left(map_starts, va + size)]:
+            v0, v1 = max(va, gpu), min(va + size, gpu + msize)
+            if v0 >= v1 or sparse:
+                continue
+            da, n_ = dev + v0 - gpu, v1 - v0
+            for c in range(da // CHUNK, (da + n_ - 1) // CHUNK + 1):
+                for f, fo, co, n in chunks.get(c, ()):
+                    lo, hi = max(c * CHUNK + co, da), min(c * CHUNK + co + n, da + n_)
+                    if lo < hi:
+                        with open(os.path.join(d, f), "rb") as fh:
+                            fh.seek(fo + lo - (c * CHUNK + co))
+                            raw[v0 - va + lo - da:v0 - va + hi - da] = fh.read(hi - lo)
         return raw
+
+    def pool_raw(pool, count):
+        if pool not in pool_copies:
+            pool_copies[pool] = (count, guest_read(pool, count * 32))
+        return pool_copies[pool][1]
 
     def pools_of(kind):
         out = set()
@@ -853,6 +915,141 @@ def build(d):
             for i in astc:
                 raw[i * 32:i * 32 + 32] = raw[rgba * 32:rgba * 32 + 32]
             print(f"PT_ASTC=dummy: pool {pool:x}: {len(astc)} ASTC headers -> header {rgba:#x} (A8B8G8R8)")
+    # PT_ASTC=decode: the block-linear ASTC textures the frame samples (descriptors.txt from the capture probe;
+    # without it every ASTC header of the pools) are decoded with Eglantine's own decoder (libptastc.so from
+    # build.sh; PT_ASTC_LIB overrides) to A8B8G8R8, all mips and layers, the sRGB bit kept, into a host arena
+    # above the guest's mappings; their headers point there. Other ASTC headers become a copy of the pool's first
+    # A8B8G8R8 header. Levels with no data in the capture are not decoded: 2 MiB arena chunks without data map
+    # to the zero block (MKW pools hold 8192^2 x 68 layer textures, 23 GB each as RGBA8, nearly unbacked).
+    # PT_ASTC=decode:<hex header>: that A8B8G8R8 header is the fallback. PT_ASTC_PNG=<dir>: level 0 of each decoded texture as PNG.
+    # shortcut: decoded from the frame's start data; ASTC data the frame itself writes (copy engine uploads) is
+    # not seen. Upgrade with a decode per delta, or in Phase 2 on upload.
+    astc_lines = []
+    if os.environ.get("PT_ASTC", "").startswith("decode"):
+        import ctypes
+        import numpy as np
+        lib = ctypes.CDLL(os.environ.get("PT_ASTC_LIB") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "libptastc.so"))
+        lib.pt_astc_decode.argtypes = [ctypes.c_void_p, ctypes.c_size_t] + [ctypes.c_uint32] * 5 + [ctypes.c_void_p]
+        tiles = {v: tuple(int(x) for x in k[8:].split("X")) for k, v in TIC_FORMATS.items() if k.startswith("ASTC_2D_")}
+        png_dir = os.environ.get("PT_ASTC_PNG")
+        if png_dir:
+            from PIL import Image
+            os.makedirs(png_dir, exist_ok=True)
+        desc = os.path.join(d, "descriptors.txt")
+        used = {int(x, 16) for x in open(desc)} if os.path.exists(desc) else None
+        astc_va = -(-max(m[0] + m[2] for m in maps) >> 36) << 36
+        a_size, a_in, filled = 0, 0, set()
+        done, nhdr, nfall, skipped = {}, 0, 0, collections.Counter()
+        arena_f = open(os.path.join(out_dir, "astc-arena.bin"), "wb")
+
+        def tic(h, f, v=None):  # read (v None) or set one header field
+            hi, lo = TIC_FIELDS[f]
+            m = (1 << (hi - lo + 1)) - 1
+            return h >> lo & m if v is None else h & ~(m << lo) | (v & m) << lo
+
+        def transcode(idx, addr, tile, w, h, depth, layers, levels, block, tws):
+            nonlocal a_size, a_in
+            src_lv, src_stride = bl_layout(w, h, depth, levels, tile, 4, block, tws)
+            dst_lv, dst_stride = bl_layout(w, h, depth, levels, (1, 1), 2, block, tws)
+            if not any(m[0] <= addr < m[0] + m[2] for m in maps):
+                return None
+            al = 9 + block[1] + block[2]
+            base = a_size = -(-a_size >> al) << al
+            a_size += dst_stride * layers
+            for layer in range(layers):
+                for lv in range(levels):
+                    lw, lh, ld = max(w >> lv, 1), max(h >> lv, 1), max(depth >> lv, 1)
+                    so, bh, bd, gx, ssz = src_lv[lv]
+                    sva = addr + layer * src_stride + so
+                    src = np.frombuffer(guest_read(sva, ssz), np.uint8)
+                    if not src.any():  # no data in the capture: stays a hole (zero)
+                        continue
+                    nbx, nby = -(-lw // tile[0]), -(-lh // tile[1])
+                    blocks = np.ascontiguousarray(src.view(np.uint64).reshape(-1, 2)[bl_runs(nbx * 16, nby, ld, bh, bd, gx) // 16])
+                    zero = ~blocks.any(1)  # sparse textures: tiles not resident read zero, kept zero (not decoded)
+                    a_in += int(blocks.size * 8 - zero.sum() * 16)
+                    pix = np.empty(lw * lh * ld * 4, np.uint8)
+                    lib.pt_astc_decode(blocks.ctypes.data, blocks.nbytes, lw, lh, ld, *tile, pix.ctypes.data)
+                    if zero.any():
+                        zm = np.repeat(np.repeat(zero.reshape(ld, nby, nbx), tile[1], 1), tile[0], 2)[:, :lh, :lw]
+                        pix.reshape(ld, lh, lw, 4)[zm] = 0
+                    if png_dir and layer == 0 and lv == 0:
+                        Image.fromarray(pix.reshape(ld * lh, lw, 4)[:lh]).save(os.path.join(png_dir, f"{idx:x}-{addr:x}.png"))
+                    rb = -(-lw * 4 // 16) * 16  # whole 16-byte runs: pad each row
+                    pix = np.pad(pix.reshape(ld * lh, lw * 4), ((0, 0), (0, rb - lw * 4)))
+                    do, bh, bd, gx, dsz = dst_lv[lv]
+                    out = np.zeros((dsz // 16, 2), np.uint64)
+                    out[bl_runs(rb, lh, ld, bh, bd, gx) // 16] = pix.reshape(-1, 16).view(np.uint64)
+                    o, buf = base + layer * dst_stride + do, out.view(np.uint8).reshape(-1)
+                    for c in range(o // CHUNK, (o + dsz - 1) // CHUNK + 1):  # only chunks with data
+                        lo, hi = max(c * CHUNK, o), min((c + 1) * CHUNK, o + dsz)
+                        if buf[lo - o:hi - o].any():
+                            arena_f.seek(lo)
+                            arena_f.write(buf[lo - o:hi - o].tobytes())
+                            filled.add(c)
+            return astc_va + base
+
+        for pool, count in pools_of("HEADER"):
+            raw = pool_raw(pool, count)
+            fmt = [raw[i * 32] & 0x7F for i in range(count)]
+            fallback = int(os.environ["PT_ASTC"][7:], 16) if os.environ["PT_ASTC"][7:] else \
+                next(i for i in range(count) if fmt[i] == TIC_FORMATS["A8B8G8R8"] and any(raw[i * 32:i * 32 + 32]))
+            for i in range(count):
+                tile = tiles.get(fmt[i])
+                if not tile:
+                    continue
+                h = int.from_bytes(raw[i * 32:i * 32 + 32], "little")
+                tt = tic(h, "TEXTURE_TYPE")
+                if used is not None and pool + i * 32 not in used or tic(h, "HEADER_VERSION") != 3 or tt > 8:
+                    if used is None or pool + i * 32 in used:  # pitch or 1D buffer ASTC, HTEX
+                        skipped[f"header version {tic(h, 'HEADER_VERSION')} type {tt}"] += 1
+                    raw[i * 32:i * 32 + 32] = raw[fallback * 32:fallback * 32 + 32]
+                    nfall += 1
+                    continue
+                dd = (tic(h, "DEPTH_MINUS_ONE") | tic(h, "DEPTH_MINUS_ONE_BIT14") << 14) + 1
+                depth, layers = (dd, 1) if tt == 2 else (1, {3: 6, 8: 6 * dd}.get(tt, dd))
+                block = tuple(tic(h, f"GOBS_PER_BLOCK_{a}") for a in ("WIDTH", "HEIGHT", "DEPTH"))
+                addr = tic(h, "ADDRESS_BITS31TO9") << 9 | tic(h, "ADDRESS_BITS48TO32") << 32
+                key = (addr, fmt[i], tic(h, "WIDTH_MINUS_ONE") + 1,
+                       (tic(h, "HEIGHT_MINUS_ONE") | tic(h, "HEIGHT_MINUS_ONE_BIT16") << 16) + 1, depth, layers,
+                       tic(h, "MAX_MIP_LEVEL") + 1, block, tic(h, "TILE_WIDTH_IN_GOBS"))
+                if key not in done:
+                    done[key] = transcode(i, addr, tile, *key[2:])
+                if done[key] is None:
+                    skipped["unmapped"] += 1
+                    raw[i * 32:i * 32 + 32] = raw[fallback * 32:fallback * 32 + 32]
+                    continue
+                h = tic(h, "COMPONENTS", TIC_FORMATS["A8B8G8R8"])
+                h = tic(tic(h, "ADDRESS_BITS31TO9", done[key] >> 9), "ADDRESS_BITS48TO32", done[key] >> 32)
+                raw[i * 32:i * 32 + 32] = h.to_bytes(32, "little")
+                nhdr += 1
+        arena_f.truncate(-(-a_size // CHUNK) * CHUNK)
+        arena_f.close()
+        assert astc_va + a_size <= HOST_BASE, "ASTC arena runs into the host buffers"
+        # chunks with data packed into blocks (ids 2000+), the rest of the arena maps to the zero block
+        per = BLOCK_SIZE // CHUNK
+        fl = sorted(filled)
+        for bi in range(0, len(fl), per):
+            astc_lines.append(f"block {2000 + bi // per} {min(per, len(fl) - bi) * CHUNK:x}")
+        aslot = {c: k for k, c in enumerate(fl)}
+        run = None  # [va, size, block, offset]
+        for c in range(-(-a_size // CHUNK)):
+            if c in aslot:
+                b_, o_ = 2000 + aslot[c] // per, aslot[c] % per * CHUNK
+                astc_lines.append(f"fill {b_} {o_:x} replay/astc-arena.bin {c * CHUNK:x} {CHUNK:x}")
+            else:
+                b_, o_ = ZERO, 0
+            if run and run[2] == b_ and (run[1] + CHUNK <= ZERO_SIZE if b_ == ZERO else run[3] + run[1] == o_):
+                run[1] += CHUNK
+            else:
+                if run:
+                    astc_lines.append("map {:x} {:x} {} {:x}".format(*run))
+                run = [astc_va + c * CHUNK, CHUNK, b_, o_]
+        if run:
+            astc_lines.append("map {:x} {:x} {} {:x}".format(*run))
+        print(f"PT_ASTC=decode: {nhdr} headers ({'all' if used is None else 'sampled'}), {len(done)} textures: {a_in >> 20} MiB "
+              f"ASTC -> {len(fl) * 2} MiB A8B8G8R8 at {astc_va:x} ({a_size >> 20} MiB of VA); {nfall} headers -> "
+              f"fallback A8B8G8R8 header; left alone: {dict(skipped)}")
     # PT_TSC_NODC=<hex indices|all>: clear DEPTH_COMPARE (TEXSAMP0 bit 9) in those samplers.
     nodc = os.environ.get("PT_TSC_NODC")
     if nodc:
@@ -977,6 +1174,7 @@ def build(d):
             open(os.path.join(out_dir, "helper-arena.bin"), "wb").write(arena)
             ab = LMB + 1 + len(chans)
             lines += [f"block {ab} {CHUNK:x}", f"fill {ab} 0 replay/helper-arena.bin 0 {len(arena):x}", f"map {arena_va:x} {CHUNK:x} {ab} 0"]
+    lines += astc_lines  # last: guest blocks and the helper arena get video memory first
     # PT_NODEP: QMDs launched from memory (NVN's barrier ring) wait for no dependence and signal none.
     patched = 0
     for qva in sorted(launched_qmds):
@@ -1095,7 +1293,7 @@ def size_of(w, h, fmt, mem):
 
 
 def image(path, w, h, fmt, mem, out):
-    """Color target bytes (as read back) -> PNG. Block linear: 64 B x 8 row GOBs, block height from
+    """Color target bytes (as read back) -> PNG. Block linear (bl_runs), block height from
     SET_COLOR_TARGET_MEMORY. Float formats are clamped to [0, 1]."""
     import numpy as np
     from PIL import Image
@@ -1105,11 +1303,9 @@ def image(path, w, h, fmt, mem, out):
     if mem & 0x1000:
         px = raw[: w * h].reshape(h, w // bpp, bpp)
     else:
-        y, xb = np.mgrid[0:h, 0:w * bpp]
-        bpr = -(-w * bpp // 64)
-        addr = (((y // (8 * bh)) * bpr + xb // 64) * 512 * bh + ((y % (8 * bh)) // 8) * 512 +
-                ((xb % 64) // 32) * 256 + ((y % 8) // 2) * 64 + ((xb % 32) // 16) * 32 + (y % 2) * 16 + xb % 16)
-        px = raw[addr].reshape(h, w, bpp)
+        assert w * bpp % 16 == 0, "row not a whole number of 16-byte runs"
+        runs = bl_runs(w * bpp, h, 1, (mem >> 4) & 0xF, 0, -(-w * bpp // 64)) // 16
+        px = raw[:runs.max() * 16 + 16].view(np.uint64).reshape(-1, 2)[runs].view(np.uint8).reshape(h, w, bpp)
     if fmt in (0xD5, 0xD6):
         rgb = px[..., :3]
     elif fmt == 0xD7:  # signed normalized: 0 shows as mid grey
@@ -1136,5 +1332,16 @@ def image(path, w, h, fmt, mem, out):
     print(f"{out}: {w}x{h}")
 
 
+def selftest():
+    """Block-linear layout helpers (PT_ASTC=decode) against hand-checked sizes and the readback layout of image()."""
+    import numpy as np
+    assert bl_layout(256, 256, 1, 1, (1, 1), 2, (0, 4, 0), 0) == ([(0, 4, 0, 16, 256 * 256 * 4)], 256 * 256 * 4)
+    assert bl_layout(64, 64, 1, 1, (8, 8), 4, (0, 0, 0), 0) == ([(0, 0, 0, 2, 1024)], 1024)  # ASTC 8x8: 8x8 blocks of 16 B
+    # one GOB, runs in (row, 16-byte column) order: native = legacy with offset bits 5 and 6 exchanged
+    assert list(bl_runs(64, 4, 1, 0, 0, 1)) == [0, 64, 256, 320, 16, 80, 272, 336, 32, 96, 288, 352, 48, 112, 304, 368]
+    assert sorted(bl_runs(256, 64, 1, 2, 0, 4)) == list(range(0, 256 * 64, 16))  # a bijection onto the level
+    print("selftest: ok")
+
+
 if __name__ == "__main__":
-    {"stats": stats, "build": build, "dump": dump, "image": image, "peek": peek, "qmds": qmds}[sys.argv[1]](*sys.argv[2:])
+    {"stats": stats, "build": build, "selftest": selftest, "dump": dump, "image": image, "peek": peek, "qmds": qmds}[sys.argv[1]](*sys.argv[2:])

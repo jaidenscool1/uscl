@@ -12,8 +12,8 @@ Host: driver 615.78.08 (open kernel module), Arch Linux.
 | Gate 1 (driver access) | **Pass** on hardware |
 | Gate 2 (method compatibility) | **Pass (real data)**: every 3D/compute/copy method in a captured MKW frame is a named Ampere method, plus three private 3D methods (0xF74/0xF7C/0xF80) that ADA_A accepts; only host-class changes needed (Tegra syncpoints 0x70/0x74 dropped) |
 | Gate 3 (shader compatibility) | **Pass (decode level)**; guest compute SASS has started to **execute** on the RTX 4060 (Phase 1), no per-instruction failure seen yet |
-| Phase 1 (capture + replay one frame) | **Lit racing frame** (seventh pass, 2026-11-17): capture `mkw14` (probe 0003 now flushes GPU-written images) replays to the lit scene; only ASTC (white stand-in) is left between it and the reference. Before: **Whole racing frame replays** (sixth pass, 2026-11-17): all 7757 entries of capture `mkw13` (racing, 3 channels) run on the RTX 4060 with no Xid, **~36 ms of GPU wait in total** (slowest entry 0.7 ms) with guest memory in VRAM. The fix was emulator-wide: Ada does not perform global loads in pixel-shader helper lanes, so `PT_HELPER_LOADS=1` routes every LDG of every pixel program through a trampoline that zeroes the destination in helper lanes. Output not yet right: the HUD layer matches the reference, the G-buffer shows the right scene (karts, track), but the lit scene composited under the HUD is black (next: find the lighting/composite passes). Earlier: the intro-flyover frame `mkw10` replays to a recognisable course image (third pass) |
-| New: texture formats | **Open, needs work**: 28% of MKW's texture headers are ASTC (8x8, 6x6, 4x4, 5x5); the RTX 4060 has no ASTC sampling (`textureCompressionASTC_LDR` false), so passthrough needs ASTC transcoding + header repointing |
+| Phase 1 (capture + replay one frame) | **Textured racing frame, exact reference** (eighth pass, 2026-11-17): capture `mkw15` replays with every sampled ASTC texture decoded (`PT_ASTC=decode`) to the right image: arch, signs, track, karts, HUD all match Eglantine's own render of the same frame (taken from the capture's end dump), aligned to the pixel; lit surfaces are 0.33-0.65x as bright as the reference (sky 1.00x): a missing light contribution, the next Phase 1 item. Before: **Lit racing frame** (seventh pass, 2026-11-17): capture `mkw14` (probe 0003 now flushes GPU-written images) replays to the lit scene; only ASTC (white stand-in) is left between it and the reference. Before: **Whole racing frame replays** (sixth pass, 2026-11-17): all 7757 entries of capture `mkw13` (racing, 3 channels) run on the RTX 4060 with no Xid, **~36 ms of GPU wait in total** (slowest entry 0.7 ms) with guest memory in VRAM. The fix was emulator-wide: Ada does not perform global loads in pixel-shader helper lanes, so `PT_HELPER_LOADS=1` routes every LDG of every pixel program through a trampoline that zeroes the destination in helper lanes. Output not yet right: the HUD layer matches the reference, the G-buffer shows the right scene (karts, track), but the lit scene composited under the HUD is black (next: find the lighting/composite passes). Earlier: the intro-flyover frame `mkw10` replays to a recognisable course image (third pass) |
+| New: texture formats | **ASTC done for replay** (eighth pass): the frame's 1455 sampled ASTC textures are decoded with Eglantine's own decoder to A8B8G8R8 in a host arena and their headers repointed. 28% of MKW's texture headers are ASTC (8x8, 6x6, 4x4, 5x5); the RTX 4060 has no ASTC sampling. Phase 2 needs the same on upload, and a smaller target (BC1/BC3) for VRAM |
 | Gates 4-6 | not started (Phase 1 uses pinned host memory at the guest's own VAs, pitch kind only: first evidence for gate 4) |
 
 ## Phase 0 tool: `uscl-eglantine/passthrough/nvrm_probe.cpp`
@@ -393,3 +393,65 @@ Facts learned on the way:
 - The guest CPU writes ~17 MB of GPU-visible memory during a frame (265 64 KiB blocks differ start vs end).
 - Eglantine on NX2 runs compute macros on the split's front (`FrontRunMacro`) against `fs.registers`.
 
+### Eighth pass (2026-11-17): ASTC decoded, exact reference, GOB layout fixed
+**Result:** capture `mkw15` (probe 0003 with `descriptors.txt`) replays with no Xid (~52 ms GPU wait, ASTC arena in host
+memory) to the textured racing frame: the MARIOKART arch and "Mario Bros. Circuit" sign, ticketing building, track,
+karts, minimap, portrait and lap box. Against Eglantine's own render of the same frame: aligned to the pixel (phase
+correlation 0,0), mean abs error 122 -> 29.5, PSNR 5.6 -> 16.7 dB (before = `PT_ASTC=dummy:107`). Images in
+`~/.local/share/uscl/ptcap/mkw15/`: `astc-before.png`, `astc-after.png`, `ref-eglantine.png`, `compare-astc.png`
+(before / after / reference / |after - reference| x3).
+
+Full-frame build and run for mkw15 (output `210bb1a000`, 2560x1440 d6 mem 40, last drawn at capture entry 7869 =
+replay count 7873):
+`PT_ASTC=decode PT_ASTC_LIB=<bin>/libptastc.so PT_NO_END=1 PT_MME=trace PT_NODEP=1 PT_HELPER_LOADS=1 python3 -I ptcap.py build <capture>`,
+`PT_VIDMEM=6500 <bin>/pt_replay <capture>/replay 7873 210bb1a000:f00000:<file>` (6.3 GB guest memory in VRAM, the
+10.5 GB ASTC arena in pinned host memory: 14.7 GB filled, 62 GB RAM machine). Build ~2.5 min.
+
+What changed:
+- **`PT_ASTC=decode` (`ptcap.py build`)**: each sampled block-linear ASTC texture (all mips and layers, 2D/array/
+  cube/3D) is read from the snapshot, decoded with **Eglantine's own `video_core/textures/astc.cpp`** (built unchanged
+  into `libptastc.so` by `build.sh`, with a stand-in `workers.h` in `astc_shim/`; boost headers from any checkout,
+  `BOOST_INC`), written as A8B8G8R8 in the same GOB layout into a host arena above the guest's mappings (2 MiB chunks
+  with data packed into blocks 2000+, chunks without data mapped to the zero block), and its header repointed
+  (format, address; block height, mips, sRGB and swizzles kept). Layout: `bl_layout` (a port of Eglantine's
+  `texture_cache/util.cpp` level sizes, layer stride, mip block shrink) and `bl_runs` (16-byte run offsets);
+  `ptcap.py selftest` checks both. `PT_ASTC=decode:<hex header>` picks the fallback header, `PT_ASTC_PNG=<dir>`
+  writes level 0 of each texture.
+- **Only the textures the frame samples.** MKW's header pool holds 29k ASTC textures (104 GB as RGBA8: four
+  8192^2 x 68 layer x 12 mip arrays alone are 23 GB each); decoding all of it wrote a 59 GB file (deleted). The
+  probe now records every descriptor `DescriptorTable::Read` sees while recording (`descriptors.txt`); mkw15: 2082
+  descriptors, **1455 ASTC textures**, the other 32360 ASTC headers become a copy of the pool's first A8B8G8R8 header.
+  Checked: a white fallback (`decode:107`) changes 48 of 3.7M pixels, so the list is complete.
+- **Sparse textures.** Two of the sampled 8192^2 x 68 arrays (`81a7a30000`, `836d530000`, virtual-texture style)
+  are mapped piece by piece over many mappings with most tiles not resident. `guest_read` now spans mappings (sparse
+  and unmapped read zero), all-zero ASTC blocks stay zero instead of decoding to the error colour, and only arena
+  chunks with data get memory. Before this the environment (arch, buildings, road) rendered near black.
+- **GOB layout: the RTX 4060 uses the guest's 'native' GOB** (Eglantine's NX2 tiling: the legacy yuzu GOB with
+  offset bits 5 and 6 exchanged). Decoded ASTC sources are clean only in it, Eglantine's end-dump render decodes only
+  in it, and the replay's own readback loses its comb fringes in it. `ptcap.py image` used the legacy layout, so
+  **every earlier pass's PNG has a comb on edges** (4-pixel pieces of row pairs swapped; flat areas unaffected). Both
+  now use `bl_runs` (native only).
+- **Exact reference without a screenshot.** The probe flushes GPU-written images into the end dump, so Eglantine's
+  own render of the replayed frame is in `end-dev-*.bin` at the output address (read it with the native GOB). This
+  replaces the debug-server screenshot for the Phase 1 image diff.
+- Probe 0003 (fork `uscl-ptcap` 07abad9af, `probes/0003` regenerated, `git am` onto its parent gives the same tree):
+  `Tegra::PtCapture::NoteDescriptor` from `DescriptorTable::Read` while recording, `descriptors.txt` at stop.
+
+Facts and open items:
+- The cyan fill behind the HUD lap box, item box and portrait is in Eglantine's own render too: not a passthrough
+  issue.
+- **Remaining difference: missing light.** Linear ratio ours/reference: sky 1.00 (so exposure and tonemap agree),
+  road 0.34-0.40, karts 0.33-0.47, dirt 0.65, arch 0.54-0.86. Some light contribution is missing or weaker on lit
+  surfaces. Next: find it (candidates: GPU-written lighting data the replay starts from, e.g. probe/GI buffers or
+  shadow terms; the light-grid compute 4924-4951 in mkw13 numbering; `PT_NO_END` data choices), measuring with
+  `PT_STATS`/`PT_PATCH` as in the seventh pass, now with the reference image to diff per pass.
+- The debug-server screenshot failure in mkw14 was its 5 s default timeout during the ~23 s dump stall (a timed-out
+  request stays pending and the next fails with "already pending"). The mkw15 watcher (`capture15.sh` in the capture
+  dir) asked once at the end dump with `timeout_s` 30, got "no answer within 60 s", and **the game never presented
+  again after the end dump** (bench watcher: STUCK after 602 s, stopped). The capture itself completed (`done.txt`).
+  Cause not found (no stacks): the screenshot request during the dump or the new descriptor hook. Next capture: no
+  screenshot (the end dump is the reference); if it still hangs, it is the hook.
+- Shortcuts in the code: ASTC is decoded from the frame's start data (uploads during the frame are not seen);
+  RGBA8 costs 16x the ASTC 8x8 size (10.5 GB here, host memory; BC1/BC3 re-encode would fit VRAM); 2 textures
+  crossing mappings were the sparse arrays above, now handled.
+- Captures: `mkw15` is the current one (48 GB); mkw14's device dumps deleted (metadata kept).

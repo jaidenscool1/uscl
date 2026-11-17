@@ -1,4 +1,4 @@
-From 28d6d20b250007738ef392f3cbfcc2c02181fb41 Mon Sep 17 00:00:00 2001
+From 07abad9af4f16b7f05afbd516053cd99e251a697 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 14:42:31 -0700
 Subject: [PATCH] PROBE: EDEN_NX2_PT_CAPTURE, record one frame of guest GPU
@@ -34,10 +34,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  src/video_core/engines/puller.h               |   2 +
  src/video_core/memory_manager.cpp             |   4 +
  src/video_core/memory_manager.h               |   2 +
- src/video_core/nx2_pt_capture.cpp             | 418 ++++++++++++++++++
- src/video_core/nx2_pt_capture.h               |  38 ++
+ src/video_core/nx2_pt_capture.cpp             | 434 ++++++++++++++++++
+ src/video_core/nx2_pt_capture.h               |  41 ++
  .../renderer_vulkan/vk_rasterizer.cpp         |   3 +-
- 14 files changed, 558 insertions(+), 4 deletions(-)
+ .../texture_cache/descriptor_table.h          |   4 +
+ 15 files changed, 581 insertions(+), 4 deletions(-)
  create mode 100644 src/video_core/nx2_pt_capture.cpp
  create mode 100644 src/video_core/nx2_pt_capture.h
 
@@ -396,10 +397,10 @@ index 9e208af29..9559603af 100644
                             u64 page_bits_ = 12);
 diff --git a/src/video_core/nx2_pt_capture.cpp b/src/video_core/nx2_pt_capture.cpp
 new file mode 100644
-index 000000000..43c24029f
+index 000000000..2293e298f
 --- /dev/null
 +++ b/src/video_core/nx2_pt_capture.cpp
-@@ -0,0 +1,418 @@
+@@ -0,0 +1,434 @@
 +// SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
@@ -416,6 +417,7 @@ index 000000000..43c24029f
 +//                   "E <method> <value>" (hex)
 +//   deltas.bin      guest bytes the back read per entry (NoteCpuData): u32 entry, u64 device address,
 +//                   u32 size, bytes
++//   descriptors.txt GPU addresses of the texture headers and samplers read while recording (hex)
 +//   done.txt        written when recording stops (first/last present, entry count)
 +
 +#include <algorithm>
@@ -467,6 +469,7 @@ index 000000000..43c24029f
 +    std::FILE* mme = nullptr;
 +    std::FILE* deltas = nullptr;
 +    std::set<s32> channels_seen;
++    std::set<u64> descriptors;
 +    u64 entries = 0;
 +};
 +
@@ -681,6 +684,14 @@ index 000000000..43c24029f
 +    }
 +}
 +
++void NoteDescriptor(u64 gpu_addr) {
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    if (s.phase == Phase::Recording) {
++        s.descriptors.insert(gpu_addr);
++    }
++}
++
 +void NoteInlineQmd(u64 gpu_addr, const u32* words) {
 +    State& s = Get();
 +    if (s.phase.load(std::memory_order_relaxed) != Phase::Recording) {
@@ -735,6 +746,12 @@ index 000000000..43c24029f
 +        if (s.mme) {
 +            std::fclose(s.mme);
 +            s.mme = nullptr;
++        }
++        if (std::FILE* f = std::fopen((s.dir / "descriptors.txt").string().c_str(), "w")) {
++            for (const u64 addr : s.descriptors) {
++                fmt::print(f, "{:x}\n", addr);
++            }
++            std::fclose(f);
 +        }
 +        if (std::FILE* f = std::fopen((s.dir / "done.txt").string().c_str(), "w")) {
 +            fmt::print(f, "first_present {}\nlast_present {}\nentries {}\nchannels {}\n",
@@ -820,10 +837,10 @@ index 000000000..43c24029f
 +} // namespace Tegra
 diff --git a/src/video_core/nx2_pt_capture.h b/src/video_core/nx2_pt_capture.h
 new file mode 100644
-index 000000000..864ccc34e
+index 000000000..cc4ac6395
 --- /dev/null
 +++ b/src/video_core/nx2_pt_capture.h
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,41 @@
 +// SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
@@ -860,6 +877,9 @@ index 000000000..864ccc34e
 +/// at every accuracy level (normally only GPU accuracy High does), so render targets and other images
 +/// the GPU wrote in earlier frames reach the dump instead of stale guest memory.
 +bool Dumping();
++/// A texture header or sampler the texture cache read while recording (descriptors.txt): the replay
++/// transcodes only the textures the frame samples (ASTC: the host has no ASTC sampling).
++void NoteDescriptor(u64 gpu_addr);
 +
 +} // namespace Tegra::PtCapture
 diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
@@ -883,6 +903,28 @@ index 9fd00f4ff..60457a489 100644
          return false;
      }
      if (True(which & VideoCommon::CacheType::TextureCache)) {
+diff --git a/src/video_core/texture_cache/descriptor_table.h b/src/video_core/texture_cache/descriptor_table.h
+index b3dd1a9fa..c950f833e 100644
+--- a/src/video_core/texture_cache/descriptor_table.h
++++ b/src/video_core/texture_cache/descriptor_table.h
+@@ -18,6 +18,7 @@
+ #include "common/common_types.h"
+ #include "common/div_ceil.h"
+ #include "common/assert.h"
++#include "video_core/nx2_pt_capture.h"
+ #include "core/memory.h"
+ #include "video_core/memory_manager.h"
+ #include "video_core/rasterizer_interface.h"
+@@ -49,6 +50,9 @@ public:
+             invalidated = false;
+         }
+         const GPUVAddr gpu_addr = current_gpu_addr + index * sizeof(T);
++        if (Tegra::PtCapture::Recording()) [[unlikely]] {
++            Tegra::PtCapture::NoteDescriptor(gpu_addr);
++        }
+         const u64 page_offset = gpu_addr & Core::Memory::YUZU_PAGEMASK;
+         std::pair<T, bool> result;
+         // This runs for every texture and sampler of every draw. An entry within one page is
 -- 
 2.56.0
 
