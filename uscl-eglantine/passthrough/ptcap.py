@@ -323,12 +323,18 @@ def sass_bra(off):  # BRA to (this instruction + 16 + off)
     return sass_ctl(0x7947 | 7 << 12 | (off & ((1 << 50) - 1)) << 32 | 0x03800000 << 64, stall=5, yld=1)
 
 
-def sass_pixld_covmask(p, wr):  # PIXLD.COVMASK RZ, P<p>: P<p> = this lane is covered (not a helper)
-    return sass_ctl(0x925 | 7 << 12 | 0xFF << 16 | 1 << 78 | p << 81, stall=1, wr=wr)
+def sass_s2r_thread_kill(r, wr):  # S2R R<r>, SR_THREAD_KILL: nonzero in helper lanes. (PIXLD.COVMASK is no helper test on
+    # the RTX 4060: its predicate output is 0 for covered pixels, so `@!P` zeroed every lane; testing the mask itself
+    # for 0 still let MKW's light loop run away in some lanes, Xid 109.)
+    return sass_ctl(0x7919 | r << 16 | 0x13 << 72, stall=1, wr=wr)
 
 
-def sass_mov_rz_unless(p, r, wait):  # @!P<p> MOV R<r>, RZ
-    return sass_ctl(0x0202 | (8 | p) << 12 | r << 16 | 0xF << 72 | 0xFF << 32, wait=wait)
+def sass_isetp_ne_zero(p, r, wait):  # ISETP.NE.U32.AND P<p>, PT, R<r>, RZ, PT
+    return sass_ctl(0x720C | 7 << 12 | r << 24 | 0xFF << 32 | (0x0003F05070 | p << 17) << 64, stall=5, wait=wait)
+
+
+def sass_mov_rz_if(p, r, wait):  # @P<p> MOV R<r>, RZ
+    return sass_ctl(0x0202 | p << 12 | r << 16 | 0xF << 72 | 0xFF << 32, wait=wait)
 
 
 def bl_layout(w, h, d, levels, tile, bpb_log2, block, tws):
@@ -1130,8 +1136,8 @@ def build(d):
     # address as the loaded value (MKW racing: a light count read this way became the address, a loop of
     # ~10^9 iterations per helper lane, 120 ms draws, Xid 109); other destinations keep whatever an earlier warp
     # left in the register (the same draw then hangs in some runs only). Each LDG jumps
-    # to a trampoline: the LDG, PIXLD.COVMASK into a predicate the program does not use, helper lanes zero the
-    # destination, BRA back. shortcut: helper lanes zero the destination even when the LDG's own guard was false,
+    # to a trampoline: the LDG, helper lanes zero the destination, BRA back; whether the lane is a helper is computed
+    # once in an entry trampoline (SR_THREAD_KILL != 0, into a predicate the program does not use). shortcut: helper lanes zero the destination even when the LDG's own guard was false,
     # and wait for the load right away (no latency hiding); LDG only (no LD/LDS/ATOM). Upgrade when a game needs it.
     arena = bytearray()
     if os.environ.get("PT_HELPER_LOADS"):
@@ -1168,13 +1174,32 @@ def build(d):
             if sites and not free:
                 print(f"PT_HELPER_LOADS: {prog:x}: all predicates used, {len(sites)} loads left alone")
                 return None
-            nprog += bool(sites)
+            if not sites:
+                return raw
+            first = int.from_bytes(raw[0x80:0x90], "little")
+            if first & 0xFFF in (0x943, 0x945, 0x947, 0x949, 0x94A, 0x950, 0x94D):  # CALL/BSSY/BRA/BRX/JMP/RET/EXIT
+                print(f"PT_HELPER_LOADS: {prog:x}: starts with a branch, {len(sites)} loads left alone")
+                return None
+            nprog += 1
+            # Entry trampoline: P<free> = helper lane (SR_THREAD_KILL != 0), once (no GPR is live at a pixel program's start, so R0 is
+            # scratch there; the program never touches P<free>). Then the program's first instruction, BRA back.
+            p = free[0]
+            moved = [w for w in sites if w[0] == 0x80]
+            t_va = arena_va + len(arena)
+            tramp = [sass_s2r_thread_kill(0, 0), sass_isetp_ne_zero(p, 0, 1), first & ~(0xF << 122)]
+            tramp += [sass_mov_rz_if(p, rd + i, 1 << (first >> 110 & 7)) for _, rd, n in moved for i in range(n)]
+            tramp.append(sass_bra(prog + 0x90 - (t_va + 16 * len(tramp) + 16)))
+            arena += b"".join(w.to_bytes(16, "little") for w in tramp)
+            raw[0x80:0x90] = sass_bra(t_va - (prog + 0x80 + 16)).to_bytes(16, "little")
+            nsite += len(moved)
             for off, rd, n in sites:
+                if off == 0x80:
+                    continue
                 x = int.from_bytes(raw[off:off + 16], "little")
                 wr = x >> 110 & 7
                 x &= ~(0xF << 122)  # no operand reuse across the jump
                 t_va, site_va = arena_va + len(arena), prog + off
-                tramp = [x, sass_pixld_covmask(free[0], wr)] + [sass_mov_rz_unless(free[0], rd + i, 1 << wr) for i in range(n)]
+                tramp = [x] + [sass_mov_rz_if(p, rd + i, 1 << wr) for i in range(n)]
                 tramp.append(sass_bra(site_va + 16 - (t_va + 16 * len(tramp) + 16)))
                 arena += b"".join(w.to_bytes(16, "little") for w in tramp)
                 raw[off:off + 16] = sass_bra(t_va - (site_va + 16)).to_bytes(16, "little")

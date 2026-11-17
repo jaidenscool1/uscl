@@ -1,4 +1,4 @@
-From d81773d899b2f5617c85f94748ce2c35dceae66c Mon Sep 17 00:00:00 2001
+From eeffa63be7bfe769b7e902b44da3a4eab9f711a9 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 14:42:31 -0700
 Subject: [PATCH] PROBE: EDEN_NX2_PT_CAPTURE, record one frame of guest GPU
@@ -24,8 +24,8 @@ belongs to the entry it executes.
 Also records the guest bytes the back reads at every other read site while recording: buffer uploads (site 1),
 every uniform bind not over GPU-modified memory (site 2) and texture uploads (site 3, GPU VA split over the
 VA map); the site is the record entry's top 4 bits and a record equal to the last one at its address is
-dropped. While a dump flushes, logs once per image the images the texture cache cannot download (their data
-never reaches the dump).
+dropped. While a dump flushes, logs every texture-cache image over dumped memory once (address,
+format, flags, GPU-modified, downloadable): images it cannot download are missing from the capture.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
@@ -44,8 +44,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  src/video_core/nx2_pt_capture.h               |  45 ++
  .../renderer_vulkan/vk_rasterizer.cpp         |   3 +-
  .../texture_cache/descriptor_table.h          |   4 +
- src/video_core/texture_cache/texture_cache.h  |  31 +
- 16 files changed, 732 insertions(+), 4 deletions(-)
+ src/video_core/texture_cache/texture_cache.h  |  42 +-
+ .../texture_cache/texture_cache_base.h        |   4 +
+ 17 files changed, 745 insertions(+), 6 deletions(-)
  create mode 100644 src/video_core/nx2_pt_capture.cpp
  create mode 100644 src/video_core/nx2_pt_capture.h
 
@@ -1081,7 +1082,7 @@ index b3dd1a9fa..c950f833e 100644
          std::pair<T, bool> result;
          // This runs for every texture and sampler of every draw. An entry within one page is
 diff --git a/src/video_core/texture_cache/texture_cache.h b/src/video_core/texture_cache/texture_cache.h
-index 414f7a280..db747bba4 100644
+index 414f7a280..8fa35747d 100644
 --- a/src/video_core/texture_cache/texture_cache.h
 +++ b/src/video_core/texture_cache/texture_cache.h
 @@ -16,6 +16,7 @@
@@ -1100,28 +1101,54 @@ index 414f7a280..db747bba4 100644
  #include "video_core/texture_cache/texture_cache_base.h"
  #include "video_core/texture_cache/util.h"
  #include "video_core/textures/decoders.h"
-@@ -1347,6 +1349,20 @@ void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size) {
+@@ -1346,6 +1348,7 @@ template <class P>
+ void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size) {
      boost::container::small_vector<ImageId, 16> images;
      ForEachImageInRegion(cpu_addr, size, [this, &images](ImageId image_id, ImageBase& image) {
++        PtLogImage(image);
          if (!IsDownloadable(image)) {
-+            // PROBE (passthrough capture): images a dump cannot download hold data the dump misses
-+            // when the GPU (or an accelerated copy) wrote them.
-+            static std::set<GPUVAddr> pt_logged; // once per image: the flush asks per mapping
-+            if (Tegra::PtCapture::Dumping() && pt_logged.insert(image.gpu_addr).second) {
-+                LOG_WARNING(HW_GPU,
-+                            "PtCapture dump: not downloadable: gpu {:#x} dev {:#x} size {:#x} "
-+                            "format {} {}x{}x{} layers {} levels {} flags {:#x} gpu_modified {}",
-+                            image.gpu_addr, image.cpu_addr, image.guest_size_bytes,
-+                            static_cast<u32>(image.info.format), image.info.size.width,
-+                            image.info.size.height, image.info.size.depth,
-+                            image.info.resources.layers, image.info.resources.levels,
-+                            static_cast<u32>(image.flags),
-+                            True(image.flags & ImageFlagBits::GpuModified));
-+            }
              return;
          }
-         image.flags &= ~ImageFlagBits::GpuModified;
-@@ -2630,6 +2646,9 @@ void TextureCache<P>::UploadLayers(Image& image, std::span<const u32> layers) {
+@@ -2142,16 +2145,36 @@ bool TextureCache<P>::IsRescaling(const ImageViewBase& image_view) const noexcep
+ template <class P>
+ bool TextureCache<P>::IsRegionGpuModified(DAddr addr, size_t size) {
+     bool is_modified = false;
+-    ForEachImageInRegion(addr, size, [&is_modified](ImageId, ImageBase& image) {
++    const bool pt_dumping = Tegra::PtCapture::Dumping();
++    ForEachImageInRegion(addr, size, [&](ImageId, ImageBase& image) {
++        if (pt_dumping) {
++            PtLogImage(image); // every image over dumped memory, not only the first modified one
++        }
+         if (False(image.flags & ImageFlagBits::GpuModified)) {
+             return false;
+         }
+         is_modified = true;
+-        return true;
++        return !pt_dumping;
+     });
+     return is_modified;
+ }
+ 
++template <class P>
++void TextureCache<P>::PtLogImage(const ImageBase& image) {
++    // PROBE (passthrough capture): what the texture cache holds over dumped memory, once per image. An image
++    // whose data the dump cannot download (Unbacked, TrimmedLevels, ...) is missing from the capture.
++    if (!Tegra::PtCapture::Dumping() || !pt_logged_images.insert(image.gpu_addr ^ (image.cpu_addr << 1)).second) {
++        return;
++    }
++    LOG_WARNING(HW_GPU,
++                "PtCapture dump image: gpu {:#x} dev {:#x} size {:#x} format {} {}x{}x{} layers {} levels {} "
++                "flags {:#x} gpu_modified {} downloadable {}",
++                image.gpu_addr, image.cpu_addr, image.guest_size_bytes, static_cast<u32>(image.info.format),
++                image.info.size.width, image.info.size.height, image.info.size.depth,
++                image.info.resources.layers, image.info.resources.levels, static_cast<u32>(image.flags),
++                True(image.flags & ImageFlagBits::GpuModified), IsDownloadable(image));
++}
++
+ template <class P>
+ std::pair<typename TextureCache<P>::Image*, BufferImageCopy> TextureCache<P>::DmaBufferImageCopy(
+     const Tegra::DMA::ImageCopy& copy_info, const Tegra::DMA::BufferOperand& buffer_operand,
+@@ -2630,6 +2653,9 @@ void TextureCache<P>::UploadLayers(Image& image, std::span<const u32> layers) {
                                        level_offset,
                                    staging.mapped_span.data() + i * tail, tail,
                                    VideoCommon::CacheType::NoTextureCache);
@@ -1131,7 +1158,7 @@ index 414f7a280..db747bba4 100644
          }
          uploads.erase(uploads.begin(), uploads.begin() + image.host_level_offset);
          for (auto& upload : uploads) {
-@@ -2660,6 +2679,9 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging)
+@@ -2660,6 +2686,9 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging)
              gpu_memory->ReadBlock(gpu_addr + layer * image.info.layer_stride + level_offset,
                                    mapped_span.data() + layer * tail, tail,
                                    VideoCommon::CacheType::NoTextureCache);
@@ -1141,7 +1168,7 @@ index 414f7a280..db747bba4 100644
          }
          uploads.erase(uploads.begin(), uploads.begin() + image.host_level_offset);
          for (auto& upload : uploads) {
-@@ -2673,6 +2695,9 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging)
+@@ -2673,6 +2702,9 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging)
                                            mapped_span.size_bytes());
          gpu_memory->ReadBlock(gpu_addr, mapped_span.data(), mapped_span.size_bytes(),
                                VideoCommon::CacheType::NoTextureCache);
@@ -1151,7 +1178,7 @@ index 414f7a280..db747bba4 100644
          const auto uploads = FullUploadSwizzles(image.info);
          runtime.AccelerateImageUpload(image, staging, uploads, 0, 0);
          return;
-@@ -2680,6 +2705,9 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging)
+@@ -2680,6 +2712,9 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging)
  
      Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(
          *gpu_memory, gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
@@ -1161,7 +1188,7 @@ index 414f7a280..db747bba4 100644
      if (True(image.flags & ImageFlagBits::Converted)) {
          unswizzle_data_buffer.resize_destructive(image.unswizzled_size_bytes);
          auto copies =
-@@ -3058,6 +3086,9 @@ void TextureCache<P>::TickAsyncUnswizzle() {
+@@ -3058,6 +3093,9 @@ void TextureCache<P>::TickAsyncUnswizzle() {
          gpu_memory->ReadBlock(image.gpu_addr + task.current_offset,
                                task.staging_buffer.mapped_span.data() + task.current_offset,
                                copy_amount);
@@ -1170,6 +1197,28 @@ index 414f7a280..db747bba4 100644
 +        }
          task.current_offset += copy_amount;
      }
+ 
+diff --git a/src/video_core/texture_cache/texture_cache_base.h b/src/video_core/texture_cache/texture_cache_base.h
+index 0b977f933..5dfab79d9 100644
+--- a/src/video_core/texture_cache/texture_cache_base.h
++++ b/src/video_core/texture_cache/texture_cache_base.h
+@@ -15,6 +15,7 @@
+ #include <map>
+ #include <mutex>
+ #include <optional>
++#include <set>
+ #include <span>
+ #include <type_traits>
+ // TODO: find out which don't require stable iters
+@@ -463,6 +464,9 @@ private:
+ 
+     /// Refresh the contents (pixel data) of an image
+     [[nodiscard]] bool IsDownloadable(const ImageBase& image) const noexcept;
++    /// PROBE (passthrough capture): log an image over dumped memory, once.
++    void PtLogImage(const ImageBase& image);
++    std::set<u64> pt_logged_images;
+ 
+     void RefreshContents(Image& image, ImageId image_id);
  
 -- 
 2.56.0
