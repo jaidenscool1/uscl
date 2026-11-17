@@ -15,7 +15,7 @@ Item {
     property bool clock24: false
 
     readonly property string ui: "qrc:/qt/qml/Uscl/xmb/ui/"
-    width: 560; height: 64
+    width: theme === "ps3" ? 560 : themeStyle.nintendo ? 430 : 260; height: 64
 
     Item {
         anchors.fill: parent
@@ -47,7 +47,7 @@ Item {
     }
     Text {
         id: clock
-        anchors.right: parent.right; anchors.rightMargin: 28
+        anchors.right: parent.right; anchors.rightMargin: themeStyle.nintendo ? 210 : 28
         height: 64; verticalAlignment: Text.AlignVCenter
         color: box.theme === "ps3" ? "#f0ffffff" : themeStyle.text; font.pixelSize: 30
         style: box.theme === "ps3" ? Text.Raised : Text.Normal; styleColor: "#80000000"
@@ -59,12 +59,15 @@ Item {
         Connections { target: box; function onThemeChanged() { clock.tick() } function onDateFormatChanged() { clock.tick() } function onClock24Changed() { clock.tick() } }
     }
     Row {
-        visible: box.theme !== "ps3"
-        spacing: 18; x: 10; y: 8; height: 48
-        Image { width: 48; height: 48; source: box.avatar; mipmap: true }
-        Rectangle { y: 17; width: 14; height: 14; radius: 7; color: box.internet === 1 ? "#53c469" : "#888888" }
-        Text { height: 48; verticalAlignment: Text.AlignVCenter; text: box.pads ? qsTr("%1 pad(s)").arg(box.pads) : ""; color: themeStyle.text; font.pixelSize: 22 }
-        Text { height: 48; verticalAlignment: Text.AlignVCenter; text: box.battery >= 0 ? String(box.battery) + "%" + (box.charging ? " ⚡" : "") : ""; color: themeStyle.text; font.pixelSize: 22 }
+        visible: themeStyle.nintendo
+        spacing: 18; x: box.width-180; y: 15; height: 34
+        ConsoleGlyph { width: 34; height: 34; kind: "wifi"; ink: box.internet === 1 ? themeStyle.text : themeStyle.muted }
+        Rectangle {
+            visible: box.battery >= 0; y: 4; width: 52; height: 28; radius: 3; color: "transparent"; border.width: 3; border.color: themeStyle.text
+            Rectangle { x: 5; y: 5; width: 40*Math.max(0,Math.min(1,box.battery/100)); height: 18; color: box.battery < 15 ? themeStyle.danger : themeStyle.text }
+            Rectangle { x: 52; y: 8; width: 4; height: 12; color: themeStyle.text }
+        }
+        Text { height: 34; verticalAlignment: Text.AlignVCenter; text: box.battery >= 0 ? String(box.battery)+"%" : ""; color: themeStyle.text; font.pixelSize: 22 }
     }
     Timer { interval: 1000; running: true; repeat: true; onTriggered: clock.tick() }
 }

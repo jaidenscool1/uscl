@@ -42,6 +42,7 @@ qt_add_qml_module(uscl
         qml/ConsolePage.qml
         qml/ThemePalette.qml
         qml/ConsoleHome.qml
+        qml/ConsoleGlyph.qml
         qml/Xmb.qml
         qml/Page.qml
         qml/OptionsPanel.qml

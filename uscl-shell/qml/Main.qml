@@ -30,6 +30,7 @@ Window {
         id: prefs
         objectName: "preferences"
         property string theme: "ps3"
+        property string pinnedGames: "[]"
         property int bgColor: 0          // 0 automatic (month), 1..13 fixed
         property bool nightShade: true
         property bool sounds: true
@@ -605,7 +606,7 @@ Window {
             { title: qsTr("Run Setup Again"), help: qsTr("Online ID, system software and games"), action: function() { setup.start() } },
             { title: qsTr("Restore Default Settings"), help: qsTr("Menu settings back to how they started (games and online ID stay)"),
               action: function() { dialog.confirm(qsTr("Restore Default Settings"), qsTr("Restore the menu settings to their defaults?"), function() {
-                  prefs.theme = "ps3"; prefs.bgColor = 0; prefs.nightShade = true; prefs.sounds = true; prefs.menuVolume = 100; prefs.clock24 = false; prefs.dateFormat = "MM/dd/yy"
+                  prefs.pinnedGames = "[]"; prefs.theme = "ps3"; prefs.bgColor = 0; prefs.nightShade = true; prefs.sounds = true; prefs.menuVolume = 100; prefs.clock24 = false; prefs.dateFormat = "MM/dd/yy"
                   notice.show(qsTr("Settings restored"), ic("it_system"))
               }) } },
             allSettingsRow()
@@ -725,18 +726,56 @@ Window {
 
     property var pageStack: []        // [{ rows: fn, parentIcon, catIcon, back: fn }]
     readonly property var topPage: pageStack.length ? pageStack[pageStack.length - 1] : null
-    function openPage(rowsFn, parentIcon, catIndex, backFn) {
-        var heading = topPage && page.cur ? page.cur.title : xmb.current ? xmb.current.title : "USCL"
+    function openPage(rowsFn, parentIcon, catIndex, backFn, headingOverride, presentation) {
+        var heading = headingOverride || (topPage && page.cur ? page.cur.title : xmb.current ? xmb.current.title : "USCL")
         if (pageStack.length) {
             var stack = pageStack.slice()
             stack[stack.length - 1].selected = page.current
             pageStack = stack
         }
         var catIcon = cats[catIndex !== undefined ? catIndex : xmb.cat].icon
-        pageStack = pageStack.concat([{ rows: rowsFn, parentIcon: parentIcon, catIcon: catIcon, title: heading, selected: 0, back: backFn || null }])
+        pageStack = pageStack.concat([{ rows: rowsFn, parentIcon: parentIcon, catIcon: catIcon, title: heading, settingsSection: cats[1].items.findIndex(function(e) { return e.title === heading }), presentation: presentation || "", selected: 0, back: backFn || null }])
         page.current = 0
         page.fromHome = pageStack.length === 1
         page.open()
+    }
+    readonly property var pinnedIds: { try { var ids = JSON.parse(prefs.pinnedGames); return Array.isArray(ids) ? ids : [] } catch (e) { return [] } }
+    function togglePin(id) {
+        var ids = pinnedIds.slice(), index = ids.indexOf(id)
+        if (index < 0) ids.push(id); else ids.splice(index, 1)
+        prefs.pinnedGames = JSON.stringify(ids)
+    }
+    function chooseSettingsSection(index) {
+        if (topPage && topPage.settingsSection >= 0) popPage()
+        if (topPage && topPage.presentation === "settings") page.current = index
+        cats[1].items[index].action()
+    }
+    function openConsoleSection(section) {
+        if (section === "library") {
+            openPage(function() { return cats[gamesCat].items.filter(function(e) { return !!e.console }) }, ic("cat_game"), gamesCat, null,
+                     themePalette.nintendo ? qsTr("All Software") : qsTr("Game Library"), "library")
+            return
+        }
+        if (section === "settings") { openPage(function() { return cats[1].items }, ic("cat_settings"), 1, null, qsTr("Settings"), "settings"); return }
+        if (section === "profile") { openPage(profilePage, avatarUrl(prefs.avatar), 0, null, qsTr("My Profile")); return }
+        if (section === "power") { cats[0].items[1].action(); return }
+        var category = {online: 2, party: 4, friends: 5}[section]
+        if (category !== undefined) {
+            if (section === "party") party.refreshServers()
+            if (section === "friends") online.refreshFriends()
+            openPage(function() { return cats[category].items }, cats[category].icon, category, null, cats[category].name)
+            return
+        }
+        if (section === "controllers") { cats[1].items[7].action(); return }
+        if (section === "sound") { openPage(soundSettingsPage, ic("it_sound"), 1, null, qsTr("Sound Settings")); return }
+        if (section === "changelog") { cats[1].items[10].action(); return }
+        var item = cats[gamesCat].items.find(function(e) { return e.id === section })
+        if (item) {
+            item.action()
+            if (topPage && section === "updates") {
+                var stack = pageStack.slice(); stack[stack.length-1].title = item.title; pageStack = stack
+            }
+        }
     }
     function popPage() {
         pageStack = pageStack.slice(0, -1)
@@ -773,7 +812,7 @@ Window {
         games.count; games.scanning; system.onlineName; system.firmwareInstalled; system.firmwareVersion; gamepad.count; prefs.avatar
         online.state; online.session; online.message; online.friends; online.friendsLoading; online.friendsError; online.players; online.bans; cfgTick
         updater.state; updater.progress
-        gameUpdates.available; gameUpdates.checking; gameUpdates.busy
+        prefs.pinnedGames; gameUpdates.available; gameUpdates.checking; gameUpdates.busy
         party.state; party.message; party.linked; party.muted; party.deafened; party.voice; party.servers
         launcher.running
         return buildCats()
@@ -781,7 +820,7 @@ Window {
 
     function settingsItem(title, desc, icon, rowsFn) {
         return { title: title, desc: desc, icon: ic(icon), preview: rowsFn().map(function(r) { return r.title }),
-                 action: function() { openPage(rowsFn, ic(icon), 1) } }
+                 action: function() { openPage(rowsFn, ic(icon), 1, null, title) } }
     }
 
     // one game: an XMB item (desc, badge) or a row of its console's page (help, value)
@@ -791,8 +830,8 @@ Window {
         var desc = gameUpdates.available[g.serial] ? updateInfo(g.serial) : named ? (consoleMeta[g.console] || [g.console])[0] : g.serial
         var badge = gameUpdates.available[g.serial] ? qsTr("Update") : ""
         return {
-                title: g.title, desc: desc, help: desc, icon: g.icon || ic("it_games"), wide: !!g.icon && wideIcon(g),
-                pic: g.pic || "", console: g.console || "PS3",
+                gameId: g.serial, title: g.title, desc: desc, help: desc, icon: g.icon || ic("it_games"), wide: !!g.icon && wideIcon(g),
+                pic: g.pic || "", console: menuConsole(g),
                 badge: badge, value: badge,
                 action: function() { play(g) },
                 info: function() { dialog.show(qsTr("Information"), gameInfo(g)) },
@@ -812,6 +851,7 @@ Window {
                                   else needsName(function() { online.host(g.serial, g.title, g.path, g.console) })
                               } },
                             g.console === "PS3" ? { title: qsTr("Downloadable Content"), action: function() { openDlc(g) } } : null,
+                            { title: pinnedIds.indexOf(g.serial) >= 0 ? qsTr("Unpin from Home") : qsTr("Pin to Home"), action: function() { togglePin(g.serial) } },
                             { title: qsTr("Information"), action: function() { dialog.show(qsTr("Information"), gameInfo(g)) } },
                             { title: qsTr("Remove from List"), action: function() {
                                 dialog.confirm(qsTr("Remove"), qsTr("Take %1 off the list? The game's files stay where they are.").arg(g.title), function() { games.remove(g.serial) })
@@ -832,7 +872,7 @@ Window {
         // the game that keeps running behind the home screen, first, like the PS3's
         if (launcher.running && runningGame) {
             let g = runningGame
-            gameItems.push({ title: g.title, desc: qsTr("Running"), icon: g.icon || ic("it_games"), wide: !!g.icon && wideIcon(g), badge: qsTr("Running"), running: true, console: g.console || "PS3",
+            gameItems.push({ title: g.title, desc: qsTr("Running"), icon: g.icon || ic("it_games"), wide: !!g.icon && wideIcon(g), badge: qsTr("Running"), running: true, console: menuConsole(g),
                              pic: g.pic || "",
                              info: function() { dialog.show(qsTr("Information"), gameInfo(g)) },
                              action: resumeGame,
@@ -860,14 +900,14 @@ Window {
         var pending = Object.keys(gameUpdates.available).length
         // the library-wide items follow the consoles
         var util = [
-            { title: qsTr("Add Games"), icon: ic("it_addgames"), action: addGames,
+            { id: "add", title: qsTr("Add Games"), icon: ic("it_addgames"), action: addGames,
               desc: games.scanning ? qsTr("Looking for games...") : qsTr("Find the games in a folder, and every folder inside it") },
-            { title: qsTr("Game Updates"), icon: ic("it_update"), badge: pending ? String(pending) : "",
+            { id: "updates", title: qsTr("Game Updates"), icon: ic("it_update"), badge: pending ? String(pending) : "",
               action: function() { updatePick = ({}); openPage(updatesPage, ic("it_update"), gamesCat) },
               desc: gameUpdates.busy ? gameUpdates.status
                   : pending ? qsTr("%n game(s) have updates: choose which to install", "", pending)
                   : gameUpdates.checking ? qsTr("Checking for updates...") : qsTr("All your games are up to date") },
-            { title: qsTr("How to Play"), icon: ic("it_help"), action: guide, desc: qsTr("Controls, quitting a game, and playing online") }
+            { id: "help", title: qsTr("How to Play"), icon: ic("it_help"), action: guide, desc: qsTr("Controls, quitting a game, and playing online") }
         ]
 
         var active = online.state !== "off"
@@ -923,12 +963,12 @@ Window {
         })
 
         return [
-            { name: qsTr("Users"), icon: ic("cat_users"), items: [
+            { id: "users", name: qsTr("Users"), icon: ic("cat_users"), items: [
                 { title: system.onlineName || qsTr("User"), icon: avatarUrl(prefs.avatar), desc: qsTr("Your profile: change your name or picture"),
                   preview: [qsTr("Online ID"), qsTr("Picture"), qsTr("Steam Account")], action: function() { openPage(profilePage, avatarUrl(prefs.avatar), 0) } },
                 { title: qsTr("Turn Off System"), icon: ic("it_power"), desc: qsTr("Quit USCL and go back to the desktop"),
                   action: function() { dialog.confirm(qsTr("Turn Off System"), qsTr("Quit USCL?"), function() { online.stop(); Qt.quit() }) } } ] },
-            { name: qsTr("Settings"), icon: ic("cat_settings"), items: [
+            { id: "settings", name: qsTr("Settings"), icon: ic("cat_settings"), items: [
                 settingsItem(qsTr("System Update"), updater.state === "available" ? qsTr("USCL %1 is available").arg(updater.latest)
                              : system.firmwareInstalled ? qsTr("PS3 system software %1 installed").arg(system.firmwareVersion) : qsTr("Install the PS3 system software (games need it)"), "it_update", systemUpdatePage),
                 settingsItem(qsTr("Game Settings"), qsTr("How games look and run: resolution, frame rate, upscaling"), "it_games", gameSettingsPage),
@@ -942,10 +982,10 @@ Window {
                 settingsItem(qsTr("System Settings"), qsTr("Language, system information and setup"), "it_system", systemSettingsPage),
                 { title: qsTr("USCL Changelog"), icon: ic("it_system"), desc: qsTr("Read what changed in this build, available offline"),
                   action: function() { dialog.show(qsTr("USCL Changelog — %1").arg(system.version), system.changelog(), { markdown: true }) } } ] },
-            { name: qsTr("Online"), icon: ic("cat_network"), items: network },
-            { name: qsTr("Game"), icon: ic("cat_game"), items: gameItems.concat(util) },
-            { name: qsTr("Party"), icon: ic("cat_party"), items: partyItems() },
-            { name: qsTr("Friends"), icon: ic("cat_friends"), items: friends }
+            { id: "online", name: qsTr("Online"), icon: ic("cat_network"), items: network },
+            { id: "games", name: qsTr("Game"), icon: ic("cat_game"), items: gameItems.concat(util) },
+            { id: "party", name: qsTr("Party"), icon: ic("cat_party"), items: partyItems() },
+            { id: "friends", name: qsTr("Friends"), icon: ic("cat_friends"), items: friends }
         ]
     }
 
@@ -1102,7 +1142,7 @@ Window {
             map[Qt.Key_Up] = "up"; map[Qt.Key_Down] = "down"; map[Qt.Key_Left] = "left"; map[Qt.Key_Right] = "right"
             map[Qt.Key_Return] = "accept"; map[Qt.Key_Enter] = "accept"; map[Qt.Key_Escape] = "back"; map[Qt.Key_Backspace] = "back"
             map[Qt.Key_Space] = "options"; map[Qt.Key_Menu] = "options"; map[Qt.Key_I] = "info"
-            map[Qt.Key_PageUp] = "l1"; map[Qt.Key_PageDown] = "r1"
+            map[Qt.Key_Home] = "home"; map[Qt.Key_PageUp] = "l1"; map[Qt.Key_PageDown] = "r1"
             if (map[e.key]) { root.input(map[e.key]); e.accepted = true }
         }
 
@@ -1163,12 +1203,15 @@ Window {
 
             ConsoleHome {
                 id: dashboard
+                objectName: "consoleDashboard"
                 anchors.fill: parent
                 theme: root.activeTheme
                 animate: root.active && !launcher.running
                 userName: system.onlineName || online.steamName || qsTr("User")
                 avatar: root.avatarUrl(prefs.avatar)
                 navigation: xmb
+                pinnedIds: root.pinnedIds
+                onSectionRequested: function(section) { root.openConsoleSection(section) }
                 visible: root.activeTheme !== "ps3" && !root.topPage && !setup.open && !boot.running
                 onNavigate: function(button) { root.input(button) }
             }
@@ -1187,6 +1230,11 @@ Window {
                 objectName: "settingsPage"
                 theme: root.activeTheme
                 heading: root.topPage ? root.topPage.title : ""
+                presentation: root.topPage ? root.topPage.presentation || "" : ""
+                settingsSections: root.cats[1].items
+                settingsSection: root.topPage ? root.topPage.settingsSection === undefined ? -1 : root.topPage.settingsSection : -1
+                onSettingsSectionChosen: function(index) { root.chooseSettingsSection(index) }
+                onLibraryAction: function(section) { root.openConsoleSection(section) }
                 anchors.fill: parent
                 visible: !!root.topPage
                 rows: root.topPage ? root.topPage.rows() : []

@@ -20,16 +20,20 @@ Item {
         name: "ConsoleThemes"
         when: windowShown
         property int launches: 0
+        SignalSpy { id: sectionSpy; target: home; signalName: "sectionRequested" }
         SignalSpy { id: optionsSpy; target: navigation; signalName: "showOptions" }
         function init() {
+            failOnWarning(/(ReferenceError|TypeError|Unable to assign|Binding loop|Cannot open)/)
             menu.close(); dialog.close(); prompt.close(); page.visible = false
             home.visible = true; navigation.visible = false
-            home.categoryFocus = false
+            home.reset()
+            page.presentation = ""; page.filterIndex = 0; page.filterFocus = false; page.settingsSection = -1; page.sectionFocus = false; home.pinnedIds = []
+            sectionSpy.clear()
             launches = 0
             optionsSpy.clear()
             var entries = []
-            for (var i = 0; i < 13; i++) entries.push({title: "Game " + i, action: function() { launches++ }, options: function() { return [] }})
-            navigation.cats = [{name: "Games", items: entries}, {name: "Settings", items: [{title: "Update USCL", action: function() { launches++ }}]}]
+            for (var i = 0; i < 13; i++) entries.push({gameId: "GAME"+i, console: i % 2 ? "PS4" : "PS3", title: "Game " + i, action: function() { launches++ }, options: function() { return [] }})
+            navigation.cats = [{id: "games", name: "Games", items: entries}, {id: "settings", name: "Settings", items: [{title: "Update USCL", action: function() { launches++ }}]}]
             navigation.cat = 0
             navigation.itemIndex = []
         }
@@ -37,35 +41,149 @@ Item {
             return ["ps4", "ps5", "x360classic", "x360", "xboxone", "switch", "switch2"].map(function(t) { return {tag: t, theme: t} })
         }
         function test_themes(data) {
-            home.theme = data.theme
-            home.input(data.theme === "x360classic" ? "down" : "right"); compare(navigation.item, 1)
-            home.input("accept"); compare(launches, 1)
-            home.input("options"); compare(optionsSpy.count, 1)
-            home.input("r1"); compare(navigation.cat, 1)
-            home.input("accept"); compare(launches, 2)
-            home.input("l1"); compare(navigation.cat, 0); compare(navigation.item, 1)
-            for (var i = 0; i < 20; i++) home.input(data.theme === "x360classic" ? "down" : "right")
-            compare(navigation.item, 12)
-            home.input(data.theme === "x360classic" ? "down" : "right"); compare(navigation.item, 12)
-            if (home.grid) { home.input("up"); verify(navigation.item >= 0 && navigation.item < 13) }
-            navigation.setItem(999); compare(navigation.item, 12)
-            navigation.cats = [{name: "Empty", items: []}]
-            navigation.cat = 0
-            home.input("accept"); compare(launches, 2)
-            compare(home.selected, 0)
+            home.theme = data.theme; home.reset()
+            compare(home.entries.length, 13) // 12 games and a deliberate library entry.
+            verify(home.entries.slice(0,12).every(function(e) { return !!e.console }))
+            if (!home.grid && data.theme !== "x360classic") {
+                home.input("right"); compare(home.selected, 1)
+                home.input("accept"); compare(launches, 1)
+                home.input("options"); compare(optionsSpy.count, 1)
+                home.input("down")
+                if (home.nintendo) verify(home.categoryFocus)
+                else compare(home.region, "details")
+                home.input("back"); compare(home.region, "software")
+                for (var i = 0; i < 30; i++) home.input("right")
+                compare(home.selected, 12)
+                home.input("accept"); compare(sectionSpy.signalArguments[0][0], "library")
+                home.input("options"); compare(sectionSpy.count, 1)
+            } else {
+                if (data.theme === "x360classic") {
+                    home.input("accept"); compare(sectionSpy.signalArguments[0][0], "library")
+                    home.input("down"); home.input("accept"); compare(sectionSpy.signalArguments[1][0], "add")
+                } else { home.input("accept"); compare(launches, 1) }
+                home.input("r1"); verify(home.tab > 0)
+                home.input("l1"); verify(home.tab >= 0)
+                home.input("back"); compare(home.region, "software")
+            }
+            home.input("home"); verify(home.guideOpen)
+            home.input("back"); verify(!home.guideOpen)
+            home.input("home"); home.shortcutIndex = home.quickEntries.findIndex(function(e) { return e.key === "settings" })
+            home.input("accept"); verify(!home.guideOpen)
+            compare(sectionSpy.signalArguments[sectionSpy.count-1][0], "settings")
+        }
+        function test_reachable_shortcuts_data() { return test_themes_data() }
+        function test_reachable_shortcuts(data) {
+            home.theme = data.theme; home.reset()
+            for (var i = 0; i < home.quickEntries.length; i++) {
+                home.input("home"); home.shortcutIndex = i
+                home.input("accept"); compare(sectionSpy.signalArguments[i][0],home.quickEntries[i].key)
+            }
+            if (!home.grid && data.theme !== "x360classic") {
+                home.input(home.nintendo ? "down" : "up")
+                verify(home.categoryFocus)
+                for (i = 0; i < 15; i++) {
+                    verify(home.functionIndices.indexOf(home.shortcutIndex) >= 0)
+                    home.input("right")
+                }
+                home.input(home.nintendo ? "up" : "down"); compare(home.region,"software")
+            }
+        }
+        function test_empty_and_large_libraries_data() { return test_themes_data() }
+        function test_empty_and_large_libraries(data) {
+            home.theme = data.theme; home.reset()
+            navigation.cats = [{id:"games",name:"Games",items:[]}]
+            compare(home.entries.length,1); compare(home.current.key,"library")
+            if (!home.grid && data.theme !== "x360classic") {
+                home.input("right"); compare(home.selected,0)
+                home.input("accept"); compare(sectionSpy.signalArguments[0][0],"library")
+            }
+            var rows = []
+            for (var i = 0; i < 240; i++) rows.push({title:"Title "+i,console:i%2 ? "PS4":"PS3",action:function(){launches++}})
+            page.theme = data.theme; page.presentation = "library"; page.rows = rows; page.current = 0
+            compare(page.displayRows.length,240)
+            page.input("down"); compare(page.current,page.gridColumns)
+            page.current = 239; page.input("down"); compare(page.current,239)
+            page.input("accept"); compare(launches,1)
+            page.current = 0; page.input("left"); verify(page.filterFocus)
+            page.input("down"); compare(page.filterIndex,1); compare(page.displayRows.length,120)
+            page.input("right"); verify(!page.filterFocus)
+            page.input("accept"); compare(launches,2)
+            page.rows = []; compare(page.filterIndex,0); compare(page.displayRows.length,0)
+            page.input("accept"); compare(launches,2)
+        }
+        function test_xbox_spatial_reachability_data() { return [{tag:"x360",theme:"x360"},{tag:"xboxone",theme:"xboxone"}] }
+        function test_xbox_spatial_reachability(data) {
+            home.theme = data.theme; home.reset()
+            for (var tab = 0; tab < home.tabs.length; tab++) {
+                home.tab = tab
+                var pending = [0], visited = ({0:true})
+                while (pending.length) {
+                    var from = pending.shift()
+                    for (var d = 0; d < 4; d++) {
+                        home.tab = tab; home.region = "software"; home.tileIndex = from
+                        home.input(["left","right","up","down"][d])
+                        if (home.tab !== tab || home.region !== "software") continue
+                        if (!visited[home.tileIndex]) { visited[home.tileIndex] = true; pending.push(home.tileIndex) }
+                    }
+                }
+                compare(Object.keys(visited).length,home.panelEntries.length,"Every tile in pivot "+tab+" must be reachable")
+            }
+        }
+        function test_blades_game_bar() {
+            home.theme = "x360classic"; home.reset()
+            for (var i = 0; i < home.panelEntries.length; i++) home.input("down")
+            compare(home.tileIndex,home.panelEntries.length)
+            home.input("accept"); compare(launches,1)
+        }
+        function test_xbox_pins_pages() {
+            home.theme = "xboxone"; home.reset()
+            home.pinnedIds = navigation.items.map(function(g) { return g.gameId })
+            home.tab = 0
+            compare(home.panelEntries.length,14)
+            home.tileIndex = 7; home.input("right")
+            verify(home.tileIndex >= 8)
+            home.tileIndex = 8; home.input("accept"); compare(launches,1)
+            home.pinnedIds = []
+            compare(home.tileIndex,0); compare(home.panelEntries.length,1)
+        }
+        function test_library_tools_and_scroll() {
+            page.theme = "switch2"; page.presentation = "library"; page.visible = true
+            var rows = []
+            for (var i = 0; i < 200; i++) rows.push({title:"Game "+i,console:"Console "+i%10})
+            page.rows = rows; page.current = 0; page.input("left")
+            for (i = 0; i < page.filters.length+2; i++) page.input("down")
+            compare(page.libraryNavIndex,page.filters.length+2)
+            var spy = Qt.createQmlObject('import QtTest; SignalSpy { signalName: "libraryAction" }',page)
+            spy.target = page
+            page.input("accept"); compare(spy.signalArguments[0][0],"help")
+            var sidebar = findChild(page,"librarySidebar")
+            wait(200)
+            verify(sidebar.contentY > 0)
+            spy.destroy()
+        }
+        function test_nintendo_settings_sections() {
+            page.theme = "switch2"; page.settingsSections = [{title:"Sound"},{title:"Controllers"}]
+            page.settingsSection = 0; page.rows = [{title:"Volume",value:"50%"}]; page.current = 0
+            page.input("left"); verify(page.sectionFocus)
+            page.input("down"); compare(page.sectionCursor,1)
+            var spy = Qt.createQmlObject('import QtTest; SignalSpy { signalName: "settingsSectionChosen" }',page)
+            spy.target = page
+            page.input("right"); compare(spy.signalArguments[0][0],1)
+            spy.destroy()
+            page.settingsSection = -1; page.sectionFocus = false
         }
         function test_disabled_and_live_updates_data() { return test_themes_data().concat([{tag: "ps3", theme: "ps3"}]) }
         function test_disabled_and_live_updates(data) {
             home.theme = data.theme
-            navigation.cats = [{name: "Games", items: [{title: "Disabled", disabled: true, action: function() { launches++ }}]}]
+            navigation.cats = [{id:"games", name: "Games", items: [{console:"PS3", title: "Disabled", disabled: true, action: function() { launches++ }}]}]
             navigation.cat = 0
             navigation.input("accept"); compare(launches, 0)
-            navigation.cats = [{name: "Games", items: [{title: "Updated", badge: "Update", action: function() { launches++ }}]}]
+            navigation.cats = [{id:"games", name: "Games", items: [{console:"PS3", title: "Updated", badge: "Update", action: function() { launches++ }}]}]
             compare(home.current.badge, "Update")
             navigation.input("accept"); compare(launches, 1)
             navigation.cats = []
             navigation.input("accept"); compare(launches, 1)
-            compare(home.entries.length, 0)
+            compare(home.games.length, 0); compare(home.entries.length, 1)
         }
         function test_pages_and_modals_data() { return test_disabled_and_live_updates_data() }
         function test_pages_and_modals(data) {
@@ -84,7 +202,8 @@ Item {
             page.input("accept"); compare(launches, 2)
             page.rows = [{title: "Game", console: "PS3", info: function() { launches++ }}, {title: "Other", console: "PS3"}]
             page.input("info"); compare(launches, 3)
-            if (data.theme !== "ps3") { page.input("right"); compare(page.current, 1); page.input("left"); compare(page.current, 0) }
+            if (data.theme === "x360classic") { page.input("down"); compare(page.current,1); page.input("up"); compare(page.current,0) }
+            else if (data.theme !== "ps3") { page.input("right"); compare(page.current, 1); page.input("left"); compare(page.current, 0) }
             menu.show([{title: "Disabled", disabled: true, action: function() { launches++ }}, {title: "Update", checked: true, action: function() { launches++ }}])
             compare(menu.current, 1)
             menu.input("up"); menu.input("accept"); verify(menu.open); compare(launches, 3)
@@ -104,50 +223,48 @@ Item {
         }
         function test_layout_data() { return test_themes_data() }
         function test_layout(data) {
-            home.theme = data.theme
-            var shelf = findChild(home, "softwareShelf")
-            verify(shelf !== null)
-            for (var i = 0; i < 13; i++) {
-                navigation.setItem(i)
-                wait(220)
-                var tile = findChild(home, "homeTile" + i)
-                verify(tile !== null)
-                verify(tile.visible)
-                verify(tile.x >= 0 && tile.y >= 0)
-                verify(tile.x + tile.width <= shelf.width + 1)
-                verify(tile.y + tile.height <= shelf.height + 1)
-                verify(tile.border.width > 0)
-                verify(tile.border.color.toString() !== tile.color.toString())
-            }
-            if (data.theme !== "x360classic") {
-                navigation.setItem(0)
-                home.input("up"); verify(home.categoryFocus)
-                home.input("right"); compare(navigation.cat, 1)
-                home.input("accept"); verify(!home.categoryFocus)
-                home.input("accept"); compare(launches, 1)
-                navigation.cat = 0
-            }
-            if (home.nintendo) {
-                var ring = findChild(home, "categoryFocusRing" + navigation.cat)
-                verify(ring !== null); compare(ring.border.width, 0)
-                home.input("up"); compare(ring.border.width, 4)
-                home.input("accept"); compare(ring.border.width, 0)
+            home.theme = data.theme; home.reset()
+            if (home.grid) {
+                for (var t = 0; t < home.tabs.length; t++) {
+                    home.tab = t; home.tileIndex = 0; wait(0)
+                    for (var j = 0; j < home.panelEntries.length; j++) {
+                        var tile = findChild(home,"dashboardTile"+j)
+                        verify(tile !== null); verify(tile.width > 0 && tile.height > 0)
+                        verify(tile.x >= 0 && tile.y >= 0)
+                        verify(tile.x+tile.width <= tile.parent.width+1)
+                        verify(tile.y+tile.height <= tile.parent.height+1)
+                    }
+                }
+            } else if (data.theme !== "x360classic") {
+                var shelf = findChild(home, "softwareShelf")
+                for (var i = 0; i < 13; i++) {
+                    home.choose(i); wait(180)
+                    var game = findChild(home,"homeTile"+i)
+                    verify(game !== null && game.visible)
+                    verify(game.x >= 0 && game.y >= 0)
+                    verify(game.x+game.width <= shelf.width+1)
+                    verify(game.y+game.height <= shelf.height+1)
+                    verify(game.border.width > 0)
+                }
             }
         }
         function test_mouse_data() { return test_themes_data() }
         function test_mouse(data) {
-            home.theme = data.theme
-            wait(250)
-            var tile = findChild(home, "homeTile1")
+            home.theme = data.theme; home.reset(); wait(200)
+            if (data.theme === "x360classic") {
+                var shortcut = home.panelEntries[0]
+                home.activate(shortcut); compare(sectionSpy.signalArguments[0][0], "library")
+                return
+            }
+            var tile = findChild(home,home.grid ? "dashboardTile0" : "homeTile1")
             verify(tile !== null)
-            mouseClick(tile, tile.width / 2, tile.height / 2)
-            compare(navigation.item, 1)
-            wait(220)
-            mouseClick(tile, tile.width / 2, tile.height / 2)
-            compare(launches, 1)
-            mouseClick(tile, tile.width / 2, tile.height / 2, Qt.RightButton)
-            compare(optionsSpy.count, 1)
-            compare(launches, 1) // A right-click must not also confirm/launch.
+            if (!home.grid) {
+                mouseClick(tile,tile.width/2,tile.height/2); compare(home.selected,1)
+                wait(180)
+            }
+            mouseClick(tile,tile.width/2,tile.height/2); compare(launches,1)
+            mouseClick(tile,tile.width/2,tile.height/2,Qt.RightButton)
+            compare(optionsSpy.count,1); compare(launches,1)
         }
         function test_mouse_ps3() {
             home.visible = false; navigation.visible = true

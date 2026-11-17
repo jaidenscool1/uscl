@@ -784,10 +784,47 @@ int main(int argc, char* argv[])
 				QCoreApplication::sendEvent(window, &press);
 				QCoreApplication::sendEvent(window, &release);
 			};
-			navigation->setProperty("cat", 1); // Settings; no external/network action.
-			if (!QMetaObject::invokeMethod(navigation, "setItem", Q_ARG(QVariant, QVariant(5))) || navigation->property("item").toInt() != 5)
-			{ fail("theme settings selection was not applied"); return; }
-			key(Qt::Key_Return);
+            const auto openThemeSettings = [root, navigation, page, &key]() {
+                if (root->property("activeTheme").toString() == "ps3") {
+                    navigation->setProperty("cat", 1);
+                    QMetaObject::invokeMethod(navigation, "setItem", Q_ARG(QVariant, QVariant(5)));
+                } else {
+                    QMetaObject::invokeMethod(root, "openConsoleSection", Q_ARG(QVariant, QVariant("settings")));
+                    page->setProperty("current", 5);
+                }
+                key(Qt::Key_Return);
+                return page->isVisible();
+            };
+            const auto returnHome = [page, &key]() {
+                for (int i = 0; i < 4 && page->isVisible(); ++i) key(Qt::Key_Escape);
+            };
+            // Exercise the real dashboard -> root -> page connections, including empty libraries.
+            auto* dashboard = root->findChild<QQuickItem*>("consoleDashboard");
+            if (!dashboard) { fail("missing console dashboard"); return; }
+            for (const QString section : {QStringLiteral("library"), QStringLiteral("settings"),
+                                          QStringLiteral("controllers"), QStringLiteral("sound"), QStringLiteral("profile")})
+            {
+                if (!QMetaObject::invokeMethod(dashboard, "sectionRequested", Q_ARG(QString, section)) ||
+                    !page->isVisible() || page->property("heading").toString().isEmpty())
+                { fail("dashboard section routing"); return; }
+                key(Qt::Key_Down);
+                key(Qt::Key_Up);
+                returnHome();
+                if (page->isVisible()) { fail("dashboard section back navigation"); return; }
+            }
+            if (active != "ps3")
+            {
+                key(Qt::Key_Home);
+                if (!dashboard->property("guideOpen").toBool()) { fail("home button quick menu"); return; }
+                key(Qt::Key_Escape);
+                if (dashboard->property("guideOpen").toBool()) { fail("quick menu back navigation"); return; }
+            }
+            QMetaObject::invokeMethod(root, "togglePin", Q_ARG(QVariant, QVariant("USCL-UI-TEST-PIN")));
+            if (!prefs->property("pinnedGames").toString().contains("USCL-UI-TEST-PIN"))
+            { fail("pin persistence"); return; }
+            QMetaObject::invokeMethod(root, "togglePin", Q_ARG(QVariant, QVariant("USCL-UI-TEST-PIN")));
+            if (prefs->property("pinnedGames").toString() != "[]") { fail("unpin persistence"); return; }
+            if (!openThemeSettings()) { fail("theme settings selection was not applied"); return; }
 			if (!page->isVisible()) { fail("theme page did not open"); return; }
 			key(Qt::Key_Return);
 			if (!options->property("open").toBool()) { fail("theme choices did not open"); return; }
@@ -798,22 +835,18 @@ int main(int argc, char* argv[])
 			if (options->property("open").toBool()) { fail("theme choice did not close"); return; }
 			if (root->property("activeTheme").toString() == active) { fail("theme did not change"); return; }
             if (!soundBindingsOk()) { fail("sound palette did not follow theme switch"); return; }
-			key(Qt::Key_Escape);
-			if (page->isVisible()) { fail("back did not return home"); return; }
-			key(Qt::Key_Return); // Remembered Theme Settings selection.
-			if (!page->isVisible()) { fail("home selection was lost after changing themes"); return; }
+            returnHome();
+            if (page->isVisible()) { fail("back did not return home"); return; }
+            if (!openThemeSettings()) { fail("theme settings could not reopen after changing themes"); return; }
 			key(Qt::Key_Return);
 			if (!options->property("open").toBool()) { fail("theme choices did not reopen"); return; }
 			key(direction == Qt::Key_Up ? Qt::Key_Down : Qt::Key_Up);
 			key(Qt::Key_Return);
 			if (root->property("activeTheme").toString() != active) { fail("original theme was not restored"); return; }
-			key(Qt::Key_Escape);
+            returnHome();
             if (!soundBindingsOk()) { fail("restored sound palette"); return; }
             // The changelog is a main Settings entry in every theme and must work offline.
-            navigation->setProperty("cat", 1);
-            if (!QMetaObject::invokeMethod(navigation, "setItem", Q_ARG(QVariant, QVariant(10))))
-            { fail("changelog selection"); return; }
-            key(Qt::Key_Return);
+            QMetaObject::invokeMethod(root, "openConsoleSection", Q_ARG(QVariant, QVariant("changelog")));
             auto* log = root->findChild<QQuickItem*>("mainDialog");
             if (!log || !log->property("open").toBool() || !log->property("markdown").toBool() ||
                 !log->property("text").toString().contains("## Unreleased"))

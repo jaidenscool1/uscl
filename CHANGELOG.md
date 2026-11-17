@@ -11,6 +11,11 @@ These changes are included in this development branch. They are not a list of pu
 - Kept game launch/resume, friends, parties, DLC, game updates and USCL update controls available in every theme.
 - Improved selection restoration, mouse actions, long-dialog scrolling and layouts in 4:3 and ultrawide windows.
 - Show running games once in modern libraries, with a Resume action.
+- Reorganized modern home screens into software, system shortcuts and a separate full library instead of six generic category shelves.
+- Matched the PS4 function/content focus flow, Xbox 360 2012 nine-tile geometry, and Switch 2 grouped toolbar more closely to console references.
+- Added Home-button quick access, console-filtered scrolling libraries and Nintendo's persistent settings-section sidebar.
+- Added persistent Xbox One game pins, extra pin pages and Pin/Unpin actions.
+- Fixed light-theme glyph contrast, hidden shortcut focus, selection clamping and directional access to dashboard tiles.
 
 ### Emulator launch screens
 

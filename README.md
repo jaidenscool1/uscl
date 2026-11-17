@@ -164,7 +164,8 @@ open-bitdemon. Updating a development clone does not regenerate this repository'
 rebuild installers or publish an update. Those steps need a reviewed change and build/game verification.
 
 The home screen has eight selectable themes: PS3, PS4, PS5, Xbox 360 Classic, Xbox 360 2012, Xbox One,
-Switch and Switch 2. All share USCL's library, settings and update controls. A theme changes the interface;
+Switch and Switch 2. Each separates software from console-style system menus; a full library provides console filters,
+Add Games, updates and help. Xbox One includes persistent game pins. All share USCL's settings and update controls. A theme changes the interface;
 it does not add emulation of its console (there is no PS5 or Xbox One emulator integration here).
 See [theme behavior, checks and remaining manual verification](docs/CONSOLE-THEMES.md) and
 [emulator loading-screen coverage](docs/LOADING-THEMES.md).
