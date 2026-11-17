@@ -1,4 +1,4 @@
-From 07abad9af4f16b7f05afbd516053cd99e251a697 Mon Sep 17 00:00:00 2001
+From 4b0dca4573a4300c83df41e85db4b6e6fbaea33f Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 14:42:31 -0700
 Subject: [PATCH] PROBE: EDEN_NX2_PT_CAPTURE, record one frame of guest GPU
@@ -28,17 +28,17 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  src/video_core/buffer_cache/buffer_cache.h    |   2 +
  src/video_core/dma_pusher.cpp                 |   8 +
  src/video_core/dma_pusher.h                   |   2 +
- src/video_core/engines/kepler_compute.cpp     |  52 ++-
+ src/video_core/engines/kepler_compute.cpp     |  52 +-
  src/video_core/engines/kepler_compute.h       |   8 +
  src/video_core/engines/maxwell_3d.cpp         |  11 +
  src/video_core/engines/puller.h               |   2 +
  src/video_core/memory_manager.cpp             |   4 +
  src/video_core/memory_manager.h               |   2 +
- src/video_core/nx2_pt_capture.cpp             | 434 ++++++++++++++++++
+ src/video_core/nx2_pt_capture.cpp             | 486 ++++++++++++++++++
  src/video_core/nx2_pt_capture.h               |  41 ++
  .../renderer_vulkan/vk_rasterizer.cpp         |   3 +-
  .../texture_cache/descriptor_table.h          |   4 +
- 15 files changed, 581 insertions(+), 4 deletions(-)
+ 15 files changed, 633 insertions(+), 4 deletions(-)
  create mode 100644 src/video_core/nx2_pt_capture.cpp
  create mode 100644 src/video_core/nx2_pt_capture.h
 
@@ -397,10 +397,10 @@ index 9e208af29..9559603af 100644
                             u64 page_bits_ = 12);
 diff --git a/src/video_core/nx2_pt_capture.cpp b/src/video_core/nx2_pt_capture.cpp
 new file mode 100644
-index 000000000..2293e298f
+index 000000000..9dc30ead8
 --- /dev/null
 +++ b/src/video_core/nx2_pt_capture.cpp
-@@ -0,0 +1,434 @@
+@@ -0,0 +1,486 @@
 +// SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
@@ -418,6 +418,8 @@ index 000000000..2293e298f
 +//   deltas.bin      guest bytes the back read per entry (NoteCpuData): u32 entry, u64 device address,
 +//                   u32 size, bytes
 +//   descriptors.txt GPU addresses of the texture headers and samplers read while recording (hex)
++//   snap-<entry>-<gpu>.bin  EDEN_NX2_PT_CAPTURE_SNAP=<entry>[-<last>[/<step>]]:<gpu>:<size>[,...] (hex gpu/size):
++//                   those GPU ranges flushed and read right after that entry ran (per-pass references for the replay)
 +//   done.txt        written when recording stops (first/last present, entry count)
 +
 +#include <algorithm>
@@ -584,6 +586,53 @@ index 000000000..2293e298f
 +    LOG_WARNING(HW_GPU, "pt capture: {} device ranges, {} MiB", merged.size(), total >> 20);
 +}
 +
++void Snapshots(State& s, MemoryManager& memory_manager, u64 entry) {
++    struct Snap {
++        u64 first, last, step, gpu, size;
++    };
++    static const std::vector<Snap> snaps = [] {
++        std::vector<Snap> out;
++        const char* text = std::getenv("EDEN_NX2_PT_CAPTURE_SNAP");
++        for (const char* p = text; p && *p;) {
++            Snap snap{};
++            char* end = nullptr;
++            snap.first = snap.last = std::strtoull(p, &end, 10);
++            snap.step = 1;
++            if (*end == '-') snap.last = std::strtoull(end + 1, &end, 10);
++            if (*end == '/') snap.step = std::max<u64>(std::strtoull(end + 1, &end, 10), 1);
++            if (*end++ != ':') break;
++            snap.gpu = std::strtoull(end, &end, 16);
++            if (*end++ != ':') break;
++            snap.size = std::strtoull(end, &end, 16);
++            out.push_back(snap);
++            p = *end == ',' ? end + 1 : end;
++        }
++        return out;
++    }();
++    auto& split = VideoCommon::GpuSplit::Get();
++    for (const Snap& snap : snaps) {
++        if (entry < snap.first || entry > snap.last || (entry - snap.first) % snap.step != 0) {
++            continue;
++        }
++        dumping = true;
++        const auto flush = [memory = &memory_manager, snap] {
++            memory->FlushRegion(snap.gpu, snap.size, VideoCommon::CacheType::All);
++        };
++        if (split.Active()) {
++            split.Run(flush, VideoCommon::DrainSite::ListFlush);
++        } else {
++            flush();
++        }
++        dumping = false;
++        std::vector<u8> data(snap.size);
++        memory_manager.ReadBlockUnsafe(snap.gpu, data.data(), data.size());
++        if (std::FILE* f = std::fopen((s.dir / fmt::format("snap-{}-{:x}.bin", entry, snap.gpu)).string().c_str(), "wb")) {
++            std::fwrite(data.data(), 1, data.size(), f);
++            std::fclose(f);
++        }
++    }
++}
++
 +template <typename T>
 +void Put(std::FILE* f, const T& v) {
 +    std::fwrite(&v, sizeof(T), 1, f);
@@ -726,6 +775,9 @@ index 000000000..2293e298f
 +        // The back finishes the previous entries first: what it notes (NoteCpuData, inline QMDs)
 +        // belongs to the entry it executes, which is then s.entries - 1.
 +        VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::ListFlush);
++        if (s.entries > 0) {
++            Snapshots(s, memory_manager, s.entries - 1); // entry s.entries - 1 has run
++        }
 +    }
 +    std::scoped_lock lk{s.mutex};
 +    if (s.phase == Phase::Stopping) {

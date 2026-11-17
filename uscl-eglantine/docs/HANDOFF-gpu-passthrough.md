@@ -12,7 +12,7 @@ Host: driver 615.78.08 (open kernel module), Arch Linux.
 | Gate 1 (driver access) | **Pass** on hardware |
 | Gate 2 (method compatibility) | **Pass (real data)**: every 3D/compute/copy method in a captured MKW frame is a named Ampere method, plus three private 3D methods (0xF74/0xF7C/0xF80) that ADA_A accepts; only host-class changes needed (Tegra syncpoints 0x70/0x74 dropped) |
 | Gate 3 (shader compatibility) | **Pass (decode level)**; guest compute SASS has started to **execute** on the RTX 4060 (Phase 1), no per-instruction failure seen yet |
-| Phase 1 (capture + replay one frame) | **Textured racing frame, exact reference** (eighth pass, 2026-11-17): capture `mkw15` replays with every sampled ASTC texture decoded (`PT_ASTC=decode`) to the right image: arch, signs, track, karts, HUD all match Eglantine's own render of the same frame (taken from the capture's end dump), aligned to the pixel; lit surfaces are 0.33-0.65x as bright as the reference (sky 1.00x): a missing light contribution, the next Phase 1 item. Before: **Lit racing frame** (seventh pass, 2026-11-17): capture `mkw14` (probe 0003 now flushes GPU-written images) replays to the lit scene; only ASTC (white stand-in) is left between it and the reference. Before: **Whole racing frame replays** (sixth pass, 2026-11-17): all 7757 entries of capture `mkw13` (racing, 3 channels) run on the RTX 4060 with no Xid, **~36 ms of GPU wait in total** (slowest entry 0.7 ms) with guest memory in VRAM. The fix was emulator-wide: Ada does not perform global loads in pixel-shader helper lanes, so `PT_HELPER_LOADS=1` routes every LDG of every pixel program through a trampoline that zeroes the destination in helper lanes. Output not yet right: the HUD layer matches the reference, the G-buffer shows the right scene (karts, track), but the lit scene composited under the HUD is black (next: find the lighting/composite passes). Earlier: the intro-flyover frame `mkw10` replays to a recognisable course image (third pass) |
+| Phase 1 (capture + replay one frame) | **Close to Eglantine** (eighth pass, 2026-11-17): capture `mkw16` replays to Eglantine's own render within **PSNR 22.6 dB, mean abs 9.1, brightness ratio 1.04**, HUD identical; left: Toad heads dark, terrain dirt paler, foliage differs (see "mkw16" below). Before: **Textured racing frame, exact reference**: capture `mkw15` replays with every sampled ASTC texture decoded (`PT_ASTC=decode`) to the right image: arch, signs, track, karts, HUD all match Eglantine's own render of the same frame (taken from the capture's end dump), aligned to the pixel; lit surfaces are 0.33-0.65x as bright as the reference (sky 1.00x): a missing light contribution, the next Phase 1 item. Before: **Lit racing frame** (seventh pass, 2026-11-17): capture `mkw14` (probe 0003 now flushes GPU-written images) replays to the lit scene; only ASTC (white stand-in) is left between it and the reference. Before: **Whole racing frame replays** (sixth pass, 2026-11-17): all 7757 entries of capture `mkw13` (racing, 3 channels) run on the RTX 4060 with no Xid, **~36 ms of GPU wait in total** (slowest entry 0.7 ms) with guest memory in VRAM. The fix was emulator-wide: Ada does not perform global loads in pixel-shader helper lanes, so `PT_HELPER_LOADS=1` routes every LDG of every pixel program through a trampoline that zeroes the destination in helper lanes. Output not yet right: the HUD layer matches the reference, the G-buffer shows the right scene (karts, track), but the lit scene composited under the HUD is black (next: find the lighting/composite passes). Earlier: the intro-flyover frame `mkw10` replays to a recognisable course image (third pass) |
 | New: texture formats | **ASTC done for replay** (eighth pass): the frame's 1455 sampled ASTC textures are decoded with Eglantine's own decoder to A8B8G8R8 in a host arena and their headers repointed. 28% of MKW's texture headers are ASTC (8x8, 6x6, 4x4, 5x5); the RTX 4060 has no ASTC sampling. Phase 2 needs the same on upload, and a smaller target (BC1/BC3) for VRAM |
 | Gates 4-6 | not started (Phase 1 uses pinned host memory at the guest's own VAs, pitch kind only: first evidence for gate 4) |
 
@@ -487,3 +487,26 @@ and writes those ranges right after that entry while recording (the dump flush p
 view's HDR target before entry 7540 (where it is cleared for a second view), the composite inputs and the light-grid
 outputs can be compared pass by pass. Then bisect the 2.5x with `PT_INJECT` at the first pass that differs. The next
 capture also tells whether the mkw15 hang was the screenshot (take none) or the descriptor hook.
+
+### Eighth pass, continued (2026-11-17): per-pass references, mkw16 matches
+- **Probe 0003: per-entry snapshots.** `EDEN_NX2_PT_CAPTURE_SNAP=<entry>[-<last>[/<step>]]:<gpu>:<size>[,...]` (hex
+  gpu/size) flushes those ranges right after that entry ran (the dump flush path) and writes
+  `snap-<entry>-<gpu>.bin`: Eglantine's own per-pass results, valid for aliased transient memory too. Fork
+  `uscl-ptcap` 4b0dca457, `probes/0003` regenerated (`git am` onto its parent: same tree).
+- **Capture `mkw16`** (`capture16.sh` in the capture dir: as mkw15, no screenshot, HDR target `8110901000`
+  snapshotted every 50 entries 4900-7550): 7551 entries, 1495 sampled ASTC textures (9.3 GB RGBA8). **The game kept
+  running after the dump**, so the mkw15 hang was the debug-server screenshot requested during the end dump (never
+  request one while a dump runs; the end dump is the reference anyway). The descriptor hook is fine.
+- **Result:** the replay (`PT_ASTC=decode PT_NO_END=1 PT_MME=trace PT_NODEP=1 PT_HELPER_LOADS=1`, `pt_replay <cap>/replay
+  7495`, output `210a51a000`) matches Eglantine's render at **PSNR 22.6 dB, mean abs 9.1, median linear ratio 1.04**,
+  HUD identical (`compare.png`, `compare-crops.png`, `replay-decode.png`, `ref-eglantine.png` in the capture dir). The
+  HDR main view matches Eglantine's snapshots (0.67-0.88x while partly drawn, 1.00-1.05x when complete, 7400-7450).
+- **mkw15's 0.4x darkness was specific to that frame** (race start under the gantry); its dumps were deleted for disk
+  space before this was known, so its cause is open. Watch for it in future captures with the snapshot tooling.
+- Left in mkw16 (localized): Toad spectators' heads render dark instead of lit, the KTV truck's yellow is weaker,
+  the terrain dirt is pale sand instead of red-brown and lacks grass tufts, one bush appears only in ours.
+  Ruled out: buffers the replay never writes (26 ranges injected from Eglantine at frame start or before the
+  composite: no gain), end-of-frame data (19.3 dB, red artifacts on foliage: `PT_NO_END` stays). Next suspects: the
+  sparse terrain virtual texture (tiles streamed during play; ASTC decoded from the frame's start data) and the
+  Toads' materials; per-pass snapshots of their targets will localize them.
+- Disk: `mkw16` is the one full capture (49 GB); mkw15's dumps deleted (metadata and images kept).
