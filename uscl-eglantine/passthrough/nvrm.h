@@ -43,6 +43,7 @@
 #include "clc6c0qmd.h"  // mesa: QMD v3 fields
 #include "clc997.h"     // mesa: full ADA_A methods
 #include "ctrl/ctrl2080/ctrl2080gr.h"
+#include "ctrl/ctrl0080/ctrl0080fifo.h"
 #include "ctrl/ctrl0000/ctrl0000gpu.h"
 #include "ctrl/ctrla06c.h"
 #include "ctrl/ctrlc36f.h"
@@ -129,6 +130,7 @@ static NvU64 map_gpu(NvHandle mem, NvU64 size, NvU64 va = 0, NvU64 offset = 0, i
         p.dmaOffset = va;
     }
     if (read_only) p.flags |= DRF_DEF(OS46, _FLAGS, _ACCESS, _READ_ONLY);
+    if (getenv("PT_GPU_CACHE")) p.flags |= DRF_DEF(OS46, _FLAGS, _GPU_CACHEABLE, _YES);
     if (kind >= 0) {
         p.flags |= DRF_DEF(OS46, _FLAGS, _PAGE_KIND_OVERRIDE, _YES);
         p.kindOverride = (NvU32)kind;
@@ -139,12 +141,13 @@ static NvU64 map_gpu(NvHandle mem, NvU64 size, NvU64 va = 0, NvU64 offset = 0, i
     return p.dmaOffset;
 }
 
-static NvHandle alloc_mem(NvU64 size, bool vid) {
+static NvHandle alloc_mem(NvU64 size, bool vid, bool contiguous = true) {
     NV_MEMORY_ALLOCATION_PARAMS a{};
     a.owner = g_root; a.size = size; a.alignment = 4096; a.limit = size - 1; a.format = 6;
     if (vid) {
         a.type = NVOS32_TYPE_IMAGE;
-        a.attr = DRF_DEF(OS32, _ATTR, _PHYSICALITY, _CONTIGUOUS) | DRF_DEF(OS32, _ATTR, _LOCATION, _VIDMEM);
+        a.attr = (contiguous ? DRF_DEF(OS32, _ATTR, _PHYSICALITY, _CONTIGUOUS) : DRF_DEF(OS32, _ATTR, _PHYSICALITY, _NONCONTIGUOUS)) |
+                 DRF_DEF(OS32, _ATTR, _LOCATION, _VIDMEM);
         a.attr2 = DRF_DEF(OS32, _ATTR2, _GPU_CACHEABLE, _YES) | DRF_DEF(OS32, _ATTR2, _ZBC, _PREFER_NO_ZBC);
         a.flags = NVOS32_ALLOC_FLAGS_MAP_NOT_REQUIRED | NVOS32_ALLOC_FLAGS_ALIGNMENT_FORCE |
                   NVOS32_ALLOC_FLAGS_IGNORE_BANK_PLACEMENT | NVOS32_ALLOC_FLAGS_PERSISTENT_VIDMEM;
@@ -160,7 +163,9 @@ static NvHandle alloc_mem(NvU64 size, bool vid) {
 
 // Pinned host memory the GPU can map, CPU-cached and snooped: our own anonymous mapping wrapped as
 // NV01_MEMORY_SYSTEM_OS_DESCRIPTOR (what tinygrad does). RM's CPU maps of its own sysmem are refused here.
-[[maybe_unused]] static NvHandle alloc_host(NvU64 size, NvU8** cpu) {
+// gpu_cache: the GPU's L2 may cache it (not coherent with the CPU: invalidate after CPU writes, flush dirty
+// lines before CPU reads; pt_replay PT_GPU_CACHE does both around every entry).
+[[maybe_unused]] static NvHandle alloc_host(NvU64 size, NvU8** cpu, bool gpu_cache = false) {
     void* p = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) die("mmap host memory", 0);
     nv_ioctl_nvos02_parameters_with_fd m{};
@@ -169,7 +174,8 @@ static NvHandle alloc_mem(NvU64 size, bool vid) {
     m.params.hRoot = g_root; m.params.hObjectParent = g_device; m.params.hObjectNew = next++;
     m.params.hClass = NV01_MEMORY_SYSTEM_OS_DESCRIPTOR;
     m.params.flags = DRF_DEF(OS02, _FLAGS, _PHYSICALITY, _NONCONTIGUOUS) | DRF_DEF(OS02, _FLAGS, _COHERENCY, _CACHED) |
-                     DRF_DEF(OS02, _FLAGS, _MAPPING, _NO_MAP);
+                     DRF_DEF(OS02, _FLAGS, _MAPPING, _NO_MAP) |
+                     (gpu_cache ? DRF_DEF(OS02, _FLAGS, _GPU_CACHEABLE, _YES) : 0);
     m.params.pMemory = (NvP64)p; m.params.limit = size - 1;
     nv_ioctl(g_dev, NV_ESC_RM_ALLOC_MEMORY, &m, "alloc os descriptor"); // on the device fd
     if (m.params.status != NV_OK) die("alloc os descriptor", m.params.status);
@@ -179,6 +185,40 @@ static NvHandle alloc_mem(NvU64 size, bool vid) {
 
 [[maybe_unused]] static NvU64 rup(NvU64 v, NvU64 a) { return (v + a - 1) / a * a; }
 [[maybe_unused]] static NvU32 hdr(NvU32 subc, NvU32 mthd, NvU32 n) { return (1u << 29) | (n << 16) | (subc << 13) | (mthd >> 2); }
+
+// Fine-grained preemption for a channel's graphics context: GFXP (pixel-level) for graphics, CILP for compute,
+// with the context buffers RM asks for (sizes from FIFO_GET_ENGINE_CONTEXT_PROPERTIES), as the userspace driver
+// sets up. Without it the context switches only between draws, and a draw longer than RM's context-switch
+// timeout ends in Xid 109. Returns the RM status (not fatal: the caller reports a refusal).
+static NvHandle alloc_mem(NvU64 size, bool vid, bool contiguous);
+static NvU64 map_gpu(NvHandle mem, NvU64 size, NvU64 va, NvU64 offset, int kind, bool read_only);
+[[maybe_unused]] static NvU32 bind_preemption(NvHandle chan) {
+    static const NvU32 ids[5] = {NV0080_CTRL_FIFO_GET_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_GRAPHICS_PREEMPT,
+                                 NV0080_CTRL_FIFO_GET_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_GRAPHICS_SPILL,
+                                 NV0080_CTRL_FIFO_GET_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_GRAPHICS_PAGEPOOL,
+                                 NV0080_CTRL_FIFO_GET_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_GRAPHICS_BETACB,
+                                 NV0080_CTRL_FIFO_GET_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_GRAPHICS_RTV};
+    NV2080_CTRL_GR_CTXSW_PREEMPTION_BIND_PARAMS b{};
+    for (int i = 0; i < 5; i++) {
+        NV0080_CTRL_FIFO_GET_ENGINE_CONTEXT_PROPERTIES_PARAMS cp{}; cp.engineId = ids[i];
+        rm_control(g_device, NV0080_CTRL_CMD_FIFO_GET_ENGINE_CONTEXT_PROPERTIES, &cp, "engine context properties");
+        if (!cp.size) continue;
+        NvU64 size = (cp.size + 0xFFFFull) & ~0xFFFFull;
+        b.vMemPtrs[i] = map_gpu(alloc_mem(size, true, true), size, 0, 0, -1, false);
+        printf("preemption buffer %u: %u bytes (align %u) at 0x%llx\n", ids[i], cp.size, cp.alignment,
+               (unsigned long long)b.vMemPtrs[i]);
+    }
+    b.flags = DRF_DEF(2080_CTRL_GR_SET_CTXSW, _PREEMPTION_MODE_FLAGS, _GFXP, _SET) |
+              DRF_DEF(2080_CTRL_GR_SET_CTXSW, _PREEMPTION_MODE_FLAGS, _CILP, _SET);
+    b.hClient = g_root; b.hChannel = chan;
+    b.gfxpPreemptMode = NV2080_CTRL_SET_CTXSW_PREEMPTION_MODE_GFX_GFXP;
+    b.cilpPreemptMode = NV2080_CTRL_SET_CTXSW_PREEMPTION_MODE_COMPUTE_CILP;
+    NVOS54_PARAMETERS p{};
+    p.hClient = g_root; p.hObject = g_subdevice; p.cmd = NV2080_CTRL_CMD_GR_CTXSW_PREEMPTION_BIND;
+    p.params = &b; p.paramsSize = sizeof(b);
+    nv_ioctl(g_ctl, NV_ESC_RM_CONTROL, &p, "preemption bind");
+    return p.status;
+}
 
 static NvHandle g_vas;
 static nv_ioctl_card_info_t g_card;

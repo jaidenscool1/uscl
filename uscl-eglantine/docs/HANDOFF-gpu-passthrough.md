@@ -12,7 +12,7 @@ Host: driver 615.78.08 (open kernel module), Arch Linux.
 | Gate 1 (driver access) | **Pass** on hardware |
 | Gate 2 (method compatibility) | **Pass (real data)**: every 3D/compute/copy method in a captured MKW frame is a named Ampere method, plus three private 3D methods (0xF74/0xF7C/0xF80) that ADA_A accepts; only host-class changes needed (Tegra syncpoints 0x70/0x74 dropped) |
 | Gate 3 (shader compatibility) | **Pass (decode level)**; guest compute SASS has started to **execute** on the RTX 4060 (Phase 1), no per-instruction failure seen yet |
-| Phase 1 (capture + replay one frame) | **Whole frame replays** (third pass): all 1216 entries of capture `mkw10` (3 channels, 2 presents) run on the RTX 4060 with no Xid, ~205 ms of GPU wait; the output target is a recognisable MKW course image (road, bridge, buildings) but hazy and without karts/HUD. Not yet compared pixel-for-pixel: Eglantine's end dump has no copy of the GPU-only targets (see "Third pass"). Fourth pass: that frame was the pre-race flyover (no karts/HUD is right); racing frames (capture `mkw13`, ~7700 entries, reference screenshot) replay to entry ~4980 of 7757, then a pixel shader's light loop runs away (Xid 109) |
+| Phase 1 (capture + replay one frame) | **Whole frame replays** (third pass): all 1216 entries of capture `mkw10` (3 channels, 2 presents) run on the RTX 4060 with no Xid, ~205 ms of GPU wait; the output target is a recognisable MKW course image (road, bridge, buildings) but hazy and without karts/HUD. Not yet compared pixel-for-pixel: Eglantine's end dump has no copy of the GPU-only targets (see "Third pass"). Fourth pass: that frame was the pre-race flyover (no karts/HUD is right); racing frames (capture `mkw13`, ~7700 entries, reference screenshot) replay to entry ~4970-5030 of 7757; there single draws take 120+ ms and get killed by the context-switch timeout (Xid 109); guest memory can now live in VRAM (`PT_VIDMEM`) |
 | New: texture formats | **Open, needs work**: 28% of MKW's texture headers are ASTC (8x8, 6x6, 4x4, 5x5); the RTX 4060 has no ASTC sampling (`textureCompressionASTC_LDR` false), so passthrough needs ASTC transcoding + header repointing |
 | Gates 4-6 | not started (Phase 1 uses pinned host memory at the guest's own VAs, pitch kind only: first evidence for gate 4) |
 
@@ -254,6 +254,32 @@ Also open:
 - Next: instrument the shader (an `STG` of the loaded count and offset into a debug buffer, encoded from an nvcc
   sm_86 kernel) to see what it actually reads; check whether the pixel stage's cbuf 0 at draw time is really
   0x210a499000 (my binding reconstruction) rather than a per-draw ring slot.
+
+### Fifth pass (2026-11-16): the stop is a timeout on slow draws, VRAM residency built
+- **Xid 109 = a draw longer than the context-switch window while the desktop needs the GPU.** Which entry dies
+  varies by run (4966, 4981, 5026): entries 4923/4962/4966 take 118-140 ms each, 4981 longer. Not a wrong
+  result as such: forcing the light counts to 0, or one loop pass, lets the draws through.
+- **VRAM residency works** (`pt_replay PT_VIDMEM=<MiB>`, e.g. 5500): guest blocks get a video memory twin the
+  guest mappings use, uploaded by the copy engine (`AMPERE_DMA_COPY_B` on a setup channel; 5.4 GiB in ~1 s);
+  deltas and readbacks go through the same copies. GPU time to entry 4983: 582 ms (host memory) -> 274 ms.
+  The 120-140 ms draws stay as slow, so memory placement is not their problem. Phase 3 needs this anyway.
+- `PT_PREEMPT=1`: GFXP/CILP context buffers (sizes from `NV0080_CTRL_CMD_FIFO_GET_ENGINE_CONTEXT_PROPERTIES`
+  0xb-0xf) bound with `NV2080_CTRL_CMD_GR_CTXSW_PREEMPTION_BIND`: RM accepts (status 0), Xid 109 unchanged.
+  `PT_GPU_CACHE=1` (host memory GPU-cacheable + L2 invalidate/flush per entry): little change.
+- Ruled out this pass: light grid contents (sane after a clean run, <= 5 lights per tile), stale CPU uniforms
+  (deltas), the index buffer (static: identical start/end, max index 1328), generic PTE kinds (`PT_KINDS=depth`),
+  shader cache staleness. The light grid mapping also holds other data the frame needs (zeroing or writing
+  past the grid breaks entry 4966).
+- **Open, next**: why these draws cost 100x more than in Eglantine. Leading idea: zcull is off in the replay
+  (its on-chip state does not carry over), so a heavy forward-lighting pixel shader behind a depth prepass
+  shades every hidden pixel; measure with a pipeline statistics report (pixel shader invocations) around the
+  draw, then restore zcull properly (`SET_ZCULL*` state + a zcull region clear) if that is it.
+- Shader patch encodings verified with nvdisasm (SM86), for PT_PATCH: `EXIT` 4d790000000000000000800300ea0f00,
+  `NOP` 18790000000000000000000000c00f00; `MOV Rd, RZ` from an existing MOV with Rd at bits 16-23 and the replaced
+  instruction's control bits (105-127); `STG.E [Ra.U32+UR4+imm24], Rb` = nvcc's `STG.E [R.64]` with bit 90
+  cleared and bit 76 flipped; `RED.E.MAX.STRONG.GPU [Ra.U32+UR4+imm]` = nvcc's RED with bit 90 cleared and bit 71
+  flipped; LDG `.STRONG.SM` -> `.CONSTANT` = flip bit 77. Control field: stall 105-108, yield 109, write barrier
+  110-112, read barrier 113-115, wait mask 116-121.
 
 Facts learned on the way:
 - MKW frame: ~1100 entries over 2 presents, ~100k words; 3D draws to 2560x1440 (HDR BF10GF11RF11 scene, sRGB

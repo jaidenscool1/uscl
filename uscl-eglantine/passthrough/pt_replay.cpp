@@ -5,11 +5,14 @@
 // usage: pt_replay <capture>/replay [entries to run] [va:size:file ...]   (readbacks after the run or a timeout)
 #include "nvrm.h"
 
+#include <array>
 #include <map>
 #include <string>
 #include <utility>
 
-struct Block { NvHandle h; NvU8* cpu; NvU64 size; };
+// A guest block: host memory (fills, deltas, readbacks go through cpu); with PT_VIDMEM also a video memory twin
+// (vid) that the guest mappings use, kept in step by the copy engine on the setup channel.
+struct Block { NvHandle h; NvU8* cpu; NvU64 size; NvHandle vid = 0; NvU64 host_gva = 0, vid_gva = 0; };
 struct Piece { NvU64 va, size; int block; NvU64 off; };
 struct Chan {
     volatile NvU8* cpu;
@@ -20,6 +23,7 @@ struct Chan {
 
 static const NvU64 CH_VA = 0xF800000000ull, CH_SZ = 4 << 20, RING = 0, USERD = 0x2000, SEM = 0x3000, PB = 0x10000;
 static const NvU32 ENTRIES = 0x400;
+static const int SETUP = 100;  // the setup channel (copy engine): video memory uploads and readbacks
 
 int main(int argc, char** argv) {
     if (argc < 2) { fprintf(stderr, "usage: %s <replay dir> [entries] [va:size:file ...]\n", argv[0]); return 1; }
@@ -34,7 +38,15 @@ int main(int argc, char** argv) {
     // PT_ZERO_RO=1: the shared zero block (under every unbacked page) read-only: a stray write faults
     // (Xid 31 names its address) instead of showing up in every other unbacked page.
     const bool zero_ro = getenv("PT_ZERO_RO") != nullptr;
+    // PT_GPU_CACHE=1: guest memory GPU-cacheable (L2), with an L2 sysmem invalidate before and a dirty flush +
+    // sysmembar after every entry. Uncached, every guest access crosses PCIe (MKW racing: Xid 109 in heavy
+    // pixel passes).
+    const bool gpu_cache = getenv("PT_GPU_CACHE") != nullptr;
+    const double slow_ms = getenv("PT_SLOW_MS") ? atof(getenv("PT_SLOW_MS")) : 0;
     int zero_block = -1;
+    // PT_VIDMEM=<MiB>: guest memory in video memory (host memory behind PCIe made single draws take 130+ ms:
+    // Xid 109 when the desktop needs the GPU meanwhile). Leave room for the desktop.
+    NvU64 vid_left = getenv("PT_VIDMEM") ? (NvU64)atol(getenv("PT_VIDMEM")) << 20 : 0, vid_used = 0;
     std::map<int, Block> blocks;
     std::vector<Piece> pieces;
     std::map<int, Chan> chans;
@@ -48,7 +60,14 @@ int main(int argc, char** argv) {
             int id; unsigned long long size;
             if (fscanf(plan, "%d %llx", &id, &size) != 2) die("plan: block", 0);
             Block b{0, nullptr, size};
-            b.h = alloc_host(size, &b.cpu);
+            b.h = alloc_host(size, &b.cpu, gpu_cache);
+            if (vid_left >= size) {  // PT_VIDMEM=<MiB>: guest blocks in video memory up to that much
+                b.vid = alloc_mem(size, true, false);
+                b.vid_gva = map_gpu(b.vid, size);
+                b.host_gva = map_gpu(b.h, size);
+                vid_left -= size;
+                vid_used += size;
+            }
             blocks[id] = b;
         } else if (k == "fill") {
             int id; unsigned long long off, foff, n; char file[64];
@@ -72,8 +91,12 @@ int main(int argc, char** argv) {
             p.va = va; p.size = size; p.off = off;
             Block& b = blocks.at(p.block);
             if (p.off + p.size > b.size || p.va + p.size > (1ull << 40)) die("plan: map out of range", 0);
-            map_gpu(b.h, p.size, p.va, p.off, kind, zero_ro && p.block == zero_block);
+            map_gpu(b.vid ? b.vid : b.h, p.size, p.va, p.off, kind, zero_ro && p.block == zero_block);
             pieces.push_back(p);
+        } else if (k == "vblock") {  // video memory, no CPU mapping
+            int id; unsigned long long size;
+            if (fscanf(plan, "%d %llx", &id, &size) != 2) die("plan: vblock", 0);
+            blocks[id] = Block{alloc_mem(size, true), nullptr, size};
         } else if (k == "zero") {
             if (fscanf(plan, "%d", &zero_block) != 1) die("plan: zero", 0);
         } else if (k == "channel") {
@@ -87,8 +110,10 @@ int main(int argc, char** argv) {
     }
     fclose(plan);
     clock_gettime(CLOCK_MONOTONIC, &t1);
-    printf("memory: %zu blocks, %zu mappings, %llu MiB filled, %.1f s\n", blocks.size(), pieces.size(),
-           (unsigned long long)(filled >> 20), (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9);
+    printf("memory: %zu blocks, %zu mappings, %llu MiB filled, %llu MiB in video memory, %.1f s\n", blocks.size(),
+           pieces.size(), (unsigned long long)(filled >> 20), (unsigned long long)(vid_used >> 20),
+           (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9);
+    if (vid_used) chans[SETUP].classes = {AMPERE_DMA_COPY_B, 0, 0, 0, 0, 0, 0, 0};
 
     // One TSG + channel per guest channel, all on the one VA space, so each keeps its own GR context.
     NvHandle usermode = rm_alloc(g_subdevice, AMPERE_USERMODE_A, nullptr, "usermode");
@@ -108,6 +133,10 @@ int main(int argc, char** argv) {
         NvHandle chan = rm_alloc(tsg, AMPERE_CHANNEL_GPFIFO_A, &ch, "channel");
         for (NvU32 cls : c.classes)
             if (cls) rm_alloc(chan, cls, nullptr, "engine object");
+        if (getenv("PT_PREEMPT")) {  // PT_PREEMPT=1: GFXP/CILP (see bind_preemption)
+            NvU32 st = bind_preemption(chan);
+            printf("channel %d: preemption bind status 0x%x\n", idx, st);
+        }
         NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS sch{}; sch.bEnable = NV_TRUE;
         rm_control(tsg, NVA06C_CTRL_CMD_GPFIFO_SCHEDULE, &sch, "schedule");
         NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS tok{}; tok.workSubmitToken = ~0u;
@@ -115,6 +144,58 @@ int main(int argc, char** argv) {
         c.token = tok.workSubmitToken;
         *(volatile NvU32*)(c.cpu + SEM) = 0;
         printf("channel %d: gva 0x%llx token 0x%x\n", idx, (unsigned long long)c.gva, c.token);
+    }
+
+    // Copy engine on the setup channel: copies (dst gva, src gva, bytes), then a semaphore we wait for.
+    auto copy = [&](const std::vector<std::array<NvU64, 3>>& ops) {
+        if (ops.empty()) return;
+        Chan& c = chans.at(SETUP);
+        std::vector<NvU32> q;
+        auto m = [&](NvU32 sc, NvU32 mthd, std::initializer_list<NvU32> v) {
+            q.push_back(hdr(sc, mthd, (NvU32)v.size())); q.insert(q.end(), v);
+        };
+        if (!c.fence) m(4, 0, {AMPERE_DMA_COPY_B});
+        for (auto& [dst, src, n] : ops)
+            for (NvU64 o = 0; o < n; o += 1u << 30) {
+                NvU64 len = std::min<NvU64>(n - o, 1u << 30), s = src + o, d = dst + o;
+                m(4, NVC7B5_OFFSET_IN_UPPER, {(NvU32)(s >> 32), (NvU32)s, (NvU32)(d >> 32), (NvU32)d});
+                m(4, NVC7B5_LINE_LENGTH_IN, {(NvU32)len, 1});
+                m(4, NVC7B5_LAUNCH_DMA, {DRF_DEF(C7B5, _LAUNCH_DMA, _DATA_TRANSFER_TYPE, _NON_PIPELINED) |
+                    DRF_DEF(C7B5, _LAUNCH_DMA, _FLUSH_ENABLE, _TRUE) | DRF_DEF(C7B5, _LAUNCH_DMA, _SRC_MEMORY_LAYOUT, _PITCH) |
+                    DRF_DEF(C7B5, _LAUNCH_DMA, _DST_MEMORY_LAYOUT, _PITCH)});
+            }
+        NvU64 sa = c.gva + SEM;
+        m(0, NVC56F_SEM_ADDR_LO, {(NvU32)sa, (NvU32)(sa >> 32), ++c.fence, 0,
+            DRF_DEF(C56F, _SEM_EXECUTE, _OPERATION, _RELEASE) | DRF_DEF(C56F, _SEM_EXECUTE, _RELEASE_WFI, _EN) |
+            DRF_DEF(C56F, _SEM_EXECUTE, _PAYLOAD_SIZE, _32BIT)});
+        const NvU32 cap_words = (CH_SZ - PB) / 4;
+        if (q.size() > cap_words) die("copy batch larger than the pushbuffer", 0);
+        if (c.pbn + q.size() > cap_words) c.pbn = 0;
+        auto* pbw = (volatile NvU32*)(c.cpu + PB);
+        for (size_t i = 0; i < q.size(); i++) pbw[c.pbn + i] = q[i];
+        NvU64 pa = c.gva + PB + c.pbn * 4ull;
+        c.pbn += q.size();
+        auto* userd = (volatile AmpereAControlGPFifo*)(c.cpu + USERD);
+        ((volatile NvU64*)(c.cpu + RING))[c.gpput % ENTRIES] = pa | ((NvU64)q.size() << 42);
+        __sync_synchronize();
+        userd->GPPut = ++c.gpput % ENTRIES;
+        __sync_synchronize();
+        mmio[NVC361_NOTIFY_CHANNEL_PENDING / 4] = c.token;
+        timespec s0, s;
+        clock_gettime(CLOCK_MONOTONIC, &s0);
+        while (*(volatile NvU32*)(c.cpu + SEM) != c.fence) {
+            clock_gettime(CLOCK_MONOTONIC, &s);
+            if (s.tv_sec - s0.tv_sec > 20) die("copy engine timeout", 0);
+        }
+    };
+    if (vid_used) {  // upload every video memory block from its host copy
+        std::vector<std::array<NvU64, 3>> ops;
+        for (auto& [id, b] : blocks)
+            if (b.vid) ops.push_back({b.vid_gva, b.host_gva, b.size});
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        copy(ops);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        printf("video memory: %zu blocks uploaded in %.2f s\n", ops.size(), (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9);
     }
 
     // Readbacks (after the run, or after a timeout: host memory outlives a dead channel).
@@ -133,6 +214,8 @@ int main(int argc, char** argv) {
                     if (q.va <= at && at < q.va + q.size) { p = &q; break; }
                 if (!p) die("readback: address not mapped", 0);
                 NvU64 n = std::min<NvU64>(size - done, p->va + p->size - at);
+                const Block& rb = blocks.at(p->block);
+                if (rb.vid) copy({{rb.host_gva + p->off + (at - p->va), rb.vid_gva + p->off + (at - p->va), n}});
                 buf.resize(n);
                 memcpy(buf.data(), blocks.at(p->block).cpu + p->off + (at - p->va), n);
                 fwrite(buf.data(), 1, n, f);
@@ -170,11 +253,29 @@ int main(int argc, char** argv) {
     for (long rep = 0; rep < repeat; rep++, fseek(push, 0, SEEK_SET))
     while ((limit < 0 || ran < limit) && fread(hdr3, 4, 3, push) == 3) {
         int idx = (int)hdr3[0], k = (int)hdr3[1];
-        words.resize(hdr3[2] + 6);
-        if (fread(words.data(), 4, hdr3[2], push) != hdr3[2]) die("short push.bin", 0);
+        const NvU32 pre = gpu_cache ? 5 : 0, post = gpu_cache ? 10 : 0;
+        words.resize(pre + hdr3[2] + post + 6);
+        if (fread(words.data() + pre, 4, hdr3[2], push) != hdr3[2]) die("short push.bin", 0);
+        if (gpu_cache) {
+            NvU32* a = words.data();
+            a[0] = hdr(0, NVC56F_MEM_OP_A, 4); a[1] = 0; a[2] = 0; a[3] = 0;
+            a[4] = DRF_DEF(C56F, _MEM_OP_D, _OPERATION, _L2_SYSMEM_INVALIDATE);
+            NvU32* z = words.data() + pre + hdr3[2];
+            z[0] = hdr(0, NVC56F_MEM_OP_A, 4); z[1] = 0; z[2] = 0; z[3] = 0;
+            z[4] = DRF_DEF(C56F, _MEM_OP_D, _OPERATION, _L2_FLUSH_DIRTY);
+            z[5] = hdr(0, NVC56F_MEM_OP_A, 4); z[6] = 0; z[7] = 0;
+            z[8] = DRF_DEF(C56F, _MEM_OP_C, _MEMBAR_TYPE, _SYS_MEMBAR);
+            z[9] = DRF_DEF(C56F, _MEM_OP_D, _OPERATION, _MEMBAR);
+        }
+        hdr3[2] += pre + post;
         Chan& c = chans.at(idx);
-        for (auto [it, end] = deltas.equal_range(k); it != end; ++it)
-            memcpy(blocks.at(it->second.block).cpu + it->second.off, it->second.bytes.data(), it->second.bytes.size());
+        std::vector<std::array<NvU64, 3>> dops;
+        for (auto [it, end] = deltas.equal_range(k); it != end; ++it) {
+            const Block& db = blocks.at(it->second.block);
+            memcpy(db.cpu + it->second.off, it->second.bytes.data(), it->second.bytes.size());
+            if (db.vid) dops.push_back({db.vid_gva + it->second.off, db.host_gva + it->second.off, it->second.bytes.size()});
+        }
+        copy(dops);
         NvU64 sa = c.gva + SEM;
         NvU32* w = words.data() + hdr3[2];
         w[0] = hdr(0, NVC56F_SEM_ADDR_LO, 5); w[1] = (NvU32)sa; w[2] = (NvU32)(sa >> 32); w[3] = ++c.fence; w[4] = 0;
@@ -209,6 +310,8 @@ int main(int argc, char** argv) {
         clock_gettime(CLOCK_MONOTONIC, &s);
         double us = (s.tv_sec - s0.tv_sec) * 1e6 + (s.tv_nsec - s0.tv_nsec) / 1e3;
         busy += us;
+        if (slow_ms > 0 && us > slow_ms * 1000)  // PT_SLOW_MS=<ms>: list the slow entries
+            printf("slow: capture entry %d (channel %d): %.1f ms\n", k, idx, us / 1e3);
         if (us > worst) { worst = us; worst_k = k; }
         ran++;
     }

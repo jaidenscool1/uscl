@@ -677,13 +677,22 @@ def build(d):
         for line in open(os.path.join(d, "kinds.txt")):
             ka, ks, kw, kf = (int(x, 16) for x in line.split())
             k_ = kf if 0x8 <= kw <= 0xE else kw
-            if k_ not in (0, 7):  # pitch is the default; 7 = invalid
+            if k_ not in (0, 7) and (os.environ.get("PT_KINDS") != "depth" or 1 <= k_ <= 5):  # pitch is the default; 7 = invalid; PT_KINDS=depth: depth kinds only
                 kranges.append((ka, ks, k_))
     env_k = [tuple(int(x, 16) for x in r.split(":")) for r in os.environ.get("PT_KIND_RANGES", "").split(",") if r]
     kranges = sorted([r for r in kranges if not any(r[0] < ea + es and ea < r[0] + r[1] for ea, es, _ in env_k)] + env_k)
     kstarts = [r[0] for r in kranges]
     nkind = collections.Counter()
+    # PT_VIDMEM_RANGES=<va>:<size>[,...] (hex): those guest pages in video memory (no CPU map, start as zero;
+    # only for data the frame itself produces), to test what host-memory access costs a draw.
+    vranges = [tuple(int(x, 16) for x in r.split(":")) for r in os.environ.get("PT_VIDMEM_RANGES", "").split(",") if r]
+    for vi, (vva, vsz) in enumerate(vranges):
+        lines.append(f"vblock {1000 + vi} {vsz:x}")
     for va, size, b, o in pieces:
+        hit = next(((vi, vva) for vi, (vva, vsz) in enumerate(vranges) if vva <= va and va + size <= vva + vsz), None)
+        if hit:
+            lines.append(f"map {va:x} {size:x} {1000 + hit[0]} {va - hit[1]:x}")
+            continue
         near = kranges[max(0, bisect.bisect_right(kstarts, va) - 1):bisect.bisect_left(kstarts, va + size)]
         near = [r for r in near if r[0] + r[1] > va]
         cuts = sorted({va, va + size} | {x for ka, ks, _ in near for x in (ka, ka + ks) if va < x < va + size})
