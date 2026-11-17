@@ -16,6 +16,8 @@ These changes are included in this development branch. They are not a list of pu
 - Added Home-button quick access, console-filtered scrolling libraries and Nintendo's persistent settings-section sidebar.
 - Added persistent Xbox One game pins, extra pin pages and Pin/Unpin actions.
 - Fixed light-theme glyph contrast, hidden shortcut focus, selection clamping and directional access to dashboard tiles.
+- Smoothed tile resizing, PS4 function-area travel and title arrival, quick-menu slides and modern page entrances.
+- Added asynchronous game-backdrop crossfades that retain the previous image until the selected artwork is ready.
 - Kept opaque game artwork inside Switch 2 rounded cards on Home and in the library.
 
 ### Emulator launch screens

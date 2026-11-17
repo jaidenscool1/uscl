@@ -390,13 +390,12 @@ Item {
             }
         }
     }
-    Image {
+    ConsoleBackdrop {
         anchors.fill: parent
         visible: style.ps5 || style.one
         source: home.current ? home.current.pic || "" : ""
-        fillMode: Image.PreserveAspectCrop
+        animate: home.animate && home.visible
         opacity: .5
-        asynchronous: true
     }
     Rectangle {
         anchors.fill: parent
@@ -470,7 +469,7 @@ Item {
         height: 150
         Behavior on y {
             NumberAnimation {
-                duration: home.animate ? 240 : 0
+                duration: home.animate ? 270 : 0
                 easing.type: Easing.OutCubic
             }
         }
@@ -585,9 +584,12 @@ Item {
         height: home.nintendo ? 400 : style.ps5 ? 180 : 420
         clip: true
         opacity: style.ps4 && home.categoryFocus ? .5 : 1
+        Behavior on opacity {
+            NumberAnimation { duration: home.animate ? 270 : 0; easing.type: Easing.OutCubic }
+        }
         Behavior on y {
             NumberAnimation {
-                duration: home.animate ? 240 : 0
+                duration: home.animate ? 270 : 0
                 easing.type: Easing.OutCubic
             }
         }
@@ -625,6 +627,13 @@ Item {
                 border.width: selected && home.region === "software" ? (home.nintendo ? 5 : 4) : 0
                 border.color: style.ps4 ? "#cdd8ed" : style.accent
                 opacity: modelData.disabled ? .45 : 1
+                Behavior on width {
+                    NumberAnimation { duration: home.animate ? 150 : 0; easing.type: Easing.OutCubic }
+                }
+                Behavior on height {
+                    enabled: style.ps4
+                    NumberAnimation { duration: home.animate ? 150 : 0; easing.type: Easing.OutCubic }
+                }
                 Behavior on x {
                     NumberAnimation {
                         duration: home.animate ? 150 : 0
@@ -669,9 +678,10 @@ Item {
                 }
                 Text {
                     visible: style.ps4 && tile.selected && !home.categoryFocus
-                    y: 342
+                    y: parent.width
                     width: parent.width
-                    height: 70
+                    height: Math.max(0, parent.height - parent.width)
+                    clip: true
                     text: tile.modelData.key ? qsTr("Open") : tile.modelData.running ? qsTr("Resume") : qsTr(
                                                                                            "Start")
                     color: "white"
@@ -717,7 +727,19 @@ Item {
         y: home.nintendo ? 255 : style.ps4 ? 538 : 580
         width: home.width - x - 96
         height: style.ps5 ? 150 : 80
+        id: softwareTitle
+        objectName: "softwareTitle"
         text: home.current ? home.current.title : ""
+        onTextChanged: {
+            if (style.ps4 && home.animate && home.visible) titleArrival.restart();
+            else { titleArrival.stop(); opacity = 1; }
+        }
+        SequentialAnimation {
+            id: titleArrival
+            PropertyAction { target: softwareTitle; property: "opacity"; value: 0 }
+            PauseAnimation { duration: 100 }
+            NumberAnimation { target: softwareTitle; property: "opacity"; to: 1; duration: 100 }
+        }
         color: style.text
         font.pixelSize: style.ps5 ? 62 : style.ps4 ? 56 : 32
         font.weight: Font.Light
@@ -844,7 +866,8 @@ Item {
                 z: index === home.tileIndex ? 2 : 0
                 Behavior on scale {
                     NumberAnimation {
-                        duration: 120
+                        duration: home.animate ? 120 : 0
+                        easing.type: Easing.OutCubic
                     }
                 }
                 border.color: style.one ? "white" : "#555555"
@@ -1100,7 +1123,14 @@ Item {
     // Home button opens console-style quick access; Esc always closes it first.
     Rectangle {
         objectName: "consoleQuickMenu"
-        visible: home.guideOpen
+        id: quickMenu
+        property real reveal: home.guideOpen ? 1 : 0
+        visible: reveal > 0
+        enabled: home.guideOpen
+        opacity: reveal
+        Behavior on reveal {
+            NumberAnimation { duration: home.animate ? 250 : 0; easing.type: Easing.OutCubic }
+        }
         anchors.fill: parent
         color: "#99000000"
         z: 20
@@ -1109,8 +1139,8 @@ Item {
             onClicked: home.guideOpen = false
         }
         Rectangle {
-            x: style.ps5 ? 96 : 0
-            y: style.ps5 ? 910 : 0
+            x: style.ps5 ? 96 : -width * (1 - quickMenu.reveal)
+            y: style.ps5 ? 910 + 90 * (1 - quickMenu.reveal) : 0
             width: style.ps5 ? home.width - 192 : 620
             height: style.ps5 ? 140 : home.height
             radius: style.ps5 ? 12 : 0

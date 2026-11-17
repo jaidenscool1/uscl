@@ -197,7 +197,9 @@ Item {
     }
 
     ConsolePage {
+        id: modernPage
         anchors.fill: parent
+        transform: Translate { id: modernShift }
         visible: page.theme !== "ps3"
         controller: page
         theme: page.theme
@@ -206,7 +208,18 @@ Item {
 
     // ---- open / close: rows slide in from the right; from the crossbar the breadcrumb shrinks into place ----
     function open() {
-        enter.restart()
+        enter.stop()
+        modernEnter.stop()
+        if (theme === "ps3") enter.restart()
+        else {
+            page.opacity = 1
+            modernEnter.restart()
+        }
+    }
+    ParallelAnimation {
+        id: modernEnter
+        NumberAnimation { target: modernPage; property: "opacity"; from: 0; to: 1; duration: 180 }
+        NumberAnimation { target: modernShift; property: "y"; from: page.theme === "ps4" || page.theme === "ps5" ? 24 : 12; to: 0; duration: 200; easing.type: Easing.OutCubic }
     }
     ParallelAnimation {
         id: enter

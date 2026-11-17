@@ -41,6 +41,7 @@ qt_add_qml_module(uscl
         qml/Background.qml
         qml/ConsolePage.qml
         qml/ThemePalette.qml
+        qml/ConsoleBackdrop.qml
         qml/ConsoleHome.qml
         qml/ConsoleGlyph.qml
         qml/RoundedCoverMask.qml

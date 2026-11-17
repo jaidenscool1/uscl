@@ -11,6 +11,7 @@ Item {
         cats: [{name: "Games", items: []}, {name: "Settings", items: []}]
     }
     ConsoleHome { id: home; anchors.fill: parent; navigation: navigation; theme: "ps5"; onNavigate: function(button) { input(button) } }
+    ConsoleBackdrop { id: backdrop; width: 400; height: 240; visible: false }
     Page { id: page; anchors.fill: parent; visible: false }
     OptionsPanel { id: menu; anchors.fill: parent }
     Dialog { id: dialog; anchors.fill: parent }
@@ -37,6 +38,54 @@ Item {
             navigation.cats = [{id: "games", name: "Games", items: entries}, {id: "settings", name: "Settings", items: [{title: "Update USCL", action: function() { launches++ }}]}]
             navigation.cat = 0
             navigation.itemIndex = []
+        }
+        function test_interrupted_motion() {
+            home.animate = true; home.theme = "ps4"; home.reset()
+            for (var i = 0; i < 10; ++i) { home.input("right"); wait(12) }
+            home.input("left")
+            var tile = findChild(home, "homeTile9")
+            tryCompare(tile, "width", 342)
+            tryCompare(tile, "height", 412)
+            tryCompare(findChild(home, "softwareTitle"), "opacity", 1)
+            home.input("home"); wait(40); home.input("back"); wait(40); home.input("home")
+            var quick = findChild(home, "consoleQuickMenu")
+            tryCompare(quick, "opacity", 1)
+            verify(quick.enabled)
+            home.input("back")
+            verify(!quick.enabled) // Closing pixels cannot consume the next click.
+            tryCompare(quick, "visible", false)
+        }
+        function test_page_entrance_interrupted() {
+            page.theme = "ps5"; page.visible = true; page.rows = [{title: "Settings"}]
+            page.open(); wait(35); page.open(); wait(35); page.open()
+            compare(page.opacity, 1)
+            wait(220)
+            page.theme = "ps3"; page.open(); wait(30)
+            page.theme = "switch2"; page.open()
+            compare(page.opacity, 1)
+            wait(220)
+            compare(page.current, 0)
+        }
+        function test_motion_disabled() {
+            home.animate = false; home.theme = "ps5"; home.reset()
+            home.input("right")
+            compare(findChild(home, "homeTile1").width, 150)
+            home.input("home")
+            compare(findChild(home, "consoleQuickMenu").opacity, 1)
+            home.input("back")
+            compare(findChild(home, "consoleQuickMenu").visible, false)
+            home.animate = true
+        }
+        function test_backdrop_latest_request() {
+            backdrop.animate = false
+            backdrop.source = "qrc:/qt/qml/Uscl/xmb/icons/cat_ps3.png"
+            backdrop.source = "qrc:/qt/qml/Uscl/xmb/icons/cat_ps4.png"
+            tryVerify(function() { return backdrop.front >= 0 })
+            var image = findChild(backdrop, backdrop.front === 0 ? "backdropFirst" : "backdropSecond")
+            tryCompare(image, "status", Image.Ready)
+            verify(image.source.toString().endsWith("/cat_ps4.png"))
+            backdrop.source = ""
+            compare(backdrop.front, -1)
         }
         function test_themes_data() {
             return ["ps4", "ps5", "x360classic", "x360", "xboxone", "switch", "switch2"].map(function(t) { return {tag: t, theme: t} })

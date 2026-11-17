@@ -152,3 +152,13 @@ Every theme exposes Settings → USCL Changelog. The app bundles the root `CHANG
 Markdown locally and supports controller and mouse scrolling. Development changes remain under Unreleased;
 the dialog heading separately shows the installed USCL version. The full-app smoke suite opens, scrolls and
 closes this menu entry in all eight themes.
+
+## Motion refinement
+
+PS4 shelf movement and tile resizing share a 150 ms ease-out, with a 100 ms title delay followed by a
+100 ms fade. Function-area travel uses 270 ms; quick access opens and closes over 250 ms and can reverse
+while moving. These timings follow local PS4 reference measurements; other consoles use conservative
+approximations rather than claimed frame-exact timing. Modern pages use a brief fade and vertical entrance.
+Game backdrops decode asynchronously before crossfading, and stale image completions cannot replace the
+current selection. Closing quick menus stop accepting mouse input immediately. The interaction suite
+checks rapid navigation, interrupted menu transitions, disabled home motion and latest-request artwork.
