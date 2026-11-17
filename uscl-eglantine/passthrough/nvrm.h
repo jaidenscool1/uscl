@@ -121,13 +121,14 @@ static void* map_cpu(NvHandle parent, NvHandle mem, NvU64 size, NvU32 flags) {
 
 // GPU mapping of [offset, offset + size) of mem; at va with 4 KiB pages when va != 0, else where RM chooses.
 // kind >= 0 overrides the PTE kind (e.g. 0x6 GENERIC_MEMORY instead of the allocation's own).
-static NvU64 map_gpu(NvHandle mem, NvU64 size, NvU64 va = 0, NvU64 offset = 0, int kind = -1) {
+static NvU64 map_gpu(NvHandle mem, NvU64 size, NvU64 va = 0, NvU64 offset = 0, int kind = -1, bool read_only = false) {
     NVOS46_PARAMETERS p{};
     p.hClient = g_root; p.hDevice = g_device; p.hDma = g_virtmem; p.hMemory = mem; p.offset = offset; p.length = size;
     if (va) {
         p.flags = DRF_DEF(OS46, _FLAGS, _DMA_OFFSET_FIXED, _TRUE) | DRF_DEF(OS46, _FLAGS, _PAGE_SIZE, _4KB);
         p.dmaOffset = va;
     }
+    if (read_only) p.flags |= DRF_DEF(OS46, _FLAGS, _ACCESS, _READ_ONLY);
     if (kind >= 0) {
         p.flags |= DRF_DEF(OS46, _FLAGS, _PAGE_KIND_OVERRIDE, _YES);
         p.kindOverride = (NvU32)kind;

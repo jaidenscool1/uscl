@@ -408,6 +408,9 @@ def build(d):
 
     # The frame, rewritten for the host.
     split = {int(x) for x in os.environ.get("PT_SPLIT", "").split(",") if x}
+    skip = {int(x) for x in os.environ.get("PT_SKIP", "").split(",") if x}
+    invalidate = bool(os.environ.get("PT_INVALIDATE"))
+    drop_re = re.compile(os.environ["PT_DROP"]) if os.environ.get("PT_DROP") else None
     # PT_MME=trace: compute macro calls become the methods Eglantine's MME emitted for them (mme.txt), so
     # the host MME does not run compute macros (Eglantine's output is what the game ran).
     traced = collections.defaultdict(collections.deque)  # entry -> deque of (start, [(method, value)])
@@ -529,6 +532,9 @@ def build(d):
                         stats["compute macro calls replaced"] += 1
                 if substitute:
                     continue
+            if drop_re and drop_re.fullmatch(n):  # bisecting: PT_DROP=<regex of method names>
+                stats[f"PT_DROP {n}"] += 1
+                continue
             if NEVER.fullmatch(n):
                 stats[f"drop {n}"] += 1
                 continue
@@ -580,6 +586,10 @@ def build(d):
                 entries.append((chans.index(ch), k * 1000 + n, encode(out[i:j])))
                 print(f"split {k}.{n}: {(names_of[(ch, out[i][0])](out[i][1]) if out[i][1] >= 0x40 else 'host')} ...")
             continue
+        if k in skip:  # bisecting: leave the entry out (its state changes too)
+            continue
+        if invalidate:  # PT_INVALIDATE=1: shader instruction/data/constant caches flushed + invalidated first
+            out = [(sc_, 0x21C // 4, 0x1017) for sc_, e_ in enumerate(bound[ch]) if e_ in (0xB197, 0xB1C0)] + out
         entries.append((chans.index(ch), k, encode(out)))
 
     for ch in chans:
@@ -589,6 +599,18 @@ def build(d):
     # under every other mapped page (so no access faults; writes there alias, reads of untouched pages are 0).
     chunks = data_chunks(d, os.path.join(out_dir, "chunks.txt"))
     backed = set(chunks)
+    # deltas.bin (capture probe NoteCpuData): guest bytes the back read during entry k (uniform bank pages
+    # the guest CPU rewrote mid-frame), applied by pt_replay right before that entry. PT_DELTAS=0: off.
+    deltas = []
+    if os.path.exists(os.path.join(d, "deltas.bin")) and os.environ.get("PT_DELTAS") != "0":
+        raw_d = open(os.path.join(d, "deltas.bin"), "rb").read()
+        o = 0
+        while o + 16 <= len(raw_d):
+            dk, da, dn = struct.unpack_from("<IQI", raw_d, o)
+            deltas.append((dk, da, raw_d[o + 16:o + 16 + dn]))
+            o += 16 + dn
+        for _, da, data in deltas:
+            backed.update(range(da // CHUNK, (da + len(data) - 1) // CHUNK + 1))
     import bisect
     starts = [m[0] for m in maps]
     for addr, size in written:
@@ -599,6 +621,16 @@ def build(d):
             if lo < hi and not sparse:
                 backed.update(range((dev + lo - gpu) // CHUNK, (dev + hi - gpu - 1) // CHUNK + 1))
             i += 1
+    # Whole mappings: a buffer with any data or write gets all of its chunks. Its other pages would alias the
+    # shared zero block, which reads back whatever stray writes landed there (MKW: a light-list tail read
+    # 0x7fff0000 as a light count instead of 0, and the pixel shader looped for seconds: CTX SWITCH TIMEOUT).
+    whole = set()
+    for gpu, dev, msize, _, sparse in maps:
+        cs = range(dev // CHUNK, (dev + msize - 1) // CHUNK + 1)
+        if not sparse and any(c in backed for c in cs):
+            whole.update(cs)
+    print(f"memory: {len(whole - backed)} more chunks to back whole mappings")
+    backed |= whole
     slot = {c: i for i, c in enumerate(sorted(backed))}
     per_block = BLOCK_SIZE // CHUNK
     nblocks = -(-len(slot) // per_block)
@@ -608,6 +640,7 @@ def build(d):
     for b in range(nblocks):
         lines.append(f"block {b} {min(BLOCK_SIZE, (len(slot) - b * per_block) * CHUNK):x}")
     lines.append(f"block {ZERO} {ZERO_SIZE:x}")
+    lines.append(f"zero {ZERO}")  # pt_replay PT_ZERO_RO=1 maps it read-only (stray writes fault, reads stay 0)
     lines.append(f"block {LMB} {lm_size:x}")
     for c, parts in sorted(chunks.items()):
         b, o = divmod(slot[c], per_block)
@@ -735,6 +768,15 @@ def build(d):
                 h = h & ~(((1 << (hi - lo + 1)) - 1) << lo) | (v << lo)
                 raw[i * 32:i * 32 + 32] = h.to_bytes(32, "little")
             print(f"PT_TIC_COPY/SET: pool {pool:x}: {len(tic_copy)} copies, {len(tic_set)} fields")
+    # PT_PATCH=<va>:<hex bytes>[,...]: overwrite guest memory in the replay (bisecting, e.g. EXIT at a shader's start).
+    for p_ in os.environ.get("PT_PATCH", "").split(","):
+        if p_:
+            pva, hexb = p_.split(":")
+            pva, data = int(pva, 16), bytes.fromhex(hexb)
+            base = pva & ~31
+            raw = pool_raw(base, -(-(pva + len(data) - base) // 32))
+            raw[pva - base:pva - base + len(data)] = data
+            print(f"PT_PATCH: {len(data)} bytes at {pva:x}")
     # PT_NODEP: QMDs launched from memory (NVN's barrier ring) wait for no dependence and signal none.
     patched = 0
     for qva in sorted(launched_qmds):
@@ -763,6 +805,17 @@ def build(d):
     for idx, ch in enumerate(chans):
         lines.append(f"channel {idx} " + " ".join(f"{ENGINES[e][1] if e in ENGINES else 0:x}" for e in states[ch]["engines"]))
     open(os.path.join(out_dir, "plan.txt"), "w").write("\n".join(lines) + "\n")
+    with open(os.path.join(out_dir, "deltas.bin"), "wb") as f:  # u32 push entry key, u32 block, u64 offset, u32 size, bytes
+        n_d = 0
+        for dk, da, data in deltas:
+            key = dk * 1000 if dk in split else dk
+            for c in range(da // CHUNK, (da + len(data) - 1) // CHUNK + 1):  # split at chunk edges
+                lo, hi = max(da, c * CHUNK), min(da + len(data), (c + 1) * CHUNK)
+                b, so = divmod(slot[c], per_block)
+                f.write(struct.pack("<IIQI", key & 0xFFFFFFFF, b, so * CHUNK + lo % CHUNK, hi - lo) + data[lo - da:hi - da])
+                n_d += hi - lo
+    if deltas:
+        print(f"deltas: {len(deltas)} records, {n_d >> 10} KiB of mid-frame guest data")
     with open(os.path.join(out_dir, "targets.txt"), "w") as f:
         f.write("# address width height format memory first_entry last_entry (color targets drawn to)\n")
         for addr, (w, h, fmt, mem, k0, k1) in sorted(targets.items(), key=lambda t: t[1][5]):
@@ -831,7 +884,7 @@ def qmds(d, entry=None, host=None):
             print(f"  host      w{i:2}: " + " ".join(f"{x:08x}" for x in hw[i:i + 8]))
 
 
-BPP = {0xD5: 4, 0xD6: 4, 0xCF: 4, 0xD0: 4, 0xD1: 4, 0xE0: 4, 0xCA: 8, 0xC6: 8}
+BPP = {0xD5: 4, 0xD6: 4, 0xD7: 4, 0xCF: 4, 0xD0: 4, 0xD1: 4, 0xE0: 4, 0xCA: 8, 0xC6: 8, 0xF2: 2}
 
 
 def size_of(w, h, fmt, mem):
@@ -859,6 +912,11 @@ def image(path, w, h, fmt, mem, out):
         px = raw[addr].reshape(h, w, bpp)
     if fmt in (0xD5, 0xD6):
         rgb = px[..., :3]
+    elif fmt == 0xD7:  # signed normalized: 0 shows as mid grey
+        rgb = (px[..., :3].view(np.int8).astype(np.int16) + 128).astype(np.uint8)
+    elif fmt == 0xF2:  # one float16 channel, as grey
+        v = np.clip(px.copy().view(np.float16)[..., 0].astype(np.float32), 0, 1)
+        rgb = np.repeat((v ** (1 / 2.2) * 255).astype(np.uint8)[..., None], 3, -1)
     elif fmt in (0xCF, 0xD0):
         rgb = px[..., 2::-1]
     else:

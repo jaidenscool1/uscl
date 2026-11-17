@@ -31,6 +31,10 @@ int main(int argc, char** argv) {
 
     // PT_KIND=<hex>: PTE kind for guest memory (default: the allocation's, pitch).
     const int guest_kind = getenv("PT_KIND") ? (int)strtol(getenv("PT_KIND"), nullptr, 16) : -1;
+    // PT_ZERO_RO=1: the shared zero block (under every unbacked page) read-only: a stray write faults
+    // (Xid 31 names its address) instead of showing up in every other unbacked page.
+    const bool zero_ro = getenv("PT_ZERO_RO") != nullptr;
+    int zero_block = -1;
     std::map<int, Block> blocks;
     std::vector<Piece> pieces;
     std::map<int, Chan> chans;
@@ -68,8 +72,10 @@ int main(int argc, char** argv) {
             p.va = va; p.size = size; p.off = off;
             Block& b = blocks.at(p.block);
             if (p.off + p.size > b.size || p.va + p.size > (1ull << 40)) die("plan: map out of range", 0);
-            map_gpu(b.h, p.size, p.va, p.off, kind);
+            map_gpu(b.h, p.size, p.va, p.off, kind, zero_ro && p.block == zero_block);
             pieces.push_back(p);
+        } else if (k == "zero") {
+            if (fscanf(plan, "%d", &zero_block) != 1) die("plan: zero", 0);
         } else if (k == "channel") {
             int idx; unsigned c[8];
             if (fscanf(plan, "%d %x %x %x %x %x %x %x %x", &idx, &c[0], &c[1], &c[2], &c[3], &c[4], &c[5], &c[6], &c[7]) != 9)
@@ -137,6 +143,20 @@ int main(int argc, char** argv) {
         }
     };
 
+    // deltas.bin (ptcap build): guest bytes written into host memory right before the entry that read them.
+    struct Delta { int block; NvU64 off; std::vector<NvU8> bytes; };
+    std::multimap<int, Delta> deltas;
+    if (FILE* df = fopen((dir + "/deltas.bin").c_str(), "rb")) {
+        NvU32 dh[2]; NvU64 doff; NvU32 dn;
+        while (fread(dh, 4, 2, df) == 2 && fread(&doff, 8, 1, df) == 1 && fread(&dn, 4, 1, df) == 1) {
+            Delta dl{(int)dh[1], doff, std::vector<NvU8>(dn)};
+            if (fread(dl.bytes.data(), 1, dn, df) != dn) die("short deltas.bin", 0);
+            if (dl.off + dn > blocks.at(dl.block).size) die("delta past its block", 0);
+            deltas.emplace((int)dh[0], std::move(dl));
+        }
+        fclose(df);
+        printf("deltas: %zu records\n", deltas.size());
+    }
     FILE* push = fopen((dir + "/push.bin").c_str(), "rb");
     if (!push) die("open push.bin", 0);
     std::vector<NvU32> words;
@@ -144,11 +164,17 @@ int main(int argc, char** argv) {
     double busy = 0, worst = 0;
     long worst_k = 0;
     NvU32 hdr3[3];
+    // PT_REPEAT=<n>: run the whole plan n times back to back (memory kept), so buffers a frame reads from the
+    // previous one (exposure, history) hold replayed data instead of the capture's zeros.
+    const long repeat = getenv("PT_REPEAT") ? strtol(getenv("PT_REPEAT"), nullptr, 0) : 1;
+    for (long rep = 0; rep < repeat; rep++, fseek(push, 0, SEEK_SET))
     while ((limit < 0 || ran < limit) && fread(hdr3, 4, 3, push) == 3) {
         int idx = (int)hdr3[0], k = (int)hdr3[1];
         words.resize(hdr3[2] + 6);
         if (fread(words.data(), 4, hdr3[2], push) != hdr3[2]) die("short push.bin", 0);
         Chan& c = chans.at(idx);
+        for (auto [it, end] = deltas.equal_range(k); it != end; ++it)
+            memcpy(blocks.at(it->second.block).cpu + it->second.off, it->second.bytes.data(), it->second.bytes.size());
         NvU64 sa = c.gva + SEM;
         NvU32* w = words.data() + hdr3[2];
         w[0] = hdr(0, NVC56F_SEM_ADDR_LO, 5); w[1] = (NvU32)sa; w[2] = (NvU32)(sa >> 32); w[3] = ++c.fence; w[4] = 0;

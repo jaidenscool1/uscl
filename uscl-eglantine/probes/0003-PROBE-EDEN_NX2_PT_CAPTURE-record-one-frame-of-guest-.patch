@@ -1,4 +1,4 @@
-From 9cc99e22dbc785f11f30bcc6ca6b6e87621f9628 Mon Sep 17 00:00:00 2001
+From 9bdc9afa524b2281250bc765533992b4a5e5096e Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 14:42:31 -0700
 Subject: [PATCH] PROBE: EDEN_NX2_PT_CAPTURE, record one frame of guest GPU
@@ -15,20 +15,28 @@ texture headers only from pages of the matching depth kind. Each channel's compu
 addresses are the image its macros run (the compute one once the channel uploaded through the compute
 class, else the 3D one), not always the 3D image.
 
+Also traces 3D macros on the split front (lower-case c/e lines in mme.txt; complete with
+EDEN_NX2_PERF_OFF=macro_batch,dma_forward and EDEN_NX2_INDIRECT_RECORDS=0), and records the guest bytes the
+back reads per entry from native uniform banks whose pages changed (deltas.bin; every bind with
+EDEN_NX2_BANK_REUPLOAD=3). While recording, each entry drains the split first, so what the back notes
+belongs to the entry it executes.
+
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- src/core/hle/service/nx2_gsv.h            |  10 +
- src/video_core/CMakeLists.txt             |   2 +
- src/video_core/dma_pusher.cpp             |   8 +
- src/video_core/dma_pusher.h               |   2 +
- src/video_core/engines/kepler_compute.cpp |  52 ++-
- src/video_core/engines/kepler_compute.h   |   8 +
- src/video_core/engines/puller.h           |   2 +
- src/video_core/memory_manager.cpp         |   4 +
- src/video_core/memory_manager.h           |   2 +
- src/video_core/nx2_pt_capture.cpp         | 380 ++++++++++++++++++++++
- src/video_core/nx2_pt_capture.h           |  30 ++
- 11 files changed, 497 insertions(+), 3 deletions(-)
+ src/core/hle/service/nx2_gsv.h             |  10 +
+ src/video_core/CMakeLists.txt              |   2 +
+ src/video_core/buffer_cache/buffer_cache.h |   2 +
+ src/video_core/dma_pusher.cpp              |   8 +
+ src/video_core/dma_pusher.h                |   2 +
+ src/video_core/engines/kepler_compute.cpp  |  52 ++-
+ src/video_core/engines/kepler_compute.h    |   8 +
+ src/video_core/engines/maxwell_3d.cpp      |  11 +
+ src/video_core/engines/puller.h            |   2 +
+ src/video_core/memory_manager.cpp          |   4 +
+ src/video_core/memory_manager.h            |   2 +
+ src/video_core/nx2_pt_capture.cpp          | 410 +++++++++++++++++++++
+ src/video_core/nx2_pt_capture.h            |  34 ++
+ 13 files changed, 544 insertions(+), 3 deletions(-)
  create mode 100644 src/video_core/nx2_pt_capture.cpp
  create mode 100644 src/video_core/nx2_pt_capture.h
 
@@ -101,6 +109,26 @@ index 1668ae51b..da76171f4 100644
      dma_pusher.h
      engines/sw_blitter/blitter.cpp
      engines/sw_blitter/blitter.h
+diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_cache/buffer_cache.h
+index bddc7b7f5..44441d828 100644
+--- a/src/video_core/buffer_cache/buffer_cache.h
++++ b/src/video_core/buffer_cache/buffer_cache.h
+@@ -24,6 +24,7 @@
+ #include "video_core/buffer_cache/buffer_cache_base.h"
+ #include "video_core/buffer_cache/storage_buffer_size.h"
+ #include "video_core/buffer_cache/uniform_stream_reuse.h"
++#include "video_core/nx2_pt_capture.h"
+ #include "video_core/gpu_split.h"
+ #include "video_core/guest_memory.h"
+ #include "video_core/host1x/gpu_device_memory_manager.h"
+@@ -1779,6 +1780,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32
+                             }
+                         }
+                         std::memcpy(shadow_dst, ptr, chunk_size);
++                        Tegra::PtCapture::NoteCpuData(cur_addr, ptr, chunk_size);
+                         shadow->initialized_mask |= page_bit;
+                         if (!already_cpu_modified) {
+                             memory_tracker.MarkRegionAsCpuModified(cur_addr, chunk_size);
 diff --git a/src/video_core/dma_pusher.cpp b/src/video_core/dma_pusher.cpp
 index 8f7571116..c4f1fdad2 100644
 --- a/src/video_core/dma_pusher.cpp
@@ -267,6 +295,42 @@ index 5e438a477..6508f3357 100644
      /// Whether this method may write guest memory: dispatches, uploads and reports. Plain native
      /// state does not.
      [[nodiscard]] bool MayWriteMemory(u32 method) const {
+diff --git a/src/video_core/engines/maxwell_3d.cpp b/src/video_core/engines/maxwell_3d.cpp
+index 4d5f92089..b1657ba31 100644
+--- a/src/video_core/engines/maxwell_3d.cpp
++++ b/src/video_core/engines/maxwell_3d.cpp
+@@ -30,6 +30,7 @@
+ #include "video_core/nx2.h"
+ #include "video_core/nx2_perf.h"
+ #include "video_core/nx2_profile.h"
++#include "video_core/nx2_pt_capture.h"
+ #include "video_core/rasterizer_interface.h"
+ #include "video_core/textures/texture.h"
+ #include "video_core/macro_dma_forward.h"
+@@ -1898,6 +1899,13 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
+         return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 0)) : ~0U;
+     }();
+     static u32 traced_calls{};
++    // PROBE (EDEN_NX2_PT_CAPTURE): 3D macro trace in mme.txt, lower case ('c' call, 'e' emitted write).
++    // Complete only with EDEN_NX2_PERF_OFF=macro_batch,dma_forward and EDEN_NX2_INDIRECT_RECORDS=0.
++    const bool pt_trace = Tegra::PtCapture::Recording();
++    if (pt_trace) [[unlikely]] {
++        Tegra::PtCapture::NoteMme('c', start,
++                                  static_cast<u32>(borrowed.empty() ? fs.parameters.size() : borrowed.size()));
++    }
+     const bool trace = trace_macro != ~0U && ((method - MacroRegistersStart) >> 1) == trace_macro &&
+                        traced_calls < 32;
+     std::string trace_line;
+@@ -2078,6 +2086,9 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
+             return fs.regs[address];
+         };
+         const auto front_emit = [&](u32 address, u32 value) {
++            if (pt_trace) [[unlikely]] {
++                Tegra::PtCapture::NoteMme('e', address, value);
++            }
+             if (trace) [[unlikely]] {
+                 trace_line += fmt::format(" {:#x}={:#x}", address, value);
+             }
 diff --git a/src/video_core/engines/puller.h b/src/video_core/engines/puller.h
 index 11fc4f923..84942606e 100644
 --- a/src/video_core/engines/puller.h
@@ -331,10 +395,10 @@ index 9e208af29..9559603af 100644
                             u64 page_bits_ = 12);
 diff --git a/src/video_core/nx2_pt_capture.cpp b/src/video_core/nx2_pt_capture.cpp
 new file mode 100644
-index 000000000..3d07e0ff1
+index 000000000..a1e0f9483
 --- /dev/null
 +++ b/src/video_core/nx2_pt_capture.cpp
-@@ -0,0 +1,380 @@
+@@ -0,0 +1,410 @@
 +// SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
@@ -349,6 +413,8 @@ index 000000000..3d07e0ff1
 +//   qmds.bin        inline QMDs the compute engine wrote: u32 entry, u64 gpu address, u32 words[64]
 +//   mme.txt         compute macro trace: "<entry> C <start> <parameter count>", "R <reg> <value>",
 +//                   "E <method> <value>" (hex)
++//   deltas.bin      guest bytes the back read per entry (NoteCpuData): u32 entry, u64 device address,
++//                   u32 size, bytes
 +//   done.txt        written when recording stops (first/last present, entry count)
 +
 +#include <algorithm>
@@ -396,6 +462,7 @@ index 000000000..3d07e0ff1
 +    std::FILE* stream = nullptr;
 +    std::FILE* qmds = nullptr;
 +    std::FILE* mme = nullptr;
++    std::FILE* deltas = nullptr;
 +    std::set<s32> channels_seen;
 +    u64 entries = 0;
 +};
@@ -591,6 +658,20 @@ index 000000000..3d07e0ff1
 +    }
 +}
 +
++void NoteCpuData(u64 device_addr, const u8* data, u32 size) {
++    State& s = Get();
++    if (s.phase.load(std::memory_order_relaxed) != Phase::Recording) {
++        return;
++    }
++    std::scoped_lock lk{s.mutex};
++    if (s.deltas) {
++        Put(s.deltas, static_cast<u32>(s.entries - 1));
++        Put(s.deltas, device_addr);
++        Put(s.deltas, size);
++        std::fwrite(data, 1, size, s.deltas);
++    }
++}
++
 +void NoteInlineQmd(u64 gpu_addr, const u32* words) {
 +    State& s = Get();
 +    if (s.phase.load(std::memory_order_relaxed) != Phase::Recording) {
@@ -621,6 +702,11 @@ index 000000000..3d07e0ff1
 +    if (phase != Phase::Armed && phase != Phase::Recording && phase != Phase::Stopping) {
 +        return;
 +    }
++    if (phase == Phase::Recording) {
++        // The back finishes the previous entries first: what it notes (NoteCpuData, inline QMDs)
++        // belongs to the entry it executes, which is then s.entries - 1.
++        VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::ListFlush);
++    }
 +    std::scoped_lock lk{s.mutex};
 +    if (s.phase == Phase::Stopping) {
 +        // Memory again at the end: what the guest CPU wrote during the frame (QMD and uniform rings).
@@ -632,6 +718,10 @@ index 000000000..3d07e0ff1
 +        if (s.qmds) {
 +            std::fclose(s.qmds);
 +            s.qmds = nullptr;
++        }
++        if (s.deltas) {
++            std::fclose(s.deltas);
++            s.deltas = nullptr;
 +        }
 +        if (s.mme) {
 +            std::fclose(s.mme);
@@ -660,6 +750,10 @@ index 000000000..3d07e0ff1
 +        }
 +        std::setvbuf(s.stream, nullptr, _IOFBF, 4 << 20);
 +        s.qmds = std::fopen((s.dir / "qmds.bin").string().c_str(), "wb");
++        s.deltas = std::fopen((s.dir / "deltas.bin").string().c_str(), "wb");
++        if (s.deltas) {
++            std::setvbuf(s.deltas, nullptr, _IOFBF, 4 << 20);
++        }
 +        s.phase = Phase::Recording;
 +    }
 +    const s32 channel = channel_state.bind_id;
@@ -717,10 +811,10 @@ index 000000000..3d07e0ff1
 +} // namespace Tegra
 diff --git a/src/video_core/nx2_pt_capture.h b/src/video_core/nx2_pt_capture.h
 new file mode 100644
-index 000000000..9b0c4d27f
+index 000000000..7b7f7fa3e
 --- /dev/null
 +++ b/src/video_core/nx2_pt_capture.h
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,34 @@
 +// SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
@@ -749,6 +843,10 @@ index 000000000..9b0c4d27f
 +/// 'E' emitted method.
 +bool Recording();
 +void NoteMme(char kind, u32 a, u32 v);
++/// Guest bytes the GPU back read for the entry being executed (uniform bank pages whose contents
++/// changed), while recording: deltas.bin, so the replay sees what the guest CPU wrote mid-frame.
++/// Recording drains the split at each entry so the back's entry is the front's.
++void NoteCpuData(u64 device_addr, const u8* data, u32 size);
 +
 +} // namespace Tegra::PtCapture
 -- 

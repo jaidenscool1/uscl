@@ -12,7 +12,7 @@ Host: driver 615.78.08 (open kernel module), Arch Linux.
 | Gate 1 (driver access) | **Pass** on hardware |
 | Gate 2 (method compatibility) | **Pass (real data)**: every 3D/compute/copy method in a captured MKW frame is a named Ampere method, plus three private 3D methods (0xF74/0xF7C/0xF80) that ADA_A accepts; only host-class changes needed (Tegra syncpoints 0x70/0x74 dropped) |
 | Gate 3 (shader compatibility) | **Pass (decode level)**; guest compute SASS has started to **execute** on the RTX 4060 (Phase 1), no per-instruction failure seen yet |
-| Phase 1 (capture + replay one frame) | **Whole frame replays** (third pass): all 1216 entries of capture `mkw10` (3 channels, 2 presents) run on the RTX 4060 with no Xid, ~205 ms of GPU wait; the output target is a recognisable MKW course image (road, bridge, buildings) but hazy and without karts/HUD. Not yet compared pixel-for-pixel: Eglantine's end dump has no copy of the GPU-only targets (see "Third pass") |
+| Phase 1 (capture + replay one frame) | **Whole frame replays** (third pass): all 1216 entries of capture `mkw10` (3 channels, 2 presents) run on the RTX 4060 with no Xid, ~205 ms of GPU wait; the output target is a recognisable MKW course image (road, bridge, buildings) but hazy and without karts/HUD. Not yet compared pixel-for-pixel: Eglantine's end dump has no copy of the GPU-only targets (see "Third pass"). Fourth pass: that frame was the pre-race flyover (no karts/HUD is right); racing frames (capture `mkw13`, ~7700 entries, reference screenshot) replay to entry ~4980 of 7757, then a pixel shader's light loop runs away (Xid 109) |
 | New: texture formats | **Open, needs work**: 28% of MKW's texture headers are ASTC (8x8, 6x6, 4x4, 5x5); the RTX 4060 has no ASTC sampling (`textureCompressionASTC_LDR` false), so passthrough needs ASTC transcoding + header repointing |
 | Gates 4-6 | not started (Phase 1 uses pinned host memory at the guest's own VAs, pitch kind only: first evidence for gate 4) |
 
@@ -85,7 +85,7 @@ Measured:
 
 ## Phase 1: capture and replay one MKW frame (2026-11-16, in progress)
 
-### Capture: `probes/0003` (`EDEN_NX2_PT_CAPTURE=<dir>`, fork branch `uscl-ptcap`, commit 9cc99e22d)
+### Capture: `probes/0003` (`EDEN_NX2_PT_CAPTURE=<dir>`, fork branch `uscl-ptcap`, commit 9bdc9afa5)
 Applies with `git am` on 0001-0013 (verified: same tree as the branch). Touch `<dir>/capture.now` in a race;
 recording starts at the next present and covers two presents. Writes (layouts in `nx2_pt_capture.cpp`):
 `maps.txt` + `dev-*.bin` (GPU VA map and device memory at the start, after flushing every GPU-dirty mapping
@@ -98,8 +98,11 @@ compute, MME data RAM, 3D cbuf bindings), `stream.bin` (every entry as executed,
 guest asked for since boot, `gpu size kind fallback`, from nx2:gpu 212/216; 211 maps and 213 unmaps forget a
 range). Run with `bench/runs.py` + a watcher that
 touches the file 20 s into the race; `WATCH_STALL_S=300` (the dump stalls the GPU front ~8 s per dump).
-A capture is ~48 GB (24 GB per dump; 3.9 GB of it nonzero). Current capture: `~/.local/share/uscl/ptcap/mkw10`
-(third pass; mkw8 and mkw9 deleted: mkw8 had no kinds, mkw9 the wrong compute MME image on channels 2/3).
+A capture is ~48 GB (24 GB per dump; 3.9 GB of it nonzero). Current capture: `~/.local/share/uscl/ptcap/mkw13`
+(fourth pass, a racing frame: touched 60 s after the menu screenshot, `BENCH_FRAMES=6000`; `ref-end.png` is the
+debug-server screenshot taken when the end dump starts, i.e. the replayed frame). Its run used
+`EDEN_NX2_BANK_REUPLOAD=3 EDEN_NX2_PERF_OFF=macro_batch,dma_forward EDEN_NX2_INDIRECT_RECORDS=0` so the 3D macro
+trace and `deltas.bin` are complete. Older captures deleted (mkw8-mkw12).
 Game path for `runs.py`: `USCL_GAME=".../GAME_DUMPS/Switch 2/Mario Kart World NS2/Mario Kart World/MKW [ROM]/base/exefs/main"`.
 
 ### Tools: `uscl-eglantine/passthrough/ptcap.py` (+ `pt_replay`)
@@ -113,6 +116,10 @@ Game path for `runs.py`: `USCL_GAME=".../GAME_DUMPS/Switch 2/Mario Kart World NS
   `PT_KIND_RANGES=<va>:<size>:<kind>`, `PT_DRAM_CHECK` are replay patches/checks explained below; header and
   sampler pool patches now compose (one copy per pool; before, `PT_ASTC=dummy` silently undid `PT_TIC_COPY`).
   `pt_replay` takes `PT_KIND=<hex>` (all guest memory) and plan lines `mapk <va> <size> <block> <off> <kind>`.
+  Fourth pass: `PT_SKIP=<entries>`, `PT_DROP=<regex of method names>`, `PT_PATCH=<va>:<hex bytes>` (e.g. `EXIT`
+  `4d790000000000000000800300ea0f00` or `NOP` `18790000000000000000000000c00f00` over shader code: code starts at
+  program + 0x80, the SPH), `PT_DELTAS=0`; `pt_replay` `PT_REPEAT=<n>` (whole plan n times, memory kept) and
+  `PT_ZERO_RO=1` (the shared zero block read-only: stray writes fault with their address).
 - `pt_replay <cap>/replay [entries] [va:size:file ...]`: maps the plan, runs entries one at a time, readbacks
   after the run or a timeout. Each failure so far killed only its own channel (Xid 11/13/31 on pt_replay's
   channel); the probe's `clear` test passes after every one and the desktop never noticed.
@@ -214,6 +221,39 @@ Next:
 Also open:
 - Memory timing: the end dump poisons rings reused within the frame, so `PT_NO_END=1`; per-entry deltas for
   data the CPU writes during the frame are not built.
+
+### Fourth pass (2026-11-16): racing frames
+- **The mkw10 frame was the pre-race course flyover** (captured 20 s after the menu screenshot): no karts or HUD
+  is correct there. Haze not from history: `PT_REPEAT=10` gives a bit-identical image (the frame reads nothing
+  from the previous one). Not resolved yet; ASTC placeholders remain the main suspect.
+- New captures touch 60 s after the menu screenshot (racing) and grab `ref-start/ref-end.png` from the debug
+  server when each dump starts (`tools/nx2/debug_mcp.py` `screenshot`).
+- **Probe additions** (fork 9bdc9afa5 = `probes/0003`): 3D macro trace (`c`/`e` in `mme.txt`, from
+  `Maxwell3D::FrontRunMacro`'s emit); per-entry guest data (`deltas.bin`: bank pages the back read whose bytes
+  changed, hooked in `BufferCache` native uniform bank diff; the replay writes them into host memory before the
+  entry); the split is drained at each recorded entry so back-side notes carry the right entry. Analysis helper
+  idea (not committed): rebuild 3D state per draw from registers + stream + the 3D trace (pipeline program
+  addresses, cbuf bindings via `BIND_GROUP_CONSTANT_BUFFER`).
+- **Whole mappings backed**: a guest mapping with any data or write gets all its chunks (+1.3 GiB). Before, its
+  other pages aliased the shared zero block, which reads back stray writes (a light-list tail read 0x7fff0000).
+- **Current stop** (mkw13 entry 4981 of 7757; mkw12 3612): Xid 109 CTX SWITCH TIMEOUT in an indexed draw whose
+  pixel shader (clustered lighting: tile index from interpolants and c[9] grid constants, per-tile record of
+  0x88 bytes at `c[0][0x520]` = two u32 counts + 64 u16 light indices) runs its light loops far too long.
+  Facts: `EXIT` at the shader start, NOPing its two loop back-branches, or forcing both counts to 0
+  (`MOV R1/R0, RZ` over the two loads) each make the draw pass; textures (all 14 TEX NOPed), zero-block garbage
+  (`PT_ZERO_RO=1`, no fault), uniform staleness (`deltas.bin` on/off, same stop) and VRS (dropping
+  `SET_SHADING_RATE_INDEX_SURFACE_*`) are ruled out. The grid itself is sane after a clean run up to the entry
+  (counts <= 5) and the base matches; yet forcing the tile offset to 0 (counts 0 there) still hangs. So the
+  values the shader loads at draw time differ from what the CPU reads back: suspect stale L1 lines for
+  `LDG.E.STRONG.SM` (the grid is rewritten by compute each frame; does the guest's cache invalidation reach the
+  host's L1, e.g. private method 0xF74 / `INVALIDATE_SHADER_CACHES`?), or GPU writes not yet in host memory.
+  Note: readbacks after a timeout can be stale (the dead channel's L2 is not written back): read GPU-written
+  data after a clean run that stops before the failing entry (`pt_replay <dir> <count>`).
+  Also ruled out: `PT_INVALIDATE=1` (`INVALIDATE_SHADER_CACHES` 0x1017, instruction/data/constant + flush, on
+  every 3D/compute subchannel before each entry): same stop.
+- Next: instrument the shader (an `STG` of the loaded count and offset into a debug buffer, encoded from an nvcc
+  sm_86 kernel) to see what it actually reads; check whether the pixel stage's cbuf 0 at draw time is really
+  0x210a499000 (my binding reconstruction) rather than a per-draw ring slot.
 
 Facts learned on the way:
 - MKW frame: ~1100 entries over 2 presents, ~100k words; 3D draws to 2560x1440 (HDR BF10GF11RF11 scene, sRGB
