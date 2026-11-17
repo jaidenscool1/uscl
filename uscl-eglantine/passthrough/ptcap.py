@@ -764,16 +764,44 @@ def build(d):
     # under every other mapped page (so no access faults; writes there alias, reads of untouched pages are 0).
     chunks = data_chunks(d, os.path.join(out_dir, "chunks.txt"))
     backed = set(chunks)
-    # deltas.bin (capture probe NoteCpuData): guest bytes the back read during entry k (uniform bank pages
-    # the guest CPU rewrote mid-frame), applied by pt_replay right before that entry. PT_DELTAS=0: off.
+    # deltas.bin (capture probe NoteCpuData): guest bytes the back read during entry k, applied by pt_replay right
+    # before that entry. The entry's top 4 bits are the read site: 0 uniform bank pages, 1 buffer uploads, 2 uniform
+    # binds, 3 texture uploads. PT_DELTAS=0: off; PT_DELTA_SITES=<digits> (default all): only those sites. Each record
+    # is cut to the bytes that differ from memory as replayed so far (start dump + earlier deltas).
     deltas = []
     if os.path.exists(os.path.join(d, "deltas.bin")) and os.environ.get("PT_DELTAS") != "0":
+        import numpy as np
+        sites, nsite = os.environ.get("PT_DELTA_SITES", "0123"), collections.Counter()
+        devs = sorted((int(f[4:-4], 16), np.memmap(os.path.join(d, f), dtype=np.uint8, mode="r"))
+                      for f in os.listdir(d) if f.startswith("dev-"))
+        cur = {}  # 64 KiB device block -> its bytes as replayed so far
+        def block(b):
+            if b not in cur:
+                cur[b] = np.zeros(1 << 16, np.uint8)
+                for base, mm in devs:
+                    lo, hi = max(b << 16, base), min((b + 1) << 16, base + len(mm))
+                    if lo < hi:
+                        cur[b][lo - (b << 16):hi - (b << 16)] = mm[lo - base:hi - base]
+            return cur[b]
         raw_d = open(os.path.join(d, "deltas.bin"), "rb").read()
         o = 0
         while o + 16 <= len(raw_d):
             dk, da, dn = struct.unpack_from("<IQI", raw_d, o)
-            deltas.append((dk, da, raw_d[o + 16:o + 16 + dn]))
+            data = np.frombuffer(raw_d, np.uint8, dn, o + 16)
             o += 16 + dn
+            if str(dk >> 28) not in sites:
+                continue
+            diff = np.zeros(dn, bool)
+            for b in range(da >> 16, (da + dn - 1 >> 16) + 1):
+                lo, hi = max(da, b << 16), min(da + dn, (b + 1) << 16)
+                m = block(b)
+                diff[lo - da:hi - da] = m[lo - (b << 16):hi - (b << 16)] != data[lo - da:hi - da]
+                m[lo - (b << 16):hi - (b << 16)] = data[lo - da:hi - da]
+            nz = np.flatnonzero(diff)
+            if len(nz):
+                deltas.append((dk & 0x0FFFFFFF, da + int(nz[0]), data[nz[0]:nz[-1] + 1].tobytes()))
+                nsite[dk >> 28] += int(nz[-1] + 1 - nz[0])
+        print("deltas by site (bytes that change memory): " + ", ".join(f"{s_} {n >> 10} KiB" for s_, n in sorted(nsite.items())))
         for _, da, data in deltas:
             backed.update(range(da // CHUNK, (da + len(data) - 1) // CHUNK + 1))
     import bisect
@@ -1204,6 +1232,17 @@ def build(d):
                             data[lo - da:hi - da] = fh.read(hi - lo)
             deltas.append((int(k_), da, bytes(data)))
             print(f"PT_INJECT: {isz:#x} bytes at {iva:x} before entry {k_}")
+    # bisecting: PT_FILL=<capture entry>:<va>:<size>:<hex byte>[,...] fills guest memory with one byte value right
+    # before that entry (e.g. 0xff over a depth texture: everything at the far plane).
+    for spec in os.environ.get("PT_FILL", "").split(","):
+        if spec:
+            k_, fva, fsz, fb = spec.split(":")
+            fva, fsz = int(fva, 16), int(fsz, 16)
+            for gpu, dev, msize, _, sparse in maps:
+                lo, hi = max(fva, gpu), min(fva + fsz, gpu + msize)
+                if lo < hi and not sparse:
+                    deltas.append((int(k_), dev + lo - gpu, bytes([int(fb, 16)]) * (hi - lo)))
+            print(f"PT_FILL: {fsz:#x} bytes of {fb} at {fva:x} before entry {k_}")
     # PT_NODEP: QMDs launched from memory (NVN's barrier ring) wait for no dependence and signal none.
     patched = 0
     for qva in sorted(launched_qmds):

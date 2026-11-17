@@ -4,7 +4,7 @@ Goal and plan: `PROMPT-gpu-passthrough-continue.md`. Hand the game's own NVIDIA 
 shaders to the host RTX 4060 (AD107) through the RM ioctls, instead of translating every draw to Vulkan.
 Host: driver 615.78.08 (open kernel module), Arch Linux.
 
-## Status (2026-11-17)
+## Status (2026-11-17, ninth pass)
 
 | Gate / phase | Result |
 |---|---|
@@ -12,8 +12,8 @@ Host: driver 615.78.08 (open kernel module), Arch Linux.
 | Gate 1 (driver access) | **Pass** on hardware |
 | Gate 2 (method compatibility) | **Pass (real data)**: every 3D/compute/copy method in a captured MKW frame is a named Ampere method, plus three private 3D methods (0xF74/0xF7C/0xF80) that ADA_A accepts; only host-class changes needed (Tegra syncpoints 0x70/0x74 dropped) |
 | Gate 3 (shader compatibility) | **Pass (decode level)**; guest compute SASS has started to **execute** on the RTX 4060 (Phase 1), no per-instruction failure seen yet |
-| Phase 1 (capture + replay one frame) | **Close to Eglantine** (eighth pass, 2026-11-17): capture `mkw16` replays to Eglantine's own render within **PSNR 22.6 dB, mean abs 9.1, brightness ratio 1.04**, HUD identical; left: Toad heads dark, terrain dirt paler, foliage differs (see "mkw16" below). Before: **Textured racing frame, exact reference**: capture `mkw15` replays with every sampled ASTC texture decoded (`PT_ASTC=decode`) to the right image: arch, signs, track, karts, HUD all match Eglantine's own render of the same frame (taken from the capture's end dump), aligned to the pixel; lit surfaces are 0.33-0.65x as bright as the reference (sky 1.00x): a missing light contribution, the next Phase 1 item. Before: **Lit racing frame** (seventh pass, 2026-11-17): capture `mkw14` (probe 0003 now flushes GPU-written images) replays to the lit scene; only ASTC (white stand-in) is left between it and the reference. Before: **Whole racing frame replays** (sixth pass, 2026-11-17): all 7757 entries of capture `mkw13` (racing, 3 channels) run on the RTX 4060 with no Xid, **~36 ms of GPU wait in total** (slowest entry 0.7 ms) with guest memory in VRAM. The fix was emulator-wide: Ada does not perform global loads in pixel-shader helper lanes, so `PT_HELPER_LOADS=1` routes every LDG of every pixel program through a trampoline that zeroes the destination in helper lanes. Output not yet right: the HUD layer matches the reference, the G-buffer shows the right scene (karts, track), but the lit scene composited under the HUD is black (next: find the lighting/composite passes). Earlier: the intro-flyover frame `mkw10` replays to a recognisable course image (third pass) |
-| New: texture formats | **ASTC done for replay** (eighth pass): the frame's 1455 sampled ASTC textures are decoded with Eglantine's own decoder to A8B8G8R8 in a host arena and their headers repointed. 28% of MKW's texture headers are ASTC (8x8, 6x6, 4x4, 5x5); the RTX 4060 has no ASTC sampling. Phase 2 needs the same on upload, and a smaller target (BC1/BC3) for VRAM |
+| Phase 1 (capture + replay one frame) | **Exit check done** (ninth pass, 2026-11-17): the replay matches Eglantine wherever the capture holds the frame's inputs (`mkw16`: 22.6 dB, HDR main view 1.00-1.05x of Eglantine's per-pass snapshots); the remaining mismatches are inputs Eglantine keeps only in host images it never writes back to guest memory (the race-start frame `mkw17`: road virtual-texture samples read 0, 9.6 dB), a capture limit that Phase 2 does not have. Phase 2 plan written (see "Phase 2 plan"). Before: **Close to Eglantine** (eighth pass, 2026-11-17): capture `mkw16` replays to Eglantine's own render within **PSNR 22.6 dB, mean abs 9.1, brightness ratio 1.04**, HUD identical; left: Toad heads dark, terrain dirt paler, foliage differs (see "mkw16" below). Before: **Textured racing frame, exact reference**: capture `mkw15` replays with every sampled ASTC texture decoded (`PT_ASTC=decode`) to the right image: arch, signs, track, karts, HUD all match Eglantine's own render of the same frame (taken from the capture's end dump), aligned to the pixel; lit surfaces are 0.33-0.65x as bright as the reference (sky 1.00x): a missing light contribution, the next Phase 1 item. Before: **Lit racing frame** (seventh pass, 2026-11-17): capture `mkw14` (probe 0003 now flushes GPU-written images) replays to the lit scene; only ASTC (white stand-in) is left between it and the reference. Before: **Whole racing frame replays** (sixth pass, 2026-11-17): all 7757 entries of capture `mkw13` (racing, 3 channels) run on the RTX 4060 with no Xid, **~36 ms of GPU wait in total** (slowest entry 0.7 ms) with guest memory in VRAM. The fix was emulator-wide: Ada does not perform global loads in pixel-shader helper lanes, so `PT_HELPER_LOADS=1` routes every LDG of every pixel program through a trampoline that zeroes the destination in helper lanes. Output not yet right: the HUD layer matches the reference, the G-buffer shows the right scene (karts, track), but the lit scene composited under the HUD is black (next: find the lighting/composite passes). Earlier: the intro-flyover frame `mkw10` replays to a recognisable course image (third pass) |
+| New: texture formats | **ASTC done for replay** (eighth pass; Phase 2: transcode on upload to BC7/BC3, see "Phase 2 plan"): the frame's 1455 sampled ASTC textures are decoded with Eglantine's own decoder to A8B8G8R8 in a host arena and their headers repointed. 28% of MKW's texture headers are ASTC (8x8, 6x6, 4x4, 5x5); the RTX 4060 has no ASTC sampling. Phase 2 needs the same on upload, and a smaller target (BC1/BC3) for VRAM |
 | Gates 4-6 | not started (Phase 1 uses pinned host memory at the guest's own VAs, pitch kind only: first evidence for gate 4) |
 
 ## Phase 0 tool: `uscl-eglantine/passthrough/nvrm_probe.cpp`
@@ -510,3 +510,147 @@ capture also tells whether the mkw15 hang was the screenshot (take none) or the 
   sparse terrain virtual texture (tiles streamed during play; ASTC decoded from the frame's start data) and the
   Toads' materials; per-pass snapshots of their targets will localize them.
 - Disk: `mkw16` is the one full capture (49 GB); mkw15's dumps deleted (metadata and images kept).
+
+### Ninth pass (2026-11-17): what Eglantine read, per-draw localization, Phase 1 exit
+**Result:** the remaining differences are localized to single draws and, for the big one, to the capture: in the
+race-start frame `mkw17` the road's three virtual-texture fetches return **0 for every pixel** in the replay
+(measured in the shader), because the data those textures sample lives in Eglantine's host images and never in
+guest memory. Everything the GPU computes from inputs the capture does hold matches Eglantine.
+
+New tools:
+- **`pt_replay` readbacks at any count:** `va:size:file@n` reads back right after the n-th entry, so one run (13 s)
+  gives every per-pass comparison point (e.g. the HDR target at all 51 snapshot entries). Count for capture entry K:
+  the last push.bin record with entry <= K (K+4 in mkw16/mkw17).
+- **Probe 0003, deltas from every read site** (fork `uscl-ptcap` d81773d89, `probes/0003` regenerated, `git am`
+  onto its parent gives the same tree): besides the uniform bank pages (site 0), `deltas.bin` now holds the bytes
+  Eglantine read at buffer uploads (site 1), every uniform bind not over GPU-modified memory (site 2) and texture
+  uploads (site 3, GPU VA split over the VA map); site = the record's top 4 bits, a record equal to the previous one
+  at its address is dropped. While a dump flushes, the probe logs (once per image) images the texture cache cannot
+  download.
+- **`ptcap.py build`:** each delta is cut to the bytes that differ from memory as replayed so far (start dump +
+  earlier deltas; a restoring write is kept), `PT_DELTA_SITES=<digits>` keeps only those sites,
+  `PT_FILL=<entry>:<va>:<size>:<byte>` fills guest memory before an entry. mkw16 rebuilt with it replays
+  bit-identically (the old 26 MB of bank records were 57 KiB of real changes).
+- `passthrough/tools/`: `drawstate.py <cap> <entry>` (3D state of an entry's last draw from the stream + 3D macro
+  trace: pipeline programs, stage 3/4 constant buffers, pools; `DRAWS=1` lists draws whose methods are traced),
+  `sass.py <cap> <program> [out]` (nvdisasm of a guest program from the start dump; `NVDISASM_FLAGS=-hex`),
+  `startread.py <cap> <va> <size> <out>` (start-dump bytes at a VA across mappings). Ad-hoc scripts (region sweeps,
+  float decodes) stay in `~/.local/share/uscl/ptcap/tools/` (`regions.py`, `hdrsweep.py` now takes paths).
+
+Measured (mkw16, the good frame; HDR target `8110901000` vs Eglantine's snapshots, 50-entry windows):
+- Racers ahead diverge from 4950-5200 (ours ~0.7x), both KTV trucks at 5700-5800 (0.5-0.65x), Toads at 5850-5900
+  (~0.55x), the bush exists only in ours (5950-6000), and the dirt gets a draw in ours at 5700-5750 that Eglantine
+  does not have, then is paler at 6450-6750. The same lit-object factor (~0.75x from the first draws) shows in mkw17.
+
+Measured (capture `mkw17`: race start under the gantry, like mkw15; 7851 entries; output `2109d1a000`, replay count
+7814; `compare.png`, `replay.png`, `ref-eglantine.png`, `shadowmask-4970.png`, `draw7373-ours-vs-egl.png` in the
+capture dir):
+- Final image **PSNR 9.6 dB, mean abs 70.1, brightness 0.38x** (Mario, karts and HUD right, world dark): mkw15's
+  darkness is back, so it is frame-dependent, not a regression.
+- **CPU writes during the frame are not the cause.** With every read site recorded, only **110 KiB** of the bytes
+  Eglantine read differ from the start dump (bank 21, buffer uploads 15, uniform binds 73 KiB, texture uploads 0).
+  The VA map is identical at start and end (no tile mapping changes). (mkw17 was only replayed with all sites on;
+  an A/B with `PT_DELTA_SITES=0` was not run.)
+- Per-entry readbacks: entry **7373** (the road, 48% of the screen, the slowest entry at 8.2 ms) writes its pixels
+  at **0.018x** Eglantine's (median), 7204 (12% of the screen) likewise; earlier lit draws ~0.75x.
+- Every input of draw 7373 was compared, ours before 7373 vs Eglantine: its 14 textures (handles from c2 in the
+  pool `2109695000`), its storage buffers (`21f4ef4000`+0x990000: identical; the per-draw ring `2212f2b000`: static),
+  its constant buffers (each byte Eglantine bound, from the site-2 deltas: identical; c14 is camera data the shader
+  does not read). The only texture that differs, an 88x48x256 R8 volume (`8105c4a200`), changes nothing when
+  injected. Ruled out by measurement too: `SET_SRGB_WRITE`=0 (9.56 dB), the 4970 screen-space outputs (the forward
+  shader's half-res factor `81176c1000` matches).
+- **The shadow mask** (layer 0 of the 2-layer RGBA8 array `811844e000`, written at 4970; G = lit) differs: ours has
+  blocky shadow slabs on the near road (G 228 vs Eglantine 253). It comes from a 512x512x101 Z16 shadow atlas
+  (`81605f0000`, sampled, not drawn this frame: cached from earlier frames; start = end dump). `PT_FILL` of the
+  atlas with 0xff gives a fully lit mask (255) and with 0x00 a fully shadowed one, so the atlas controls the mask,
+  but a fully lit mask leaves the final image at 0.39x: secondary.
+- **The road's virtual textures read zero.** Patching draw 7373's pixel shader (`114cfad600`, at +0x17e0: `MOV`
+  the samples to R0-R2, wait on all scoreboards, `EXIT`) shows the three 8192x8192x68 virtual-texture fetches
+  (handle 0x8 and 0xc: ASTC sRGB, decoded into the arena; 0xa: **BC6H**, sampled straight from guest memory)
+  return 0 in 100% of the road's pixels; a control texture (0xe) returns plausible colour at the same patch point.
+  The BC6H array is fully mapped (5.9 GB of VA over 143 mappings) but only 224 MiB of it is nonzero in the dumps,
+  and its device pages are shared with 82 other VAs (e.g. a 513 MB pool at `228e680000`): the game fills tiles of
+  a physical page pool through other views and maps them into the virtual textures. Eglantine renders the road
+  textured, so it has that data in host images; its texture cache never downloads `Unbacked` or `TrimmedLevels`
+  images ("never upload/download"), and its log shows two such images as render targets (the 6144^2 and 3072^2
+  signed-RGBA8 clipmaps `8171190000`/`817a190000`: "Render target in unbacked image", the clipmap the seventh pass
+  found zero in the capture). Which host image holds the virtual-texture tiles is not confirmed: the mkw18 run's
+  log was used up by one framebuffer image (now logged once per image).
+
+Conclusion for Phase 1: the replay reproduces Eglantine wherever the capture holds the frame's inputs; what is left
+comes from data Eglantine keeps only on the host (unbacked/trimmed/sparse-tile images) and the shadow atlas content.
+In Phase 2 none of this applies: the guest's own GPU writes go to real memory on the host GPU, so pools, virtual
+textures, clipmaps and the shadow atlas hold what the game wrote. A Phase 1 capture that needs them would have to
+read them back from Eglantine's host images during the dump (next item if Phase 1 work continues).
+
+Next (if more Phase 1 fidelity is wanted): capture with the once-per-image log to name the images behind the
+virtual-texture pool, the clipmaps and the shadow atlas; then a dump-only download path for them in the probe
+(unbacked: per bound layer/tile; trimmed: the levels the host has); re-check mkw17 and mkw16's lit-object 0.75x.
+
+Captures: `mkw17` is the one full capture (49 GB + 10 GB arena); mkw16's dumps deleted (metadata, snapshots and
+images kept); mkw18 (same procedure, logging probe) kept only for its run log (`bench/run-ptcap18.log`).
+
+## Phase 1 exit check (2026-11-17)
+| Capture | Frame | PSNR vs Eglantine | Mean abs (0-255) | Brightness | Notes |
+|---|---|---|---|---|---|
+| `mkw16` | racing, open course | **22.6 dB** | 9.1 | 1.04x | HUD identical; HDR main view 1.00-1.05x of Eglantine's snapshots; Toad heads, KTV trucks and pack ~0.5-0.75x, dirt material and foliage differ |
+| `mkw17` | race start under the gantry | 9.6 dB | 70.1 | 0.38x | HUD, Mario, karts right; road virtual textures sample 0 (data only in Eglantine's host images), shadow atlas differs |
+
+Runs: no Xid in any replay this pass, `nvrm_probe clear` health check OK after each; ~51 ms GPU wait per frame
+(slowest entry 8.2 ms, the road), guest memory 6.2 GB in VRAM, ASTC arena in pinned host memory.
+
+Stopgaps still in the Phase 1 replay (none is meant for Phase 2):
+- `PT_NO_END=1`: start-of-frame data only (the end dump poisons rings reused within the frame).
+- Mid-frame guest data comes from `deltas.bin`, now from every read site (bytes Eglantine read when it read them):
+  a capture-only substitute for real memory.
+- ASTC: decoded from the frame's start data with Eglantine's decoder into a **10.6 GB A8B8G8R8 arena in pinned host
+  memory** (1495 sampled textures, 658 MiB of ASTC), headers repointed; unsampled ASTC headers point at a stand-in.
+- `PT_MME=trace`: compute macros that emit an inline QMD are replaced by Eglantine's emitted methods (the host MME
+  writes the QMD one word late; cause not found).
+- `PT_NODEP=1`: QMD dependence counters (NVN's barrier ring) dropped; entries run serialized.
+- `PT_HELPER_LOADS=1`: every pixel-shader LDG goes through a trampoline that zeroes it in helper lanes (Ada skips
+  global loads in helper lanes). This one is needed in Phase 2 too (patch programs when they are uploaded).
+- `SET_SRGB_WRITE` kept at the guest value (the 4060 sRGB-encodes clears into plain RGBA8 targets with it set;
+  console behaviour unknown).
+- Data Eglantine never writes back (unbacked/trimmed images) is missing from the capture (above).
+
+Verdict: **Phase 1 answered its question** (guest command streams and shaders run on the RTX 4060 and produce the
+game's frame; differences trace to the capture, not the GPU). Go to Phase 2.
+
+## Phase 2 plan: passthrough as an optional Eglantine backend
+Goal: `EDEN_NX2_PASSTHROUGH=1` runs the guest's channels on the host RTX through RM channels; Vulkan only presents.
+Order (each step ends with MKW running, compared against the Vulkan backend with the debug-server screenshot):
+1. **Channels and submission.** One RM channel per guest channel (ADA_A + ADA_COMPUTE_A + a copy engine), from
+   `nvrm_probe`/`pt_replay`'s setup. Hook where Eglantine receives GPFIFO entries (`DmaPusher` before decode): submit
+   the guest's pushbuffer ranges as host GPFIFO entries (guest pushbuffers mapped at their own VAs), with the host-class
+   rewrites `ptcap.py build` does today: drop Tegra syncpoint methods (0x70/0x74), keep everything else. Start
+   with one channel and serialized submission (a host semaphore after each entry, as `pt_replay`).
+2. **Memory (gate 4).** Mirror the guest GPU VA space: the probe's `NoteMap`/`NoteUnmap`/`NoteGuestKind` hooks are
+   exactly the events needed. Guest device memory imported into RM as system memory (OS descriptor over Eglantine's
+   own host mapping, so CPU and GPU see the same bytes) and mapped at the guest's VAs with the guest's (fallback)
+   PTE kinds; sparse regions as RM sparse VA with the guest's tile mappings. VRAM residency is Phase 3.
+3. **Shader programs.** On writes to program memory (and at bind), patch helper-lane LDGs as `PT_HELPER_LOADS` does
+   (trampoline arena per program region), cached per program hash.
+4. **Macros and QMDs.** Run 3D macros on the host MME; compute macros that emit inline QMDs through Eglantine's MME
+   (as `PT_MME=trace`) until the host MME's one-word-late QMD is understood. QMD dependence: keep NVN's barrier
+   ring but give it hardware counters (the replay dropped them because Eglantine's scheduler produced the values).
+5. **Sync (gate 5).** Guest semaphores and syncpoint increments become host semaphore releases into guest memory;
+   guest fence waits on the CPU poll that memory. The measured hazard (the guest CPU rewrites ~0.37% of uniform
+   memory before the GPU finished reading it) disappears when the guest fence only signals after the host GPU passed
+   it, which real semaphores do.
+6. **ASTC (and other formats the RTX cannot sample) on upload.** The GPU reads texture headers straight from guest
+   memory, so the backend keeps a shadow copy of each header pool (on `SET_TEX_HEADER_POOL`, and when the guest
+   writes pool memory) with ASTC headers repointed to transcoded copies. Transcode on first use and when the
+   guest CPU writes the texture's memory (Eglantine's memory tracker), per tile for sparse/virtual textures (on
+   tile map). Target format: **BC7** (8 bpp, closest quality) or **BC3/BC1** (8/4 bpp, faster to encode) instead of
+   RGBA8 (32 bpp): MKW's 1495 sampled ASTC textures are 10.6 GB as RGBA8, ~2.7 GB as BC7/BC3, ~1.3 GB as BC1, which
+   fits the 8 GB card next to ~6 GB of guest memory only as BC1/BC3/BC7 with residency (Phase 3). First version: CPU
+   decode (Eglantine's `astc.cpp`, as `libptastc.so`) + CPU BC encode, cached on disk by content hash (MKW's
+   textures are static); GPU encode later if upload stalls show.
+7. **Presentation (gate 6).** Copy the guest's output image (block-linear sRGB RGBA8) with the copy engine into a
+   pitch buffer that Vulkan imports (RM export to an fd, else a staging copy), then present as now.
+8. **Measure.** MKW racing fps vs the Vulkan backend (`bench/runs.py`, interleaved pairs), Switch Sports unchanged
+   (`bench/nsr.py`). Phase 3 then moves hot memory to VRAM (the replay: 582 -> 274 ms to entry 4983 with VRAM).
+Open questions to answer early: RM import of Eglantine's host memory (OS descriptor limits, page pinning of a
+multi-GB guest arena), whether the 3D macro path on the host MME is complete for MKW (the `PT_MME=trace` QMD
+case), and how Eglantine's channel scheduling maps onto concurrent host channels.

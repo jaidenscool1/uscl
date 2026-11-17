@@ -198,11 +198,15 @@ int main(int argc, char** argv) {
         printf("video memory: %zu blocks uploaded in %.2f s\n", ops.size(), (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9);
     }
 
-    // Readbacks (after the run, or after a timeout: host memory outlives a dead channel).
-    auto readbacks = [&] {
+    // Readbacks (after the run, or after a timeout: host memory outlives a dead channel). `va:size:file@n` reads
+    // back right after the n-th entry instead (per-pass comparisons in one run).
+    auto readbacks = [&](long at) {
         for (int a = 3; a < argc; a++) {
             unsigned long long va, size; char file[512];
             if (sscanf(argv[a], "%llx:%llx:%511s", &va, &size, file) != 3) die("readback: va:size:file", 0);
+            char* n = strchr(file, '@');
+            if (n) *n = 0;
+            if ((n ? strtol(n + 1, nullptr, 0) : -1) != at) continue;
             FILE* f = fopen(file, "wb");
             if (!f) die("open readback file", 0);
             NvU64 done = 0;
@@ -303,7 +307,7 @@ int main(int argc, char** argv) {
             if (s.tv_sec - s0.tv_sec > 5) {
                 printf("entry %ld (capture entry %d, channel %d, %u words): TIMEOUT, sem %u want %u, GPGet %u GPPut %u\n",
                        ran, k, idx, hdr3[2], *sem, c.fence, userd->GPGet, userd->GPPut);
-                readbacks();
+                readbacks(-1);
                 return 3;
             }
         }
@@ -314,10 +318,11 @@ int main(int argc, char** argv) {
             printf("slow: capture entry %d (channel %d): %.1f ms\n", k, idx, us / 1e3);
         if (us > worst) { worst = us; worst_k = k; }
         ran++;
+        readbacks(ran);
     }
     fclose(push);
     printf("ran %ld entries, %.1f ms GPU wait in total, slowest %.1f ms (capture entry %ld)\n", ran, busy / 1e3, worst / 1e3, worst_k);
 
-    readbacks();
+    readbacks(-1);
     return 0;
 }
