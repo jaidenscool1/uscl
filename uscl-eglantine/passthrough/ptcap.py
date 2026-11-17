@@ -179,9 +179,10 @@ TIC_FIELDS = {m[1]: (int(m[2]), int(m[3])) for l in open(os.environ.get("TEX_HEA
     if (m := re.match(r"#define NVC797_TEXHEAD_BL_(\w+)\s+MW\((\d+):(\d+)\)", l))}
 
 CHUNK = 1 << 21
-# PT_STATS counters: (report, pipeline location): DA vertices, VS invocations, clipper invocations, PS invocations.
-STATS = [(0x1, 0x1), (0x5, 0x2), (0xF, 0x4), (0x13, 0xA)]
-STATS_NAMES = ["vertices", "VS", "clipper", "PS"]
+# PT_STATS counters: (report, pipeline location): DA vertices and primitives, VS invocations, clipper invocations
+# and primitives, zpass pixels (64-bit field: the count is in the upper word), PS invocations.
+STATS = [(0x1, 0x1), (0x3, 0x1), (0x5, 0x2), (0xF, 0x4), (0x11, 0x4), (0x2, 0xF), (0x13, 0xA)]  # locations as NVK uses them (VTG_PRIMITIVES_OUT at VPC: Xid 69)
+STATS_NAMES = ["vertices", "DA prims", "VS", "clipper", "clipper prims", "Z pass", "PS"]
 HOST_BASE = 0xF0_0000_0000  # host-owned buffers: above every guest mapping, inside the 1 TiB window
 ZERO_SIZE = BLOCK_SIZE = 64 << 20
 TPC_SLOTS = 72  # GR litter maxima on AD107, 12 GPCs x 6 TPCs (nvrm_probe gr info)
@@ -465,16 +466,25 @@ def build(d):
     invalidate = bool(os.environ.get("PT_INVALIDATE"))
     stats_at = [int(x) for x in os.environ.get("PT_STATS", "").split(",") if x]
     drop_re = re.compile(os.environ["PT_DROP"]) if os.environ.get("PT_DROP") else None
+    # bisecting: PT_SETV=<method name>:<old hex>:<new hex>[,...] rewrites one method's value in the stream
+    setv = {(nm, int(o, 16)): int(v, 16) for nm, o, v in (x.split(":") for x in os.environ.get("PT_SETV", "").split(",") if x)}
     # PT_MME=trace: compute macro calls become the methods Eglantine's MME emitted for them (mme.txt), so
     # the host MME does not run compute macros (Eglantine's output is what the game ran).
     traced = collections.defaultdict(collections.deque)  # entry -> deque of (start, [(method, value)])
-    if os.environ.get("PT_MME") == "trace":
+    # PT_MME3D=trace: the same for 3D macros (lowercase c/e lines, Maxwell3D::FrontRunMacro's emits), to tell a
+    # host MME difference from a replay bug
+    traced3d = collections.defaultdict(collections.deque)
+    if os.environ.get("PT_MME") == "trace" or os.environ.get("PT_MME3D") == "trace":
         for line in open(os.path.join(d, "mme.txt")):
             k_, kind, a_, v_ = line.split()
-            if kind == "C":
+            if kind == "C" and os.environ.get("PT_MME") == "trace":
                 traced[int(k_)].append((int(a_, 16), []))
-            elif kind == "E":
+            elif kind == "E" and os.environ.get("PT_MME") == "trace":
                 traced[int(k_)][-1][1].append((int(a_, 16), int(v_, 16)))
+            elif kind == "c" and os.environ.get("PT_MME3D") == "trace":
+                traced3d[int(k_)].append((int(a_, 16), []))
+            elif kind == "e" and os.environ.get("PT_MME3D") == "trace":
+                traced3d[int(k_)][-1][1].append((int(a_, 16), int(v_, 16)))
     # Only entries whose traced calls match the stream's in number (calls pair up in order). Start addresses
     # are not compared: each channel's front uploads the same macros at its own positions (macro 57 is 0x281
     # on the 3D channel, 0x42 on a compute-only one), which the captured engine state does not show.
@@ -522,6 +532,15 @@ def build(d):
             if starts and len(starts) == len(traced.get(k, ())):
                 trace_ok.add(k)
         print(f"PT_MME=trace: {len(trace_ok)} entries use Eglantine's compute macro output")
+    trace3d_ok = set()
+    if traced3d:
+        st0 = {ch: [0, 0, 0, 0] for ch in chans}
+        for k, (ch, addr, *_rest, words) in enumerate(stream):
+            n_ = sum(1 for sc, m, a, _ in decode(words, st0[ch]) if m >= 0x40 and states[ch]["engines"][sc] == 0xB197
+                     and (names[0xB197](m * 4) or "").startswith("CALL_MME_MACRO("))
+            if n_ and n_ == len(traced3d.get(k, ())):
+                trace3d_ok.add(k)
+        print(f"PT_MME3D=trace: {len(trace3d_ok)} entries can use Eglantine's 3D macro output")
     names_of = {}
     for ch in chans:
         for sc in range(8):
@@ -586,12 +605,25 @@ def build(d):
                         stats["compute macro calls replaced"] += 1
                 if substitute:
                     continue
+            if e == 0xB197 and k in trace3d_ok and not from_trace and n.startswith(("CALL_MME_MACRO(", "CALL_MME_DATA(")):
+                if n.startswith("CALL_MME_MACRO("):
+                    start, emits = traced3d[k].popleft()
+                    # MME_DMA_READ_FIFOED pulls its data from the pushbuffer: only the MME itself can issue it
+                    substitute = trace_complete(emits, regs) and n3d.off("MME_DMA_READ_FIFOED") // 4 not in (em for em, _ in emits)
+                    if substitute:
+                        spliced.extend((sc, em, ev) for em, ev in emits)
+                        stats["3D macro calls replaced"] += 1
+                if substitute:
+                    continue
             if drop_re and drop_re.fullmatch(n):  # bisecting: PT_DROP=<regex of method names>
                 stats[f"PT_DROP {n}"] += 1
                 continue
             if NEVER.fullmatch(n):
                 stats[f"drop {n}"] += 1
                 continue
+            if (n, a) in setv:
+                stats[f"PT_SETV {n}"] += 1
+                a = setv[(n, a)]
             if n == "SET_REPORT_SEMAPHORE_D":
                 if a & 3 in (1, 3):  # acquire, trap
                     stats["drop report acquire/trap"] += 1
@@ -807,12 +839,16 @@ def build(d):
     # PT_ASTC=dummy: the host samples no ASTC (RTX 40: textureCompressionASTC_LDR false; 28% of MKW's texture
     # headers): every ASTC header in the texture header pools becomes a copy of an A8B8G8R8 header of the same
     # pool (wrong image, valid memory). shortcut: transcode ASTC (to RGBA8/BC7) and repoint the headers instead.
-    if os.environ.get("PT_ASTC") == "dummy":
+    # PT_ASTC=dummy[:<hex header index>]: every ASTC header becomes a copy of that A8B8G8R8 header (default: the
+    # pool's first one; in MKW that is a black 4x1 texture, so ASTC-textured surfaces render black: 107 is white)
+    if os.environ.get("PT_ASTC", "").startswith("dummy"):
         astc_codes = {v for k, v in TIC_FORMATS.items() if k.startswith("ASTC")}
+        pick = os.environ["PT_ASTC"].partition(":")[2]
         for pool, count in pools_of("HEADER"):
             raw = pool_raw(pool, count)
             fmt = [raw[i * 32] & 0x7F for i in range(count)]
-            rgba = next(i for i in range(count) if fmt[i] == TIC_FORMATS["A8B8G8R8"] and any(raw[i * 32:i * 32 + 32]))
+            rgba = int(pick, 16) if pick else \
+                next(i for i in range(count) if fmt[i] == TIC_FORMATS["A8B8G8R8"] and any(raw[i * 32:i * 32 + 32]))
             astc = [i for i in range(count) if fmt[i] in astc_codes and any(raw[i * 32:i * 32 + 32])]
             for i in astc:
                 raw[i * 32:i * 32 + 32] = raw[rgba * 32:rgba * 32 + 32]
@@ -869,6 +905,9 @@ def build(d):
         arena_va = lm_va + lm_size + len(chans) * CHUNK
         nvdisasm = os.environ.get("NVDISASM") or shutil.which("nvdisasm")
         assert nvdisasm, "PT_HELPER_LOADS needs nvdisasm (PATH or NVDISASM)"
+        # bisecting: PT_HELPER_SKIP=<program>:<code offset>+<code offset>[,...] leaves those loads alone
+        helper_skip = {(int(pr, 16), int(o, 16)) for pr, _, offs in (x.partition(":") for x in
+                       os.environ.get("PT_HELPER_SKIP", "").split(",") if x) for o in offs.split("+")}
         ldg_re = re.compile(r"/\*([0-9a-f]+)\*/\s+(?:@!?P[0-6T]\s+)?LDG(\S*)\s+R(\d+),")
         nprog = nsite = nver = 0
 
@@ -891,7 +930,7 @@ def build(d):
             text = res.stdout
             free = [] if re.search(r"\bPR\b", text) else [p for p in range(6, -1, -1) if not re.search(rf"\bP{p}\b", text)]
             sites = [(int(mo[1], 16) + 0x80, int(mo[3]), 4 if ".128" in mo[2] else 2 if ".64" in mo[2] else 1)
-                     for mo in ldg_re.finditer(text)]
+                     for mo in ldg_re.finditer(text) if (prog, int(mo[1], 16)) not in helper_skip]
             if sites and not free:
                 print(f"PT_HELPER_LOADS: {prog:x}: all predicates used, {len(sites)} loads left alone")
                 return None

@@ -12,7 +12,7 @@ Host: driver 615.78.08 (open kernel module), Arch Linux.
 | Gate 1 (driver access) | **Pass** on hardware |
 | Gate 2 (method compatibility) | **Pass (real data)**: every 3D/compute/copy method in a captured MKW frame is a named Ampere method, plus three private 3D methods (0xF74/0xF7C/0xF80) that ADA_A accepts; only host-class changes needed (Tegra syncpoints 0x70/0x74 dropped) |
 | Gate 3 (shader compatibility) | **Pass (decode level)**; guest compute SASS has started to **execute** on the RTX 4060 (Phase 1), no per-instruction failure seen yet |
-| Phase 1 (capture + replay one frame) | **Whole racing frame replays** (sixth pass, 2026-11-17): all 7757 entries of capture `mkw13` (racing, 3 channels) run on the RTX 4060 with no Xid, **~36 ms of GPU wait in total** (slowest entry 0.7 ms) with guest memory in VRAM. The fix was emulator-wide: Ada does not perform global loads in pixel-shader helper lanes, so `PT_HELPER_LOADS=1` routes every LDG of every pixel program through a trampoline that zeroes the destination in helper lanes. Output not yet right: the HUD layer matches the reference, the G-buffer shows the right scene (karts, track), but the lit scene composited under the HUD is black (next: find the lighting/composite passes). Earlier: the intro-flyover frame `mkw10` replays to a recognisable course image (third pass) |
+| Phase 1 (capture + replay one frame) | **Lit racing frame** (seventh pass, 2026-11-17): capture `mkw14` (probe 0003 now flushes GPU-written images) replays to the lit scene; only ASTC (white stand-in) is left between it and the reference. Before: **Whole racing frame replays** (sixth pass, 2026-11-17): all 7757 entries of capture `mkw13` (racing, 3 channels) run on the RTX 4060 with no Xid, **~36 ms of GPU wait in total** (slowest entry 0.7 ms) with guest memory in VRAM. The fix was emulator-wide: Ada does not perform global loads in pixel-shader helper lanes, so `PT_HELPER_LOADS=1` routes every LDG of every pixel program through a trampoline that zeroes the destination in helper lanes. Output not yet right: the HUD layer matches the reference, the G-buffer shows the right scene (karts, track), but the lit scene composited under the HUD is black (next: find the lighting/composite passes). Earlier: the intro-flyover frame `mkw10` replays to a recognisable course image (third pass) |
 | New: texture formats | **Open, needs work**: 28% of MKW's texture headers are ASTC (8x8, 6x6, 4x4, 5x5); the RTX 4060 has no ASTC sampling (`textureCompressionASTC_LDR` false), so passthrough needs ASTC transcoding + header repointing |
 | Gates 4-6 | not started (Phase 1 uses pinned host memory at the guest's own VAs, pitch kind only: first evidence for gate 4) |
 
@@ -102,7 +102,8 @@ A capture is ~48 GB (24 GB per dump; 3.9 GB of it nonzero). Current capture: `~/
 (fourth pass, a racing frame: touched 60 s after the menu screenshot, `BENCH_FRAMES=6000`; `ref-end.png` is the
 debug-server screenshot taken when the end dump starts, i.e. the replayed frame). Its run used
 `EDEN_NX2_BANK_REUPLOAD=3 EDEN_NX2_PERF_OFF=macro_batch,dma_forward EDEN_NX2_INDIRECT_RECORDS=0` so the 3D macro
-trace and `deltas.bin` are complete. Older captures deleted (mkw8-mkw12).
+trace and `deltas.bin` are complete. Older captures deleted (mkw8-mkw12). **Seventh pass: use `mkw14`** (same
+settings, probe with the image flush; mkw13's dumps deleted for disk space, its `ref-end.png` and metadata kept).
 Game path for `runs.py`: `USCL_GAME=".../GAME_DUMPS/Switch 2/Mario Kart World NS2/Mario Kart World/MKW [ROM]/base/exefs/main"`.
 
 ### Tools: `uscl-eglantine/passthrough/ptcap.py` (+ `pt_replay`)
@@ -327,6 +328,62 @@ Also open:
   (light/deferred shading, exposure, tonemap): list compute launches and their texture/image bindings in that
   range, read back their outputs, and compare with Eglantine (a capture-probe dump of the same targets would give
   pixel references). Then ASTC transcoding (`PT_ASTC=dummy` is still a stopgap).
+
+### Seventh pass (2026-11-17): why the lit scene is black
+The frame is not deferred. Structure of mkw13 (3D state rebuilt per draw with the 3D macro trace):
+depth prepass 689-4863 into `812ee00000` (S8Z24, LESS, color writes off), screen-space passes in 4923 (half-res
+RGBA16F `8116f40000`/`81176c1000`, an R32F 640x360 -> 80x45 chain, full-res RGBA8), light-grid compute on channel
+2 (4924-4951), then a **forward** pass 4954-7646 into the HDR target `8110901000` (depth EQUAL, writes off), each
+entry one small draw (1.1M indices in all). Entry 7540 clears the HDR target again (a second view), so read it
+before that (e.g. after 6826).
+
+Two independent causes, both found by measuring inside the pixel shader of entry 6826 (1.98M invocations):
+1. **`PT_ASTC=dummy` used a black texture.** The pool's first A8B8G8R8 header (0x100) is NVN's 4x1 opaque black
+   default, so every ASTC texture (albedo, the item box, the minimap, "24th") sampled black. `PT_ASTC=dummy:107`
+   picks header 0x107 (4x4 white); with it the minimap comes back. Still a stopgap until ASTC transcoding.
+2. **The capture misses every GPU-rendered image.** The forward shader's last factor is texture handle 0x16 =
+   the half-res RGBA16F target `81176c1000` written in 4923; after 4923 it is 1.2% nonzero, and the signed-RGBA8
+   clipmap the frame reads (`8171190000` 6144^2 ... `817ce90000` 768^2, format 0xD7) is exactly zero even after
+   entry 4 shades 171k pixels into it. Cause in the probe: `DumpMemory` flushes what `IsMemoryDirty` reports, and
+   `RasterizerVulkan::MustFlushRegion` only asks the texture cache when GPU accuracy is High, so the start dump
+   flushed 59 MiB (buffers only) and dumped stale guest memory (zeros) for all images the GPU wrote in earlier
+   frames. **Fix (probe 0003 update):** `Tegra::PtCapture::Dumping()` is true while a dump flushes, and
+   `MustFlushRegion` then consults the texture cache at every accuracy level (`FlushRegion` itself is not gated;
+   `DownloadMemory` downloads every downloadable image in the range, so the dirty check keeps it to GPU-written
+   ones). **For Phase 2 this does not matter** (the real backend keeps GPU data in GPU memory); it only affects
+   captures.
+
+**Result:** capture `mkw14` (same procedure as mkw13, probe with the fix) flushed **951 MiB** at the start dump
+(was 59), and its frame (7894 entries) replays with no Xid in ~34 ms GPU wait to a **lit racing scene**: karts,
+the pack ahead, track, sky, lighting and shadows (`PT_ASTC=dummy:107 PT_NO_END=1 PT_MME=trace PT_NODEP=1
+PT_HELPER_LOADS=1`, output `210a71a000` after entry 7854). Washed out to near-white because every ASTC texture is
+the white stand-in. The debug-server screenshots of this run were not written (no `ref-*.png` in mkw14).
+
+**Next:**
+1. ASTC transcoding in `ptcap.py build` (the real fix for the washed-out image and the missing HUD art): decode each
+   ASTC texture the frame samples (headers in the pool, block-linear layout, mips) to RGBA8 in a host arena and
+   repoint its header; compare with Eglantine's own decode. A reference screenshot for mkw14-style frames (fix the
+   watcher's `debug_mcp.py` call) makes the comparison exact.
+2. Then the Phase 1 exit check: image diff against the reference, and the remaining stopgaps (`PT_NO_END`, deltas
+   limited to uniform banks).
+
+Ruled out on the way (each measured, not argued): depth test (EQUAL->LEQUAL and depth test off: same), zcull
+(restore sets it off, nothing re-enables it), VRS (palette has no cull entries; image size 0: same), the
+prepass depth (the 690 clear and the prepass both land), the host MME for 3D macros (`PT_MME3D=trace`: same
+bindings), the helper-load trampolines (same with the site skipped), stale constant caches (`PT_INVALIDATE`), VRAM
+vs host memory, previous-frame state (`PT_REPEAT=2`). Pitfall that cost time: a register that looks final at a
+shader's output can be rewritten by a later multi-register TEX/LDC (`TEX ... R10` writes R10 and R11); check every
+writer, including the second register of 64-bit and texture results, before trusting an instrumented output.
+
+New replay knobs (`ptcap.py build`): `PT_SETV=<method>:<old>:<new>` (rewrite one method value in the stream),
+`PT_ASTC=dummy:<hex header>`, `PT_HELPER_SKIP=<program>:<off>+<off>` (leave helper loads alone; the light-loop
+loads still need the trampoline or Xid 109), `PT_MME3D=trace` (3D macro calls with a complete trace become
+Eglantine's emitted methods; calls that emit `MME_DMA_READ_FIFOED` stay on the host MME, else Xid 13
+DMA_READ_FIFOED_FROM_PB). `PT_STATS` now also records DA primitives, clipper primitives and zpass pixels.
+Shader instrumentation encodings (verified with nvdisasm SM86): `MOV Rd, Rs` = 0x7202 | Rd<<16 | Rs<<32, 0xf at
+byte 9; `I2FP.F32.U32 Rd, Rs` low 0x7245 | Rd<<16 | Rs<<32, high 0x201000 (+ control bits);
+`I2FP.F32.U32 Rd, c[b][o]` = 0x7a45 | Rd<<16 | (o/4)<<40 | b<<54, same high word. Output the values through the
+pixel shader's color registers into a target whose format can hold them (BF10GF11RF11 caps at 65024).
 
 Facts learned on the way:
 - MKW frame: ~1100 entries over 2 presents, ~100k words; 3D draws to 2560x1440 (HDR BF10GF11RF11 scene, sRGB

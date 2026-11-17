@@ -1,4 +1,4 @@
-From 9bdc9afa524b2281250bc765533992b4a5e5096e Mon Sep 17 00:00:00 2001
+From 28d6d20b250007738ef392f3cbfcc2c02181fb41 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 14:42:31 -0700
 Subject: [PATCH] PROBE: EDEN_NX2_PT_CAPTURE, record one frame of guest GPU
@@ -23,20 +23,21 @@ belongs to the entry it executes.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- src/core/hle/service/nx2_gsv.h             |  10 +
- src/video_core/CMakeLists.txt              |   2 +
- src/video_core/buffer_cache/buffer_cache.h |   2 +
- src/video_core/dma_pusher.cpp              |   8 +
- src/video_core/dma_pusher.h                |   2 +
- src/video_core/engines/kepler_compute.cpp  |  52 ++-
- src/video_core/engines/kepler_compute.h    |   8 +
- src/video_core/engines/maxwell_3d.cpp      |  11 +
- src/video_core/engines/puller.h            |   2 +
- src/video_core/memory_manager.cpp          |   4 +
- src/video_core/memory_manager.h            |   2 +
- src/video_core/nx2_pt_capture.cpp          | 410 +++++++++++++++++++++
- src/video_core/nx2_pt_capture.h            |  34 ++
- 13 files changed, 544 insertions(+), 3 deletions(-)
+ src/core/hle/service/nx2_gsv.h                |  10 +
+ src/video_core/CMakeLists.txt                 |   2 +
+ src/video_core/buffer_cache/buffer_cache.h    |   2 +
+ src/video_core/dma_pusher.cpp                 |   8 +
+ src/video_core/dma_pusher.h                   |   2 +
+ src/video_core/engines/kepler_compute.cpp     |  52 ++-
+ src/video_core/engines/kepler_compute.h       |   8 +
+ src/video_core/engines/maxwell_3d.cpp         |  11 +
+ src/video_core/engines/puller.h               |   2 +
+ src/video_core/memory_manager.cpp             |   4 +
+ src/video_core/memory_manager.h               |   2 +
+ src/video_core/nx2_pt_capture.cpp             | 418 ++++++++++++++++++
+ src/video_core/nx2_pt_capture.h               |  38 ++
+ .../renderer_vulkan/vk_rasterizer.cpp         |   3 +-
+ 14 files changed, 558 insertions(+), 4 deletions(-)
  create mode 100644 src/video_core/nx2_pt_capture.cpp
  create mode 100644 src/video_core/nx2_pt_capture.h
 
@@ -395,10 +396,10 @@ index 9e208af29..9559603af 100644
                             u64 page_bits_ = 12);
 diff --git a/src/video_core/nx2_pt_capture.cpp b/src/video_core/nx2_pt_capture.cpp
 new file mode 100644
-index 000000000..a1e0f9483
+index 000000000..43c24029f
 --- /dev/null
 +++ b/src/video_core/nx2_pt_capture.cpp
-@@ -0,0 +1,410 @@
+@@ -0,0 +1,418 @@
 +// SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
@@ -442,6 +443,8 @@ index 000000000..a1e0f9483
 +
 +namespace Tegra::PtCapture {
 +namespace {
++
++std::atomic<bool> dumping{false};
 +
 +struct Range {
 +    u64 size;
@@ -506,6 +509,7 @@ index 000000000..a1e0f9483
 +    // split's back, so the flush runs there (as DmaPusher::FlushGpuWrittenCommands does).
 +    auto& split = VideoCommon::GpuSplit::Get();
 +    split.Drain(VideoCommon::DrainSite::ListFlush);
++    dumping = true;
 +    u64 flushed = 0;
 +    for (const auto& [mm, map] : s.maps) {
 +        if (mm != &memory_manager) {
@@ -526,6 +530,7 @@ index 000000000..a1e0f9483
 +            flushed += r.size;
 +        }
 +    }
++    dumping = false;
 +    LOG_WARNING(HW_GPU, "pt capture: flushed {} MiB of dirty mappings", flushed >> 20);
 +    std::FILE* maps_file = std::fopen((s.dir / fmt::format("{}maps.txt", prefix)).string().c_str(), "w");
 +    std::vector<std::pair<u64, u64>> dev;
@@ -638,6 +643,10 @@ index 000000000..a1e0f9483
 +    } else if (phase == Phase::Recording && s.presents >= s.first_present + 2) {
 +        s.phase = Phase::Stopping;
 +    }
++}
++
++bool Dumping() {
++    return dumping.load(std::memory_order_relaxed);
 +}
 +
 +bool Recording() {
@@ -811,10 +820,10 @@ index 000000000..a1e0f9483
 +} // namespace Tegra
 diff --git a/src/video_core/nx2_pt_capture.h b/src/video_core/nx2_pt_capture.h
 new file mode 100644
-index 000000000..7b7f7fa3e
+index 000000000..864ccc34e
 --- /dev/null
 +++ b/src/video_core/nx2_pt_capture.h
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,38 @@
 +// SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
@@ -847,8 +856,33 @@ index 000000000..7b7f7fa3e
 +/// changed), while recording: deltas.bin, so the replay sees what the guest CPU wrote mid-frame.
 +/// Recording drains the split at each entry so the back's entry is the front's.
 +void NoteCpuData(u64 device_addr, const u8* data, u32 size);
++/// True while a dump flushes the host caches: the rasterizer then reports GPU-written images as dirty
++/// at every accuracy level (normally only GPU accuracy High does), so render targets and other images
++/// the GPU wrote in earlier frames reach the dump instead of stale guest memory.
++bool Dumping();
 +
 +} // namespace Tegra::PtCapture
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 9fd00f4ff..60457a489 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -76,6 +76,7 @@
+ #include "video_core/nx2_knobs.h"
+ #include "video_core/nx2_perf.h"
+ #include "video_core/nx2_profile.h"
++#include "video_core/nx2_pt_capture.h"
+ 
+ namespace Vulkan {
+ 
+@@ -2199,7 +2200,7 @@ bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheT
+             return true;
+         }
+     }
+-    if (!Settings::IsGPULevelHigh()) {
++    if (!Settings::IsGPULevelHigh() && !Tegra::PtCapture::Dumping()) {
+         return false;
+     }
+     if (True(which & VideoCommon::CacheType::TextureCache)) {
 -- 
 2.56.0
 
