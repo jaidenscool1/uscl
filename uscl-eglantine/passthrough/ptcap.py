@@ -179,6 +179,9 @@ TIC_FIELDS = {m[1]: (int(m[2]), int(m[3])) for l in open(os.environ.get("TEX_HEA
     if (m := re.match(r"#define NVC797_TEXHEAD_BL_(\w+)\s+MW\((\d+):(\d+)\)", l))}
 
 CHUNK = 1 << 21
+# PT_STATS counters: (report, pipeline location): DA vertices, VS invocations, clipper invocations, PS invocations.
+STATS = [(0x1, 0x1), (0x5, 0x2), (0xF, 0x4), (0x13, 0xA)]
+STATS_NAMES = ["vertices", "VS", "clipper", "PS"]
 HOST_BASE = 0xF0_0000_0000  # host-owned buffers: above every guest mapping, inside the 1 TiB window
 ZERO_SIZE = BLOCK_SIZE = 64 << 20
 TPC_SLOTS = 72  # GR litter maxima on AD107, 12 GPCs x 6 TPCs (nvrm_probe gr info)
@@ -275,6 +278,56 @@ def encode(methods):
         words.extend(a for _, _, a in methods[i:j])
         i = j
     return words
+
+
+def pixel_programs(d, states, stream, n3d):
+    """Pixel shader program addresses the frame draws with: the 3D state, replayed with the 3D macro trace
+    ('c'/'e' lines in mme.txt: the program addresses are set inside macros), sampled after each macro call
+    and draw method (A and B are written as a pair by then)."""
+    tr = collections.defaultdict(collections.deque)
+    for line in open(os.path.join(d, "mme.txt")):
+        k, kind, a, v = line.split()
+        if kind == "c":
+            tr[int(k)].append([])
+        elif kind == "e":
+            tr[int(k)][-1].append((int(a, 16), int(v, 16)))
+    pa, pb, ps = (n3d.off(x, 5) // 4 for x in ("SET_PIPELINE_PROGRAM_ADDRESS_A", "SET_PIPELINE_PROGRAM_ADDRESS_B", "SET_PIPELINE_SHADER"))
+    regs = {ch: dict(enumerate(s["regs"][0xB197])) for ch, s in states.items()}
+    st, out = {ch: [0, 0, 0, 0] for ch in states}, set()
+    for k, (ch, _addr, *_r, words) in enumerate(stream):
+        r, calls = regs[ch], tr.get(k, collections.deque())
+        for sc, m, a, _ in decode(words, st[ch]):
+            if m < 0x40 or states[ch]["engines"][sc] != 0xB197:
+                continue
+            r[m] = a
+            nm = n3d(m * 4) or ""
+            if nm.startswith("CALL_MME_MACRO(") and calls:
+                r.update((mm, vv) for mm, vv in calls.popleft() if mm < 0xE00)
+            elif not nm.startswith(("DRAW", "BEGIN")):
+                continue
+            if r.get(ps, 0) & 1 and r.get(ps, 0) >> 4 & 0xF == 5:
+                out.add(r.get(pa, 0) << 32 | r.get(pb, 0))
+    return out
+
+
+# SM86 SASS words for the helper-lane load trampolines (PT_HELPER_LOADS); checked with nvdisasm.
+SASS_CTL = ((1 << 128) - 1) ^ ((1 << 105) - 1)
+
+
+def sass_ctl(x, stall=2, yld=0, wr=7, rd=7, wait=0):
+    return (x & ~SASS_CTL) | ((stall | yld << 4 | wr << 5 | rd << 8 | wait << 11) << 105)
+
+
+def sass_bra(off):  # BRA to (this instruction + 16 + off)
+    return sass_ctl(0x7947 | 7 << 12 | (off & ((1 << 50) - 1)) << 32 | 0x03800000 << 64, stall=5, yld=1)
+
+
+def sass_pixld_covmask(p, wr):  # PIXLD.COVMASK RZ, P<p>: P<p> = this lane is covered (not a helper)
+    return sass_ctl(0x925 | 7 << 12 | 0xFF << 16 | 1 << 78 | p << 81, stall=1, wr=wr)
+
+
+def sass_mov_rz_unless(p, r, wait):  # @!P<p> MOV R<r>, RZ
+    return sass_ctl(0x0202 | (8 | p) << 12 | r << 16 | 0xF << 72 | 0xFF << 32, wait=wait)
 
 
 def build(d):
@@ -589,13 +642,21 @@ def build(d):
             continue
         if k in skip:  # bisecting: leave the entry out (its state changes too)
             continue
-        if k in stats_at and ch == chans[0]:  # PT_STATS=<entries>: pixel shader invocations before/after the entry
+        if k in stats_at and ch == chans[0]:  # PT_STATS=<entries>: pipeline counters (+ timestamps) before/after
             sc3 = bound[ch].index(0xB197)
-            at = drams[0][2] + (1 << 20) + 32 * stats_at.index(k)
-            rep = lambda a: [(sc3, n3d.off("SET_REPORT_SEMAPHORE_A") // 4, a >> 32), (sc3, n3d.off("SET_REPORT_SEMAPHORE_B") // 4, a & 0xFFFFFFFF),
-                             (sc3, n3d.off("SET_REPORT_SEMAPHORE_C") // 4, 0), (sc3, n3d.off("SET_REPORT_SEMAPHORE_D") // 4, 2 | 0xA << 12 | 0x13 << 23)]
-            out = rep(at) + out + rep(at + 16)
-            print(f"PT_STATS: entry {k}: pixel shader invocations at {at:x} (before) and {at + 16:x} (after)")
+            at = drams[0][2] + (1 << 20) + 256 * stats_at.index(k)
+
+            def rep(a, report, loc):
+                return [(sc3, n3d.off("SET_REPORT_SEMAPHORE_A") // 4, a >> 32),
+                        (sc3, n3d.off("SET_REPORT_SEMAPHORE_B") // 4, a & 0xFFFFFFFF),
+                        (sc3, n3d.off("SET_REPORT_SEMAPHORE_C") // 4, 0),
+                        (sc3, n3d.off("SET_REPORT_SEMAPHORE_D") // 4, 2 | loc << 12 | report << 23)]
+            before, after = [], []
+            for i, (report, loc) in enumerate(STATS):  # 16-byte records: counter, timestamp
+                before += rep(at + 16 * i, report, loc)
+                after += rep(at + 128 + 16 * i, report, loc)
+            out = before + out + after
+            print(f"PT_STATS: entry {k}: counters at {at:x} (before) and {at + 128:x} (after)")
         if invalidate:  # PT_INVALIDATE=1: shader instruction/data/constant caches flushed + invalidated first
             out = [(sc_, 0x21C // 4, 0x1017) for sc_, e_ in enumerate(bound[ch]) if e_ in (0xB197, 0xB1C0)] + out
         entries.append((chans.index(ch), k, encode(out)))
@@ -794,6 +855,89 @@ def build(d):
             raw = pool_raw(base, -(-(pva + len(data) - base) // 32))
             raw[pva - base:pva - base + len(data)] = data
             print(f"PT_PATCH: {len(data)} bytes at {pva:x}")
+    # PT_HELPER_LOADS=1: on Ada, a pixel shader's helper lanes (coverage 0, run for derivatives) do not perform
+    # global loads: LDG leaves the destination unchanged. Guest code like `LDG R5, [R5.U32+UR4]` then keeps the
+    # address as the loaded value (MKW racing: a light count read this way became the address, a loop of
+    # ~10^9 iterations per helper lane, 120 ms draws, Xid 109); other destinations keep whatever an earlier warp
+    # left in the register (the same draw then hangs in some runs only). Each LDG jumps
+    # to a trampoline: the LDG, PIXLD.COVMASK into a predicate the program does not use, helper lanes zero the
+    # destination, BRA back. shortcut: helper lanes zero the destination even when the LDG's own guard was false,
+    # and wait for the load right away (no latency hiding); LDG only (no LD/LDS/ATOM). Upgrade when a game needs it.
+    arena = bytearray()
+    if os.environ.get("PT_HELPER_LOADS"):
+        import shutil, subprocess, tempfile
+        arena_va = lm_va + lm_size + len(chans) * CHUNK
+        nvdisasm = os.environ.get("NVDISASM") or shutil.which("nvdisasm")
+        assert nvdisasm, "PT_HELPER_LOADS needs nvdisasm (PATH or NVDISASM)"
+        ldg_re = re.compile(r"/\*([0-9a-f]+)\*/\s+(?:@!?P[0-6T]\s+)?LDG(\S*)\s+R(\d+),")
+        nprog = nsite = nver = 0
+
+        def patch(prog, img):  # img: unpatched memory from prog on -> the patched program (to its end), or None
+            nonlocal arena, nprog, nsite
+            end = next((o for o in range(0x80, len(img) - 16, 16)
+                        if img[o] == 0x4D and img[o + 1] & 0xF == 9 and int.from_bytes(img[o + 16:o + 32], "little") & ~SASS_CTL
+                        == sass_bra(-0x10) & ~SASS_CTL), None)  # EXIT; BRA to itself
+            if end is None:
+                print(f"PT_HELPER_LOADS: {prog:x}: no program end found, left alone")
+                return None
+            raw = bytearray(img[:-(-(end + 0x20) // 32) * 32])
+            with tempfile.NamedTemporaryFile(suffix=".bin") as f:
+                f.write(raw[0x80:end + 0x20])
+                f.flush()
+                res = subprocess.run([nvdisasm, "-b", "SM86", f.name], capture_output=True, text=True)
+            if res.returncode:
+                print(f"PT_HELPER_LOADS: {prog:x}: nvdisasm: {res.stderr.strip().splitlines()[:1]}, left alone")
+                return None
+            text = res.stdout
+            free = [] if re.search(r"\bPR\b", text) else [p for p in range(6, -1, -1) if not re.search(rf"\bP{p}\b", text)]
+            sites = [(int(mo[1], 16) + 0x80, int(mo[3]), 4 if ".128" in mo[2] else 2 if ".64" in mo[2] else 1)
+                     for mo in ldg_re.finditer(text)]
+            if sites and not free:
+                print(f"PT_HELPER_LOADS: {prog:x}: all predicates used, {len(sites)} loads left alone")
+                return None
+            nprog += bool(sites)
+            for off, rd, n in sites:
+                x = int.from_bytes(raw[off:off + 16], "little")
+                wr = x >> 110 & 7
+                x &= ~(0xF << 122)  # no operand reuse across the jump
+                t_va, site_va = arena_va + len(arena), prog + off
+                tramp = [x, sass_pixld_covmask(free[0], wr)] + [sass_mov_rz_unless(free[0], rd + i, 1 << wr) for i in range(n)]
+                tramp.append(sass_bra(site_va + 16 - (t_va + 16 * len(tramp) + 16)))
+                arena += b"".join(w.to_bytes(16, "little") for w in tramp)
+                raw[off:off + 16] = sass_bra(t_va - (site_va + 16)).to_bytes(16, "little")
+                nsite += 1
+            return raw
+        for prog in sorted(pixel_programs(d, states, stream, n3d)):
+            m_ = next((m for m in maps if m[0] <= prog < m[0] + m[2]), None)
+            if not prog or m_ is None or prog in pool_copies:
+                continue
+            img = bytearray(pool_raw(prog, min(1 << 15, (m_[0] + m_[2] - prog) // 32)))
+            del pool_copies[prog]
+            raw = patch(prog, img)
+            if raw is not None:
+                pool_copies[prog] = (len(raw) // 32, raw)
+            # Programs the CPU (re)writes during the frame: each version is patched at the entry that writes it
+            # (an extra delta after that entry's own).
+            dev = m_[1] + prog - m_[0]
+            by_entry = collections.defaultdict(list)
+            for dk, da, data in deltas:
+                if da < dev + len(img) and dev < da + len(data):
+                    by_entry[dk].append((da, data))
+            for dk in sorted(by_entry):
+                for da, data in by_entry[dk]:
+                    lo, hi = max(da, dev), min(da + len(data), dev + len(img))
+                    img[lo - dev:hi - dev] = data[lo - da:hi - da]
+                raw = patch(prog, img)
+                if raw is not None:
+                    deltas.append((dk, dev, bytes(raw)))
+                    nver += 1
+        assert len(arena) + 0x100 <= CHUNK, "trampoline arena overflow"
+        print(f"PT_HELPER_LOADS: {nsite} loads in {nprog} pixel programs ({nver} rewritten mid-frame) go through trampolines at {arena_va:x}")
+        if arena:
+            arena += sass_bra(-0x10).to_bytes(16, "little") * 16  # instruction prefetch past the last trampoline
+            open(os.path.join(out_dir, "helper-arena.bin"), "wb").write(arena)
+            ab = LMB + 1 + len(chans)
+            lines += [f"block {ab} {CHUNK:x}", f"fill {ab} 0 replay/helper-arena.bin 0 {len(arena):x}", f"map {arena_va:x} {CHUNK:x} {ab} 0"]
     # PT_NODEP: QMDs launched from memory (NVN's barrier ring) wait for no dependence and signal none.
     patched = 0
     for qva in sorted(launched_qmds):

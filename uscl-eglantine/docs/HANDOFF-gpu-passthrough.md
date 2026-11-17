@@ -4,7 +4,7 @@ Goal and plan: `PROMPT-gpu-passthrough-continue.md`. Hand the game's own NVIDIA 
 shaders to the host RTX 4060 (AD107) through the RM ioctls, instead of translating every draw to Vulkan.
 Host: driver 615.78.08 (open kernel module), Arch Linux.
 
-## Status (2026-11-16)
+## Status (2026-11-17)
 
 | Gate / phase | Result |
 |---|---|
@@ -12,7 +12,7 @@ Host: driver 615.78.08 (open kernel module), Arch Linux.
 | Gate 1 (driver access) | **Pass** on hardware |
 | Gate 2 (method compatibility) | **Pass (real data)**: every 3D/compute/copy method in a captured MKW frame is a named Ampere method, plus three private 3D methods (0xF74/0xF7C/0xF80) that ADA_A accepts; only host-class changes needed (Tegra syncpoints 0x70/0x74 dropped) |
 | Gate 3 (shader compatibility) | **Pass (decode level)**; guest compute SASS has started to **execute** on the RTX 4060 (Phase 1), no per-instruction failure seen yet |
-| Phase 1 (capture + replay one frame) | **Whole frame replays** (third pass): all 1216 entries of capture `mkw10` (3 channels, 2 presents) run on the RTX 4060 with no Xid, ~205 ms of GPU wait; the output target is a recognisable MKW course image (road, bridge, buildings) but hazy and without karts/HUD. Not yet compared pixel-for-pixel: Eglantine's end dump has no copy of the GPU-only targets (see "Third pass"). Fourth pass: that frame was the pre-race flyover (no karts/HUD is right); racing frames (capture `mkw13`, ~7700 entries, reference screenshot) replay to entry ~4970-5030 of 7757; there single draws take 120+ ms and get killed by the context-switch timeout (Xid 109); guest memory can now live in VRAM (`PT_VIDMEM`) |
+| Phase 1 (capture + replay one frame) | **Whole racing frame replays** (sixth pass, 2026-11-17): all 7757 entries of capture `mkw13` (racing, 3 channels) run on the RTX 4060 with no Xid, **~36 ms of GPU wait in total** (slowest entry 0.7 ms) with guest memory in VRAM. The fix was emulator-wide: Ada does not perform global loads in pixel-shader helper lanes, so `PT_HELPER_LOADS=1` routes every LDG of every pixel program through a trampoline that zeroes the destination in helper lanes. Output not yet right: the HUD layer matches the reference, the G-buffer shows the right scene (karts, track), but the lit scene composited under the HUD is black (next: find the lighting/composite passes). Earlier: the intro-flyover frame `mkw10` replays to a recognisable course image (third pass) |
 | New: texture formats | **Open, needs work**: 28% of MKW's texture headers are ASTC (8x8, 6x6, 4x4, 5x5); the RTX 4060 has no ASTC sampling (`textureCompressionASTC_LDR` false), so passthrough needs ASTC transcoding + header repointing |
 | Gates 4-6 | not started (Phase 1 uses pinned host memory at the guest's own VAs, pitch kind only: first evidence for gate 4) |
 
@@ -120,6 +120,10 @@ Game path for `runs.py`: `USCL_GAME=".../GAME_DUMPS/Switch 2/Mario Kart World NS
   `4d790000000000000000800300ea0f00` or `NOP` `18790000000000000000000000c00f00` over shader code: code starts at
   program + 0x80, the SPH), `PT_DELTAS=0`; `pt_replay` `PT_REPEAT=<n>` (whole plan n times, memory kept) and
   `PT_ZERO_RO=1` (the shared zero block read-only: stray writes fault with their address).
+  Sixth pass: **`PT_HELPER_LOADS=1` is required for racing frames** (needs nvdisasm); `PT_STATS=<entries>` writes
+  4 pipeline counters + timestamps per entry at the first MME data RAM image + 1 MiB (256 B each; read back e.g.
+  `f004900000:<n*256>`). Full-frame build: `PT_NO_END=1 PT_MME=trace PT_NODEP=1 PT_ASTC=dummy PT_HELPER_LOADS=1`,
+  replay `PT_VIDMEM=5500 pt_replay <cap>/replay`.
 - `pt_replay <cap>/replay [entries] [va:size:file ...]`: maps the plan, runs entries one at a time, readbacks
   after the run or a timeout. Each failure so far killed only its own channel (Xid 11/13/31 on pt_replay's
   channel); the probe's `clear` test passes after every one and the desktop never noticed.
@@ -290,6 +294,39 @@ Also open:
   cleared and bit 76 flipped; `RED.E.MAX.STRONG.GPU [Ra.U32+UR4+imm]` = nvcc's RED with bit 90 cleared and bit 71
   flipped; LDG `.STRONG.SM` -> `.CONSTANT` = flip bit 77. Control field: stall 105-108, yield 109, write barrier
   110-112, read barrier 113-115, wait mask 116-121.
+
+### Sixth pass (2026-11-17): helper lanes, the whole racing frame replays
+- **Root cause of the 100+ ms draws: helper-lane loads.** On Ada, a pixel shader's helper lanes (coverage 0, run
+  only for derivatives) do not perform `LDG`: the destination register keeps its old value. MKW's light loops
+  load a count with `LDG R5, [R5.U32+UR4]`, so in helper lanes the count *is* the address (~10^9 iterations).
+  Proof on 4962's pixel shader (0x1150383300): `PIXLD.COVMASK RZ, P1` (P1 = lane covered) + `@!P1 BRA` past loop 2
+  -> 0.87 ms; the same branch taken for covered lanes instead -> 117.75 ms. With the destination elsewhere, the
+  helper lane keeps what an earlier warp left in the physical register, so the same draw hangs in some runs only
+  (seen as entry 4966 passing at one entry count and timing out at another).
+  Ruled out on the way: SPH flags (DOES_LOAD_OR_STORE, SASS_VERSION, bits 21/22), VRS, cache operations, memory
+  placement, preemption, GPU caching, tile clamps, zero restore.
+- **Fix (emulator-wide), `ptcap.py build` with `PT_HELPER_LOADS=1`:** finds every pixel program the frame
+  draws with (3D state replayed with the 3D macro trace, `pixel_programs`), its end (`EXIT; BRA self`), its LDGs
+  and an unused predicate (nvdisasm text, `NVDISASM` or PATH), and replaces each LDG with a `BRA` to a trampoline
+  in a host arena block (`f004e00000`): the LDG (its control bits, operand reuse cleared), `PIXLD.COVMASK RZ, Pk`
+  (on the LDG's scoreboard), `@!Pk MOV Rd(+i), RZ` waiting on it, `BRA` back. Programs the CPU rewrites mid-frame
+  (deltas) get each version patched as an extra delta at that entry (28 in mkw13). mkw13: 2774 loads in 221
+  programs; 2 programs nvdisasm rejects ("Illegal instruction") are left alone. Result: 4962 118 ms -> 1.0 ms,
+  the whole frame (7760 replay entries) runs with no Xid in ~36 ms GPU wait (VRAM) / ~445 ms (host memory,
+  4923 then 121 ms: 10.6 M pixel invocations from host memory). Shortcuts (in the code): helper lanes zero the
+  destination even when the LDG's own guard was false; the trampoline waits for the load right away; `LD`/`LDS`/
+  `ATOM` not covered. **Phase 2 needs this in the shader path** (a real SASS decoder instead of nvdisasm text).
+- **Output check (not right yet).** Entry 7727 starts the next frame (clears 28 targets), so read targets with
+  `pt_replay <dir> 7729 ...`. The frame's sRGB output `210c31a000` (2560x1440, d6) has the HUD ("05", "1/3") in the
+  right places on black; `811844e000`/`811934e000` (d5, G-buffer style) show the race scene with the player's kart
+  and the pack ahead, as in `ref-end.png`; the HDR target `8110901000` stays empty until entries 5500-7000 and then
+  holds only far objects on the horizon (1.7% of pixels). So geometry renders; the lighting/composite of the opaque
+  scene is missing. Note `targets.txt` first/last entries miss target switches done inside 3D macros (the build's
+  shadow does not apply the 3D macro trace), so they are hints only.
+- **Next:** find the passes between the G-buffer (entry 4923) and the composite (7646-7720), most likely compute
+  (light/deferred shading, exposure, tonemap): list compute launches and their texture/image bindings in that
+  range, read back their outputs, and compare with Eglantine (a capture-probe dump of the same targets would give
+  pixel references). Then ASTC transcoding (`PT_ASTC=dummy` is still a stopgap).
 
 Facts learned on the way:
 - MKW frame: ~1100 entries over 2 presents, ~100k words; 3D draws to 2560x1440 (HDR BF10GF11RF11 scene, sRGB
