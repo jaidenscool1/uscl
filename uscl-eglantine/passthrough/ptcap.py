@@ -281,33 +281,83 @@ def encode(methods):
     return words
 
 
-def pixel_programs(d, states, stream, n3d):
-    """Pixel shader program addresses the frame draws with: the 3D state, replayed with the 3D macro trace
-    ('c'/'e' lines in mme.txt: the program addresses are set inside macros), sampled after each macro call
-    and draw method (A and B are written as a pair by then)."""
-    tr = collections.defaultdict(collections.deque)
+def macro3d_calls(d, states, stream, n3d):
+    """The 3D macro trace ('c'/'e' lines in mme.txt) paired with the stream's 3D macro calls: yields
+    (entry, channel, subchannel, method, argument, emits) for every 3D method; emits is the traced call's
+    [(method, value)] on the write that starts a call (None if it has no trace), else None.
+    Each write to CALL_MME_MACRO(n) starts a call (NVN batches 1-parameter calls as non-incrementing runs), its
+    CALL_MME_DATA(n) writes add parameters. The trace's entry numbers are not used: Eglantine's front runs macros out of step with
+    the probe's entry counter (mkw19: entry 4910's 2134 calls are logged as entry 4936). Calls pair up by
+    order, start address and parameter count instead (a traced call that matches no stream call is skipped)."""
+    tr = []
     for line in open(os.path.join(d, "mme.txt")):
         k, kind, a, v = line.split()
         if kind == "c":
-            tr[int(k)].append([])
-        elif kind == "e":
-            tr[int(k)][-1].append((int(a, 16), int(v, 16)))
-    pa, pb, ps = (n3d.off(x, 5) // 4 for x in ("SET_PIPELINE_PROGRAM_ADDRESS_A", "SET_PIPELINE_PROGRAM_ADDRESS_B", "SET_PIPELINE_SHADER"))
-    regs = {ch: dict(enumerate(s["regs"][0xB197])) for ch, s in states.items()}
-    st, out = {ch: [0, 0, 0, 0] for ch in states}, set()
-    for k, (ch, _addr, *_r, words) in enumerate(stream):
-        r, calls = regs[ch], tr.get(k, collections.deque())
+            tr.append((int(a, 16), int(v, 16), []))
+        elif kind == "e" and tr:
+            tr[-1][2].append((int(a, 16), int(v, 16)))
+    st, j, pending = {ch: [0, 0, 0, 0] for ch in states}, 0, {}
+
+    def match(ch):  # the open call on this channel, now complete: find its trace record
+        nonlocal j
+        call = pending.pop(ch, None)
+        if call is None:
+            return
+        key = (call[0], call[1])
+        t = next((t for t in range(j, min(j + 256, len(tr))) if tr[t][:2] == key), None)
+        if t is not None:
+            call[2][:] = tr[t][2]
+            call[3][0] = True
+            j = t + 1
+    # Emits are filled when the call's parameter count is known (the next call or non-macro method), so the
+    # yielded list is mutable: consumers read it after the generator moved past the call's parameters.
+    for k, (ch, _a, *_r, words) in enumerate(stream):
         for sc, m, a, _ in decode(words, st[ch]):
             if m < 0x40 or states[ch]["engines"][sc] != 0xB197:
+                yield k, ch, sc, m, a, None
                 continue
-            r[m] = a
             nm = n3d(m * 4) or ""
-            if nm.startswith("CALL_MME_MACRO(") and calls:
-                r.update((mm, vv) for mm, vv in calls.popleft() if mm < 0xE00)
-            elif not nm.startswith(("DRAW", "BEGIN")):
-                continue
-            if r.get(ps, 0) & 1 and r.get(ps, 0) >> 4 & 0xF == 5:
-                out.add(r.get(pa, 0) << 32 | r.get(pb, 0))
+            emits = None
+            if nm.startswith("CALL_MME_MACRO("):
+                match(ch)
+                emits = []
+                pending[ch] = [states[ch]["pos3d"][int(nm[15:-1])], 1, emits, [False]]
+            elif nm.startswith("CALL_MME_DATA(") and ch in pending:
+                pending[ch][1] += 1
+            else:
+                match(ch)
+            yield k, ch, sc, m, a, emits
+    for ch in list(pending):
+        match(ch)
+
+
+def pixel_programs(d, states, stream, n3d):
+    """Pixel shader program addresses the frame draws with: the 3D state, replayed with the 3D macro trace
+    (macro3d_calls: the program addresses are set inside macros), sampled after each macro call and draw
+    method (A and B are written as a pair by then)."""
+    pa, pb, ps = (n3d.off(x, 5) // 4 for x in ("SET_PIPELINE_PROGRAM_ADDRESS_A", "SET_PIPELINE_PROGRAM_ADDRESS_B", "SET_PIPELINE_SHADER"))
+    regs = {ch: dict(enumerate(s["regs"][0xB197])) for ch, s in states.items()}
+    out, call = set(), {}
+    for k, ch, sc, m, a, emits in macro3d_calls(d, states, stream, n3d):
+        if states[ch]["engines"][sc] != 0xB197:
+            continue
+        r = regs[ch]
+        nm = n3d(m * 4) or ""
+        if nm.startswith("CALL_MME_DATA("):
+            continue
+        if ch in call:  # the previous call is complete (and paired) once a non-parameter method follows
+            for mm, vv in call.pop(ch) + [(None, None)]:  # sampled at each emitted draw and after the call
+                if mm is None or (n3d(mm * 4) or "").startswith(("DRAW", "BEGIN")):
+                    if r.get(ps, 0) & 1 and r.get(ps, 0) >> 4 & 0xF == 5:
+                        out.add(r.get(pa, 0) << 32 | r.get(pb, 0))
+                if mm is not None and mm < 0xE00:
+                    r[mm] = vv
+        if emits is not None:
+            call[ch] = emits
+            continue
+        r[m] = a
+        if nm.startswith(("DRAW", "BEGIN")) and r.get(ps, 0) & 1 and r.get(ps, 0) >> 4 & 0xF == 5:
+            out.add(r.get(pa, 0) << 32 | r.get(pb, 0))
     return out
 
 
@@ -335,6 +385,13 @@ def sass_isetp_ne_zero(p, r, wait):  # ISETP.NE.U32.AND P<p>, PT, R<r>, RZ, PT
 
 def sass_mov_rz_if(p, r, wait):  # @P<p> MOV R<r>, RZ
     return sass_ctl(0x0202 | p << 12 | r << 16 | 0xF << 72 | 0xFF << 32, wait=wait)
+
+
+def override_ranges(ranges, over):
+    """[(start, size, value)] with the `over` ranges winning: the others are cut around them."""
+    for ea, es, _ in over:
+        ranges = [(lo, hi - lo, v) for a, n, v in ranges for lo, hi in ((a, min(a + n, ea)), (max(a, ea + es), a + n)) if lo < hi]
+    return sorted(ranges + list(over))
 
 
 def bl_layout(w, h, d, levels, tile, bpb_log2, block, tws):
@@ -423,6 +480,7 @@ def build(d):
         return (rmw(e, regs, hi, i) << 32) | rmw(e, regs, lo, i)
 
     targets = {}  # color target address -> [width, height, format, memory, first entry, last entry]
+    drawn = set()  # (address, size upper bound) of every color/depth target the frame draws to
 
     def note_targets(regs, k=-1):
         ct_select = rmw(0xB197, regs, "SET_CT_SELECT")
@@ -437,6 +495,8 @@ def build(d):
                 layers = max(1, rmw(0xB197, regs, "SET_COLOR_TARGET_THIRD_DIMENSION", i) & 0xFFFF)
                 pitch = rmw(0xB197, regs, "SET_COLOR_TARGET_ARRAY_PITCH", i) * 4
                 written.add((addr, max(pitch * layers, w * h * 16) + CHUNK))
+                if fmt and i < (ct_select & 0xF) and k >= 0:
+                    drawn.add((addr, max(pitch * layers, w * h * 16)))  # upper bound, no padding
         addr = a64(0xB197, regs, "SET_ZT_A", "SET_ZT_B")
         if addr:
             w, h = rmw(0xB197, regs, "SET_ZT_SIZE_A"), rmw(0xB197, regs, "SET_ZT_SIZE_B")
@@ -444,6 +504,7 @@ def build(d):
             pitch = rmw(0xB197, regs, "SET_ZT_ARRAY_PITCH") * 4
             written.add((addr, max(pitch * layers, w * h * 8) + CHUNK))
             if k >= 0:  # depth targets too (zeta formats do not collide with color format codes)
+                drawn.add((addr, max(pitch * layers, w * h * 8)))
                 t = targets.setdefault(addr, [w, h, rmw(0xB197, regs, "SET_ZT_FORMAT"), rmw(0xB197, regs, "SET_ZT_BLOCK_SIZE"), k, k])
                 t[5] = k
 
@@ -508,6 +569,8 @@ def build(d):
                     stats[e] += 1
             if e == 0xB197:
                 out.append((sc, n.off("SET_ZCULL") // 4, 0))
+                if os.environ.get("PT_SRGB_WRITE") != "guest":
+                    out.append((sc, n.off("SET_SRGB_WRITE") // 4, 0))  # see the stream rewrite of SET_SRGB_WRITE
                 # bisecting: PT_SETR=<3D method name>:<hex value>[,...] sets that register after the restore
                 for nm, v in (x.rsplit(":", 1) for x in os.environ.get("PT_SETR", "").split(",") if x):
                     base, _, i = nm.rstrip(")").partition("(")
@@ -691,6 +754,12 @@ def build(d):
             if NEVER.fullmatch(n):
                 stats[f"drop {n}"] += 1
                 continue
+            if n == "SET_SRGB_WRITE" and a and os.environ.get("PT_SRGB_WRITE") != "guest":
+                # With it set, Ada sRGB-encodes writes into plain UNORM targets too (MKW's shadow mask factors, A8B8G8R8:
+                # measured in the shader's outputs); sRGB formats encode by format either way. NVN sets 1 and keeps data
+                # in UNORM targets, so the guest GPU does not encode them; Eglantine (Vulkan) and NVK ignore the method.
+                stats["SET_SRGB_WRITE -> 0"] += 1
+                a = 0
             if (n, a) in setv:
                 stats[f"PT_SETV {n}"] += 1
                 a = setv[(n, a)]
@@ -866,44 +935,6 @@ def build(d):
             else:
                 pieces.append(piece)
             d0 = e
-    # PTE kinds: Ada samples depth texture headers (Z16, Z24S8, ...) only from pages of the matching depth
-    # kind (TEX FORMAT otherwise; color views of those pages are fine). Kinds come from the guest's own
-    # requests (kinds.txt, capture probe NoteGuestKind; Turing+ numbering, the same on T239 and Ada), the
-    # incompressible fallback for compressible kinds (no compression tags here). PT_KIND_RANGES=<va>:<size>:<kind>[,...]
-    # (hex) overrides.
-    kranges = []
-    if os.path.exists(os.path.join(d, "kinds.txt")):
-        for line in open(os.path.join(d, "kinds.txt")):
-            ka, ks, kw, kf = (int(x, 16) for x in line.split())
-            k_ = kf if 0x8 <= kw <= 0xE else kw
-            if k_ not in (0, 7) and (os.environ.get("PT_KINDS") != "depth" or 1 <= k_ <= 5):  # pitch is the default; 7 = invalid; PT_KINDS=depth: depth kinds only
-                kranges.append((ka, ks, k_))
-    env_k = [tuple(int(x, 16) for x in r.split(":")) for r in os.environ.get("PT_KIND_RANGES", "").split(",") if r]
-    kranges = sorted([r for r in kranges if not any(r[0] < ea + es and ea < r[0] + r[1] for ea, es, _ in env_k)] + env_k)
-    kstarts = [r[0] for r in kranges]
-    nkind = collections.Counter()
-    # PT_VIDMEM_RANGES=<va>:<size>[,...] (hex): those guest pages in video memory (no CPU map, start as zero;
-    # only for data the frame itself produces), to test what host-memory access costs a draw.
-    vranges = [tuple(int(x, 16) for x in r.split(":")) for r in os.environ.get("PT_VIDMEM_RANGES", "").split(",") if r]
-    for vi, (vva, vsz) in enumerate(vranges):
-        lines.append(f"vblock {1000 + vi} {vsz:x}")
-    for va, size, b, o in pieces:
-        hit = next(((vi, vva) for vi, (vva, vsz) in enumerate(vranges) if vva <= va and va + size <= vva + vsz), None)
-        if hit:
-            lines.append(f"map {va:x} {size:x} {1000 + hit[0]} {va - hit[1]:x}")
-            continue
-        near = kranges[max(0, bisect.bisect_right(kstarts, va) - 1):bisect.bisect_left(kstarts, va + size)]
-        near = [r for r in near if r[0] + r[1] > va]
-        cuts = sorted({va, va + size} | {x for ka, ks, _ in near for x in (ka, ka + ks) if va < x < va + size})
-        for lo, hi in zip(cuts, cuts[1:]):
-            kind = next((k_ for ka, ks, k_ in near if ka <= lo < ka + ks), None)
-            if kind is not None:
-                nkind[kind] += hi - lo
-            lines.append(f"map {lo:x} {hi - lo:x} {b} {o + lo - va:x}" if kind is None else
-                         f"mapk {lo:x} {hi - lo:x} {b} {o + lo - va:x} {kind:x}")
-    lines.append(f"map {lm_va:x} {lm_size:x} {LMB} 0")
-    if nkind:
-        print("PTE kinds: " + ", ".join(f"{k:#x} {v >> 20} MiB" for k, v in sorted(nkind.items())))
     # Texture header / sampler pool patches (bisecting, ASTC stopgap). Every patch edits one copy of each pool
     # (read once from the chunks' data); the copies become fill lines at the end, so patches compose.
     pool_copies = {}  # pool va -> (count, bytearray)
@@ -939,6 +970,84 @@ def build(d):
                          r[names[e].off(f"SET_TEX_{kind}_POOL_C") // 4] + 1))
         return sorted(p for p in out if p[0])
 
+    # Depth images the frame samples but never draws hold Eglantine's download: its texture cache writes every
+    # format in the color GOB arrangement, while on the GPU the guest's depth PTE kinds make the texture unit use
+    # the depth one (nil's FermiZS; measured: MKW's cached Z16 shadow atlas read sector-permuted, mask 17.8 dB,
+    # with a color kind and an R16 header 28.0 dB vs Eglantine). Such an image becomes its bit-identical color
+    # twin on a color kind. Phase 1 only: on the GPU the guest's own depth writes are in the depth arrangement.
+    # shortcut: Z16 and ZF32 (exact twins); other depth formats are counted and left alone. PT_DEPTH_TWIN=0: off.
+    DEPTH_TWIN = {TIC_FORMATS["Z16"]: TIC_FORMATS["R16"], TIC_FORMATS["ZF32"]: TIC_FORMATS["R32"]}
+    depth_formats = {v for k_, v in TIC_FORMATS.items() if re.fullmatch(r"(Z|S8Z|X8Z|ZF32_X24S|ZF32)\w*", k_)}
+    twin_k, twin_hdr, twin_left = [], [], collections.Counter()
+    desc = os.path.join(d, "descriptors.txt")
+    if os.environ.get("PT_DEPTH_TWIN") != "0" and os.path.exists(desc):
+        used = {int(x, 16) for x in open(desc)}
+        for pool, count in pools_of("HEADER"):
+            raw = pool_raw(pool, count)
+            for i in range(count):
+                h = int.from_bytes(raw[i * 32:i * 32 + 32], "little")
+                f_ = h & 0x7F
+                if pool + i * 32 not in used or f_ not in depth_formats:
+                    continue
+                g_ = lambda f: h >> TIC_FIELDS[f][1] & ((1 << (TIC_FIELDS[f][0] - TIC_FIELDS[f][1] + 1)) - 1)
+                tt = g_("TEXTURE_TYPE")
+                if f_ not in DEPTH_TWIN or g_("HEADER_VERSION") != 3 or tt > 8:
+                    twin_left[f"format {f_:#x} type {tt}"] += 1
+                    continue
+                dd = (g_("DEPTH_MINUS_ONE") | g_("DEPTH_MINUS_ONE_BIT14") << 14) + 1
+                depth, layers = (dd, 1) if tt == 2 else (1, {3: 6, 8: 6 * dd}.get(tt, dd))
+                block = tuple(g_(f"GOBS_PER_BLOCK_{x}") for x in ("WIDTH", "HEIGHT", "DEPTH"))
+                addr = g_("ADDRESS_BITS31TO9") << 9 | g_("ADDRESS_BITS48TO32") << 32
+                _, stride = bl_layout(g_("WIDTH_MINUS_ONE") + 1, (g_("HEIGHT_MINUS_ONE") | g_("HEIGHT_MINUS_ONE_BIT16") << 16) + 1,
+                                      depth, g_("MAX_MIP_LEVEL") + 1, (1, 1), 1 if f_ == TIC_FORMATS["Z16"] else 2, block,
+                                      g_("TILE_WIDTH_IN_GOBS"))
+                size = -(-stride * layers >> 16) << 16  # whole 64 KiB pages: kinds are per big page
+                if any(wa < addr + size and addr < wa + ws for wa, ws in drawn):
+                    twin_left["drawn in the frame"] += 1
+                    continue
+                twin_k.append((addr, size, 0x6))  # GENERIC_16BX2 (block-linear color)
+                raw[i * 32] = raw[i * 32] & 0x80 | DEPTH_TWIN[f_]
+                twin_hdr.append(i)
+        print(f"depth twins: {len(twin_hdr)} sampled depth headers -> color twins over {len(set(twin_k))} ranges "
+              f"({sum(s_ for _, s_, _ in set(twin_k)) >> 20} MiB); left alone: {dict(twin_left)}")
+    # PTE kinds: Ada samples depth texture headers (Z16, Z24S8, ...) only from pages of the matching depth
+    # kind (TEX FORMAT otherwise; color views of those pages are fine). Kinds come from the guest's own
+    # requests (kinds.txt, capture probe NoteGuestKind; Turing+ numbering, the same on T239 and Ada), the
+    # incompressible fallback for compressible kinds (no compression tags here). PT_KIND_RANGES=<va>:<size>:<kind>[,...]
+    # (hex) overrides.
+    kranges = []
+    if os.path.exists(os.path.join(d, "kinds.txt")):
+        for line in open(os.path.join(d, "kinds.txt")):
+            ka, ks, kw, kf = (int(x, 16) for x in line.split())
+            k_ = kf if 0x8 <= kw <= 0xE else kw
+            if k_ not in (0, 7) and (os.environ.get("PT_KINDS") != "depth" or 1 <= k_ <= 5):  # pitch is the default; 7 = invalid; PT_KINDS=depth: depth kinds only
+                kranges.append((ka, ks, k_))
+    env_k = [tuple(int(x, 16) for x in r.split(":")) for r in os.environ.get("PT_KIND_RANGES", "").split(",") if r] + sorted(set(twin_k))
+    kranges = override_ranges(kranges, env_k)
+    kstarts = [r[0] for r in kranges]
+    nkind = collections.Counter()
+    # PT_VIDMEM_RANGES=<va>:<size>[,...] (hex): those guest pages in video memory (no CPU map, start as zero;
+    # only for data the frame itself produces), to test what host-memory access costs a draw.
+    vranges = [tuple(int(x, 16) for x in r.split(":")) for r in os.environ.get("PT_VIDMEM_RANGES", "").split(",") if r]
+    for vi, (vva, vsz) in enumerate(vranges):
+        lines.append(f"vblock {1000 + vi} {vsz:x}")
+    for va, size, b, o in pieces:
+        hit = next(((vi, vva) for vi, (vva, vsz) in enumerate(vranges) if vva <= va and va + size <= vva + vsz), None)
+        if hit:
+            lines.append(f"map {va:x} {size:x} {1000 + hit[0]} {va - hit[1]:x}")
+            continue
+        near = kranges[max(0, bisect.bisect_right(kstarts, va) - 1):bisect.bisect_left(kstarts, va + size)]
+        near = [r for r in near if r[0] + r[1] > va]
+        cuts = sorted({va, va + size} | {x for ka, ks, _ in near for x in (ka, ka + ks) if va < x < va + size})
+        for lo, hi in zip(cuts, cuts[1:]):
+            kind = next((k_ for ka, ks, k_ in near if ka <= lo < ka + ks), None)
+            if kind is not None:
+                nkind[kind] += hi - lo
+            lines.append(f"map {lo:x} {hi - lo:x} {b} {o + lo - va:x}" if kind is None else
+                         f"mapk {lo:x} {hi - lo:x} {b} {o + lo - va:x} {kind:x}")
+    lines.append(f"map {lm_va:x} {lm_size:x} {LMB} 0")
+    if nkind:
+        print("PTE kinds: " + ", ".join(f"{k:#x} {v >> 20} MiB" for k, v in sorted(nkind.items())))
     # PT_ASTC=dummy: the host samples no ASTC (RTX 40: textureCompressionASTC_LDR false; 28% of MKW's texture
     # headers): every ASTC header in the texture header pools becomes a copy of an A8B8G8R8 header of the same
     # pool (wrong image, valid memory). shortcut: transcode ASTC (to RGBA8/BC7) and repoint the headers instead.
@@ -1455,6 +1564,10 @@ def selftest():
     # one GOB, runs in (row, 16-byte column) order: native = legacy with offset bits 5 and 6 exchanged
     assert list(bl_runs(64, 4, 1, 0, 0, 1)) == [0, 64, 256, 320, 16, 80, 272, 336, 32, 96, 288, 352, 48, 112, 304, 368]
     assert sorted(bl_runs(256, 64, 1, 2, 0, 4)) == list(range(0, 256 * 64, 16))  # a bijection onto the level
+    # MKW's Z16 shadow atlas (512x512x101, 4 levels, 16-GOB blocks, tile width 3): the RTX samples layers 0xB0000 apart
+    assert bl_layout(512, 512, 1, 4, (1, 1), 1, (0, 4, 0), 3)[1] == 0xB0000
+    assert override_ranges([(0x100, 0x400, 1), (0x600, 0x100, 6)], [(0x200, 0x100, 6)]) == \
+        [(0x100, 0x100, 1), (0x200, 0x100, 6), (0x300, 0x200, 1), (0x600, 0x100, 6)]
     print("selftest: ok")
 
 
