@@ -270,7 +270,17 @@ Also open:
   (deltas), the index buffer (static: identical start/end, max index 1328), generic PTE kinds (`PT_KINDS=depth`),
   shader cache staleness. The light grid mapping also holds other data the frame needs (zeroing or writing
   past the grid breaks entry 4966).
-- **Open, next**: why these draws cost 100x more than in Eglantine. Leading idea: zcull is off in the replay
+- **Measured with `PT_STATS=<entries>`** (3D report PS_INVOCATIONS, pipeline location PIXEL_SHADER 0xA:
+  without the location Ada raises Xid 69): 4923 = 10.6 M pixel shader invocations (2.9x the screen) in
+  139 ms; **4962 = 31 invocations in 118 ms, 4966 = 15 in 134 ms**. Instrumenting the 4962 and 4981 pixel shaders
+  (`RED.MAX` of the loaded light counts and tile offsets into spare words, then `EXIT`) shows counts 0 and tile
+  offsets in range: the light loops are not where the time goes. Caution: Xid 109 depends on whether the desktop
+  wants the GPU during a long draw, so single "this patch makes it pass" results above are not conclusive.
+  With the pixel shaders of 4962/4966 (also used by 4923) replaced by `EXIT`, the whole run to entry 4986 takes
+  22 ms of GPU time instead of 273 ms.
+- **Open, next**: where 4962/4966 spend 100+ ms with ~30 pixel shader invocations. Measure inside the entry with
+  more reports (VS_INVOCATIONS, primitives generated, and the timestamps the four-word reports carry) to see
+  whether vertex work (counts, instancing) or a stall dominates; then why these draws cost 100x more than in Eglantine. Leading idea: zcull is off in the replay
   (its on-chip state does not carry over), so a heavy forward-lighting pixel shader behind a depth prepass
   shades every hidden pixel; measure with a pipeline statistics report (pixel shader invocations) around the
   draw, then restore zcull properly (`SET_ZCULL*` state + a zcull region clear) if that is it.

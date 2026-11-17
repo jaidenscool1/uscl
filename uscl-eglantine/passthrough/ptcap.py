@@ -410,6 +410,7 @@ def build(d):
     split = {int(x) for x in os.environ.get("PT_SPLIT", "").split(",") if x}
     skip = {int(x) for x in os.environ.get("PT_SKIP", "").split(",") if x}
     invalidate = bool(os.environ.get("PT_INVALIDATE"))
+    stats_at = [int(x) for x in os.environ.get("PT_STATS", "").split(",") if x]
     drop_re = re.compile(os.environ["PT_DROP"]) if os.environ.get("PT_DROP") else None
     # PT_MME=trace: compute macro calls become the methods Eglantine's MME emitted for them (mme.txt), so
     # the host MME does not run compute macros (Eglantine's output is what the game ran).
@@ -588,6 +589,13 @@ def build(d):
             continue
         if k in skip:  # bisecting: leave the entry out (its state changes too)
             continue
+        if k in stats_at and ch == chans[0]:  # PT_STATS=<entries>: pixel shader invocations before/after the entry
+            sc3 = bound[ch].index(0xB197)
+            at = drams[0][2] + (1 << 20) + 32 * stats_at.index(k)
+            rep = lambda a: [(sc3, n3d.off("SET_REPORT_SEMAPHORE_A") // 4, a >> 32), (sc3, n3d.off("SET_REPORT_SEMAPHORE_B") // 4, a & 0xFFFFFFFF),
+                             (sc3, n3d.off("SET_REPORT_SEMAPHORE_C") // 4, 0), (sc3, n3d.off("SET_REPORT_SEMAPHORE_D") // 4, 2 | 0xA << 12 | 0x13 << 23)]
+            out = rep(at) + out + rep(at + 16)
+            print(f"PT_STATS: entry {k}: pixel shader invocations at {at:x} (before) and {at + 16:x} (after)")
         if invalidate:  # PT_INVALIDATE=1: shader instruction/data/constant caches flushed + invalidated first
             out = [(sc_, 0x21C // 4, 0x1017) for sc_, e_ in enumerate(bound[ch]) if e_ in (0xB197, 0xB1C0)] + out
         entries.append((chans.index(ch), k, encode(out)))
