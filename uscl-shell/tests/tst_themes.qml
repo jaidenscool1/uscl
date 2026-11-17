@@ -130,6 +130,17 @@ Item {
                 compare(Object.keys(visited).length,home.panelEntries.length,"Every tile in pivot "+tab+" must be reachable")
             }
         }
+        function test_switch2_opaque_cover_corners() {
+            home.theme = "switch2"; home.reset(); wait(180)
+            var tile = findChild(home,"homeTile0")
+            var opaqueCover = Qt.createQmlObject('import QtQuick; Rectangle { anchors.fill: parent; color: "red"; z: 0.5 }',tile)
+            wait(60)
+            var capture = grabImage(home)
+            var origin = tile.mapToItem(home,0,0)
+            verify(capture.red(origin.x+6,origin.y+6) > 200 && capture.green(origin.x+6,origin.y+6) > 200,"An opaque cover must not square off the rounded corner")
+            compare(capture.red(origin.x+100,origin.y+100),255); compare(capture.green(origin.x+100,origin.y+100),0)
+            opaqueCover.destroy()
+        }
         function test_ps4_information_does_not_launch() {
             home.theme = "ps4"; home.reset()
             home.input("down"); home.input("accept")

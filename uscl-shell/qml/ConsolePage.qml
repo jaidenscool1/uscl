@@ -144,6 +144,13 @@ Item {
                 asynchronous: true
                 mipmap: true
             }
+            RoundedCoverMask {
+                anchors.fill: parent
+                visible: style.lightSwitch
+                z: 1
+                radius: game.radius
+                outsideColor: style.background
+            }
             Text {
                 x: style.blades ? 100 : 12
                 y: style.blades ? 8 : parent.height - 67

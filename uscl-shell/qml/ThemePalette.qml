@@ -20,7 +20,7 @@ QtObject {
     readonly property color accent: xbox ? "#107c10" : nintendo ? "#39e3d2" : ps5 ? "#ffffff" : "#79c9ff"
     readonly property color focusFill: xbox ? "#107c10" : lightSwitch ? "#ffffff" : nintendo ? "#464646" : ps5 ? "#25303e" : "#ffffff"
     readonly property color focusText: xbox ? "white" : lightSwitch ? "#272727" : nintendo || ps5 ? "white" : "#15213a"
-    readonly property int radius: ps5 ? 16 : nintendo ? 3 : 0
+    readonly property int radius: lightSwitch ? 24 : ps5 ? 16 : nintendo ? 3 : 0
     readonly property string confirmGlyph: xbox ? "A" : nintendo ? "A" : "✕"
     readonly property string backGlyph: xbox || nintendo ? "B" : "○"
     readonly property string optionsGlyph: xbox ? "☰" : nintendo ? "+" : "△"

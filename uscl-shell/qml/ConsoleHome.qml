@@ -642,6 +642,13 @@ Item {
                     asynchronous: true
                     mipmap: true
                 }
+                RoundedCoverMask {
+                    anchors.fill: parent
+                    visible: style.lightSwitch
+                    z: 1
+                    radius: tile.radius
+                    outsideColor: style.background
+                }
                 ConsoleGlyph {
                     visible: !!tile.modelData.key
                     x: parent.width * .25

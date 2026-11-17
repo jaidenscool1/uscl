@@ -23,7 +23,8 @@ all games, including games beyond the home strip, with console filters and scrol
 | Switch 2 | Light HOME organization, rounded software cards and a grouped lower toolbar, including USCL party chat | [Home](images/theme-switch2.png) |
 
 The screenshots use made-up titles and USCL icons, without personal profiles or game artwork. Installed
-games use their own icons and backgrounds. Nintendo tool glyphs are original vector drawings, with colors
+games use their own icons and backgrounds. Switch 2 cover corners remain rounded with opaque artwork on both renderers.
+Nintendo tool glyphs are original vector drawings, with colors
 that remain visible on the light toolbar. The status clock is separate from profile actions.
 
 USCL actions replace console-only services in the corresponding regions. There are no pretend storefronts,

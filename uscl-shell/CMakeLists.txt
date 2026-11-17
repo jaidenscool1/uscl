@@ -43,6 +43,7 @@ qt_add_qml_module(uscl
         qml/ThemePalette.qml
         qml/ConsoleHome.qml
         qml/ConsoleGlyph.qml
+        qml/RoundedCoverMask.qml
         qml/Xmb.qml
         qml/Page.qml
         qml/OptionsPanel.qml
