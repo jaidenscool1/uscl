@@ -69,7 +69,7 @@ Item {
         function test_motion_disabled() {
             home.animate = false; home.theme = "ps5"; home.reset()
             home.input("right")
-            compare(findChild(home, "homeTile1").width, 150)
+            compare(findChild(home, "homeTile1").width, 180)
             home.input("home")
             compare(findChild(home, "consoleQuickMenu").opacity, 1)
             home.input("back")
@@ -87,13 +87,57 @@ Item {
             backdrop.source = ""
             compare(backdrop.front, -1)
         }
+        function test_reference_geometry() {
+            home.animate = false; home.theme = "ps5"; home.reset()
+            var ps5Tile = findChild(home,"homeTile0")
+            var origin = ps5Tile.mapToItem(home,0,0)
+            compare(origin.x,168); compare(origin.y,123); compare(ps5Tile.width,180)
+            compare(findChild(home,"homeTile1").width,108)
+            home.theme = "switch2"; home.reset()
+            var switchTile = findChild(home,"homeTile0")
+            origin = switchTile.mapToItem(home,0,0)
+            compare(origin.x,159); compare(origin.y,300); compare(switchTile.width,384)
+            verify(findChild(switchTile,"softwareFocusRing").visible)
+            home.animate = true
+        }
+        function test_ps5_options_action() {
+            home.theme = "ps5"; home.reset(); home.input("down"); home.input("right")
+            compare(home.detailsAction,1); home.input("accept")
+            compare(optionsSpy.count,1); compare(launches,0)
+            home.input("left"); home.input("accept"); compare(launches,1)
+        }
+        function test_ps5_control_center_cards() {
+            home.theme = "ps5"; home.reset(); home.input("home")
+            home.input("up"); compare(home.guideRegion,"cards")
+            home.input("right"); compare(home.guideCardIndex,1)
+            home.input("accept"); compare(sectionSpy.signalArguments[0][0],"updates")
+            compare(launches,0); verify(!home.guideOpen)
+            home.input("home"); home.input("up"); home.input("down")
+            compare(home.guideRegion,"controls")
+            home.input("accept"); compare(sectionSpy.signalArguments[1][0],"library")
+            home.input("home"); wait(260)
+            var card = findChild(home,"controlCenterCard2")
+            mouseClick(card,card.width/2,card.height/2)
+            compare(sectionSpy.signalArguments[2][0],"changelog"); compare(launches,0)
+        }
+        function test_pivot_interruptions_data() {
+            return ["x360classic","x360","xboxone"].map(function(t) { return {tag:t,theme:t} })
+        }
+        function test_pivot_interruptions(data) {
+            home.theme = data.theme; home.reset()
+            home.input("r1"); wait(35); home.input("l1"); wait(35); home.input("r1")
+            tryCompare(home,"pivotOffset",0); tryCompare(home,"pivotOpacity",1)
+            verify(home.tab >= 0 && home.tab < home.tabs.length)
+            var before = home.tab; home.input("accept")
+            compare(home.tab,before)
+        }
         function test_themes_data() {
             return ["ps4", "ps5", "x360classic", "x360", "xboxone", "switch", "switch2"].map(function(t) { return {tag: t, theme: t} })
         }
         function test_themes(data) {
             home.theme = data.theme; home.reset()
-            compare(home.entries.length, 13) // 12 games and a deliberate library entry.
-            verify(home.entries.slice(0,12).every(function(e) { return !!e.console }))
+            compare(home.entries.length, data.theme === "ps5" ? 11 : 13) // Compact PS5 row, with a deliberate library entry.
+            verify(home.entries.slice(0,-1).every(function(e) { return !!e.console }))
             if (!home.grid && data.theme !== "x360classic") {
                 home.input("right"); compare(home.selected, 1)
                 home.input("accept"); compare(launches, 1)
@@ -103,7 +147,7 @@ Item {
                 else compare(home.region, "details")
                 home.input("back"); compare(home.region, "software")
                 for (var i = 0; i < 30; i++) home.input("right")
-                compare(home.selected, 12)
+                compare(home.selected, home.entries.length - 1)
                 home.input("accept"); compare(sectionSpy.signalArguments[0][0], "library")
                 home.input("options"); compare(sectionSpy.count, 1)
             } else {
@@ -186,7 +230,7 @@ Item {
             wait(60)
             var capture = grabImage(home)
             var origin = tile.mapToItem(home,0,0)
-            verify(capture.red(origin.x+6,origin.y+6) > 200 && capture.green(origin.x+6,origin.y+6) > 200,"An opaque cover must not square off the rounded corner")
+            verify(capture.red(origin.x+2,origin.y+2) > 200 && capture.green(origin.x+2,origin.y+2) > 200,"An opaque cover must not square off the rounded corner")
             compare(capture.red(origin.x+100,origin.y+100),255); compare(capture.green(origin.x+100,origin.y+100),0)
             opaqueCover.destroy()
         }
@@ -206,12 +250,16 @@ Item {
         }
         function test_xbox_pins_pages() {
             home.theme = "xboxone"; home.reset()
-            home.pinnedIds = navigation.items.map(function(g) { return g.gameId })
+            var games = navigation.cats[0].items.slice()
+            for (var i = 13; i < 25; ++i) games.push({gameId:"GAME"+i, console:"PS4", title:"Game "+i, action:function() { launches++ }})
+            navigation.cats = [{id:"games", name:"Games", items:games},navigation.cats[1]]
+            home.pinnedIds = games.map(function(g) { return g.gameId })
             home.tab = 0
-            compare(home.panelEntries.length,14)
-            home.tileIndex = 7; home.input("right")
-            verify(home.tileIndex >= 8)
-            home.tileIndex = 8; home.input("accept"); compare(launches,1)
+            compare(home.panelEntries.length,26)
+            compare(home.groupSize,15)
+            home.tileIndex = 14; home.input("right")
+            compare(home.tileIndex,15)
+            home.input("accept"); compare(launches,1)
             home.pinnedIds = []
             compare(home.tileIndex,0); compare(home.panelEntries.length,1)
         }
@@ -306,14 +354,14 @@ Item {
                 }
             } else if (data.theme !== "x360classic") {
                 var shelf = findChild(home, "softwareShelf")
-                for (var i = 0; i < 13; i++) {
+                for (var i = 0; i < home.entries.length; i++) {
                     home.choose(i); wait(180)
                     var game = findChild(home,"homeTile"+i)
                     verify(game !== null && game.visible)
                     verify(game.x >= 0 && game.y >= 0)
                     verify(game.x+game.width <= shelf.width+1)
                     verify(game.y+game.height <= shelf.height+1)
-                    verify(game.border.width > 0)
+                    verify(game.border.width > 0 || (data.theme === "switch2" && findChild(game,"softwareFocusRing").visible))
                 }
             }
         }

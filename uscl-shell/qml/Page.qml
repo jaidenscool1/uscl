@@ -21,7 +21,7 @@ Item {
     onSettingsSectionChanged: { sectionCursor = Math.max(0,settingsSection); sectionFocus = false }
     readonly property var filters: [qsTr("All Games")].concat(Array.from(new Set(rows.filter(function(e) { return !!e.console }).map(function(e) { return e.console }))))
     readonly property var displayRows: modernSoftware && filterIndex > 0 ? rows.filter(function(e) { return e.console === filters[filterIndex] }) : rows
-    readonly property int gridColumns: theme === "x360classic" ? 1 : theme === "switch" || theme === "switch2" ? 4 : 5
+    readonly property int gridColumns: theme === "x360classic" ? 1 : 5
     onPresentationChanged: { filterIndex = 0; libraryNavIndex = 0; filterFocus = false }
     onFiltersChanged: { if (filterIndex >= filters.length) filterIndex = 0 }
     function selectFilter(index) { filterIndex = Math.max(0, Math.min(filters.length-1,index)); libraryNavIndex = filterIndex; current = 0; sound("cursor") }

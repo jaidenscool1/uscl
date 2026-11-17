@@ -7,7 +7,7 @@ styles, not emulator integrations.
 ## Layout targets and USCL actions
 
 The modern themes no longer display the XMB's six categories as game tiles. Software, system shortcuts,
-settings and the full library have separate navigation regions. Home strips contain up to 12 games and a
+settings and the full library have separate navigation regions. Home strips contain up to 12 games (10 on PS5) and a
 library entry. Add Games, updates and help remain available through the library sidebar. The library keeps
 all games, including games beyond the home strip, with console filters and scrolling.
 
@@ -15,10 +15,10 @@ all games, including games beyond the home strip, with console filters and scrol
 |---|---|---|
 | PS3 | Existing crossbar, console folders, remembered category selection and breadcrumb columns | [Home](images/theme-ps3.png) |
 | PS4 | Mature 2016–2020 layout: 200 px neighboring tiles, a 330 px selected image inside a frame, a Start strip, function screen above and game information below | [Home](images/theme-ps4.png) |
-| PS5 | Launch-era compact software strip, game backdrop, large game title, Play action and a bottom Control Center ribbon | [Home](images/theme-ps5.png) |
+| PS5 | Launch-era compact software strip, game backdrop, large game title, Play/Options actions, USCL quick-access cards and compact bottom Control Center controls | [Home](images/theme-ps5.png) |
 | Xbox 360 Classic | Launch-era four-blade structure, silver edges, colored active blade, gamer card, menu list and game/tray bar; inner libraries use a vertical list | [Home](images/theme-x360classic.png) |
 | Xbox 360 2012 | October 2012 three-row, nine-tile geometry: three left tiles, central two-row hero, two lower wide tiles and three right tiles; Home/Social/Games/Settings pivots | [Home](images/theme-x360.png) |
-| Xbox One | Original 2013 dark dashboard: Pins/Home/Library pivots, large game tile, tall library tile, stacked side tiles and bottom tiles | [Home](images/theme-xboxone.png) |
+| Xbox One | Original 2013 black dashboard: Pins/Home/Library pivots, wide game tile, stacked system tiles, four recent/action tiles and a news rail; Pins uses a separate three-row grid | [Home](images/theme-xboxone.png) |
 | Switch | Original dark HOME organization, square software row, separate profile, six circular system shortcuts and mint focus outline | [Home](images/theme-switch.png) |
 | Switch 2 | Light HOME organization, rounded software cards and a grouped lower toolbar, including USCL party chat | [Home](images/theme-switch2.png) |
 
@@ -39,7 +39,7 @@ selection. Restoring menu defaults clears pins.
 
 Additional captures: [PS4 function screen](images/theme-ps4-functions.png),
 [PS5 Control Center](images/theme-ps5-quick.png), [Nintendo settings](images/theme-switch2-settings.png),
-and [filtered library](images/theme-ps5-library.png).
+[filtered library](images/theme-ps5-library.png), and [Xbox One Pins](images/theme-xboxone-pins.png).
 
 ## Navigation
 
@@ -51,7 +51,7 @@ and [filtered library](images/theme-ps5-library.png).
 | Nintendo home | Left/right software; Up focuses My Page; Down focuses the lower system row; Back returns to software |
 | Xbox 360 Classic | Left/right or L1/R1 switches blades; up/down selects a menu item or the game/tray bar |
 | Xbox tile dashboards | Directional movement follows tile positions; Up at the top focuses pivots; L1/R1 changes pivot; side edges change pivot or pin page |
-| Quick Menu / Control Center | Home opens/closes; arrows select; confirm opens the selected USCL section; Back closes |
+| Quick Menu / Control Center | Home opens/closes; arrows select; PS5 Up/Down switches cards/controls; confirm opens the selected USCL section; Back closes |
 | Library | Directional grid movement (vertical list in Blades); Left at the first column focuses filters/tools; Up/down selects a filter or tool; Right returns to games |
 | Nintendo settings | Root list previews each section; Enter opens it; Left in a section focuses the persistent section sidebar; Right/Enter opens the selected section; Back returns |
 | Other settings | Up/down item; confirm opens; Back/left returns; L1/R1 jumps five |
@@ -66,6 +66,9 @@ and library delegates are virtualized; hidden pin-page covers do not decode.
 
 ## Research and reference limits
 
+A fresh online screenshot/video comparison and its concrete measurements are recorded in
+[CONSOLE-REFERENCES.md](CONSOLE-REFERENCES.md). It separates observed geometry from approximate motion timing.
+
 The local JSXTV Kodi source (`kodi-xmb`) supplied measured PS4 and Xbox design notes and private retail
 reference frames. Those were inspected for geometry, spacing, focus and transitions. The live Kodi server
 was unreachable during this pass. No server configuration, private frames or owner-supplied audio was
@@ -78,7 +81,7 @@ Primary references used to check menu roles and era:
 - [Nintendo Switch HOME overview](https://en-americas-support.nintendo.com/app/answers/detail/a_id/22308): user profiles, software and system functions.
 - [Nintendo Switch 2 HOME overview](https://en-americas-support.nintendo.com/app/answers/detail/a_id/68181) and [Nintendo's transfer guide screenshots](https://support.nintendo.com/jp/switch2/mastery/transfer/switch-to-switch2/index.html): rounded cards, grouped toolbar and status/profile placement.
 - [Xbox's October 2012 dashboard announcement](https://news.xbox.com/en-us/2012/10/15/new-xbox-360-dashboard-update-starts-rolling-out-today/): the selected Metro era and content organization.
-- [Xbox's November 2013 SmartGlass announcement](https://news.xbox.com/en-us/2013/11/19/xbox-one-xbox-smartglass/): original Xbox One pinning. The Kodi reference set covers Xbox 360 rather than Xbox One; Xbox One's detailed appearance remains less fully verified.
+- [Xbox's November 2013 SmartGlass announcement](https://news.xbox.com/en-us/2013/11/19/xbox-one-xbox-smartglass/): original Xbox One pinning. The [official 2013 demo](https://www.youtube.com/watch?v=xhe6jV-APwM&t=45s) additionally verifies Home geometry and the separate three-row Pins grid.
 
 Blades measurements come from the local reference set's launch dashboard captures. Switch 2's ten toolbar
 positions are mapped to available USCL functions; Switch uses the earlier six-shortcut arrangement.
@@ -162,3 +165,8 @@ approximations rather than claimed frame-exact timing. Modern pages use a brief 
 Game backdrops decode asynchronously before crossfading, and stale image completions cannot replace the
 current selection. Closing quick menus stop accepting mouse input immediately. The interaction suite
 checks rapid navigation, interrupted menu transitions, disabled home motion and latest-request artwork.
+
+The later online-reference pass adds directional Xbox pivot/blade entrances, PS4 function-icon travel
+and profile fades, a more compact PS5 strip and controls, functional PS5 cards/Options, and distinct
+Nintendo toolbar geometry and focus treatments. Xbox One Pins uses fifteen positions per page, with
+three rows per column. Tests cover page boundaries and every Home tile's directional reachability.

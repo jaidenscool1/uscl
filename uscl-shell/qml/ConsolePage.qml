@@ -108,7 +108,7 @@ Item {
         width: screen.width - x - 96
         height: 690
         cellWidth: width / screen.controller.gridColumns
-        cellHeight: style.blades ? 92 : style.nintendo ? 340 : 330
+        cellHeight: style.blades ? 92 : style.nintendo ? 300 : 330
         clip: true
         model: screen.software ? screen.controller.displayRows : []
         currentIndex: screen.controller.current
@@ -150,6 +150,10 @@ Item {
                 z: 1
                 radius: game.radius
                 outsideColor: style.background
+            }
+            ConsoleFocusRing {
+                anchors.fill: parent; radius: game.radius; z: 2
+                visible: style.lightSwitch && game.selected && !screen.controller.filterFocus
             }
             Text {
                 x: style.blades ? 100 : 12

@@ -11,7 +11,7 @@ Item {
     Xmb { id: nav; anchors.fill: parent; visible: home.theme === "ps3"; cat: 3 }
     ConsoleHome { visible: theme !== "ps3" && !page.visible; id: home; anchors.fill: parent; navigation: nav; animate: false; theme: "ps4" }
     Page { id: page; anchors.fill: parent; visible: false; theme: home.theme; settingsSections: gallery.settingRows }
-    ClockBox { theme: home.theme; x: gallery.width-width-40; y: 44; avatar: home.avatar; internet: 1; pads: 1; battery: 80; clock24: true }
+    ClockBox { theme: home.theme; x: gallery.width-width-(home.theme === "ps5" ? 56 : 40); y: home.theme === "ps5" ? 28 : home.nintendo ? 80 : 44; avatar: home.avatar; internet: 1; pads: 1; battery: 80; clock24: true }
     GameLaunch { id: launch; anchors.fill: parent; theme: home.theme; shown: false; starting: true; windowActive: false; title: "A New Adventure"; gameIcon: Qt.resolvedUrl("../xmb/icons/cat_ps3.png") }
     TestCase {
         name: "Capture"
@@ -34,6 +34,11 @@ Item {
                 home.theme = themes[t]; home.reset()
                 wait(400)
                 grabImage(gallery).save(directory + "/uscl-preview-" + themes[t] + ".png")
+                if (themes[t] === "xboxone") {
+                    home.pinnedIds = games.slice(0,10).map(function(g) { return g.gameId }); home.tab = 0
+                    wait(240); grabImage(gallery).save(directory+"/uscl-pins-xboxone.png")
+                    home.reset()
+                }
                 if (themes[t] !== "ps3") {
                     home.region = "functions"; home.focusFunctions(0); home.shortcutIndex = home.shortcuts.findIndex(function(e) { return e.key === "settings" })
                     wait(300); grabImage(gallery).save(directory+"/uscl-functions-"+themes[t]+".png")

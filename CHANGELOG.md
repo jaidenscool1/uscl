@@ -17,6 +17,10 @@ These changes are included in this development branch. They are not a list of pu
 - Added persistent Xbox One game pins, extra pin pages and Pin/Unpin actions.
 - Fixed light-theme glyph contrast, hidden shortcut focus, selection clamping and directional access to dashboard tiles.
 - Smoothed tile resizing, PS4 function-area travel and title arrival, quick-menu slides and modern page entrances.
+- Refined PS5 strip and utility geometry from Sony's walkthrough; added functional Control Center cards and a game Options button.
+- Matched Nintendo HOME card sizing, toolbar spacing, profile/status placement and Switch 2 multicolor focus outlines to official footage.
+- Separated Xbox One's three-row Pins grid from its Home dashboard and added a news rail, with directional pivot/blade transitions.
+- Refined PS4 Quick Menu typography, spacing, profile footer and focus frame from Sony's published screenshot.
 - Added asynchronous game-backdrop crossfades that retain the previous image until the selected artwork is ready.
 - Kept opaque game artwork inside Switch 2 rounded cards on Home and in the library.
 

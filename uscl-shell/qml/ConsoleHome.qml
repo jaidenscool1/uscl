@@ -27,6 +27,9 @@ Item {
     property int softwareIndex: 0
     property int detailsAction: 0
     property bool guideOpen: false
+    property string guideRegion: "controls"
+    property int guideCardIndex: 0
+    readonly property var guideCards: [library, shortcut("updates", qsTr("Game Updates"), "it_update"), shortcut("changelog", qsTr("USCL News"), "it_system")]
     readonly property int gamesCategory: {
         for (var i = 0; i < navigation.cats.length; i++)
             if (navigation.cats[i].id === "games")
@@ -45,7 +48,7 @@ Item {
     }
     readonly property var library: shortcut("library", nintendo ? qsTr("All Software") : qsTr("Game Library"),
                                             "cat_game")
-    readonly property var entries: games.slice(0, 12).concat([library])
+    readonly property var entries: games.slice(0, style.ps5 ? 10 : 12).concat([library])
     readonly property int selected: Math.max(0, Math.min(softwareIndex, entries.length - 1))
     readonly property var current: entries[selected]
     readonly property var shortcuts: {
@@ -90,8 +93,8 @@ Item {
         region = "functions";
     }
     readonly property var tabs: style.blades ? [qsTr("online"), qsTr("games"), qsTr("library"), qsTr(
-                                                    "system")] : style.one ? [qsTr("pins"), qsTr("home"), qsTr(
-                                                                                  "library")] : [qsTr("home"),
+                                                    "system")] : style.one ? [qsTr("Pins"), qsTr("Home"), qsTr(
+                                                                                  "Library")] : [qsTr("home"),
                                                                                                  qsTr("social"),
                                                                                                  qsTr("games"),
                                                                                                  qsTr("settings")]
@@ -127,7 +130,7 @@ Item {
                                                                                          ? games[0] : add, lib,
                                                                                          friends, party, upd,
                                                                                          settings, add,
-                                                                                         online];
+                                                                                         online, shortcut("changelog", qsTr("USCL News"), "it_system"), shortcut("controllers", qsTr("Controllers"), "it_gamepad"), shortcut("sound", qsTr("Sound"), "it_sound")];
         var news = shortcut("changelog", qsTr("What's New in USCL"), "it_system");
         var sound = shortcut("sound", qsTr("Sound"), "it_sound"), controls = shortcut("controllers", qsTr(
                                                                                           "Controllers"),
@@ -165,7 +168,21 @@ Item {
         softwareIndex = 0;
         tab = theme === "xboxone" || theme === "x360classic" ? 1 : 0;
     }
-    onThemeChanged: reset()
+    property int previousTab: 0
+    property int pivotDirection: 1
+    property real pivotOffset: 0
+    property real pivotOpacity: 1
+    onTabChanged: {
+        pivotDirection = tab >= previousTab ? 1 : -1;
+        previousTab = tab;
+        if (style.xbox && animate && visible) pivotArrival.restart();
+    }
+    ParallelAnimation {
+        id: pivotArrival
+        NumberAnimation { target: home; property: "pivotOffset"; from: home.pivotDirection * 60; to: 0; duration: 200; easing.type: Easing.OutCubic }
+        NumberAnimation { target: home; property: "pivotOpacity"; from: .25; to: 1; duration: 160 }
+    }
+    onThemeChanged: { pivotArrival.stop(); pivotOffset = 0; pivotOpacity = 1; reset(); }
     Component.onCompleted: reset()
     onGamesChanged: softwareIndex = Math.min(softwareIndex, Math.max(0, entries.length - 1))
     function choose(index) {
@@ -202,28 +219,22 @@ Item {
         tileIndex = 0;
         navigation.sound("category");
     }
-    readonly property int groupSize: style.one ? 8 : 9
+    readonly property int groupSize: style.one ? (tab === 1 ? 11 : 15) : 9
     function xboxRect(index) {
-        var shapes = style.one ? [[0, 0, 760, 430], [774, 0, 220, 430], [1008, 0, 360, 132], [1008, 149, 360,
-                                                                                              132], [1008, 298,
-                                                                                                     360, 132],
-                                  [0, 444, 446, 155], [460, 444, 446, 155], [920, 444, 448, 155]] : [[0, 0,
-                                                                                                      261, 195],
-                                                                                                     [0, 201, 261,
-                                                                                                      195], [0, 402,
-                                                                                                             261, 195],
-                                                                                                     [267, 0, 699,
-                                                                                                      396], [267,
-                                                                                                             402, 345, 195],
-                                                                                                     [618, 402,
-                                                                                                      348, 195],
-                                                                                                     [972, 0, 261,
-                                                                                                      195], [972,
-                                                                                                             201, 261, 195],
-                                                                                                     [972, 402,
-                                                                                                      261, 195]];
-        var r = shapes[index % shapes.length], unit = xboxShelf.width / (style.one ? 1368 : 1233);
-        return Qt.rect(r[0] * unit, r[1], r[2] * unit, r[3]);
+        if (style.one && tab !== 1) {
+            var slot = index % groupSize;
+            return Qt.rect(Math.floor(slot / 3) * 216, (slot % 3) * 216, 210, 210);
+        }
+        // 2013: four-unit hero, stacked one-unit functions, four recent tiles and a news rail.
+        var shapes = style.one ? [[0,0,864,432], [870,0,210,210], [870,216,210,210],
+                                  [870,432,210,210], [0,438,210,204], [216,438,210,204],
+                                  [432,438,210,204], [648,438,210,204],
+                                  [1140,0,330,210], [1140,216,330,210], [1140,432,330,210]]
+                               : [[0,0,261,195], [0,201,261,195], [0,402,261,195],
+                                  [267,0,699,396], [267,402,345,195], [618,402,348,195],
+                                  [972,0,261,195], [972,201,261,195], [972,402,261,195]];
+        var r = shapes[index % shapes.length];
+        return Qt.rect(r[0], r[1], r[2], r[3]);
     }
     function moveTile(button) {
         var a = xboxRect(tileIndex), dx = button === "left" ? -1 : button === "right" ? 1 : 0, dy = button
@@ -265,18 +276,26 @@ Item {
         if (button === "home") {
             guideOpen = !guideOpen;
             shortcutIndex = 0;
+            guideRegion = "controls";
+            guideCardIndex = 0;
             return;
         }
         if (guideOpen) {
-            if (button === "back")
+            if (button === "back") guideOpen = false;
+            else if (style.ps5 && (button === "up" || button === "down")) {
+                guideRegion = button === "up" ? "cards" : "controls";
+                navigation.sound("cursor");
+            } else if (button === "left" || button === "up") {
+                if (style.ps5 && guideRegion === "cards") guideCardIndex = Math.max(0, guideCardIndex - 1);
+                else shortcutIndex = Math.max(0, shortcutIndex - 1);
+                navigation.sound("cursor");
+            } else if (button === "right" || button === "down") {
+                if (style.ps5 && guideRegion === "cards") guideCardIndex = Math.min(guideCards.length - 1, guideCardIndex + 1);
+                else shortcutIndex = Math.min(quickEntries.length - 1, shortcutIndex + 1);
+                navigation.sound("cursor");
+            } else if (button === "accept") {
                 guideOpen = false;
-            else if (button === "left" || button === "up")
-                shortcutIndex = Math.max(0, shortcutIndex - 1);
-            else if (button === "right" || button === "down")
-                shortcutIndex = Math.min(quickEntries.length - 1, shortcutIndex + 1);
-            else if (button === "accept") {
-                guideOpen = false;
-                activate(quickEntries[shortcutIndex]);
+                activate(style.ps5 && guideRegion === "cards" ? guideCards[guideCardIndex] : quickEntries[shortcutIndex]);
             }
             return;
         }
@@ -331,10 +350,10 @@ Item {
         } else if (region === "details") {
             if (button === "up")
                 region = "software";
-            else if (style.ps4 && (button === "left" || button === "right"))
+            else if ((style.ps4 || (style.ps5 && current && current.options)) && (button === "left" || button === "right"))
                 detailsAction = button === "right" ? 1 : 0;
             else if (button === "accept")
-                activate(current, style.ps4 && !current.key ? (detailsAction ? "options" : "info") : "accept");
+                activate(current, style.ps4 && !current.key ? (detailsAction ? "options" : "info") : style.ps5 && detailsAction ? "options" : "accept");
             else if (button === "options" || button === "info")
                 activate(current, button);
         } else if (button === "left" || button === "right")
@@ -392,8 +411,8 @@ Item {
     }
     ConsoleBackdrop {
         anchors.fill: parent
-        visible: style.ps5 || style.one
-        source: home.current ? home.current.pic || "" : ""
+        visible: style.ps5
+        source: style.ps5 && home.current ? home.current.pic || "" : ""
         animate: home.animate && home.visible
         opacity: .5
     }
@@ -413,23 +432,25 @@ Item {
     }
     // Profile lives where the console puts it, separate from the status clock.
     Item {
-        x: home.nintendo ? 96 : style.one ? 96 : style.ps4 ? 850 : 1430
-        y: home.nintendo ? 70 : style.one ? 78 : 78
-        width: home.nintendo ? 100 : style.ps5 ? 80 : 390
-        height: 80
-        visible: !style.blades && !style.metro && !(style.ps4 && home.categoryFocus)
+        x: home.nintendo ? 64 : style.one ? 96 : style.ps4 ? 850 : 1550
+        y: home.nintendo ? 60 : style.one ? 58 : style.ps5 ? 34 : 78
+        width: home.nintendo ? 110 : style.ps5 ? 64 : 390
+        height: home.nintendo ? 110 : 80
+        visible: !style.blades && !style.metro
+        opacity: style.ps4 && home.categoryFocus ? 0 : 1
+        Behavior on opacity { NumberAnimation { duration: home.animate ? 270 : 0 } }
         Rectangle {
             anchors.fill: parent
             color: "transparent"
-            radius: home.nintendo ? 40 : 0
+            radius: home.nintendo ? 55 : style.ps5 ? 32 : 0
             border.width: home.region === "profile" ? 4 : 0
             border.color: style.accent
         }
         Image {
             x: 8
             y: 8
-            width: 64
-            height: 64
+            width: home.nintendo ? 94 : style.ps5 ? 42 : 64
+            height: width
             source: home.avatar
             fillMode: Image.PreserveAspectFit
             mipmap: true
@@ -445,17 +466,23 @@ Item {
             verticalAlignment: Text.AlignVCenter
             elide: Text.ElideRight
         }
+        Text {
+            visible: home.nintendo && home.region === "profile"
+            y: 112; width: 250; text: qsTr("My Page")
+            color: style.lightSwitch ? "#1256b3" : style.accent; font.pixelSize: 30
+        }
         MouseArea {
             anchors.fill: parent
+            enabled: parent.opacity > .99
             onClicked: home.sectionRequested("profile")
         }
     }
     // PS4 function area; Switch's lower system row; PS5 top utility shortcuts.
     Rectangle {
         visible: style.lightSwitch
-        x: functions.x - 15
+        x: functions.x - 8
         y: functions.y - 17
-        width: functions.width + 30
+        width: functions.width + 16
         height: 134
         radius: 67
         color: "#f5f5f5"
@@ -463,10 +490,10 @@ Item {
     Item {
         id: functions
         visible: !style.xbox
-        x: home.nintendo ? (home.width - (home.shortcuts.length - 1) * 140) / 2 : style.ps5 ? 1210 : 100
-        y: home.nintendo ? 790 : style.ps4 ? (home.categoryFocus ? 670 : 76) : 80
-        width: home.nintendo ? (home.shortcuts.length - 1) * 140 : style.ps5 ? 220 : home.width - 200
-        height: 150
+        x: home.nintendo ? (home.width - (home.shortcuts.length - 1) * (style.lightSwitch ? 124 : 162)) / 2 : style.ps5 ? 1340 : 100
+        y: home.nintendo ? (style.lightSwitch ? 790 : 753) : style.ps4 ? (home.categoryFocus ? 670 : 76) : 38
+        width: home.nintendo ? (home.shortcuts.length - 1) * (style.lightSwitch ? 124 : 162) : style.ps5 ? 220 : home.width - 200
+        height: style.ps5 ? 70 : 150
         Behavior on y {
             NumberAnimation {
                 duration: home.animate ? 270 : 0
@@ -499,47 +526,53 @@ Item {
                                                            friends: 644,
                                                            settings: 1490,
                                                            power: 1650
-                                                       }[modelData.key] || 0) : slot * (home.nintendo ? 140 :
+                                                       }[modelData.key] || 0) : slot * (home.nintendo ? (style.lightSwitch ? 124 : 162) :
                                                                                                         style.ps5
                                                                                                         ? 110 : functions.width
                                                                                                           / home.shortcuts.length)
-                width: home.nintendo ? 120 : style.ps5 ? 90 : 150
-                height: 140
+                width: home.nintendo ? (style.lightSwitch ? 120 : 152) : style.ps5 ? 90 : 150
+                height: style.ps5 ? 70 : home.nintendo && !style.lightSwitch ? 170 : 140
+                Behavior on x { NumberAnimation { duration: home.animate && style.ps4 ? 270 : 0; easing.type: Easing.OutCubic } }
                 readonly property bool selected: home.categoryFocus && home.shortcutIndex === index
                 Rectangle {
                     x: 10
                     y: 0
-                    width: 100
-                    height: 100
-                    radius: home.nintendo ? 50 : 0
-                    color: home.nintendo && !style.lightSwitch ? "#414141" : "transparent"
-                    border.width: fn.selected ? 4 : 0
+                    width: style.ps5 ? 64 : home.nintendo && !style.lightSwitch ? 132 : 100
+                    height: width
+                    radius: home.nintendo ? width / 2 : style.ps5 ? 32 : 0
+                    color: home.nintendo && !style.lightSwitch ? "#414141" : style.lightSwitch && fn.modelData.key === "online" ? "#e60020" : "transparent"
+                    border.width: fn.selected && !style.lightSwitch ? 4 : 0
                     border.color: style.accent
                 }
                 ConsoleGlyph {
-                    x: 28
-                    y: 18
-                    width: fn.selected && !home.nintendo ? 80 : 64
+                    x: style.ps5 ? 24 : home.nintendo && !style.lightSwitch ? 44 : 28
+                    y: style.ps5 ? 10 : home.nintendo && !style.lightSwitch ? 34 : 18
+                    width: style.ps5 ? 36 : fn.selected && !home.nintendo ? 80 : 64
+                    Behavior on width { NumberAnimation { duration: home.animate ? 150 : 0; easing.type: Easing.OutCubic } }
                     height: width
                     kind: fn.modelData.key
                     ink: home.nintendo ? ({
                                               changelog: style.lightSwitch ? "#63a629" : "#e44c4f",
                                               add: style.lightSwitch ? "#e7473d" : "#e49b31",
-                                              online: "#e60020",
+                                              online: style.lightSwitch ? "white" : "#e60020",
                                               party: "#e49b31",
                                               library: "#477dd3",
                                               friends: "#09afba"
                                           }[kind] || (style.lightSwitch ? "#555555" : "#eeeeee")) : "white"
                     opacity: fn.selected || home.nintendo ? 1 : .7
                 }
+                ConsoleFocusRing {
+                    x: 7; y: -3; width: 106; height: 106; radius: 53
+                    visible: style.lightSwitch && fn.selected
+                }
                 Text {
                     x: -40
-                    y: 110
+                    y: style.ps5 ? 72 : home.nintendo && !style.lightSwitch ? 142 : 110
                     width: 200
                     text: fn.modelData.title
                     visible: fn.selected
                     horizontalAlignment: Text.AlignHCenter
-                    color: style.text
+                    color: home.nintendo ? style.accent : style.text
                     font.pixelSize: 25
                     elide: Text.ElideRight
                 }
@@ -557,7 +590,7 @@ Item {
     Text {
         visible: style.ps5
         x: 96
-        y: 70
+        y: 36
         text: qsTr("Games")
         font.pixelSize: 35
         color: "white"
@@ -565,7 +598,7 @@ Item {
     Text {
         visible: style.ps5
         x: 280
-        y: 70
+        y: 36
         text: qsTr("Game Library")
         font.pixelSize: 35
         color: "#bbc2ca"
@@ -578,10 +611,10 @@ Item {
         id: shelf
         objectName: "softwareShelf"
         visible: !style.xbox
-        x: home.nintendo ? 105 : style.ps5 ? 96 : 0
-        y: home.nintendo ? 320 : style.ps5 ? 190 : home.categoryFocus ? 912 : 203
+        x: home.nintendo ? 151 : style.ps5 ? 160 : 0
+        y: home.nintendo ? (style.lightSwitch ? 294 : 285) : style.ps5 ? 117 : home.categoryFocus ? 912 : 203
         width: home.width - x
-        height: home.nintendo ? 400 : style.ps5 ? 180 : 420
+        height: home.nintendo ? 405 : style.ps5 ? 200 : 420
         clip: true
         opacity: style.ps4 && home.categoryFocus ? .5 : 1
         Behavior on opacity {
@@ -609,9 +642,9 @@ Item {
                 objectName: "homeTile" + index
                 readonly property bool selected: index === home.selected
                 readonly property int delta: index - home.selected
-                x: home.nintendo ? 8 + delta * 386 : style.ps5 ? 8 + (delta < 0 ? delta * 126 : delta === 0
-                                                                                  ? 0 : 166 + (delta - 1)
-                                                                                    * 126) : 282 + (delta < 0
+                x: home.nintendo ? 8 + delta * 406 : style.ps5 ? 8 + (delta < 0 ? delta * 114 : delta === 0
+                                                                                  ? 0 : 186 + (delta - 1)
+                                                                                    * 114) : 282 + (delta < 0
                                                                                                     ? delta * 204 :
                                                                                                       delta === 0
                                                                                                       ? 0 : (home.categoryFocus
@@ -619,12 +652,12 @@ Item {
                                                                                                         + (delta
                                                                                                            - 1) * 204)
                 y: 6
-                width: home.nintendo ? 368 : style.ps5 ? (selected ? 150 : 112) : selected &&
+                width: home.nintendo ? 384 : style.ps5 ? (selected ? 180 : 108) : selected &&
                                                          !home.categoryFocus ? 342 : 200
                 height: style.ps4 && selected && !home.categoryFocus ? 412 : width
                 radius: style.ps5 ? 16 : style.lightSwitch ? 24 : 0
                 color: home.nintendo ? "#505050" : "#123979"
-                border.width: selected && home.region === "software" ? (home.nintendo ? 5 : 4) : 0
+                border.width: selected && home.region === "software" && !style.lightSwitch ? (home.nintendo ? 5 : style.ps5 ? 2 : 4) : 0
                 border.color: style.ps4 ? "#cdd8ed" : style.accent
                 opacity: modelData.disabled ? .45 : 1
                 Behavior on width {
@@ -657,6 +690,12 @@ Item {
                     z: 1
                     radius: tile.radius
                     outsideColor: style.background
+                }
+                ConsoleFocusRing {
+                    objectName: "softwareFocusRing"
+                    x: -4; y: -4; width: parent.width + 8; height: parent.height + 8
+                    radius: tile.radius + 4; z: 2
+                    visible: style.lightSwitch && tile.selected && home.region === "software"
                 }
                 ConsoleGlyph {
                     visible: !!tile.modelData.key
@@ -722,9 +761,9 @@ Item {
         }
     }
     Text {
-        visible: !style.xbox && !(style.ps4 && home.categoryFocus)
-        x: home.nintendo ? 105 : style.ps4 ? 638 : 96
-        y: home.nintendo ? 255 : style.ps4 ? 538 : 580
+        visible: !style.xbox && !(style.ps4 && home.categoryFocus) && (!home.nintendo || home.region === "software")
+        x: home.nintendo ? 159 : style.ps4 ? 638 : 171
+        y: home.nintendo ? (style.lightSwitch ? 234 : 210) : style.ps4 ? 538 : 600
         width: home.width - x - 96
         height: style.ps5 ? 150 : 80
         id: softwareTitle
@@ -740,21 +779,29 @@ Item {
             PauseAnimation { duration: 100 }
             NumberAnimation { target: softwareTitle; property: "opacity"; to: 1; duration: 100 }
         }
-        color: style.text
-        font.pixelSize: style.ps5 ? 62 : style.ps4 ? 56 : 32
+        color: home.nintendo ? style.accent : style.text
+        font.pixelSize: style.ps5 ? 62 : style.ps4 ? 56 : 34
         font.weight: Font.Light
         elide: Text.ElideRight
-        maximumLineCount: 2
-        wrapMode: Text.Wrap
+        maximumLineCount: home.nintendo ? 1 : 2
+        wrapMode: home.nintendo ? Text.NoWrap : Text.Wrap
+    }
+    Text {
+        objectName: "compactSoftwareTitle"
+        visible: style.ps5
+        x: 354; y: 245; width: home.width - 450; height: 44
+        text: home.current ? home.current.title : ""
+        font.pixelSize: 30; font.weight: Font.Light; color: style.text; elide: Text.ElideRight
     }
     Item {
         visible: !style.xbox && !home.nintendo && !home.categoryFocus
-        x: style.ps4 ? 286 : 96
-        y: style.ps4 ? 700 : 710
+        x: style.ps4 ? 286 : 171
+        y: style.ps4 ? 700 : 740
         width: home.width - x - 200
         height: 245
         Text {
             width: parent.width
+            visible: !style.ps5
             text: home.region === "details" ? qsTr("Game Information") : home.current && home.current.console
                                               ? home.current.console : qsTr("Your games, together")
             font.pixelSize: 30
@@ -762,13 +809,14 @@ Item {
         }
         Rectangle {
             y: 46
+            visible: !style.ps5
             width: parent.width
             height: 1
             color: style.divider
         }
         Text {
-            y: 67
-            width: parent.width
+            y: style.ps5 ? 0 : 67
+            width: style.ps5 ? 720 : parent.width
             height: 85
             text: home.current ? home.current.desc || qsTr("Browse every console in your game library.") : ""
             font.pixelSize: 27
@@ -779,12 +827,12 @@ Item {
         }
         Rectangle {
             visible: style.ps5 || home.region === "details"
-            y: 166
-            width: 300
+            y: style.ps5 ? 103 : 166
+            width: style.ps5 ? 333 : 300
             height: 62
             radius: style.ps5 ? 31 : 0
             color: style.ps5 ? "white" : "#174fb3"
-            border.width: home.region === "details" && (!style.ps4 || home.detailsAction === 0) ? 4 : 0
+            border.width: home.region === "details" && home.detailsAction === 0 ? 4 : 0
             border.color: style.accent
             Text {
                 anchors.centerIn: parent
@@ -798,6 +846,16 @@ Item {
             }
         }
         Rectangle {
+            objectName: "ps5GameOptions"
+            visible: style.ps5 && home.current && !!home.current.options
+            x: 357; y: 103; width: 66; height: 62; radius: 31
+            color: "#80222b37"
+            border.width: home.region === "details" && home.detailsAction === 1 ? 2 : 0
+            border.color: "white"
+            Text { anchors.centerIn: parent; text: "•••"; color: "white"; font.pixelSize: 28 }
+            MouseArea { anchors.fill: parent; onClicked: home.activate(home.current,"options") }
+        }
+        Rectangle {
             visible: style.ps4 && home.region === "details" && !home.current.key
             x: 325; y: 166; width: 300; height: 62; color: "#174fb3"
             border.width: home.detailsAction === 1 ? 4 : 0; border.color: style.accent
@@ -808,8 +866,8 @@ Item {
     // Xbox pivots have their own dashboard panels, rather than turning settings into game covers.
     Row {
         visible: style.xbox && !style.blades
-        x: style.one ? 326 : 255
-        y: style.one ? 195 : 164
+        x: style.one ? 96 : 255
+        y: 164
         spacing: 48
         Repeater {
             model: home.tabs
@@ -819,8 +877,8 @@ Item {
                 text: modelData
                 font.pixelSize: style.one ? 48 : 42
                 font.weight: Font.Light
-                color: style.metro ? "white" : index === home.tab ? style.text : style.muted
-                opacity: index === home.tab ? 1 : .65
+                color: style.metro ? "white" : index === home.tab ? style.text : "#686868"
+                opacity: index === home.tab || style.one ? 1 : .65
                 Rectangle {
                     y: parent.height + 8
                     width: parent.width
@@ -842,10 +900,17 @@ Item {
     Item {
         id: xboxShelf
         visible: home.grid
-        x: style.one ? 326 : 345
-        y: style.one ? 340 : 270
+        x: style.one ? (home.tab === 1 ? 312 : 96) : 345
+        y: style.one ? 285 : 270
         width: style.one ? home.width - x - 96 : 1233
-        height: 610
+        height: style.one ? 648 : 610
+        transform: Translate { x: home.pivotOffset }
+        opacity: home.pivotOpacity
+        Text {
+            visible: style.one && home.tab === 1
+            x: 1140; y: -38; width: 330; height: 30
+            text: qsTr("WHAT'S NEW IN USCL"); color: "#b0b0b0"; font.pixelSize: 20
+        }
         Repeater {
             model: home.grid ? home.panelEntries : []
             delegate: Rectangle {
@@ -859,8 +924,8 @@ Item {
                 y: rect.y
                 width: rect.width
                 height: rect.height
-                color: xboxTile.modelData.key === "changelog" ? "#1c334a" : "#107c10"
-                border.width: index === home.tileIndex && home.region === "software" ? (style.metro ? 3 : 5) :
+                color: style.one && home.tab === 1 && index >= 8 ? "#171717" : xboxTile.modelData.key === "changelog" ? "#1c334a" : "#107c10"
+                border.width: index === home.tileIndex && home.region === "software" ? (style.metro ? 3 : 2) :
                                                                                        0
                 scale: style.metro && index === home.tileIndex && home.region === "software" ? 1.06 : 1
                 z: index === home.tileIndex ? 2 : 0
@@ -937,6 +1002,8 @@ Item {
                 x: index <= home.tab ? index * 70 : home.width - (4 - index) * 70
                 width: index === home.tab ? home.width - 210 : 70
                 height: home.height
+                Behavior on x { NumberAnimation { duration: home.animate ? 200 : 0; easing.type: Easing.OutCubic } }
+                Behavior on width { NumberAnimation { duration: home.animate ? 200 : 0; easing.type: Easing.OutCubic } }
                 radius: 140
                 color: index === home.tab ? parent.bladeColor : "#d7dad9"
                 border.width: 3
@@ -966,6 +1033,8 @@ Item {
             y: 60
             width: 1180
             height: 910
+            transform: Translate { x: home.pivotOffset }
+            opacity: home.pivotOpacity
             Text {
                 text: home.tabs[home.tab]
                 color: "white"
@@ -1100,7 +1169,7 @@ Item {
         }
     }
     Rectangle {
-        visible: !(style.ps4 && home.categoryFocus)
+        visible: !home.guideOpen && !(style.ps4 && home.categoryFocus)
         x: 96
         y: 990
         width: home.width - 192
@@ -1108,7 +1177,7 @@ Item {
         color: style.divider
     }
     Text {
-        visible: !(style.ps4 && home.categoryFocus)
+        visible: !home.guideOpen && !(style.ps4 && home.categoryFocus)
         x: 96
         y: 1010
         width: home.width - 192
@@ -1138,51 +1207,91 @@ Item {
             anchors.fill: parent
             onClicked: home.guideOpen = false
         }
+        Row {
+            visible: style.ps5
+            x: 96; y: 500 + 45 * (1 - quickMenu.reveal); spacing: 24
+            Repeater {
+                model: style.ps5 ? home.guideCards : []
+                delegate: Rectangle {
+                    required property var modelData
+                    required property int index
+                    objectName: "controlCenterCard" + index
+                    width: 310; height: 380; radius: 18
+                    color: "#20262e"
+                    border.width: home.guideRegion === "cards" && home.guideCardIndex === index ? 2 : 0
+                    border.color: "#e4e6f0"
+                    ConsoleGlyph {
+                        x: 95; y: 65; width: 120; height: 120
+                        kind: parent.modelData.key; ink: "#e3e7ed"
+                    }
+                    Text {
+                        x: 24; y: 260; width: parent.width - 48; height: 85
+                        text: parent.modelData.title; color: "white"; font.pixelSize: 30
+                        wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: { home.guideOpen = false; home.activate(parent.modelData); }
+                    }
+                }
+            }
+        }
         Rectangle {
-            x: style.ps5 ? 96 : -width * (1 - quickMenu.reveal)
-            y: style.ps5 ? 910 + 90 * (1 - quickMenu.reveal) : 0
-            width: style.ps5 ? home.width - 192 : 620
-            height: style.ps5 ? 140 : home.height
+            x: style.ps5 ? 420 : -width * (1 - quickMenu.reveal)
+            y: style.ps5 ? 960 + 60 * (1 - quickMenu.reveal) : 0
+            width: style.ps5 ? 1080 : 620
+            height: style.ps5 ? 100 : home.height
             radius: style.ps5 ? 12 : 0
-            color: style.ps5 ? "#e0141414" : style.panel
+            color: style.ps5 ? "transparent" : style.ps4 ? "#092776" : style.panel
             Text {
-                x: 40
-                y: 25
+                x: style.ps4 ? 96 : 40
+                y: style.ps4 ? 52 : 25
                 visible: !style.ps5
                 text: qsTr("Quick Menu")
                 color: style.text
-                font.pixelSize: 38
+                font.pixelSize: style.ps4 ? 52 : 38
+            }
+            Rectangle {
+                visible: style.ps4; x: 96; y: 140; width: 480; height: 1; color: "#40ffffff"
+            }
+            Item {
+                visible: style.ps4; x: 96; y: home.height - 108; width: 480; height: 90
+                Rectangle { width: parent.width; height: 1; color: "#40ffffff" }
+                Image { x: 0; y: 24; width: 48; height: 48; source: home.avatar; fillMode: Image.PreserveAspectFit }
+                Text { x: 64; y: 24; width: 400; height: 48; text: home.userName; color: "white"; font.pixelSize: 26; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight }
             }
             Repeater {
                 model: home.quickEntries
                 delegate: Rectangle {
                     required property var modelData
                     required property int index
-                    x: style.ps5 ? 30 + index * (parent.width - 60) / home.quickEntries.length : 25
-                    y: style.ps5 ? 0 : 110 + index * 112
-                    width: style.ps5 ? (parent.width - 60) / home.quickEntries.length - 10 : 570
-                    height: style.ps5 ? 130 : 100
-                    color: !style.ps5 && index === home.shortcutIndex ? style.focusFill : "transparent"
-                    border.width: !style.ps5 && index === home.shortcutIndex ? 3 : 0
-                    border.color: style.accent
+                    x: style.ps5 ? 30 + index * (parent.width - 60) / home.quickEntries.length : style.ps4 ? 96 : 25
+                    y: style.ps5 ? 0 : style.ps4 ? 155 + index * 94 : 110 + index * 112
+                    width: style.ps5 ? (parent.width - 60) / home.quickEntries.length - 10 : style.ps4 ? 480 : 570
+                    height: style.ps4 ? 86 : 100
+                    color: !style.ps5 && !style.ps4 && index === home.shortcutIndex ? style.focusFill : "transparent"
+                    border.width: !style.ps5 && index === home.shortcutIndex ? (style.ps4 ? 2 : 3) : 0
+                    border.color: style.ps4 ? "white" : style.accent
                     Rectangle {
-                        visible: style.ps5 && parent.index === home.shortcutIndex
-                        x: (parent.width-72)/2; y: 4; width: 72; height: 72; radius: 36; color: "white"
+                        visible: style.ps5 && home.guideRegion === "controls" && parent.index === home.shortcutIndex
+                        x: (parent.width-54)/2; y: 4; width: 54; height: 54; radius: 27; color: "white"
                     }
                     ConsoleGlyph {
                         x: style.ps5 ? (parent.width-width)/2 : 20
-                        y: 18; width: style.ps5 ? 42 : 52; height: width
+                        y: style.ps5 ? 14 : 18; width: style.ps5 ? 34 : style.ps4 ? 42 : 52; height: width
                         kind: parent.modelData.key
-                        ink: style.ps5 && parent.index === home.shortcutIndex ? "#141414" : style.text
+                        ink: style.ps5 && home.guideRegion === "controls" && parent.index === home.shortcutIndex ? "#141414" : style.text
                     }
                     Text {
-                        x: style.ps5 ? 12 : 95
-                        y: style.ps5 ? 78 : 0
-                        width: parent.width - x - 12
-                        height: style.ps5 ? 40 : 100
+                        x: style.ps5 ? (parent.width - 200) / 2 : 95
+                        y: style.ps5 ? 64 : 0
+                        width: style.ps5 ? 200 : parent.width - x - 12
+                        horizontalAlignment: style.ps5 ? Text.AlignHCenter : Text.AlignLeft
+                        height: style.ps5 ? 40 : style.ps4 ? 86 : 100
                         text: parent.modelData.title
-                        color: style.ps5 ? "white" : parent.index === home.shortcutIndex ? style.focusText : style.text
-                        font.pixelSize: style.ps5 ? 22 : 25
+                        visible: !style.ps5 || (home.guideRegion === "controls" && parent.index === home.shortcutIndex)
+                        color: style.ps5 || style.ps4 ? "white" : parent.index === home.shortcutIndex ? style.focusText : style.text
+                        font.pixelSize: style.ps5 ? 20 : style.ps4 ? 30 : 25
                         verticalAlignment: Text.AlignVCenter
                         elide: Text.ElideRight
                     }

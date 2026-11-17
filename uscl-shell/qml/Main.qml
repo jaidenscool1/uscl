@@ -1247,7 +1247,8 @@ Window {
 
             ClockBox {
                 theme: root.activeTheme
-                x: stage.width - 40 - width; y: 44
+                x: stage.width - (root.activeTheme === "ps5" ? 56 : 40) - width
+                y: root.activeTheme === "ps5" ? 28 : root.activeTheme === "switch" || root.activeTheme === "switch2" ? 80 : 44
                 avatar: root.avatarUrl(prefs.avatar)
                 internet: system.internet
                 pads: gamepad.count
