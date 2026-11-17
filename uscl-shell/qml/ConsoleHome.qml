@@ -25,6 +25,7 @@ Item {
     property int tab: 0
     property int tileIndex: 0
     property int softwareIndex: 0
+    property int detailsAction: 0
     property bool guideOpen: false
     readonly property int gamesCategory: {
         for (var i = 0; i < navigation.cats.length; i++)
@@ -330,8 +331,10 @@ Item {
         } else if (region === "details") {
             if (button === "up")
                 region = "software";
+            else if (style.ps4 && (button === "left" || button === "right"))
+                detailsAction = button === "right" ? 1 : 0;
             else if (button === "accept")
-                activate(current);
+                activate(current, style.ps4 && !current.key ? (detailsAction ? "options" : "info") : "accept");
             else if (button === "options" || button === "info")
                 activate(current, button);
         } else if (button === "left" || button === "right")
@@ -344,8 +347,10 @@ Item {
         } else if (button === "down") {
             if (nintendo)
                 focusFunctions(0);
-            else
+            else {
+                detailsAction = 0;
                 region = "details";
+            }
         } else if (button === "accept" || button === "options" || button === "info")
             activate(current, button);
     }
@@ -744,23 +749,31 @@ Item {
             elide: Text.ElideRight
         }
         Rectangle {
+            visible: style.ps5 || home.region === "details"
             y: 166
             width: 300
             height: 62
             radius: style.ps5 ? 31 : 0
             color: style.ps5 ? "white" : "#174fb3"
-            border.width: home.region === "details" ? 4 : 0
+            border.width: home.region === "details" && (!style.ps4 || home.detailsAction === 0) ? 4 : 0
             border.color: style.accent
             Text {
                 anchors.centerIn: parent
-                text: home.current && home.current.key ? qsTr("Open Library") : qsTr("Play Game")
+                text: home.current && home.current.key ? qsTr("Open Library") : style.ps4 ? qsTr("Information") : qsTr("Play Game")
                 color: style.ps5 ? "#111111" : "white"
                 font.pixelSize: 28
             }
             MouseArea {
                 anchors.fill: parent
-                onClicked: home.activate(home.current)
+                onClicked: home.activate(home.current, style.ps4 && !home.current.key ? "info" : "accept")
             }
+        }
+        Rectangle {
+            visible: style.ps4 && home.region === "details" && !home.current.key
+            x: 325; y: 166; width: 300; height: 62; color: "#174fb3"
+            border.width: home.detailsAction === 1 ? 4 : 0; border.color: style.accent
+            Text { anchors.centerIn: parent; text: qsTr("Options"); color: "white"; font.pixelSize: 28 }
+            MouseArea { anchors.fill: parent; onClicked: home.activate(home.current,"options") }
         }
     }
     // Xbox pivots have their own dashboard panels, rather than turning settings into game covers.

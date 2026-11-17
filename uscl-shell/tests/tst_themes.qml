@@ -20,6 +20,7 @@ Item {
         name: "ConsoleThemes"
         when: windowShown
         property int launches: 0
+        property int inspected: 0
         SignalSpy { id: sectionSpy; target: home; signalName: "sectionRequested" }
         SignalSpy { id: optionsSpy; target: navigation; signalName: "showOptions" }
         function init() {
@@ -29,10 +30,10 @@ Item {
             home.reset()
             page.presentation = ""; page.filterIndex = 0; page.filterFocus = false; page.settingsSection = -1; page.sectionFocus = false; home.pinnedIds = []
             sectionSpy.clear()
-            launches = 0
+            launches = 0; inspected = 0
             optionsSpy.clear()
             var entries = []
-            for (var i = 0; i < 13; i++) entries.push({gameId: "GAME"+i, console: i % 2 ? "PS4" : "PS3", title: "Game " + i, action: function() { launches++ }, options: function() { return [] }})
+            for (var i = 0; i < 13; i++) entries.push({gameId: "GAME"+i, console: i % 2 ? "PS4" : "PS3", title: "Game " + i, action: function() { launches++ }, info: function() { inspected++ }, options: function() { return [] }})
             navigation.cats = [{id: "games", name: "Games", items: entries}, {id: "settings", name: "Settings", items: [{title: "Update USCL", action: function() { launches++ }}]}]
             navigation.cat = 0
             navigation.itemIndex = []
@@ -128,6 +129,14 @@ Item {
                 }
                 compare(Object.keys(visited).length,home.panelEntries.length,"Every tile in pivot "+tab+" must be reachable")
             }
+        }
+        function test_ps4_information_does_not_launch() {
+            home.theme = "ps4"; home.reset()
+            home.input("down"); home.input("accept")
+            compare(inspected,1); compare(launches,0)
+            home.input("right"); home.input("accept")
+            compare(optionsSpy.count,1); compare(launches,0)
+            home.input("back"); home.input("accept"); compare(launches,1)
         }
         function test_blades_game_bar() {
             home.theme = "x360classic"; home.reset()

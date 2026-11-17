@@ -45,7 +45,7 @@ and [filtered library](images/theme-ps5-library.png).
 | Context | Controls |
 |---|---|
 | PS3 home | Left/right category; up/down item; L1/R1 jumps five |
-| PS4 home | Left/right software; Up opens functions; Down opens game information; Back returns to software |
+| PS4 home | Left/right software; Up opens functions; Down opens Information/Options actions; Back returns to software |
 | PS5 home | Left/right software; Up focuses visible system shortcuts; Down focuses the game action; Home opens Control Center |
 | Nintendo home | Left/right software; Up focuses My Page; Down focuses the lower system row; Back returns to software |
 | Xbox 360 Classic | Left/right or L1/R1 switches blades; up/down selects a menu item or the game/tray bar |
