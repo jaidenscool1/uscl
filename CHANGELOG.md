@@ -29,6 +29,9 @@ These changes are included in this development branch. They are not a list of pu
 - Removed Xbox focus-tile overlap, bounded long titles and settings descriptions, and staged PS4 function icons to avoid collisions during transitions.
 - Settled reused backdrop buffers before loading new artwork and hid closing overlays when switching themes.
 
+- Refined PS5 Control Center portrait-card proportions, preview/context/title hierarchy and bottom control spacing against Sony footage.
+- Added live library-card previews and delayed scrolling for long Nintendo HOME titles; hidden or motion-disabled titles stay still.
+
 ### Emulator launch screens
 
 - Added a themed shell launch/return screen for every home-screen emulator path, with game artwork and title.

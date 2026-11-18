@@ -781,7 +781,7 @@ Item {
         }
     }
     Text {
-        visible: !style.xbox && !(style.ps4 && home.categoryFocus) && (!home.nintendo || home.region === "software")
+        visible: !style.xbox && !home.nintendo && !(style.ps4 && home.categoryFocus) && !(style.ps5 && home.guideOpen)
         x: home.nintendo ? 159 : style.ps4 ? 638 : 171
         y: home.nintendo ? (style.lightSwitch ? 234 : 210) : style.ps4 ? 538 : 600
         width: home.width - x - 96
@@ -809,6 +809,14 @@ Item {
         maximumLineCount: home.nintendo ? 1 : 2
         wrapMode: home.nintendo ? Text.NoWrap : Text.Wrap
     }
+    ScrollingTitle {
+        objectName: "nintendoSoftwareTitle"
+        visible: home.nintendo && home.region === "software"
+        x: 159; y: style.lightSwitch ? 234 : 210; width: 820; height: 50
+        text: home.current ? home.current.title : ""
+        color: style.accent
+        active: home.animate && home.visible && !home.guideOpen
+    }
     Text {
         objectName: "compactSoftwareTitle"
         visible: style.ps5
@@ -817,7 +825,7 @@ Item {
         font.pixelSize: 30; font.weight: Font.Light; color: style.text; elide: Text.ElideRight
     }
     Item {
-        visible: !style.xbox && !home.nintendo && !home.categoryFocus
+        visible: !style.xbox && !home.nintendo && !home.categoryFocus && !(style.ps5 && home.guideOpen)
         x: style.ps4 ? 286 : 171
         y: style.ps4 ? 700 : 740
         width: home.width - x - 200
@@ -1237,38 +1245,62 @@ Item {
         }
         Row {
             visible: style.ps5
-            x: 96; y: 500 + 45 * (1 - quickMenu.reveal); spacing: 24
+            objectName: "controlCenterCards"
+            x: 84; y: 366 + 45 * (1 - quickMenu.reveal); spacing: 24
             Repeater {
                 model: style.ps5 ? home.guideCards : []
                 delegate: Rectangle {
                     required property var modelData
                     required property int index
                     objectName: "controlCenterCard" + index
-                    width: 310; height: 380; radius: 18
+                    width: 438; height: 528; radius: 18
                     color: "#20262e"
                     border.width: home.guideRegion === "cards" && home.guideCardIndex === index ? 2 : 0
                     border.color: "#e4e6f0"
                     ConsoleGlyph {
-                        x: 95; y: 65; width: 120; height: 120
+                        x: 28; y: 24; width: 42; height: 42
                         kind: parent.modelData.key; ink: "#e3e7ed"
                     }
+                    Rectangle {
+                        x: 28; y: 84; width: parent.width-56; height: 230
+                        color: "#151b24"
+                        ConsoleGlyph { anchors.centerIn: parent; width: 110; height: 110; kind: parent.parent.modelData.key; ink: "#b6c3d5" }
+                        Grid {
+                            anchors.fill: parent; columns: 2; spacing: 4
+                            visible: parent.parent.index === 0 && home.games.length > 0
+                            Repeater {
+                                model: home.guideOpen && style.ps5 ? home.games.slice(0,4) : []
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    width: 189; height: 113; color: "#273242"
+                                    Image { anchors.fill: parent; source: parent.modelData.icon || ""; fillMode: Image.PreserveAspectFit; asynchronous: true }
+                                }
+                            }
+                        }
+                    }
                     Text {
-                        x: 24; y: 260; width: parent.width - 48; height: 85
-                        text: parent.modelData.title; color: "white"; font.pixelSize: 30
+                        x: 28; y: 390; width: parent.width-56; height: 36
+                        text: parent.index === 0 ? qsTr("%1 games").arg(home.games.length) : parent.index === 1 ? qsTr("Manage game updates") : qsTr("What's new in USCL")
+                        color: "#b8bec7"; font.pixelSize: 24; elide: Text.ElideRight
+                    }
+                    Text {
+                        x: 28; y: 434; width: parent.width - 56; height: 78
+                        text: parent.modelData.title; color: "white"; font.pixelSize: 34; font.weight: Font.DemiBold
                         wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight
                     }
                     MouseArea {
                         anchors.fill: parent
-                        onClicked: { home.guideOpen = false; home.activate(parent.modelData); }
+                        onClicked: { home.guideCardIndex = parent.index; home.guideRegion = "cards"; home.guideOpen = false; home.activate(parent.modelData); }
                     }
                 }
             }
         }
         Rectangle {
-            x: style.ps5 ? 420 : -width * (1 - quickMenu.reveal)
+            objectName: "controlCenterControls"
+            x: style.ps5 ? 360 : -width * (1 - quickMenu.reveal)
             y: style.ps5 ? 960 + 60 * (1 - quickMenu.reveal) : 0
-            width: style.ps5 ? 1080 : 620
-            height: style.ps5 ? 100 : home.height
+            width: style.ps5 ? 1212 : 620
+            height: style.ps5 ? 110 : home.height
             radius: style.ps5 ? 12 : 0
             color: style.ps5 ? "transparent" : style.ps4 ? "#092776" : style.panel
             Text {
@@ -1293,29 +1325,30 @@ Item {
                 delegate: Rectangle {
                     required property var modelData
                     required property int index
+                    objectName: "controlCenterControl"+index
                     x: style.ps5 ? 30 + index * (parent.width - 60) / home.quickEntries.length : style.ps4 ? 96 : 25
                     y: style.ps5 ? 0 : style.ps4 ? 155 + index * 94 : 110 + index * 112
                     width: style.ps5 ? (parent.width - 60) / home.quickEntries.length - 10 : style.ps4 ? 480 : 570
-                    height: style.ps4 ? 86 : 100
+                    height: style.ps5 ? 110 : style.ps4 ? 86 : 100
                     color: !style.ps5 && !style.ps4 && index === home.shortcutIndex ? style.focusFill : "transparent"
                     border.width: !style.ps5 && index === home.shortcutIndex ? (style.ps4 ? 2 : 3) : 0
                     border.color: style.ps4 ? "white" : style.accent
                     Rectangle {
                         visible: style.ps5 && home.guideRegion === "controls" && parent.index === home.shortcutIndex
-                        x: (parent.width-54)/2; y: 4; width: 54; height: 54; radius: 27; color: "white"
+                        x: (parent.width-54)/2; y: 20; width: 54; height: 54; radius: 27; color: "white"
                     }
                     ConsoleGlyph {
                         x: style.ps5 ? (parent.width-width)/2 : 20
-                        y: style.ps5 ? 14 : 18; width: style.ps5 ? 34 : style.ps4 ? 42 : 52; height: width
+                        y: style.ps5 ? 30 : 18; width: style.ps5 ? 34 : style.ps4 ? 42 : 52; height: width
                         kind: parent.modelData.key
                         ink: style.ps5 && home.guideRegion === "controls" && parent.index === home.shortcutIndex ? "#141414" : style.text
                     }
                     Text {
                         x: style.ps5 ? (parent.width - 200) / 2 : 95
-                        y: style.ps5 ? 64 : 0
+                        y: style.ps5 ? 82 : 0
                         width: style.ps5 ? 200 : parent.width - x - 12
                         horizontalAlignment: style.ps5 ? Text.AlignHCenter : Text.AlignLeft
-                        height: style.ps5 ? 40 : style.ps4 ? 86 : 100
+                        height: style.ps5 ? 28 : style.ps4 ? 86 : 100
                         text: parent.modelData.title
                         visible: !style.ps5 || (home.guideRegion === "controls" && parent.index === home.shortcutIndex)
                         color: style.ps5 || style.ps4 ? "white" : parent.index === home.shortcutIndex ? style.focusText : style.text

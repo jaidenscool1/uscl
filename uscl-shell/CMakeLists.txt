@@ -44,6 +44,7 @@ qt_add_qml_module(uscl
         qml/ConsoleFocusRing.qml
         qml/ConsoleBackdrop.qml
         qml/ConsoleHome.qml
+        qml/ScrollingTitle.qml
         qml/ConsoleGlyph.qml
         qml/RoundedCoverMask.qml
         qml/Xmb.qml

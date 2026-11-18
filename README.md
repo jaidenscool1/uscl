@@ -165,7 +165,7 @@ rebuild installers or publish an update. Those steps need a reviewed change and 
 
 The home screen has eight selectable themes: PS3, PS4, PS5, Xbox 360 Classic, Xbox 360 2012, Xbox One,
 Switch and Switch 2. Each separates software from console-style system menus; a full library provides console filters,
-a persistent sidebar for Add Games, updates and help. Libraries preserve their console filter and selected game when returning from nested menus. Mouse, wheel and keyboard navigation share the same visible selection. Xbox One includes persistent game pins. Selected tiles resize smoothly, quick menus slide in, and game backdrops crossfade after loading. All share USCL's settings and update controls. A theme changes the interface;
+a persistent sidebar for Add Games, updates and help. Libraries preserve their console filter and selected game when returning from nested menus. Mouse, wheel and keyboard navigation share the same visible selection. Xbox One includes persistent game pins. PS5 Control Center cards show live library previews, and long Nintendo HOME titles scroll within a bounded region. Selected tiles resize smoothly, quick menus slide in, and game backdrops crossfade after loading. All share USCL's settings and update controls. A theme changes the interface;
 it does not add emulation of its console (there is no PS5 or Xbox One emulator integration here).
 See the [online screenshot/video reference audit](docs/CONSOLE-REFERENCES.md),
 [theme behavior, checks and remaining manual verification](docs/CONSOLE-THEMES.md) and

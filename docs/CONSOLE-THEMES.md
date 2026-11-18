@@ -170,3 +170,9 @@ The later online-reference pass adds directional Xbox pivot/blade entrances, PS4
 and profile fades, a more compact PS5 strip and controls, functional PS5 cards/Options, and distinct
 Nintendo toolbar geometry and focus treatments. Xbox One Pins uses fifteen positions per page, with
 three rows per column. Tests cover page boundaries and every Home tile's directional reachability.
+
+PS5 Control Center uses larger portrait cards with live library previews and a count, and a lower
+control row spaced across the screen. Nintendo HOME titles use bounded delayed scrolling only when
+the selected name overflows; hidden labels and disabled motion do not keep an animation running.
+Tests cover card geometry and empty-library actions, plus title scrolling, selection changes, quick
+menu interruption and focus changes in both Nintendo themes.

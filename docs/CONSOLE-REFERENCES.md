@@ -32,6 +32,8 @@ claim that the app matches every reference pixel.
 |---|---|---|
 | PS5 selected software origin | (168, 123) | (168, 123) |
 | PS5 selected / neighboring cover | 177 / 105 square | 180 / 108 square |
+| PS5 Control Center selected card | (78, 366), roughly 443×530 | (84, 366), 438×528; USCL cards use Library, Updates and News |
+| PS5 bottom control centers | roughly y=1011 | y=1007, spread across the lower center; eight USCL controls |
 | PS5 Play origin | (171, 843) | (171, 843) |
 | Switch 2 first cover origin and size | (159, 300), 384 square | (159, 300), 384 square |
 | Switch first cover origin and size | (159, 291), 384 square | (159, 291), 384 square |
@@ -55,3 +57,20 @@ shortcuts. Original fonts, icons, artwork and these functional substitutions sti
 Regression checks cover the measured home anchors, interrupted pivots, PS5 card/control navigation and
 Options without accidental launch, Xbox pin-page boundaries, opaque rounded cover corners, and full
 keyboard/mouse access. They do not certify perceptually exact motion or physical-controller latency.
+
+## Follow-up accuracy pass
+
+The 10:20 Sony frame showed that the prior USCL Control Center cards were undersized and too low.
+The revised cards use the measured portrait proportions, a small header glyph, a preview region, muted
+context and a stronger title. The library preview uses up to four live game icons and the actual game
+count, with an empty-library fallback; no reference artwork is bundled. Bottom controls are spaced
+across the lower center with labels remaining inside the stage. The eight available USCL controls
+substitute for Sony's larger service-specific set.
+
+Nintendo's HOME footage shows long software names travelling within a clipped area above the selected
+cover. Both Nintendo themes now use a dedicated bounded title region: short titles stay still, long
+titles pause before scrolling to their ending, and selection changes reset their position. Travel
+stops while hidden, while quick access is open and when motion is disabled. The 1200 ms initial pause,
+60 stage-pixels/second travel and 1000 ms ending pause are conservative implementation choices, not
+frame-exact measurements. Regression tests check timing order, reset/visibility behavior, card bounds
+and empty-library actions on software and OpenGL renderers.

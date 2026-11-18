@@ -104,6 +104,44 @@ Item {
             verify(findChild(switchTile,"softwareFocusRing").visible)
             home.animate = true
         }
+        function test_nintendo_title_travel_data() { return [{tag:"switch",theme:"switch"},{tag:"switch2",theme:"switch2"}] }
+        function test_nintendo_title_travel(data) {
+            home.theme = data.theme; home.reset()
+            var rows = navigation.cats[0].items.slice()
+            rows[0] = Object.assign({}, rows[0], {title:"A long Nintendo software title that continues beyond the visible title region with its full ending"})
+            navigation.cats = [{id:"games",name:"Games",items:rows}]
+            var title = findChild(home,"nintendoSoftwareTitle")
+            verify(title.visible); verify(title.overflow > 0); verify(title.scrolling)
+            wait(1100); compare(title.offset,0)
+            wait(400); verify(title.offset < 0); verify(title.offset >= -title.overflow)
+            home.input("home"); compare(title.offset,0); verify(!title.scrolling)
+            home.input("back"); verify(title.scrolling)
+            home.input("down"); verify(!title.visible); verify(!title.scrolling); compare(title.offset,0)
+            home.input("up"); verify(title.scrolling)
+            home.animate = false; verify(!title.scrolling); compare(title.offset,0)
+            home.animate = true; home.input("right"); compare(title.text,"Game 1"); compare(title.offset,0); verify(!title.scrolling)
+        }
+        function test_ps5_card_geometry_and_empty_library() {
+            home.animate = false; home.theme = "ps5"; home.reset(); home.input("home")
+            wait(30) // Row positions settle during the next polish pass.
+            verify(!findChild(home,"softwareTitle").visible)
+            verify(!findChild(home,"homeGameDescription").visible)
+            var controls = findChild(home,"controlCenterControls")
+            for (var i=0; i<3; ++i) {
+                var card = findChild(home,"controlCenterCard"+i), p = card.mapToItem(home,0,0)
+                compare(card.width,438); compare(card.height,528)
+                compare(p.x,84+i*462); compare(p.y,366)
+                verify(p.y+card.height < controls.y); verify(p.x+card.width <= home.width)
+            }
+            for (var controlIndex=0; controlIndex<home.quickEntries.length; ++controlIndex) {
+                var control = findChild(home,"controlCenterControl"+controlIndex), cp = control.mapToItem(home,0,0)
+                compare(cp.x+control.width/2,457+controlIndex*144)
+                verify(cp.y+control.height <= home.height)
+            }
+            navigation.cats = [{id:"games",name:"Games",items:[]}]
+            home.input("up"); home.input("accept")
+            compare(sectionSpy.signalArguments[0][0],"library"); compare(launches,0)
+        }
         function test_ps5_options_action() {
             home.theme = "ps5"; home.reset(); home.input("down"); home.input("right")
             compare(home.detailsAction,1); home.input("accept")
