@@ -4,7 +4,7 @@ Goal and plan: `PROMPT-gpu-passthrough-continue.md`. Hand the game's own NVIDIA 
 shaders to the host RTX 4060 (AD107) through the RM ioctls, instead of translating every draw to Vulkan.
 Host: driver 615.78.08 (open kernel module), Arch Linux.
 
-## Status (2026-11-17, eleventh pass)
+## Status (2026-11-18, twelfth pass)
 
 | Gate / phase | Result |
 |---|---|
@@ -14,7 +14,7 @@ Host: driver 615.78.08 (open kernel module), Arch Linux.
 | Gate 3 (shader compatibility) | **Pass (decode level)**; guest compute SASS has started to **execute** on the RTX 4060 (Phase 1), no per-instruction failure seen yet |
 | Phase 1 (capture + replay one frame) | **Road and seams localized, new capture** (eleventh pass): mkw19's near road / mid band / pylon / beam are MKW's virtual-texture pages the capture lacks (8192x8192x68 ASTC arrays: Eglantine keeps written layers only in host-only SparseLayers images; not a passthrough bug); the dashed seams come from `PT_HELPER_LOADS` zeroing per-instance UV loads in helper lanes (fix designed: quad-neighbour value); new capture `mkw21` (race-start countdown, pack in view) with per-pass HDR snapshots 300-7900: 19.9 dB, 0.93x, trees only in ours from entry 6784 (a macro-40 draw split across GPFIFO entries; which side is right is open). Before: **Shadow mask fixed, open course checked** (tenth pass): the race-start slabs were the cached Z16 atlas read in the depth GOB arrangement (guest depth PTE kinds; the capture holds Eglantine's colour-arrangement download): depth twins in `ptcap.py build` take `mkw19`'s shadow mask from 17.8 to **28.0 dB** vs Eglantine; `SET_SRGB_WRITE` forced to 0; the 3D macro trace is paired by call order (21 pixel programs the helper-lane patch had missed). `mkw19` 17.6 dB, 1.015x; open-course `mkw20` **22.9 dB world, 0.986x**, dirt 30.6 dB. Left, localized to entries: mkw19 near road / pylon / top beam / Mario's shadow; mkw20 post-chain wedges and seams (entry 2926). Before: **Exit check done, helper-lane fix** (ninth pass, 2026-11-17): the `PT_HELPER_LOADS` trampoline zeroed global loads in *covered* pixels (PIXLD.COVMASK's predicate is no helper test); with `SR_THREAD_KILL` the race-start frames replay lit: `mkw17` 9.6 -> **13.9 dB** (brightness 0.38 -> 0.89x), `mkw19` **17.6 dB** (1.03x), no Xid. Left: the shadow mask (cached shadow atlas tiles), gantry darker, foliage. Earlier in the pass: the replay matches Eglantine wherever the capture holds the frame's inputs (`mkw16`: 22.6 dB, HDR main view 1.00-1.05x of Eglantine's per-pass snapshots); the remaining mismatches are inputs Eglantine keeps only in host images it never writes back to guest memory (superseded: the zero virtual-texture samples were the trampoline bug, see "Ninth pass, continued"). Phase 2 plan written (see "Phase 2 plan"). Before: **Close to Eglantine** (eighth pass, 2026-11-17): capture `mkw16` replays to Eglantine's own render within **PSNR 22.6 dB, mean abs 9.1, brightness ratio 1.04**, HUD identical; left: Toad heads dark, terrain dirt paler, foliage differs (see "mkw16" below). Before: **Textured racing frame, exact reference**: capture `mkw15` replays with every sampled ASTC texture decoded (`PT_ASTC=decode`) to the right image: arch, signs, track, karts, HUD all match Eglantine's own render of the same frame (taken from the capture's end dump), aligned to the pixel; lit surfaces are 0.33-0.65x as bright as the reference (sky 1.00x): a missing light contribution, the next Phase 1 item. Before: **Lit racing frame** (seventh pass, 2026-11-17): capture `mkw14` (probe 0003 now flushes GPU-written images) replays to the lit scene; only ASTC (white stand-in) is left between it and the reference. Before: **Whole racing frame replays** (sixth pass, 2026-11-17): all 7757 entries of capture `mkw13` (racing, 3 channels) run on the RTX 4060 with no Xid, **~36 ms of GPU wait in total** (slowest entry 0.7 ms) with guest memory in VRAM. The fix was emulator-wide: Ada does not perform global loads in pixel-shader helper lanes, so `PT_HELPER_LOADS=1` routes every LDG of every pixel program through a trampoline that zeroes the destination in helper lanes. Output not yet right: the HUD layer matches the reference, the G-buffer shows the right scene (karts, track), but the lit scene composited under the HUD is black (next: find the lighting/composite passes). Earlier: the intro-flyover frame `mkw10` replays to a recognisable course image (third pass) |
 | New: texture formats | **ASTC done for replay** (eighth pass; Phase 2: transcode on upload to BC7/BC3, see "Phase 2 plan"): the frame's 1455 sampled ASTC textures are decoded with Eglantine's own decoder to A8B8G8R8 in a host arena and their headers repointed. 28% of MKW's texture headers are ASTC (8x8, 6x6, 4x4, 5x5); the RTX 4060 has no ASTC sampling. Phase 2 needs the same on upload, and a smaller target (BC1/BC3) for VRAM |
-| Phase 2 | **Steps 2b-3 done** (eleventh pass, continued): every guest channel on its own host channel with async submission (-1% racing fps next to Vulkan with doorbell batching), pixel programs patched for helper lanes on bind (C++ port byte-identical to ptcap on 210 programs; 237/237 patched programs read back right at their guest VAs). Fork 043f82389 = `patches/0016`. Next: the guest's own words (QMD dependence, inline-QMD macros, texture header pool, host-class rewrites). Before: **Step 2 done** (eleventh pass): guest VA space mirrored inside Eglantine (sparse RM range, guest memory as OS descriptors at the guest's VAs and kinds), checked live: 128556 entries read back at their guest VA by the host copy engine, 0 differ; hole punching off under passthrough (pinned pages went stale). Fork 65397093a = `patches/0015`. Next: submit the guest's own words (async), then steps 3-5. Before: **Step 1 done** (tenth pass): an RM channel follows guest channel 1 inside Eglantine (`EDEN_NX2_PASSTHROUGH=1`, fork `uscl-passthrough-ship` / `patches/0014`), 15.45M serialized submissions in an MKW race, no Xid; the per-entry wait costs 37-43 -> 13-21 fps, so later steps submit asynchronously. Next: step 2 (guest VA space) |
+| Phase 2 | **The guest's own words run** (twelfth pass): `EDEN_NX2_PASSTHROUGH_WORDS=1` (fork e5091605d = `patches/0017`); MKW boots to the menu and race on the RTX 4060, main menu read back from guest memory matches the game (ASTC black); `SYNC=1` correct (~7 fps), async stable for ~10M entries without Xid but races Eglantine's memory writes: next is host-as-sole-executor + VRAM residency + ASTC transcode. Before: **Steps 2b-3 done** (eleventh pass, continued): every guest channel on its own host channel with async submission (-1% racing fps next to Vulkan with doorbell batching), pixel programs patched for helper lanes on bind (C++ port byte-identical to ptcap on 210 programs; 237/237 patched programs read back right at their guest VAs). Fork 043f82389 = `patches/0016`. Next: the guest's own words (QMD dependence, inline-QMD macros, texture header pool, host-class rewrites). Before: **Step 2 done** (eleventh pass): guest VA space mirrored inside Eglantine (sparse RM range, guest memory as OS descriptors at the guest's VAs and kinds), checked live: 128556 entries read back at their guest VA by the host copy engine, 0 differ; hole punching off under passthrough (pinned pages went stale). Fork 65397093a = `patches/0015`. Next: submit the guest's own words (async), then steps 3-5. Before: **Step 1 done** (tenth pass): an RM channel follows guest channel 1 inside Eglantine (`EDEN_NX2_PASSTHROUGH=1`, fork `uscl-passthrough-ship` / `patches/0014`), 15.45M serialized submissions in an MKW race, no Xid; the per-entry wait costs 37-43 -> 13-21 fps, so later steps submit asynchronously. Next: step 2 (guest VA space) |
 | Gate 4 (memory) | **Pass** (eleventh pass): sparse range + OS descriptors, no size limit up to 12 GiB, ~210 ms/GiB to pin, every MKW kind maps, live readback check 0 differences |
 | Gates 5-6 | not started |
 
@@ -802,27 +802,71 @@ reference the tenth pass lacked), composite and swapchain window. Replay: all 84
 
 **5. Clipmaps / VT pages: not done** (Phase 2 does not need it; the readback design is under item 2).
 
-## Twelfth pass (2026-11-17): the guest's own words, first live runs
-Fork `uscl-passthrough-ship` WIP commit on 043f82389 (not yet a patch file; the `ptcap` worktree is on the
-ship branch: switch back to `uscl-passthrough` and rebuild before any capture). `EDEN_NX2_PASSTHROUGH_WORDS=1`.
-- **Measured (mkw21):** no plain QMD launch from memory; every inline QMD (139) has DEPENDENT_QMD0 decrement;
-  NVN's barrier QMDs are scheduled from memory (PCAS2 3) with counter 2, raised by 0xC, lowered by 7 and by
-  inline QMDs; 19 report releases to VA 0 (dropped live). No macro emits SET_SRGB_WRITE.
-- **Raw ASTC headers on Ada: sample black, no fault** (mkw21 replay, 37590 raw headers, no Xid, `replay-astcraw/`).
-  The header pool shadow is a quality item (transcode, plan step 6), not a safety gate. Z16: covered by the
-  mirror's guest kinds.
-- Translator (Words in nx2_passthrough.cpp): decode + re-encode (encoder self-test), host-class rewrites,
-  local memory per host channel (72 MiB), compute macro calls replaced by the front's traces (paired per channel;
-  `OnStep` fixes calls resumed after an acquire: 30k unpaired -> 0), 470M words out per session translate-only.
-- **Runs** (MKW, no Xid in any): markers / translate-only boot and race (~53 fps). Async words: stall at boot
-  (our GPU runs behind Eglantine: its writes land after the guest moved on). `SYNC=1`: boots to ~205 presents,
-  then Eglantine deadlocks on two semaphores released by NVN barrier QMDs. Bisect (`DROP`): compute launches.
-  Cause found with `WATCH`: launching a barrier QMD at schedule time releases the payload NVN patches *later*
-  (0 instead of 4..0xf). Fix written (dependence tracked in stream order with Eglantine's native_qmd.h rules,
-  barrier copied on the GPU timeline by the copy engine + semaphore AND, launched when it reaches 0):
-  **built, not yet run.**
-- Next: run `ptS` (SYNC) with the scheduler; then the async hazard (plan step 5: guest fences gate on the host
-  GPU); `DROP=4` run froze the emulator later (~262 presents), not yet looked at.
+## Twelfth pass (2026-11-18): the guest's own words run on the host GPU
+**Result:** with `EDEN_NX2_PASSTHROUGH_WORDS=1` the backend submits the guest's own methods (rewritten for the
+host) on every guest channel; MKW boots to the main menu and into the race on the RTX 4060, and the main menu
+read back from the game's output target in guest memory is the game's (`bench/pt-live-menu.png`; ASTC
+surfaces black, see below). Fork `uscl-passthrough-ship` **e5091605d** = `patches/0017` (`git am` 0001-0017
+onto 30181ba05: identical tree); probe branch `uscl-passthrough` **3b72596a8** (built; the ptcap worktree is
+back on it).
+
+Measured first (mkw21, offline):
+- **QMD dependence:** no plain QMD is launched from memory. Every inline QMD (139) carries `DEPENDENT_QMD0` with
+  action 4 (decrement); NVN's barrier QMDs are scheduled from memory (PCAS2 action 3, `DEPENDENCE_COUNTER` 2),
+  raised by PCAS2 0xC, lowered by 7 and by the inline QMDs; a third release slot (word 52, `RELEASE2` in Ada's
+  QMD V03 too) carries NVN's queue syncs. 19 report releases a frame go to VA 0. No macro emits SET_SRGB_WRITE.
+- **Raw ASTC headers on Ada sample black, no fault**: mkw21 replay with all 37590 ASTC headers raw
+  (`mkw21/replay-astcraw/`), 8442 entries, no Xid (`bench/pt-astc-raw-vs-decoded.png`). So the header pool is a
+  quality item (transcode, plan step 6), not a safety gate. Z16 is covered live by the mirror's guest kinds.
+
+The translator (`Words` in nx2_passthrough.cpp), each part found by a failing run:
+- Decode + re-encode per entry (runs kept; encoder self-test at start); host-class rewrites: Ampere B -> Ada
+  classes (+ I2M, 2D), syncpoints / firmware / SW / instrumentation / zcull / `SET_SPA_VERSION` / TLB mem ops
+  dropped, `SET_SRGB_WRITE` 0, zcull off and `SET_BINDLESS_TEXTURE` 0 at bind (Phase 1 restore defaults), shader
+  local memory moved to a per-channel 72 MiB host buffer (guest buffer sized for T239's TPCs), operations at
+  unmapped VAs dropped.
+- Compute macro calls -> the split front's emitted methods (hooks in `KeplerCompute::FrontRunMacro`); `OnStep`
+  in `DmaPusher::Step` keeps the pairing for entries resumed after an acquire (30k unpaired calls -> 0).
+- Inline QMDs go to host slots (Eglantine reads the guest's QMD ring back). QMD dependence is tracked in stream
+  order with Eglantine's own rules (`native_qmd.h`, one table for every channel); a barrier reaching 0 is copied
+  on the GPU timeline (copy engine + `SEM_EXECUTE` IAND reductions clear its dependence) and launched there.
+  First version launched barriers at schedule time from a CPU copy: their release payloads were 0 (NVN patches
+  them while the barrier waits; `_WATCH` showed `0x...37010 = 0 after entry`), Eglantine deadlocked.
+- **While Eglantine still executes every entry, it alone writes and waits on the guest's semaphores**: two
+  writers left a slot one behind (deadlock), and a host acquire behind Eglantine waited forever (channel 1000
+  entries deep). `EDEN_NX2_PASSTHROUGH_RELEASES=1` turns host releases/acquires on (for the sole-executor mode).
+- An entry that ends inside a method run is held and submitted with its continuation: MKW's macro-40 draws end
+  a main entry after the first parameter; a host MME left mid-call while switched out raised **Xid 13
+  MISSING_MACRO_DATA** (postmortem: GP 500 = entry 23607 ending in `CALL_MME_MACRO(40)`, 1 word).
+- Program pages becoming or changing as shadow pages wait for the host channels first: the unmap-then-map
+  window let the host fetch a zero program header (**Xid 13 Shader Program Header 18**). Guest unmaps and kind
+  changes do not wait (that stalled loading for seconds; a data page reading 0 for a moment does not fault).
+- `Ready()` honours `EDEN_NX2_PASSTHROUGH`: the nvhost hooks (kinds, unmaps) opened an RM client without it
+  since 0015 (a bug for every SDK build).
+- Bisecting tools: `_SYNC=1` (wait per entry), `_DROP=<mask>` (1 report sem, 2 host sem, 4 compute launches,
+  8 I2M, 16 copy, 32 3D, 64 acquires), `_WATCH=<va or 20-bit suffix>`, `_REREAD=1`, `_SNAP=<s>:<va|0>:<size>:<file>`
+  (guest memory as the host rendered it; 0 = the last 2560x1440 sRGB colour target), postmortem log (the
+  submissions around GPGet) when a channel stops.
+
+Runs (MKW, `runs.py`, Xid checked after each; `nvrm_probe clear` OK after each):
+
+| Run | Result |
+|---|---|
+| markers / translate-only (`_SUBMIT=0`) | race 53.4 / 52.5 fps, as Vulkan alone (53.8) |
+| async, first versions | stall at boot (host writes land after Eglantine's) |
+| `SYNC=1`, scheduler + releases left to Eglantine | boots, menu, race: 4M entries, ~7 fps, no Xid |
+| async, before the held-run fix | Xid 13 MISSING_MACRO_DATA (x2), Xid 32 (by-reference attempt, own bug) |
+| async, before the program-page quiesce | Xid 13 Shader Program Header |
+| async, final (3 runs, ~10M entries) | **no Xid**; ~27k entries/s: the host GPU, reading all guest memory as uncached sysmem next to Vulkan's work, is the bottleneck (ring full) |
+| async, final, longer race | Eglantine deadlocked at 166 s: NVN's fence slots read 0 (the host's late memory writes reset them after Eglantine's releases) |
+
+What this means: in this dual-execution mode every guest-memory write the host makes can land after Eglantine
+moved on (async), so `SYNC=1` is the correct mode and it is slow. The way forward is the plan's step 5 for
+real: **the host is the only executor** (Eglantine's back does not render; guest fences follow host semaphores,
+`_RELEASES=1`), plus **VRAM residency** (Phase 3) for speed, and **ASTC transcoding** (step 6) for the black
+surfaces. Shortcuts left in code: macro-parameter entries GPU-culled after Eglantine read them use Eglantine's
+words (69 of 1617 differ; a GPU-timeline copy is the fix); QMD slot ring reused after 16384 launches; barrier
+counters read on the CPU at schedule time; inline QMDs with their own dependence count launch at once.
 
 ## Phase 2, step 1: channels and submission (2026-11-17)
 **Result:** the RM channel runs inside Eglantine. Fork branch `uscl-passthrough-ship` (`5e536b6a4`, on
