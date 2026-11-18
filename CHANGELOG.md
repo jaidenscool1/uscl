@@ -1,8 +1,16 @@
 # USCL Changelog
 
-## Unreleased
+## 0.5.2-alpha — 2026-11-18
 
-These changes are included in this development branch. They are not a list of published releases.
+Console menus, original theme audio and safer firmware installation. The Linux
+AppImage reuses the verified v0.5.1-alpha native cores with a rebuilt 0.5.2 shell;
+native emulator loading colors require separately rebuilt cores on Linux.
+Windows rebuilds cores from the release patch manifest. Switch 2 PR #18 and native
+PS4 PR #19 remain outside this release.
+
+- Preserve installed Switch firmware and version metadata when replacement import fails.
+- Add a sourced Switch 2 CPU/GPU translation tracker, separating baseline and pending work.
+- Update all maintained emulator/server fork READMEs and packaging notes.
 
 ### Console themes
 

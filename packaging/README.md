@@ -60,3 +60,13 @@ The private key is `~/.config/uscl-signing/update-key.pem` on the maintainer's P
 GitHub, not in CI), so a compromised repo or CI run can't ship an update USCL would install. **Back it up**
 somewhere offline: without it no further update can be published to existing installs (a new key means
 everyone reinstalls once).
+
+### v0.5.2-alpha Linux provenance
+
+This release's AppImage reuses the native emulators, servers and dependencies from
+the checksum- and Ed25519-verified v0.5.1-alpha AppImage, then rebuilds the shell as
+0.5.2-alpha and deploys its Qt dependencies. This avoids packaging unrelated local
+core development changes. Linux native loading-color patches are not included in
+those retained cores; the shell's themed launch screen is included. Windows builds
+the release patch manifest through its installer workflow. Neither platform includes
+the unmerged Switch 2 work in PR #18 or the native PS4 preview in PR #19.

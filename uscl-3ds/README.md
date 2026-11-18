@@ -128,3 +128,7 @@ the shell alone does not update a separately installed emulator.
 
 Switch 2 CPU/GPU translation, game evidence and pending work are tracked in
 [SWITCH2-PROGRESS.md](../docs/SWITCH2-PROGRESS.md).
+
+For v0.5.2-alpha, Linux retains the signed v0.5.1-alpha native core and therefore
+uses the shell launch theme without the new native loading colors. Windows builds
+the loading-color patch from the release manifest. See [packaging provenance](../packaging/README.md#v052-alpha-linux-provenance).
