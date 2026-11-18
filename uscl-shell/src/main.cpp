@@ -390,13 +390,13 @@ namespace
 				      version.open(QIODevice::ReadOnly) && version.readAll() == "1.0.0", "failed firmware import preserves installed files and version");
 				oldFirmware.close();
 				version.close();
-				QDir().mkpath(root.filePath("new-firmware"));
 				write("new-firmware/new.nca", "new firmware");
 				error.clear();
-				SwitchCore::installConsoleFiles({{"firmware", root.filePath("new-firmware")}, {"version", "2.0.0"}, {"master", -1}}, &error);
+				SwitchCore::installConsoleFiles({{"firmware", root.filePath("games/new-firmware")}, {"version", "2.0.0"}, {"master", -1}}, &error);
 				check(error.isEmpty() && !QFileInfo::exists(registered + "old.nca") && QFileInfo::exists(registered + "new.nca") &&
 				      version.open(QIODevice::ReadOnly) && version.readAll() == "2.0.0", "successful firmware replacement contains only the new version");
 				version.close();
+				QDir(root.filePath("games/new-firmware")).removeRecursively();
 				for (const QString& installedCore : {core, SwitchCore::profileDir() + "data/eglantine/"})
 				{
 					QDir(installedCore + "nand/system/Contents/registered").removeRecursively();
