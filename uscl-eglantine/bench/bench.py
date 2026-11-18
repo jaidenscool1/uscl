@@ -78,6 +78,14 @@ def main():
                         "gpu": util, "vram": vram})
     subprocess.run([sys.executable, "-I", DBG, "--call", json.dumps({"method": "screenshot", "params": {}}),
                     "--out", shot.replace(".png", "-end.png")], capture_output=True, timeout=120)
+    # BENCH_TRIGGER=<file>: the passthrough backend's snapshot (EDEN_NX2_PASSTHROUGH_SNAP=-1:...:<file>) of the
+    # frame next to the end screenshot; waits until the backend took it (it removes <file>.now).
+    if trigger := os.environ.get("BENCH_TRIGGER"):
+        open(trigger + ".now", "w").close()
+        for _ in range(60):
+            if not os.path.exists(trigger + ".now"):
+                break
+            time.sleep(1)
     fps = [x["fps"] for x in samples]
     summary = {"label": label, "race_s": round(time.time() - start, 1), "samples": len(samples),
                "fps_mean": round(statistics.mean(fps), 1), "fps_min": min(fps),
