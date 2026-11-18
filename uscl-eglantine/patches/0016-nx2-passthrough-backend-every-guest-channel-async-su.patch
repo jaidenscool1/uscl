@@ -1,0 +1,1102 @@
+From 043f82389ebbfd76280d4cb678fd2aef64474f74 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 19:30:08 -0700
+Subject: [PATCH] nx2: passthrough backend: every guest channel, async
+ submission, pixel programs patched for helper lanes
+
+Channels: each guest channel gets its own host channel (own TSG and graphics
+context, GFXP/CILP preemption contexts bound, EDEN_NX2_PASSTHROUGH_PREEMPT=0
+off), all on the mirrored VA space. Submission is asynchronous: a pushbuffer
+ring per channel reclaimed through a fence released without WFI; the CPU only
+waits when a ring is full or for a check. The doorbell rings every 64
+submissions (EDEN_NX2_PASSTHROUGH_BATCH): one per entry cost 15% of MKW's
+racing fps next to Vulkan, 64 cost 1%. Entries are recorded by OnEntry and
+submitted by OnEntryDone, once the front has processed their methods.
+
+Pixel programs: Ada skips global loads in helper lanes, so guest pixel
+programs are patched as USCL's PT_HELPER_LOADS does (nx2_helper_loads: each
+LDG through a trampoline that zeroes it in helper lanes, SR_THREAD_KILL into a
+predicate the program never uses). The SM86 scanner needs no disassembler:
+predicate operand fields per opcode were measured with nvdisasm on MKW's 320
+pixel programs (unknown opcodes count as using every field); its output is
+byte-identical to ptcap's for all 210 programs with loads (2745 loads).
+Maxwell3D::FrontWrite reports program binds (SET_PIPELINE_PROGRAM_ADDRESS,
+direct or from macros, all on the entry thread); a bound pixel program with
+loads is patched into shadow copies of its 4 KiB guest pages, which the mirror
+maps at the guest VAs instead of the guest pages; other programs sharing a
+shadow page are copied in when bound. EDEN_NX2_PASSTHROUGH_CHECK also reads
+each newly patched program back at its guest VA with the copy engine.
+
+MKW: 2.5M program binds per session (57% from macros), 411 pixel programs
+patched (4943 loads) in 1793 shadow pages; checked 237 of 237 patched programs
+and 0 of 8267 entries differ on the GPU; no Xid. The guest's methods are still
+not submitted (markers only).
+---
+ src/video_core/CMakeLists.txt         |   2 +
+ src/video_core/dma_pusher.cpp         |   2 +
+ src/video_core/engines/maxwell_3d.cpp |  11 +
+ src/video_core/nx2_helper_loads.cpp   | 236 +++++++++++++
+ src/video_core/nx2_helper_loads.h     |  40 +++
+ src/video_core/nx2_passthrough.cpp    | 472 +++++++++++++++++++++++---
+ src/video_core/nx2_passthrough.h      |   8 +-
+ 7 files changed, 717 insertions(+), 54 deletions(-)
+ create mode 100644 src/video_core/nx2_helper_loads.cpp
+ create mode 100644 src/video_core/nx2_helper_loads.h
+
+diff --git a/src/video_core/CMakeLists.txt b/src/video_core/CMakeLists.txt
+index 7fcd20895..ed106e53c 100644
+--- a/src/video_core/CMakeLists.txt
++++ b/src/video_core/CMakeLists.txt
+@@ -42,6 +42,8 @@ add_library(video_core STATIC
+     dirty_flags.h
+     dma_pusher.cpp
+     nx2_passthrough.cpp
++    nx2_helper_loads.cpp
++    nx2_helper_loads.h
+     nx2_passthrough.h
+     dma_pusher.h
+     engines/sw_blitter/blitter.cpp
+diff --git a/src/video_core/dma_pusher.cpp b/src/video_core/dma_pusher.cpp
+index cb226aae3..352af3f4e 100644
+--- a/src/video_core/dma_pusher.cpp
++++ b/src/video_core/dma_pusher.cpp
+@@ -134,6 +134,7 @@ bool DmaPusher::Step() {
+             return false;
+         }
+         command_resume_offset = 0;
++        Nx2Passthrough::OnEntryDone(channel_state.bind_id);
+         dma_pushbuffer.pop_front();
+         return true;
+     }
+@@ -368,6 +369,7 @@ bool DmaPusher::Step() {
+             return false;
+         }
+         command_resume_offset = 0;
++        Nx2Passthrough::OnEntryDone(channel_state.bind_id);
+         if (dma_state.method_count != 0) {
+             split_method_end = header.addr + header.size * sizeof(u32);
+         }
+diff --git a/src/video_core/engines/maxwell_3d.cpp b/src/video_core/engines/maxwell_3d.cpp
+index 4d5f92089..234f130e6 100644
+--- a/src/video_core/engines/maxwell_3d.cpp
++++ b/src/video_core/engines/maxwell_3d.cpp
+@@ -23,6 +23,7 @@
+ #include "core/core_timing.h"
+ #include "video_core/dirty_flags.h"
+ #include "video_core/engines/maxwell_3d.h"
++#include "video_core/nx2_passthrough.h"
+ #include "video_core/nx2.h"
+ #include "video_core/gpu.h"
+ #include "video_core/gpu_split.h"
+@@ -1525,6 +1526,16 @@ void Maxwell3D::ReleaseFront() {
+ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 method,
+                            u32 argument, bool is_last_call, bool from_macro) {
+     namespace Profile = VideoCommon::Nx2Profile;
++    if (Nx2Passthrough::Requested()) [[unlikely]] {
++        // A native program address (SET_PIPELINE_PROGRAM_ADDRESS_B: word 6 of a 16-word pipeline slot).
++        constexpr u32 pipelines = MAXWELL3D_REG_INDEX(pipelines);
++        if (method >= pipelines && method < pipelines + 16 * Regs::MaxShaderProgram && (method - pipelines) % 16 == 6) {
++            const u32 stage = (method - pipelines) / 16;
++            const auto& regs = reinterpret_cast<const Regs&>(fs.regs);
++            Nx2Passthrough::OnProgramBind(
++                stage, (static_cast<u64>(regs.pipelines[stage].reserved[0] & 0xff) << 32) | argument, from_macro);
++        }
++    }
+     if (Profile::Enabled()) [[unlikely]] {
+         // The uniform stream is the bulk of what a native title writes: count it separately.
+         constexpr u32 cb_first = MAXWELL3D_REG_INDEX(const_buffer.buffer);
+diff --git a/src/video_core/nx2_helper_loads.cpp b/src/video_core/nx2_helper_loads.cpp
+new file mode 100644
+index 000000000..5bb538971
+--- /dev/null
++++ b/src/video_core/nx2_helper_loads.cpp
+@@ -0,0 +1,236 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#include <algorithm>
++#include <array>
++#include <cstring>
++
++#include "video_core/nx2_helper_loads.h"
++
++namespace Tegra::Nx2Passthrough::HelperLoads {
++namespace {
++
++// One SM86 instruction: bits 0-63 in lo, 64-127 in hi; control (stall, yield, barriers, wait mask) at 105-127.
++struct Word {
++    u64 lo = 0, hi = 0;
++};
++constexpr u64 CTL_HI = ~((u64{1} << 41) - 1); // bits 105-127 of the instruction
++constexpr u32 SPH = 0x80;
++
++Word Load(std::span<const u8> b, size_t at) {
++    Word w;
++    std::memcpy(&w.lo, b.data() + at, 8);
++    std::memcpy(&w.hi, b.data() + at + 8, 8);
++    return w;
++}
++
++void Store(std::vector<u8>& b, size_t at, Word w) {
++    std::memcpy(b.data() + at, &w.lo, 8);
++    std::memcpy(b.data() + at + 8, &w.hi, 8);
++}
++
++void Append(std::vector<u8>& b, Word w) {
++    b.resize(b.size() + 16);
++    Store(b, b.size() - 16, w);
++}
++
++Word Ctl(Word x, u32 stall = 2, u32 yld = 0, u32 wr = 7, u32 rd = 7, u32 wait = 0) {
++    const u64 c = stall | yld << 4 | wr << 5 | rd << 8 | u64{wait} << 11;
++    return {x.lo, (x.hi & ~CTL_HI) | c << 41};
++}
++
++/// BRA to (this instruction + 16 + off).
++Word Bra(s64 off) {
++    const u64 o = static_cast<u64>(off) & ((u64{1} << 50) - 1);
++    return Ctl({0x7947 | 7 << 12 | (o & 0xFFFFFFFF) << 32, (o >> 32) | 0x03800000}, 5, 1);
++}
++
++/// S2R R<r>, SR_THREAD_KILL: nonzero in helper lanes (PIXLD.COVMASK's predicate is no helper test on Ada).
++Word S2rThreadKill(u32 r, u32 wr) {
++    return Ctl({0x7919 | u64{r} << 16, 0x13 << 8}, 1, 0, wr);
++}
++
++/// ISETP.NE.U32.AND P<p>, PT, R<r>, RZ, PT
++Word IsetpNeZero(u32 p, u32 r, u32 wait) {
++    return Ctl({0x720C | 7 << 12 | u64{r} << 24 | u64{0xFF} << 32, 0x0003F05070ULL | u64{p} << 17}, 5, 0, 7, 7, wait);
++}
++
++/// @P<p> MOV R<r>, RZ
++Word MovRzIf(u32 p, u32 r, u32 wait) {
++    return Ctl({0x0202 | u64{p} << 12 | u64{r} << 16 | u64{0xFF} << 32, 0xF00}, 2, 0, 7, 7, wait);
++}
++
++u32 Opcode(Word w) {
++    return static_cast<u32>(w.lo & 0xFFF);
++}
++
++/// LDG (generic address + uniform offset), as nvdisasm prints `LDG... R<d>, [R.U32+UR]`.
++bool IsLdg(Word w) {
++    return Opcode(w) == 0x981;
++}
++
++/// Registers an LDG writes: 1 (up to 32 bits), 2 (.64), 4 (.128).
++u32 LdgRegs(Word w) {
++    switch ((w.hi >> 9) & 7) {
++    case 5:
++        return 2;
++    case 6:
++    case 7:
++        return 4;
++    default:
++        return 1;
++    }
++}
++
++/// The 3-bit predicate operand fields (absolute bit offsets) an opcode uses, measured with nvdisasm on MKW's 320
++/// pixel programs: every predicate nvdisasm names sits in these fields. -1: opcode never seen (all candidates).
++constexpr std::array<int, 5> CANDIDATES{68, 77, 81, 84, 87};
++std::span<const int> PredicateFields(u32 op) {
++    static constexpr std::array<int, 1> f87{87};
++    static constexpr std::array<int, 1> f81{81};
++    static constexpr std::array<int, 2> f81_87{81, 87};
++    static constexpr std::array<int, 3> f81_84_87{81, 84, 87};
++    static constexpr std::array<int, 3> f68_81_87{68, 81, 87};
++    static constexpr std::array<int, 4> f68_81_84_87{68, 81, 84, 87};
++    static constexpr std::array<int, 0> none{};
++    switch (op) {
++    case 0x207: case 0x208: case 0x209: case 0x20a: case 0x217: case 0x807: case 0x808: case 0x809: case 0x80a:
++    case 0x817: case 0x947: case 0x94d: case 0xa09: case 0xa0a: case 0xc17:
++        return f87;
++    case 0x589: case 0xf89:
++        return f81;
++    case 0x212: case 0x812:
++        return f81_87;
++    case 0xa12:
++        return f68_81_87;
++    case 0x20b: case 0x80b: case 0xa0b:
++    // Carry-capable families (IADD3, LEA, IMAD): no predicate operands in the measured programs, but they can.
++    case 0x210: case 0x810: case 0xa10: case 0xc10: case 0x211: case 0x811: case 0xa11: case 0xc11:
++    case 0x224: case 0x824: case 0xa24: case 0xc24:
++        return f81_84_87;
++    case 0x20c: case 0x80c: case 0xa0c:
++        return f68_81_84_87;
++    case 0x81c:
++        return CANDIDATES;
++    // Seen without predicate operands.
++    case 0x202: case 0x220: case 0x221: case 0x223: case 0x230: case 0x23e: case 0x245: case 0x299: case 0x300:
++    case 0x305: case 0x306: case 0x307: case 0x308: case 0x326: case 0x421: case 0x423: case 0x424: case 0x621:
++    case 0x623: case 0x624: case 0x802: case 0x805: case 0x816: case 0x819: case 0x820: case 0x822: case 0x823:
++    case 0x882: case 0x890: case 0x892: case 0x899: case 0x91a: case 0x941: case 0x945: case 0x95b: case 0x981:
++    case 0xa02: case 0xa20: case 0xa23: case 0xab9: case 0xb05: case 0xb08: case 0xb60: case 0xb63: case 0xb66:
++    case 0xb69: case 0xb82: case 0xc20: case 0xc45: case 0xd06:
++        return none;
++    default:
++        return CANDIDATES;
++    }
++}
++
++/// Predicates an instruction may name: its guard (bits 12-14) and its predicate operand fields (7 = PT).
++u32 PredicateMask(Word w) {
++    u32 m = 1u << ((w.lo >> 12) & 7);
++    for (const int bit : PredicateFields(static_cast<u32>(w.lo & 0xFFF))) {
++        m |= 1u << ((w.hi >> (bit - 64)) & 7);
++    }
++    return m & 0x7F;
++}
++
++/// P2R / R2P read or write the whole predicate file.
++bool UsesPr(Word w) {
++    const u32 op = Opcode(w);
++    return op == 0x803 || op == 0x804 || op == 0x903 || op == 0x904;
++}
++
++bool IsBranch(Word w) {
++    switch (Opcode(w)) {
++    case 0x943: case 0x945: case 0x947: case 0x949: case 0x94A: case 0x950: case 0x94D:
++        return true;
++    default:
++        return false;
++    }
++}
++
++} // Anonymous namespace
++
++size_t ProgramEnd(std::span<const u8> image) {
++    const Word self = Bra(-0x10);
++    for (size_t o = SPH; o + 32 <= image.size(); o += 16) {
++        if (image[o] == 0x4D && (image[o + 1] & 0xF) == 9) {
++            const Word next = Load(image, o + 16);
++            if (next.lo == self.lo && (next.hi & ~CTL_HI) == (self.hi & ~CTL_HI)) {
++                return o;
++            }
++        }
++    }
++    return 0;
++}
++
++Result Patch(u64 program, std::span<const u8> image, u64 trampoline_va) {
++    Result r;
++    const size_t end = ProgramEnd(image);
++    if (end == 0) {
++        r.skipped = "no program end found";
++        return r;
++    }
++    r.program.assign(image.begin(), image.begin() + std::min(image.size(), (end + 0x20 + 31) / 32 * 32));
++    struct Site {
++        size_t off;
++        u32 rd, regs;
++    };
++    std::vector<Site> sites;
++    u32 used = 0;
++    bool pr = false;
++    for (size_t o = SPH; o <= end; o += 16) {
++        const Word w = Load(r.program, o);
++        used |= PredicateMask(w);
++        pr |= UsesPr(w);
++        if (IsLdg(w)) sites.push_back({o, static_cast<u32>((w.lo >> 16) & 0xFF), LdgRegs(w)});
++    }
++    if (sites.empty()) return r;
++    int free = -1;
++    for (int p = 6; p >= 0 && !pr; --p) {
++        if ((used & (1u << p)) == 0) {
++            free = p;
++            break;
++        }
++    }
++    if (free < 0) {
++        r.skipped = "no free predicate";
++        return r;
++    }
++    const Word first = Load(r.program, SPH);
++    if (IsBranch(first)) {
++        r.skipped = "starts with a branch";
++        return r;
++    }
++    const u32 p = static_cast<u32>(free);
++    auto& t = r.trampolines;
++    const auto va_now = [&] { return trampoline_va + t.size(); };
++    // Entry trampoline: P<p> = helper lane, once (no GPR is live at a pixel program's start, so R0 is scratch);
++    // then the program's first instruction (and, if that is an LDG, its zeroing), BRA back.
++    const u64 entry_va = va_now();
++    Append(t, S2rThreadKill(0, 0));
++    Append(t, IsetpNeZero(p, 0, 1));
++    Append(t, {first.lo, first.hi & ~(u64{0xF} << 58)}); // no operand reuse across the jump
++    const u32 first_wr = static_cast<u32>((first.hi >> 46) & 7);
++    if (IsLdg(first)) {
++        for (u32 i = 0; i < LdgRegs(first); ++i) Append(t, MovRzIf(p, static_cast<u32>((first.lo >> 16) & 0xFF) + i, 1u << first_wr));
++        ++r.loads;
++    }
++    Append(t, Bra(static_cast<s64>(program + SPH + 0x10) - static_cast<s64>(va_now() + 16)));
++    Store(r.program, SPH, Bra(static_cast<s64>(entry_va) - static_cast<s64>(program + SPH + 16)));
++    for (const Site& s : sites) {
++        if (s.off == SPH) continue;
++        Word x = Load(r.program, s.off);
++        const u32 wr = static_cast<u32>((x.hi >> 46) & 7);
++        x.hi &= ~(u64{0xF} << 58);
++        const u64 site_va = program + s.off, at = va_now();
++        Append(t, x);
++        for (u32 i = 0; i < s.regs; ++i) Append(t, MovRzIf(p, s.rd + i, 1u << wr));
++        Append(t, Bra(static_cast<s64>(site_va + 16) - static_cast<s64>(va_now() + 16)));
++        Store(r.program, s.off, Bra(static_cast<s64>(at) - static_cast<s64>(site_va + 16)));
++        ++r.loads;
++    }
++    return r;
++}
++
++} // namespace Tegra::Nx2Passthrough::HelperLoads
+diff --git a/src/video_core/nx2_helper_loads.h b/src/video_core/nx2_helper_loads.h
+new file mode 100644
+index 000000000..c443d339c
+--- /dev/null
++++ b/src/video_core/nx2_helper_loads.h
+@@ -0,0 +1,40 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#pragma once
++
++#include <span>
++#include <string>
++#include <vector>
++
++#include "common/common_types.h"
++
++// Helper-lane loads for the GPU passthrough backend: on Ada, a pixel shader's helper lanes (coverage 0, run only
++// for derivatives) do not perform global loads, so LDG leaves its destination unchanged. Guest code such as
++// `LDG R5, [R5.U32+UR4]` then keeps the address as the loaded count (MKW: a light loop of ~10^9 iterations per
++// helper lane, 100+ ms draws, Xid 109). Each LDG of a pixel program is redirected to a trampoline that performs it
++// and zeroes the destination in helper lanes; helper status (SR_THREAD_KILL != 0) is computed once at the program
++// start into a predicate the program never uses. Port of USCL ptcap.py PT_HELPER_LOADS (SM86 words checked with
++// nvdisasm there). shortcut: helper lanes get 0, not a covered neighbour's value (derivatives of loaded values are
++// wrong on triangle edges); LDG only (no LD/LDS/ATOM). Upgrade when a game needs it.
++namespace Tegra::Nx2Passthrough::HelperLoads {
++
++struct Result {
++    /// The program from its SPH up to its end (rounded to 32 bytes), with each LDG replaced by a branch.
++    std::vector<u8> program;
++    /// Trampoline words appended to the caller's arena (at arena_va + arena_offset_before).
++    std::vector<u8> trampolines;
++    u32 loads = 0;
++    /// Why the program was left alone (empty when patched or when it has no loads).
++    std::string skipped;
++};
++
++/// The offset of a program's `EXIT; BRA self` pair (from the SPH), or 0 when not found within `image`.
++size_t ProgramEnd(std::span<const u8> image);
++
++/// Patches the pixel program at GPU VA `program` (`image` = its memory from the SPH on, at least to its end).
++/// Trampolines are laid out for GPU VA `trampoline_va`. `skipped` explains a program left alone; a program with
++/// no loads comes back unchanged.
++Result Patch(u64 program, std::span<const u8> image, u64 trampoline_va);
++
++} // namespace Tegra::Nx2Passthrough::HelperLoads
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index fae6261a5..a5feb4572 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -10,6 +10,9 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <cstring>
++#include <deque>
++#include <set>
++#include <thread>
+ #include <map>
+ #include <optional>
+ #include <chrono>
+@@ -21,6 +24,7 @@
+ #include <vector>
+ 
+ #include "common/logging.h"
++#include "video_core/nx2_helper_loads.h"
+ #include "video_core/nx2_passthrough.h"
+ 
+ #if defined(NX2_PASSTHROUGH) && defined(__linux__)
+@@ -57,6 +61,8 @@
+ #include "class/clc9c0.h"
+ #include "alloc/alloc_channel.h"
+ #include "ctrl/ctrl0000/ctrl0000gpu.h"
++#include "ctrl/ctrl0080/ctrl0080fifo.h"
++#include "ctrl/ctrl2080/ctrl2080gr.h"
+ #include "ctrl/ctrla06c.h"
+ #include "ctrl/ctrlc36f.h"
+ 
+@@ -81,6 +87,9 @@ constexpr NvU64 GUEST_VA_LO = 1ull << 36, GUEST_VA_HI = 1ull << 40;
+ // 12 GiB (nvrm_probe guestvm), so only memory the guest maps for the GPU is pinned.
+ constexpr NvU64 GRANULE = 64ull << 20;
+ constexpr NvU32 ENTRIES = 0x400;
++// Patched pixel programs: shadow copies of the 4 KiB guest pages they lie in (mapped at the guest VAs instead of
++// the guest's pages) and the helper-load trampolines, both in video memory the CPU writes.
++constexpr NvU64 PAGE = 0x1000, SHADOW_POOL = 32ull << 20, ARENA = 8ull << 20;
+ constexpr auto WAIT_LIMIT = std::chrono::seconds(2);
+ 
+ struct Error : std::runtime_error {
+@@ -139,11 +148,47 @@ public:
+         gv.attr = DRF_DEF(OS32, _ATTR, _PAGE_SIZE, _4KB);
+         guest_va = Alloc(device, NV50_MEMORY_VIRTUAL, &gv, "sparse guest VA range");
+ 
++        notifier = AllocSysmem(64 << 10);
++        shadow_mem = AllocVidmem(SHADOW_POOL);
++        shadow_cpu = static_cast<volatile u8*>(
++            MapCpu(shadow_mem, SHADOW_POOL, DRF_DEF(OS33, _FLAGS, _CACHING_TYPE, _WRITECOMBINED)));
++        const NvHandle arena = AllocVidmem(ARENA);
++        arena_cpu = static_cast<volatile u8*>(MapCpu(arena, ARENA, DRF_DEF(OS33, _FLAGS, _CACHING_TYPE, _WRITECOMBINED)));
++        arena_gva = MapGpu(arena, ARENA);
++        // Instruction prefetch past the last trampoline reads valid words (BRA to itself).
++        for (NvU64 o = 0; o < ARENA; o += 16) {
++            const NvU32 bra[4] = {0x7947, 0xfffffff0, 0x0383ffff, 0x000fea00}; // ptcap sass_bra(-0x10)
++            for (int i = 0; i < 4; ++i) reinterpret_cast<volatile NvU32*>(arena_cpu + o)[i] = bra[i];
++        }
++        preempt = [] {
++            const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_PREEMPT");
++            return v == nullptr || v[0] != '0';
++        }();
++    }
++
++    struct Channel {
++        volatile NvU8* cpu = nullptr;
++        NvU64 gva = 0, gpput = 0;
++        NvU32 token = 0, fence = 0;
++        bool copy_bound = false;
++        // In-flight submissions: their fence and pushbuffer span (word offsets in [0, PB_WORDS)).
++        struct Pending {
++            NvU32 fence;
++            NvU64 start, end;
++        };
++        std::deque<Pending> pending;
++        NvU64 head = 0; // next free pushbuffer word
++    };
++    static constexpr NvU64 PB_WORDS = (CHECK - PB) / 4;
++
++    /// The host channel for guest channel `guest`: its own TSG (own graphics context, as the guest's channels
++    /// have), on the one VA space; created on first use.
++    Channel& ChannelFor(s32 guest) {
++        if (const auto it = channels.find(guest); it != channels.end()) return it->second;
++        Channel& c = channels[guest];
+         const NvHandle mem = AllocVidmem(CH_SZ);
+-        cpu = static_cast<volatile NvU8*>(
+-            MapCpu(mem, CH_SZ, DRF_DEF(OS33, _FLAGS, _CACHING_TYPE, _WRITECOMBINED)));
+-        gva = MapGpu(mem, CH_SZ);
+-        const NvHandle notifier = AllocSysmem(64 << 10);
++        c.cpu = static_cast<volatile NvU8*>(MapCpu(mem, CH_SZ, DRF_DEF(OS33, _FLAGS, _CACHING_TYPE, _WRITECOMBINED)));
++        c.gva = MapGpu(mem, CH_SZ);
+         NV_CHANNEL_GROUP_ALLOCATION_PARAMETERS tp{};
+         tp.engineType = NV2080_ENGINE_TYPE_GRAPHICS;
+         tp.hVASpace = vaspace;
+@@ -155,7 +200,7 @@ public:
+         NV_CHANNEL_ALLOC_PARAMS ch{};
+         ch.hObjectError = notifier;
+         ch.hObjectBuffer = mem;
+-        ch.gpFifoOffset = gva + RING;
++        ch.gpFifoOffset = c.gva + RING;
+         ch.gpFifoEntries = ENTRIES;
+         ch.hContextShare = ctxshare;
+         ch.hUserdMemory[0] = mem;
+@@ -164,39 +209,60 @@ public:
+         for (const NvU32 cls : {ADA_A, ADA_COMPUTE_A, AMPERE_DMA_COPY_B}) {
+             Alloc(chan, cls, nullptr, "engine object");
+         }
++        if (preempt) BindPreemption(chan);
+         NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS sch{};
+         sch.bEnable = NV_TRUE;
+         Control(tsg, NVA06C_CTRL_CMD_GPFIFO_SCHEDULE, &sch, "schedule");
+         NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS tok{};
+         tok.workSubmitToken = ~0u;
+         Control(chan, NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN, &tok, "work submit token");
+-        token = tok.workSubmitToken;
+-        *reinterpret_cast<volatile NvU32*>(cpu + SEM) = 0;
+-    }
+-
+-    /// Submits `words` (host pushbuffer) plus a semaphore release and waits for it. False on timeout.
+-    bool Submit(std::span<const NvU32> words) {
+-        const NvU64 sem = gva + SEM;
+-        const NvU32 tail[6] = {Hdr(0, NVC56F_SEM_ADDR_LO, 5), static_cast<NvU32>(sem),
+-                               static_cast<NvU32>(sem >> 32), ++fence, 0,
+-                               DRF_DEF(C56F, _SEM_EXECUTE, _OPERATION, _RELEASE) |
+-                                   DRF_DEF(C56F, _SEM_EXECUTE, _RELEASE_WFI, _EN) |
+-                                   DRF_DEF(C56F, _SEM_EXECUTE, _PAYLOAD_SIZE, _32BIT)};
+-        const NvU64 n = words.size() + 6, cap = (CHECK - PB) / 4;
+-        if (n > cap) return false;
+-        if (pbn + n > cap) pbn = 0; // serialized: the previous submission has completed
+-        auto* pb = reinterpret_cast<volatile NvU32*>(cpu + PB) + pbn;
++        c.token = tok.workSubmitToken;
++        *reinterpret_cast<volatile NvU32*>(c.cpu + SEM) = 0;
++        LOG_INFO(HW_GPU, "Nx2 passthrough: host channel for guest channel {} (token {:#x}, preemption {})", guest,
++                 c.token, preempt ? "GFXP/CILP" : "default");
++        return c;
++    }
++
++    /// Appends `words` plus a fence release (no WFI) to the channel and rings its doorbell. `wait`: returns once
++    /// the GPU has executed them (WFI). The CPU only waits when the ring is full. False on a 2 s timeout.
++    bool Submit(Channel& c, std::span<const NvU32> words, bool wait) {
++        const NvU64 sem = c.gva + SEM;
++        const NvU32 fence = ++c.fence;
++        const NvU32 tail[6] = {Hdr(0, NVC56F_SEM_ADDR_LO, 5), static_cast<NvU32>(sem), static_cast<NvU32>(sem >> 32),
++                               fence, 0,
++                               static_cast<NvU32>(DRF_DEF(C56F, _SEM_EXECUTE, _OPERATION, _RELEASE) |
++                                                  (wait ? DRF_DEF(C56F, _SEM_EXECUTE, _RELEASE_WFI, _EN)
++                                                        : DRF_DEF(C56F, _SEM_EXECUTE, _RELEASE_WFI, _DIS)) |
++                                                  DRF_DEF(C56F, _SEM_EXECUTE, _PAYLOAD_SIZE, _32BIT))};
++        const NvU64 n = words.size() + 6;
++        if (n >= PB_WORDS / 2) return false;
++        const auto start = std::chrono::steady_clock::now();
++        NvU64 at;
++        while (!Reserve(c, n, at)) {
++            ++ring_waits;
++            if (std::chrono::steady_clock::now() - start > WAIT_LIMIT) return false;
++        }
++        auto* pb = reinterpret_cast<volatile NvU32*>(c.cpu + PB) + at;
+         for (size_t i = 0; i < words.size(); ++i) pb[i] = words[i];
+         for (size_t i = 0; i < 6; ++i) pb[words.size() + i] = tail[i];
+-        const NvU64 pa = gva + PB + pbn * 4;
+-        pbn += n;
+-        reinterpret_cast<volatile NvU64*>(cpu + RING)[gpput % ENTRIES] = pa | (n << 42);
+-        __sync_synchronize();
+-        reinterpret_cast<volatile AmpereAControlGPFifo*>(cpu + USERD)->GPPut = ++gpput % ENTRIES;
+-        __sync_synchronize();
+-        mmio[NVC361_NOTIFY_CHANNEL_PENDING / 4] = token;
+-        const auto start = std::chrono::steady_clock::now();
+-        while (*reinterpret_cast<volatile NvU32*>(cpu + SEM) != fence) {
++        c.pending.push_back({fence, at, at + n});
++        c.head = at + n;
++        reinterpret_cast<volatile NvU64*>(c.cpu + RING)[c.gpput % ENTRIES] = (c.gva + PB + at * 4) | (n << 42);
++        ++c.gpput;
++        // The doorbell rings every 64 submissions (EDEN_NX2_PASSTHROUGH_BATCH): one per entry cost 15% of MKW's
++        // racing fps next to Vulkan (the GPU kept switching to our channels), 64 cost 1%. shortcut: nothing flushes
++        // a partial batch yet; once the guest's words run, flush where the guest waits.
++        static const u64 batch = [] {
++            const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_BATCH");
++            return v != nullptr ? std::max<u64>(1, std::strtoull(v, nullptr, 0)) : 64;
++        }();
++        if (wait || c.gpput % batch == 0) {
++            __sync_synchronize();
++            reinterpret_cast<volatile AmpereAControlGPFifo*>(c.cpu + USERD)->GPPut = static_cast<NvU32>(c.gpput % ENTRIES);
++            __sync_synchronize();
++            mmio[NVC361_NOTIFY_CHANNEL_PENDING / 4] = c.token;
++        }
++        while (wait && static_cast<s32>(*reinterpret_cast<volatile NvU32*>(c.cpu + SEM) - fence) < 0) {
+             if (std::chrono::steady_clock::now() - start > WAIT_LIMIT) return false;
+         }
+         return true;
+@@ -213,6 +279,7 @@ public:
+             LOG_INFO(HW_GPU, "Nx2 passthrough: RM client freed (status {:#x})", p.status);
+             root = 0;
+         }
++        channels.clear();
+         for (const int fd : fds) close(fd);
+         fds.clear();
+         if (ctl >= 0) close(ctl);
+@@ -220,6 +287,56 @@ public:
+     }
+ 
+ 
++    /// Finds room for n words in the channel's pushbuffer ring; frees what the GPU finished (the fence).
++    bool Reserve(Channel& c, NvU64 n, NvU64& at) {
++        // Guest entries run ~125k/s: read the fence (video memory over BAR) only when room runs short.
++        auto room = [&]() -> bool {
++            if (c.pending.size() >= ENTRIES - 1) return false;
++            if (c.pending.empty()) {
++                at = c.head + n <= PB_WORDS ? c.head : 0;
++                return true;
++            }
++            const NvU64 tail = c.pending.front().start;
++            if (c.head >= tail) {
++                if (PB_WORDS - c.head >= n) { at = c.head; return true; }
++                if (tail > n) { at = 0; return true; }
++                return false;
++            }
++            if (tail - c.head > n) { at = c.head; return true; }
++            return false;
++        };
++        if (room()) return true;
++        const NvU32 done = *reinterpret_cast<volatile NvU32*>(c.cpu + SEM);
++        while (!c.pending.empty() && static_cast<s32>(done - c.pending.front().fence) >= 0) c.pending.pop_front();
++        return room();
++    }
++
++    /// GFXP (pixel-level) graphics and CILP compute preemption with the context buffers RM asks for, as the
++    /// userspace driver sets up (nvrm.h bind_preemption, accepted by RM on this GPU).
++    void BindPreemption(NvHandle chan) {
++        static constexpr NvU32 ids[5] = {NV0080_CTRL_FIFO_GET_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_GRAPHICS_PREEMPT,
++                                         NV0080_CTRL_FIFO_GET_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_GRAPHICS_SPILL,
++                                         NV0080_CTRL_FIFO_GET_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_GRAPHICS_PAGEPOOL,
++                                         NV0080_CTRL_FIFO_GET_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_GRAPHICS_BETACB,
++                                         NV0080_CTRL_FIFO_GET_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_GRAPHICS_RTV};
++        NV2080_CTRL_GR_CTXSW_PREEMPTION_BIND_PARAMS b{};
++        for (int i = 0; i < 5; ++i) {
++            NV0080_CTRL_FIFO_GET_ENGINE_CONTEXT_PROPERTIES_PARAMS cp{};
++            cp.engineId = ids[i];
++            Control(device, NV0080_CTRL_CMD_FIFO_GET_ENGINE_CONTEXT_PROPERTIES, &cp, "engine context properties");
++            if (cp.size == 0) continue;
++            const NvU64 size = (cp.size + 0xFFFFull) & ~0xFFFFull;
++            b.vMemPtrs[i] = MapGpu(AllocVidmem(size), size);
++        }
++        b.flags = DRF_DEF(2080_CTRL_GR_SET_CTXSW, _PREEMPTION_MODE_FLAGS, _GFXP, _SET) |
++                  DRF_DEF(2080_CTRL_GR_SET_CTXSW, _PREEMPTION_MODE_FLAGS, _CILP, _SET);
++        b.hClient = root;
++        b.hChannel = chan;
++        b.gfxpPreemptMode = NV2080_CTRL_SET_CTXSW_PREEMPTION_MODE_GFX_GFXP;
++        b.cilpPreemptMode = NV2080_CTRL_SET_CTXSW_PREEMPTION_MODE_COMPUTE_CILP;
++        Control(subdevice, NV2080_CTRL_CMD_GR_CTXSW_PREEMPTION_BIND, &b, "preemption bind");
++    }
++
+     // --- Step 2: the guest VA space ---
+ 
+     /// Maps [va, va + size) to guest memory at `off` (bytes from the guest memory base), replacing what was there.
+@@ -233,6 +350,10 @@ public:
+         const NvU64 hi = va + size;
+         for (auto& [pva, p] : TakePieces(va, hi)) {
+             RmUnmap(pva, p.mem);
++            if (p.shadow != ~0u) { // the guest remaps code: the page is rebuilt at the next bind
++                free_shadow.push_back(p.shadow);
++                continue;
++            }
+             if (pva < va) MapPiece(pva, va - pva, p.off, p.kind);
+             if (pva + p.size > hi) MapPiece(hi, pva + p.size - hi, p.off + (hi - pva), p.kind);
+         }
+@@ -243,11 +364,72 @@ public:
+         AssignKind(va, va + size, host_kind);
+         ++kind_changes;
+         for (auto& [pva, p] : TakePieces(va, va + size)) {
++            if (p.shadow != ~0u) { // shadow pages stay as they are (pitch)
++                pieces[pva] = p;
++                continue;
++            }
+             RmUnmap(pva, p.mem);
+             MapOff(pva, p.off, p.size);
+         }
+     }
+ 
++    // --- Step 3: pixel programs patched for helper-lane loads ---
++
++    /// The guest bound `va` to pipeline stage `stage` (5: pixel). A pixel program with loads is patched into
++    /// shadow pages the first time, and again when its guest bytes changed (checked at most once per `epoch`);
++    /// other programs lying in shadow pages are copied into them. Returns true when the GPU's view changed.
++    bool BindProgram(u32 stage, NvU64 va, u64 epoch) {
++        Program& pr = programs[va];
++        if (pr.epoch == epoch && pr.stage == stage) return false;
++        pr.epoch = epoch;
++        pr.stage = stage;
++        // Binds run ~20k/s: a program that shares no page with a patched one needs nothing (stages 0-4).
++        if (stage != 5 && !TouchesShadow(va, pr.size != 0 ? pr.size : MAX_PROGRAM)) return false;
++        if (pr.size != 0 && GuestEquals(va, pr.unpatched) && ShadowsIntact(va, pr.size)) return false;
++        std::vector<u8> image(MAX_PROGRAM);
++        image.resize(ReadGuest(va, image));
++        if (image.size() < 0x100) return false;
++        if (stage != 5) {
++            // Not patched; refreshed where it shares a shadow page with a patched program.
++            const size_t end = HelperLoads::ProgramEnd(image);
++            if (end == 0) return false;
++            pr.size = (end + 0x20 + 31) / 32 * 32;
++            pr.unpatched.assign(image.begin(), image.begin() + pr.size);
++            return WriteShadow(va, pr.unpatched, false);
++        }
++        HelperLoads::Result r = HelperLoads::Patch(va, image, arena_gva + arena_used);
++        pr.size = r.program.size();
++        pr.unpatched.assign(image.begin(), image.begin() + std::min(image.size(), r.program.size()));
++        if (!r.skipped.empty()) { // remembered as read (up to MAX_PROGRAM), so it is not looked at again
++            pr.unpatched = image;
++            pr.size = image.size();
++            if (!pr.skipped) {
++                pr.skipped = true;
++                if (++programs_skipped <= 8) {
++                    LOG_WARNING(HW_GPU, "Nx2 passthrough: pixel program {:#x} left unpatched: {}", va, r.skipped);
++                }
++            }
++            return WriteShadow(va, pr.unpatched, false);
++        }
++        if (r.loads == 0) return WriteShadow(va, pr.unpatched, false);
++        if (arena_used + r.trampolines.size() + 0x100 > ARENA) {
++            if (++programs_skipped <= 8) LOG_WARNING(HW_GPU, "Nx2 passthrough: trampoline arena full");
++            return false;
++        }
++        for (size_t i = 0; i < r.trampolines.size(); ++i) arena_cpu[arena_used + i] = r.trampolines[i];
++        arena_used += r.trampolines.size();
++        ++programs_patched;
++        loads_patched += r.loads;
++        WriteShadow(va, r.program, true);
++        pending_checks.emplace_back(va, std::move(r.program));
++        return true;
++    }
++
++    /// Patched programs to read back at their guest VA (EDEN_NX2_PASSTHROUGH_CHECK): VA and expected bytes.
++    std::vector<std::pair<NvU64, std::vector<u8>>> pending_checks;
++    NvU64 programs_patched = 0, programs_skipped = 0, loads_patched = 0, shadow_pages = 0;
++
++
+     void SetGuestMemory(std::span<u8> guest) {
+         guest_base = guest.data();
+         guest_size = guest.size();
+@@ -257,12 +439,12 @@ public:
+     NvU64 GuestSize() const { return guest_size; }
+ 
+     /// Copies `bytes` at guest VA `va` into the check buffer with the copy engine (part of the next Submit).
+-    void QueueCheckCopy(std::vector<NvU32>& words, NvU64 va, NvU64 bytes) {
+-        if (!copy_bound) {
++    void QueueCheckCopy(Channel& c, std::vector<NvU32>& words, NvU64 va, NvU64 bytes) {
++        if (!c.copy_bound) {
+             words.insert(words.end(), {Hdr(4, 0, 1), AMPERE_DMA_COPY_B});
+-            copy_bound = true;
++            c.copy_bound = true;
+         }
+-        const NvU64 dst = gva + CHECK;
++        const NvU64 dst = c.gva + CHECK;
+         words.insert(words.end(), {Hdr(4, NVC7B5_OFFSET_IN_UPPER, 4), static_cast<NvU32>(va >> 32),
+                                    static_cast<NvU32>(va), static_cast<NvU32>(dst >> 32), static_cast<NvU32>(dst),
+                                    Hdr(4, NVC7B5_LINE_LENGTH_IN, 2), static_cast<NvU32>(bytes), 1,
+@@ -272,7 +454,7 @@ public:
+                                        DRF_DEF(C7B5, _LAUNCH_DMA, _SRC_MEMORY_LAYOUT, _PITCH) |
+                                        DRF_DEF(C7B5, _LAUNCH_DMA, _DST_MEMORY_LAYOUT, _PITCH)});
+     }
+-    const volatile NvU8* CheckBuffer() const { return cpu + CHECK; }
++    static const volatile NvU8* CheckBuffer(const Channel& c) { return c.cpu + CHECK; }
+ 
+     /// The kind the mirror mapped at va (~0u where nothing is mapped).
+     NvU32 MappedKind(NvU64 va) const {
+@@ -291,7 +473,7 @@ public:
+     }
+ 
+     // Counters for the log.
+-    NvU64 pinned = 0, rm_maps = 0, rm_unmaps = 0, kind_changes = 0, kind_fallbacks = 0;
++    NvU64 ring_waits = 0, pinned = 0, rm_maps = 0, rm_unmaps = 0, kind_changes = 0, kind_fallbacks = 0;
+     std::chrono::nanoseconds import_time{};
+     size_t Pieces() const { return pieces.size(); }
+ 
+@@ -300,12 +482,110 @@ private:
+         NvU64 size, off;
+         NvU32 kind;
+         NvHandle mem;
++        u32 shadow = ~0u; // a shadow page (index in the pool): off is still the guest memory it stands for
+     };
+     struct Run {
+         NvU64 end;
+         NvU32 kind;
+     };
+ 
++    static constexpr size_t MAX_PROGRAM = 0x8000;
++    struct Program {
++        u64 epoch = 0;
++        u32 stage = ~0u;
++        NvU64 size = 0;
++        bool skipped = false;
++        std::vector<u8> unpatched;
++    };
++
++    /// Whether guest memory at va still holds `bytes` (compared in place).
++    bool GuestEquals(NvU64 va, std::span<const u8> bytes) const {
++        for (size_t done = 0; done < bytes.size();) {
++            const u8* src = MirroredHost(va + done);
++            const size_t n = std::min<size_t>(bytes.size() - done, PAGE - ((va + done) & (PAGE - 1)));
++            if (src == nullptr || std::memcmp(src, bytes.data() + done, n) != 0) return false;
++            done += n;
++        }
++        return true;
++    }
++
++    /// Guest bytes at va (the guest memory behind the mirror, shadow pages included) up to an unmapped page.
++    size_t ReadGuest(NvU64 va, std::span<u8> out) const {
++        size_t done = 0;
++        while (done < out.size()) {
++            const u8* src = MirroredHost(va + done);
++            if (src == nullptr) break;
++            const size_t n = std::min<size_t>(out.size() - done, PAGE - ((va + done) & (PAGE - 1)));
++            std::memcpy(out.data() + done, src, n);
++            done += n;
++        }
++        return done;
++    }
++
++    bool TouchesShadow(NvU64 va, NvU64 size) const {
++        const auto it = shadowed_pages.lower_bound(va & ~(PAGE - 1));
++        return it != shadowed_pages.end() && *it < va + size;
++    }
++
++    /// Whether every page of [va, va + size) that should be a shadow page still is one.
++    bool ShadowsIntact(NvU64 va, NvU64 size) const {
++        for (NvU64 page = va & ~(PAGE - 1); page < va + size; page += PAGE) {
++            const auto it = pieces.find(page);
++            const bool shadow = it != pieces.end() && it->second.shadow != ~0u;
++            if (shadow != shadowed_pages.contains(page)) return false;
++        }
++        return true;
++    }
++
++    /// Writes `bytes` at va into shadow pages: `create` makes missing shadow pages (copies of the guest page);
++    /// otherwise only pages already shadowed are written. True when a shadow page changed.
++    bool WriteShadow(NvU64 va, std::span<const u8> bytes, bool create) {
++        bool changed = false;
++        for (NvU64 page = va & ~(PAGE - 1); page < va + bytes.size(); page += PAGE) {
++            auto it = pieces.find(page);
++            u32 index = it != pieces.end() ? it->second.shadow : ~0u;
++            if (index == ~0u) {
++                if (!create) continue;
++                index = NewShadowPage(page);
++                if (index == ~0u) return changed;
++            }
++            const NvU64 lo = std::max(va, page), hi = std::min<NvU64>(va + bytes.size(), page + PAGE);
++            volatile u8* dst = shadow_cpu + index * PAGE + (lo - page);
++            for (NvU64 i = 0; i < hi - lo; ++i) dst[i] = bytes[lo - va + i];
++            changed = true;
++        }
++        return changed;
++    }
++
++    /// Replaces the guest page at `page` with a shadow copy of it; ~0u when the pool is full or nothing is mapped.
++    u32 NewShadowPage(NvU64 page) {
++        const u8* src = MirroredHost(page);
++        if (src == nullptr || (free_shadow.empty() && shadow_next == SHADOW_POOL / PAGE)) return ~0u;
++        const u32 index = free_shadow.empty() ? shadow_next++ : free_shadow.back();
++        if (!free_shadow.empty() && index == free_shadow.back()) free_shadow.pop_back();
++        const NvU64 off = static_cast<NvU64>(src - guest_base);
++        for (NvU64 i = 0; i < PAGE; ++i) shadow_cpu[index * PAGE + i] = src[i];
++        Unmap(page, PAGE);
++        NVOS46_PARAMETERS p{};
++        p.hClient = root;
++        p.hDevice = device;
++        p.hDma = guest_va;
++        p.hMemory = shadow_mem;
++        p.offset = index * PAGE;
++        p.length = PAGE;
++        p.flags = DRF_DEF(OS46, _FLAGS, _DMA_OFFSET_FIXED, _TRUE) | DRF_DEF(OS46, _FLAGS, _PAGE_SIZE, _4KB) |
++                  DRF_DEF(OS46, _FLAGS, _PAGE_KIND_OVERRIDE, _YES);
++        p.kindOverride = 0;
++        p.dmaOffset = page;
++        Ioctl(ctl, NV_ESC_RM_MAP_MEMORY_DMA, &p, "map shadow page");
++        if (p.status != NV_OK) throw Error("map shadow page", p.status);
++        pieces[page] = Piece{PAGE, off, 0, shadow_mem, index};
++        shadowed_pages.insert(page);
++        ++shadow_pages;
++        ++rm_maps;
++        return index;
++    }
++
+     /// Removes and returns the mappings that overlap [lo, hi).
+     std::vector<std::pair<NvU64, Piece>> TakePieces(NvU64 lo, NvU64 hi) {
+         std::vector<std::pair<NvU64, Piece>> out;
+@@ -454,10 +734,17 @@ private:
+     NvHandle guest_va = 0;
+     u8* guest_base = nullptr;
+     NvU64 guest_size = 0;
+-    bool copy_bound = false;
+     std::vector<NvHandle> granules;
+     std::map<NvU64, Piece> pieces; // RM mappings by guest VA
+     std::map<NvU64, Run> kinds;    // the guest's kinds (host kind) by guest VA
++    NvHandle shadow_mem = 0;
++    volatile u8* shadow_cpu = nullptr;
++    volatile u8* arena_cpu = nullptr;
++    NvU64 arena_gva = 0, arena_used = 0;
++    u32 shadow_next = 0;
++    std::vector<u32> free_shadow;
++    std::set<NvU64> shadowed_pages; // pages a patched program needs as shadow pages
++    std::map<NvU64, Program> programs;
+ 
+     template <class T>
+     void Ioctl(int fd, int nr, T* p, const char* what) {
+@@ -558,11 +845,13 @@ private:
+     }
+ 
+     int ctl = -1;
+-    NvU32 dev_minor = 0, token = 0, fence = 0;
++    NvU32 dev_minor = 0;
++    bool preempt = true;
++    NvHandle notifier = 0;
++    std::map<s32, Channel> channels;
+     NvHandle root = 0, device = 0, subdevice = 0, vaspace = 0, virtmem = 0;
+     volatile NvU32* mmio = nullptr;
+-    volatile NvU8* cpu = nullptr;
+-    NvU64 gva = 0, gpput = 0, pbn = 0;
++
+     std::vector<int> fds;
+     std::vector<std::pair<void*, size_t>> maps;
+ };
+@@ -571,10 +860,21 @@ struct State {
+     std::mutex mutex;
+     std::unique_ptr<Host> host;
+     bool tried = false;
+-    s32 channel = -1;                       // the guest channel the host channel follows (step 1: one)
+     const void* memory_manager = nullptr;   // the guest VA space mirrored (step 2: the first that maps)
+     u64 entries = 0, words = 0, maps = 0, unmaps = 0, outside = 0, other_managers = 0;
+-    u64 checked = 0, check_mismatch = 0, check_wrong = 0; // wrong: differs from the mirrored memory too
++    u64 checked = 0, check_mismatch = 0, check_wrong = 0;
++    // Program binds (measuring the shadow-program design): per stage, from macros, on another thread than
++    // OnEntry, distinct pixel programs.
++    std::array<u64, 6> binds{};
++    u64 macro_binds = 0, foreign_binds = 0, programs_checked = 0, programs_wrong = 0;
++    std::thread::id entry_thread;
++    std::set<u64> pixel_programs;
++    struct Recorded {
++        bool valid = false;
++        GPUVAddr address = 0;
++        std::vector<CommandHeader> words;
++    };
++    std::map<s32, Recorded> recorded; // per guest channel: the entry being processed // wrong: differs from the mirrored memory too
+     u32 check_every = 0;
+     std::chrono::nanoseconds busy{}, worst{};
+ };
+@@ -620,12 +920,17 @@ void Guarded(State& s, const char* what, F&& f) {
+ 
+ void LogStats(State& s) {
+     Host& h = *s.host;
++    LOG_INFO(HW_GPU, "Nx2 passthrough: program binds per stage {} {} {} {} {} {}, {} from macros, {} off the entry "
++             "thread, {} distinct pixel programs; {} patched ({} loads, {} left alone), {} shadow pages, {} checked on "
++             "the GPU, {} wrong", s.binds[0], s.binds[1], s.binds[2], s.binds[3], s.binds[4], s.binds[5],
++             s.macro_binds, s.foreign_binds, s.pixel_programs.size(), h.programs_patched, h.loads_patched,
++             h.programs_skipped, h.shadow_pages, s.programs_checked, s.programs_wrong);
+     LOG_INFO(HW_GPU,
+-             "Nx2 passthrough: {} entries ({} guest words), mean {:.1f} us, worst {} us; guest VA: {} maps, {} unmaps "
++             "Nx2 passthrough: {} entries ({} guest words), mean {:.1f} us, worst {} us, {} ring waits; guest VA: {} maps, {} unmaps "
+              "({} outside), {} RM mappings ({} made, {} undone), {} kind changes ({} kept as pitch), {} MiB pinned in "
+              "{} ms; check: {} entries, {} differ from the parsed words, {} from the mirrored memory",
+              s.entries, s.words, std::chrono::duration<double, std::micro>(s.busy).count() / 50000.0,
+-             std::chrono::duration_cast<std::chrono::microseconds>(s.worst).count(), s.maps, s.unmaps, s.outside,
++             std::chrono::duration_cast<std::chrono::microseconds>(s.worst).count(), h.ring_waits, s.maps, s.unmaps, s.outside,
+              h.Pieces(), h.rm_maps, h.rm_unmaps, h.kind_changes, h.kind_fallbacks, h.pinned >> 20,
+              std::chrono::duration_cast<std::chrono::milliseconds>(h.import_time).count(), s.checked, s.check_mismatch,
+              s.check_wrong);
+@@ -674,6 +979,23 @@ void OnUnmap(const void* memory_manager, GPUVAddr gpu_addr, u64 size) {
+     Guarded(s, "unmap", [&](Host& h) { h.Unmap(lo, hi - lo); });
+ }
+ 
++void OnProgramBind(u32 stage, GPUVAddr program, bool from_macro) {
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    if (!s.host || stage >= s.binds.size()) return;
++    ++s.binds[stage];
++    s.macro_binds += from_macro;
++    s.foreign_binds += std::this_thread::get_id() != s.entry_thread;
++    if (stage == 5) s.pixel_programs.insert(program);
++    if (program < GUEST_VA_LO || program >= GUEST_VA_HI) return;
++    // Patched before the entry that binds it is submitted (OnEntryDone). shortcut: a known program is compared
++    // with guest memory again at most every 100 ms, so code rewritten in place at the same address runs
++    // unpatched (old) for up to that long; hook the shader cache's invalidations when a game needs it.
++    const u64 epoch = static_cast<u64>(std::chrono::steady_clock::now().time_since_epoch() /
++                                       std::chrono::milliseconds(100));
++    Guarded(s, "program", [&](Host& h) { h.BindProgram(stage, program, epoch); });
++}
++
+ void OnGuestKind(GPUVAddr gpu_addr, u64 size, u32 kind, u32 fallback_kind) {
+     State& s = Get();
+     std::scoped_lock lk{s.mutex};
+@@ -693,21 +1015,63 @@ void OnEntry(s32 channel, GPUVAddr address, std::span<const CommandHeader> comma
+     State& s = Get();
+     std::scoped_lock lk{s.mutex};
+     if (!Ready(s)) return;
+-    if (s.channel < 0) {
+-        s.channel = channel;
+-        LOG_INFO(HW_GPU, "Nx2 passthrough: following guest channel {}", channel);
++    s.entry_thread = std::this_thread::get_id();
++    auto& e = s.recorded[channel];
++    e.valid = true;
++    e.address = address;
++    e.words.assign(commands.begin(), commands.end());
++}
++
++void OnEntryDone(s32 channel) {
++    if (!Requested()) [[likely]] {
++        return;
+     }
+-    if (channel != s.channel) return;
+-    // Step 1 keeps the entry's place in the guest's order with one marker submission per entry. Step 2's live
+-    // check: every n-th entry the copy engine reads the entry's words at their guest VA, compared after the wait.
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    if (!s.host) return;
++    const auto it = s.recorded.find(channel);
++    if (it == s.recorded.end() || !it->second.valid) return;
++    it->second.valid = false;
++    const GPUVAddr address = it->second.address;
++    const std::span<const CommandHeader> commands{it->second.words};
++    // One marker submission per entry, on the guest channel's own host channel, without waiting (the guest's
++    // words follow once its programs are patched). The live check (every n-th entry) waits for its copy.
++    Host::Channel* c = nullptr;
++    Guarded(s, "channel", [&](Host& h) { c = &h.ChannelFor(channel); });
++    if (!s.host) return;
++    // EDEN_NX2_PASSTHROUGH_CHECK: each newly patched program is read back at its guest VA by the GPU.
++    for (auto& [va, expected] : s.host->pending_checks) {
++        if (s.check_every == 0 || expected.size() > CHECK_SZ) break;
++        std::vector<NvU32> copy;
++        s.host->QueueCheckCopy(*c, copy, va, expected.size());
++        bool ok = false;
++        Guarded(s, "program check", [&](Host& h) { ok = h.Submit(*c, copy, true); });
++        if (!s.host) return;
++        const volatile NvU8* src = Host::CheckBuffer(*c);
++        size_t i = 0;
++        while (ok && i < expected.size() && src[i] == expected[i]) ++i;
++        ++s.programs_checked;
++        if (!ok || i != expected.size()) {
++            if (++s.programs_wrong <= 8) {
++                LOG_WARNING(HW_GPU, "Nx2 passthrough check: patched program {:#x} differs at byte {:#x} of {:#x}", va,
++                            i, expected.size());
++            }
++        }
++    }
++    s.host->pending_checks.clear();
++    static const bool submit = [] { // EDEN_NX2_PASSTHROUGH_SUBMIT=0 (bisecting): no submissions at all
++        const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_SUBMIT");
++        return v == nullptr || v[0] != '0';
++    }();
++    if (!submit) return;
+     std::vector<NvU32> words;
+     const u64 bytes = commands.size_bytes();
+     const bool check = s.check_every != 0 && address != 0 && bytes != 0 && bytes <= CHECK_SZ &&
+                        address >= GUEST_VA_LO && address + bytes <= GUEST_VA_HI && s.entries % s.check_every == 0;
+-    if (check) s.host->QueueCheckCopy(words, address, bytes);
++    if (check) s.host->QueueCheckCopy(*c, words, address, bytes);
+     const auto start = std::chrono::steady_clock::now();
+     bool done = false;
+-    Guarded(s, "submit", [&](Host& h) { done = h.Submit(words); });
++    Guarded(s, "submit", [&](Host& h) { done = h.Submit(*c, words, check); });
+     if (!s.host) return;
+     if (!done) {
+         LOG_ERROR(HW_GPU, "Nx2 passthrough off: entry {:#x} not done within 2 s", address);
+@@ -721,7 +1085,7 @@ void OnEntry(s32 channel, GPUVAddr address, std::span<const CommandHeader> comma
+     if (check) {
+         ++s.checked;
+         std::vector<u8> got(bytes);
+-        const volatile NvU8* src = s.host->CheckBuffer();
++        const volatile NvU8* src = Host::CheckBuffer(*c);
+         for (u64 i = 0; i < bytes; ++i) got[i] = src[i];
+         // A difference is the mirror's fault only where the GPU's bytes also differ from the guest memory the
+         // mirror maps there now (else the guest rewrote the words after Eglantine parsed them).
+@@ -785,6 +1149,8 @@ bool Requested() {
+ void OnMap(const void*, GPUVAddr, const u8*, u64, std::span<u8>) {}
+ void OnUnmap(const void*, GPUVAddr, u64) {}
+ void OnGuestKind(GPUVAddr, u64, u32, u32) {}
++void OnProgramBind(u32, GPUVAddr, bool) {}
++void OnEntryDone(s32) {}
+ void Shutdown() {}
+ 
+ } // namespace Tegra::Nx2Passthrough
+diff --git a/src/video_core/nx2_passthrough.h b/src/video_core/nx2_passthrough.h
+index 11851d056..b04537843 100644
+--- a/src/video_core/nx2_passthrough.h
++++ b/src/video_core/nx2_passthrough.h
+@@ -22,8 +22,10 @@ namespace Tegra::Nx2Passthrough {
+ /// EDEN_NX2_PASSTHROUGH=1 (read once).
+ bool Requested();
+ 
+-/// Called for every guest command list as the DMA pusher parses it (once per entry).
++/// Called for every guest command list as the DMA pusher parses it (once per entry): recorded, submitted by
++/// OnEntryDone once the entry's methods (and the program binds they make) have been processed.
+ void OnEntry(s32 channel, GPUVAddr address, std::span<const CommandHeader> commands);
++void OnEntryDone(s32 channel);
+ 
+ /// The GPU memory manager `memory_manager` maps [gpu_addr, gpu_addr + size) to host memory `host` (one
+ /// contiguous run of the guest's device memory `guest_memory`). Only the first memory manager is followed.
+@@ -36,6 +38,10 @@ void OnUnmap(const void* memory_manager, GPUVAddr gpu_addr, u64 size);
+ /// The PTE kind the guest asks for over a range (nx2:gpu 212, 216); 0xff forgets it (pitch).
+ void OnGuestKind(GPUVAddr gpu_addr, u64 size, u32 kind, u32 fallback_kind);
+ 
++/// The guest bound program `program` (absolute GPU VA, SET_PIPELINE_PROGRAM_ADDRESS) to pipeline stage `stage`
++/// (5: pixel), on the thread that parses its command lists, before the entry is done.
++void OnProgramBind(u32 stage, GPUVAddr program, bool from_macro);
++
+ /// Frees the host channel and RM client (also done at process exit).
+ void Shutdown();
+ 
+-- 
+2.56.0
+
