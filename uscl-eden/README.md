@@ -6,7 +6,7 @@
 | **Upstream** | [eden-emu/eden](https://git.eden-emu.dev/eden-emu/eden.git) (GPL-3.0-or-later, with per-file notices: keep its licenses and corresponding source with any build you share) |
 | **Pinned base** | `58c1e20ee58efa3900ba616207d460886214480b` (`v0.2.1`) |
 | **Our changes** | `patches/0001`–`0012`, applied with `git am` |
-| **Ships in** | both installers (`eden` + `eden-cli`; Windows: `Eden\`) |
+| **Ships in** | both installers (`eden` + `eden-cli` + `eden-room`; Windows: `Eden\`) |
 | **Online** | Eden local-wireless rooms over the Steam tunnel (`uscl-bridge host switch`, UDP 24872); native Online Play in development ([uscl-switch-online](../uscl-switch-online/)) |
 | **Status** | Mario Kart 8 Deluxe: two copies raced on one PC through a room ([setup](../docs/SWITCH.md), [notes](../games/0100152000022000.md)) |
 

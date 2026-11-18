@@ -144,7 +144,7 @@ jobs:
           ./uscl/tools/dev-scripts/build-switch-core.ps1
           New-Item -ItemType Directory -Force out | Out-Null
           Copy-Item -Recurse uscl/build/switch-core/bin out/Eden
-          foreach ($exe in 'eden.exe', 'eden-cli.exe') { if (-not (Test-Path out/Eden/$exe)) { throw "$exe was not built" } }
+          foreach ($exe in 'eden.exe', 'eden-cli.exe', 'eden-room.exe') { if (-not (Test-Path out/Eden/$exe)) { throw "$exe was not built" } }
           $global:LASTEXITCODE = 0
 
       - name: Build Eglantine

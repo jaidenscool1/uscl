@@ -27,11 +27,12 @@ cmake -S "$source_dir" -B "$source_dir/build-uscl" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
   -DENABLE_QT=ON -DYUZU_TESTS=OFF -DBUILD_TESTING=OFF -DENABLE_CUBEB=OFF \
   -DENABLE_WEB_SERVICE=OFF -DYUZU_USE_BUNDLED_FFMPEG=OFF \
-  -DYUZU_ROOM_STANDALONE=OFF -DYUZU_DISABLE_LLVM=ON \
+  -DYUZU_ROOM_STANDALONE=ON -DYUZU_DISABLE_LLVM=ON \
   -DVulkanHeaders_FORCE_BUNDLED=ON "${extra[@]}"
-cmake --build "$source_dir/build-uscl" --target eden eden-cli -j "${USCL_BUILD_JOBS:-8}"
+cmake --build "$source_dir/build-uscl" --target eden eden-cli yuzu_room_standalone -j "${USCL_BUILD_JOBS:-8}"
 install -m755 "$source_dir/build-uscl/bin/eden" "$prefix/bin/eden-native"
 install -m755 "$source_dir/build-uscl/bin/eden-cli" "$prefix/bin/eden-cli"
+install -m755 "$source_dir/build-uscl/bin/eden-room" "$prefix/bin/eden-room"
 if [[ -n "${USCL_EDEN_QT_PREFIX:-}" ]]; then
   # Support development dependencies extracted without installing system packages.
   for library in "$USCL_EDEN_QT_PREFIX"/lib/libQt6Charts.so*; do

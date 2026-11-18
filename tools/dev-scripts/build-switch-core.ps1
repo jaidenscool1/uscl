@@ -49,9 +49,9 @@ if (Test-Path $gitPatch) { $extra += "-DPATCH_EXECUTABLE=$gitPatch" }
 $build = "$source\build-uscl"
 cmake -S $source -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DGLSLANGVALIDATOR=$glslang" `
     -DENABLE_QT=ON -DYUZU_TESTS=OFF -DBUILD_TESTING=OFF -DENABLE_WEB_SERVICE=OFF `
-    -DYUZU_ROOM_STANDALONE=OFF -DYUZU_DISABLE_LLVM=ON @extra
+    -DYUZU_ROOM_STANDALONE=ON -DYUZU_DISABLE_LLVM=ON @extra
 if ($LASTEXITCODE) { throw 'cmake configure failed' }
-cmake --build $build --target yuzu yuzu-cmd -j $jobs   # eden.exe (settings) + eden-cli.exe (runs games)
+cmake --build $build --target yuzu yuzu-cmd yuzu_room_standalone -j $jobs   # eden.exe (settings) + eden-cli.exe (runs games) + eden-room.exe (online sessions)
 if ($LASTEXITCODE) { throw 'build failed' }
 
 # The bin folder holds eden.exe plus the Qt/SDL/FFmpeg DLLs Eden's build copies beside it.
