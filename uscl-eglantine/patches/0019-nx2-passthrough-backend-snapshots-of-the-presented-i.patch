@@ -1,0 +1,324 @@
+From 3cde5150ea8c2357e8a14b5b420106d560b017ee Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 05:59:35 -0700
+Subject: [PATCH] nx2: passthrough backend: snapshots of the presented image,
+ ASTC arena in chunks, page tables in system memory
+
+OnPresent (nx2:vi2 Composite) records the image the game presents; EDEN_NX2_PASSTHROUGH_SNAP address 0 now
+reads it (MKW draws 2560x1440 into it; its largest sRGB colour target was a transition mask once).
+
+The ASTC arena is imported and mapped in 256 MiB chunks as it fills, up to EDEN_NX2_PASSTHROUGH_ASTC_MB (8192
+by default): MKW's boot, menus and a race decode ~11k sampled textures, 4.4 GiB; the old 2 GiB arena ran full
+(textures left black), pinning the whole cap up front made shutdown take minutes.
+
+The device and VA space allow page tables in system memory (RETRY_PTE_ALLOC_IN_SYS): next to Eglantine's own
+Vulkan work MKW's race filled video memory and RM's page-table pool failed (NV_ERR_NO_MEMORY). One shader
+local memory buffer for every channel, as the guest has it. Used texture headers pointing outside the guest
+range and the arena are logged (MKW: null headers at address 0 in its second pool).
+
+MKW race on the host GPU (SYNC): HUD, minimap, karts, signs, banners, grass as in Eglantine's frame; the track
+and buildings are 8192^2 x 68 virtual-texture ASTC arrays left raw (black).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/core/hle/service/nx2_gsv.h     |   1 +
+ src/video_core/nx2_passthrough.cpp | 142 ++++++++++++++++++++++++-----
+ src/video_core/nx2_passthrough.h   |   4 +
+ 3 files changed, 122 insertions(+), 25 deletions(-)
+
+diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
+index f01f91f89..e36f8dacd 100644
+--- a/src/core/hle/service/nx2_gsv.h
++++ b/src/core/hle/service/nx2_gsv.h
+@@ -2456,6 +2456,7 @@ private:
+             layout = Nx2CalculateImageLayout(image->second.preference.data());
+             image_format = image->second.preference[6];
+         }
++        Tegra::Nx2Passthrough::OnPresent(address, layout.width, layout.height, layout.block_height_log2, layout.size);
+         const auto device = Nvidia::Devices::Nx2GpuMemoryRegistry::Get().DeviceAddressOf(address);
+         if (!device) {
+             LOG_WARNING(Service, "nx2:vi2 present: image {} at {:#x} has no device mapping",
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index 1182b009e..6e495243e 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -149,10 +149,14 @@ public:
+         dp.deviceId = id.deviceInstance;
+         dp.hClientShare = root;
+         dp.vaMode = NV_DEVICE_ALLOCATION_VAMODE_OPTIONAL_MULTIPLE_VASPACES;
++        // Page tables may fall back to system memory: next to Eglantine's Vulkan work MKW's race filled video
++        // memory and RM's page-table pool failed (NV_ERR_NO_MEMORY in virtmemReserveMempool).
++        dp.flags = NV_DEVICE_ALLOCATION_FLAGS_RETRY_PTE_ALLOC_IN_SYS;
+         device = Alloc(root, NV01_DEVICE_0, &dp, "device");
+         NV2080_ALLOC_PARAMETERS sp{};
+         subdevice = Alloc(device, NV20_SUBDEVICE_0, &sp, "subdevice");
+         NV_VASPACE_ALLOCATION_PARAMETERS vp{};
++        vp.flags = NV_VASPACE_ALLOCATION_FLAGS_RETRY_PTE_ALLOC_IN_SYS;
+         vaspace = Alloc(device, FERMI_VASPACE_A, &vp, "vaspace");
+         NV_MEMORY_VIRTUAL_ALLOCATION_PARAMS mv{};
+         mv.limit = (1ull << 40) - 1;
+@@ -371,11 +375,13 @@ public:
+         }
+     }
+ 
+-    /// The channel's shader local memory (allocated on first use).
+-    NvU64 LocalMemory(Channel& c) {
+-        if (c.lm_gva == 0) c.lm_gva = MapGpu(AllocVidmem(LM_SIZE, false), LM_SIZE);
+-        return c.lm_gva;
++    /// Shader local memory, one buffer for every channel as the guest has it (MKW: one address on all its
++    /// channels); allocated on first use.
++    NvU64 LocalMemory(Channel&) {
++        if (lm_gva == 0) lm_gva = MapGpu(AllocVidmem(LM_SIZE, false), LM_SIZE);
++        return lm_gva;
+     }
++    NvU64 lm_gva = 0;
+ 
+     /// A free host QMD slot. shortcut: a ring of 16384 slots, reused after 16384 launches (MKW: ~150 a frame),
+     /// assumed done by then.
+@@ -527,10 +533,16 @@ public:
+     void RefreshPools(u64 epoch) {
+         if (pools.empty() || epoch == pools_epoch || astc_cpu == nullptr) return;
+         pools_epoch = epoch;
++        GrowAstc();
+         bool fresh = false;
+         {
+             std::scoped_lock lk{astc_mutex};
+             for (auto& [header, result] : astc_done) {
++                if (result == std::pair<NvU64, u32>{0, 1}) { // no committed room yet: queued again later
++                    astc_queued.erase(header);
++                    fresh = true;
++                    continue;
++                }
+                 decoded[header] = result;
+                 fresh = true;
+                 result.first != 0 ? ++astc_decoded : ++astc_failed;
+@@ -584,13 +596,15 @@ public:
+     void TranslateHeader(u8* raw, NvU64 header_va) {
+         Header h;
+         std::memcpy(h.data(), raw, 32);
++        CheckHeaderAddress(h, header_va, "guest");
+         if (!IsAstc(h[0])) return;
+         if (const auto it = decoded.find(h); it != decoded.end()) {
+             const auto [va, components] = it->second;
+             if (va == 0) return;
+             h[0] = (h[0] & ~0x7Fu) | components;                                // COMPONENTS
+             h[1] = (h[1] & 0x1FFu) | (static_cast<u32>(va) & ~0x1FFu);          // ADDRESS_BITS31TO9
+-            h[2] = (h[2] & ~0x1FFFFu) | (static_cast<u32>(va >> 32) & 0x1FFFFu); // ADDRESS_BITS48TO32
++            h[2] = (h[2] & ~0xFFFFu) | (static_cast<u32>(va >> 32) & 0xFFFFu); // address bits 47:32
++            CheckHeaderAddress(h, header_va, "repointed");
+             std::memcpy(raw, h.data(), 32);
+             ++astc_headers;
+             return;
+@@ -623,6 +637,24 @@ public:
+         astc_cv.notify_one();
+     }
+ 
++    /// Logs (8 times) a used header whose texture lies outside the guest range and the arena (Xid 31 hunt).
++    void CheckHeaderAddress(const Header& h, NvU64 header_va, const char* what) {
++        if (!used_headers.contains(header_va) || std::all_of(h.begin(), h.end(), [](u32 w) { return w == 0; })) return;
++        const NvU64 a = (NvU64{h[2] & 0xFFFF} << 32) | (h[1] & ~0x1FFu);
++        if (a >= GUEST_VA_LO && a < GUEST_VA_HI) return;
++        {
++            std::scoped_lock lk{astc_mutex};
++            for (const NvU64 c : astc_chunks) {
++                if (a >= c && a < c + ASTC_CHUNK) return;
++            }
++        }
++        if (++odd_headers <= 8) {
++            LOG_WARNING(HW_GPU, "Nx2 passthrough: {} header at {:#x} points at {:#x}: {:08x} {:08x} {:08x} {:08x} {:08x} "
++                        "{:08x} {:08x} {:08x}", what, header_va, a, h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
++        }
++    }
++    NvU64 odd_headers = 0;
++
+     void SetMemoryManager(Tegra::MemoryManager* mm) { memory_manager = mm; }
+     NvU64 astc_decoded = 0, astc_failed = 0, astc_too_large = 0, astc_headers = 0;
+     NvU64 AstcArenaUsed() const { return astc_used.load(); }
+@@ -633,29 +665,54 @@ private:
+         std::vector<u8> guest;
+     };
+ 
++    /// The arena: the CPU range reserved for the whole cap, imported (pinned) and mapped for the GPU in 256 MiB
++    /// chunks as it fills (a texture never straddles two; the largest decoded one is 128 MiB). Pinning the whole
++    /// cap at start held 8 GiB and made shutdown take minutes.
+     void StartAstc() {
+         const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_ASTC_MB");
+-        astc_size = (v != nullptr ? std::strtoull(v, nullptr, 0) : 2048ull) << 20;
++        astc_size = ((v != nullptr ? std::strtoull(v, nullptr, 0) : 8192ull) << 20) / ASTC_CHUNK * ASTC_CHUNK;
+         if (astc_size == 0) return;
+-        void* p = mmap(nullptr, astc_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++        void* p = mmap(nullptr, astc_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+         if (p == MAP_FAILED) throw Error("ASTC arena", 0);
+         maps.emplace_back(p, astc_size);
++        astc_cpu = static_cast<u8*>(p);
++        GrowAstc();
++        astc_thread = std::thread([this] { AstcWorker(); });
++        LOG_INFO(HW_GPU, "Nx2 passthrough: ASTC arena up to {} MiB, {} MiB chunks", astc_size >> 20, ASTC_CHUNK >> 20);
++    }
++
++    /// Entry thread: keeps two chunks ahead of the one the worker fills.
++    void GrowAstc() {
++        for (;;) {
++            size_t have, cur;
++            {
++                std::scoped_lock lk{astc_mutex};
++                have = astc_chunks.size();
++                cur = astc_chunk;
++            }
++            if (have > cur + 2 || NvU64{have + 1} * ASTC_CHUNK > astc_size) return;
++            const NvU64 gva = MapGpu(ImportHost(astc_cpu + have * ASTC_CHUNK, ASTC_CHUNK, 0x73000000u + static_cast<NvU32>(have)),
++                                     ASTC_CHUNK);
++            std::scoped_lock lk{astc_mutex};
++            astc_chunks.push_back(gva);
++        }
++    }
++
++    /// Imports (pins) host memory for the GPU as an OS descriptor with handle `handle`.
++    NvHandle ImportHost(u8* p, NvU64 size, NvU32 handle) {
+         nv_ioctl_nvos02_parameters_with_fd d{};
+         d.fd = -1;
+         d.params.hRoot = root;
+         d.params.hObjectParent = device;
+-        d.params.hObjectNew = 0x73000000u;
++        d.params.hObjectNew = handle;
+         d.params.hClass = NV01_MEMORY_SYSTEM_OS_DESCRIPTOR;
+         d.params.flags = DRF_DEF(OS02, _FLAGS, _PHYSICALITY, _NONCONTIGUOUS) |
+                          DRF_DEF(OS02, _FLAGS, _COHERENCY, _CACHED) | DRF_DEF(OS02, _FLAGS, _MAPPING, _NO_MAP);
+         d.params.pMemory = reinterpret_cast<NvP64>(p);
+-        d.params.limit = astc_size - 1;
+-        Ioctl(fds.at(0), NV_ESC_RM_ALLOC_MEMORY, &d, "import ASTC arena");
+-        if (d.params.status != NV_OK) throw Error("import ASTC arena", d.params.status);
+-        astc_gva = MapGpu(d.params.hObjectNew, astc_size);
+-        astc_cpu = static_cast<u8*>(p);
+-        astc_thread = std::thread([this] { AstcWorker(); });
+-        LOG_INFO(HW_GPU, "Nx2 passthrough: ASTC arena {} MiB at {:#x}", astc_size >> 20, astc_gva);
++        d.params.limit = size - 1;
++        Ioctl(fds.at(0), NV_ESC_RM_ALLOC_MEMORY, &d, "import host memory");
++        if (d.params.status != NV_OK) throw Error("import host memory", d.params.status);
++        return d.params.hObjectNew;
+     }
+ 
+     void StopAstc() {
+@@ -736,12 +793,23 @@ private:
+         SwizzleImageToBuffer(out_info, copies, pixels, swizzled, memory_manager->UsesNativeTiling());
+         // 4 KiB: the header takes 512-byte aligned addresses (64 KiB padding filled 2 GiB with 26k small textures)
+         const NvU64 size = (swizzled.size() + 0xFFF) & ~NvU64{0xFFF};
+-        NvU64 at = astc_used.load();
+-        do {
+-            if (at + size > astc_size) return {0, 0}; // arena full
+-        } while (!astc_used.compare_exchange_weak(at, at + size));
+-        std::memcpy(astc_cpu + at, swizzled.data(), swizzled.size());
+-        return {astc_gva + at, rgba_only ? 0x08u : bc1 ? 0x24u : 0x26u}; // A8B8G8R8, DXT1, DXT45
++        NvU64 cpu_off, va;
++        {
++            std::scoped_lock lk{astc_mutex};
++            if (size > ASTC_CHUNK) return {0, 0};
++            if (astc_offset + size > ASTC_CHUNK) {
++                ++astc_chunk;
++                astc_offset = 0;
++            }
++            if (NvU64{astc_chunk + 1} * ASTC_CHUNK > astc_size) return {0, 0}; // arena full
++            if (astc_chunk >= astc_chunks.size()) return {0, 1};               // not mapped yet: again later
++            cpu_off = astc_chunk * ASTC_CHUNK + astc_offset;
++            va = astc_chunks[astc_chunk] + astc_offset;
++            astc_offset += size;
++            astc_used += size;
++        }
++        std::memcpy(astc_cpu + cpu_off, swizzled.data(), swizzled.size());
++        return {va, rgba_only ? 0x08u : bc1 ? 0x24u : 0x26u}; // A8B8G8R8, DXT1, DXT45
+     }
+ 
+     std::map<NvU64, Pool> pools;
+@@ -757,8 +825,12 @@ private:
+     bool astc_stop = false;
+     std::thread astc_thread;
+     u8* astc_cpu = nullptr;
+-    NvU64 astc_gva = 0, astc_size = 0;
++    NvU64 astc_size = 0;
+     std::atomic<NvU64> astc_used{0};
++    std::vector<NvU64> astc_chunks; // GPU VA of each mapped chunk (astc_mutex)
++    size_t astc_chunk = 0;          // the chunk the worker fills, and where (astc_mutex)
++    NvU64 astc_offset = 0;
++    static constexpr NvU64 ASTC_CHUNK = 256ull << 20;
+ 
+ public:
+     // --- Step 2: the guest VA space ---
+@@ -1465,6 +1537,11 @@ struct State {
+     std::array<u64, CountEnd> counts{};
+     std::mutex used_mutex; // OnDescriptorRead (Eglantine's back thread) -> the entry thread
+     std::vector<u64> used_new;
++    struct Present {
++        NvU64 address = 0;
++        u32 width = 0, height = 0, block_height_log2 = 0;
++        u64 size = 0;
++    } present; // the last image the game presented (OnPresent)
+     NvU64 output_target = 0; // the largest sRGB A8B8G8R8 colour target set (OnColorTarget)
+     u64 output_area = 0;
+     std::chrono::nanoseconds drain_time{};
+@@ -2138,6 +2215,15 @@ void OnDescriptorRead(GPUVAddr address) {
+     if (s.used_new.size() < (1u << 20)) s.used_new.push_back(address);
+ }
+ 
++void OnPresent(GPUVAddr address, u32 width, u32 height, u32 block_height_log2, u64 size) {
++    if (!Requested()) [[likely]] {
++        return;
++    }
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    s.present = {address, width, height, block_height_log2, size};
++}
++
+ void OnColorTarget(GPUVAddr address, u32 width, u32 height, u32 format) {
+     State& s = Get();
+     std::scoped_lock lk{s.mutex};
+@@ -2384,7 +2470,11 @@ void OnEntryDone(s32 channel) {
+     static const auto snap_start = std::chrono::steady_clock::now();
+     for (auto it = snaps.begin(); s.host && it != snaps.end();) {
+         auto [sec, va, size, path] = *it;
+-        if (va == 0) va = s.output_target; // 0: the game's output
++        const State::Present shown = s.present;
++        if (va == 0) { // 0: the image the game presented last (else the largest sRGB colour target)
++            va = shown.address != 0 ? shown.address : s.output_target;
++            if (shown.address != 0) size = shown.size;
++        }
+         // A negative time: when <file>.now exists (removed once taken).
+         const std::string trigger = path + ".now";
+         if (sec < 0 ? access(trigger.c_str(), F_OK) != 0
+@@ -2412,8 +2502,9 @@ void OnEntryDone(s32 channel) {
+                 std::fwrite(bytes.data(), 1, bytes.size(), f);
+                 std::fclose(f);
+             }
+-            LOG_INFO(HW_GPU, "Nx2 passthrough snapshot: {:#x} +{:#x} ({:#x} mapped) after entry {} -> {}", va, size,
+-                     mapped, s.entries, path);
++            LOG_INFO(HW_GPU, "Nx2 passthrough snapshot: {:#x} +{:#x} ({:#x} mapped) after entry {} -> {} (last present "
++                     "{:#x} {}x{}, block height {})", va, size, mapped, s.entries, path, shown.address, shown.width,
++                     shown.height, 1u << shown.block_height_log2);
+         });
+         it = snaps.erase(it);
+     }
+@@ -2521,6 +2612,7 @@ void OnGuestKind(GPUVAddr, u64, u32, u32) {}
+ void OnProgramBind(u32, GPUVAddr, bool) {}
+ void OnEntryDone(s32) {}
+ void OnStep(s32) {}
++void OnPresent(GPUVAddr, u32, u32, u32, u64) {}
+ void OnDescriptorRead(GPUVAddr) {}
+ void OnColorTarget(GPUVAddr, u32, u32, u32) {}
+ void OnComputeMacro() {}
+diff --git a/src/video_core/nx2_passthrough.h b/src/video_core/nx2_passthrough.h
+index 360e2be87..e3e37533e 100644
+--- a/src/video_core/nx2_passthrough.h
++++ b/src/video_core/nx2_passthrough.h
+@@ -60,6 +60,10 @@ void OnColorTarget(GPUVAddr address, u32 width, u32 height, u32 format);
+ /// game samples, which the passthrough's ASTC transcoding decodes first.
+ void OnDescriptorRead(GPUVAddr address);
+ 
++/// The game presents the image at GPU address `address` (block-linear RGBA8, width x height, GOB block height
++/// 1 << block_height_log2, size bytes): what EDEN_NX2_PASSTHROUGH_SNAP address 0 reads.
++void OnPresent(GPUVAddr address, u32 width, u32 height, u32 block_height_log2, u64 size);
++
+ /// Frees the host channel and RM client (also done at process exit).
+ void Shutdown();
+ 
+-- 
+2.56.0
+

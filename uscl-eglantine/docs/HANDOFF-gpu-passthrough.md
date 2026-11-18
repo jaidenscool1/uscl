@@ -887,6 +887,27 @@ Fork ship **2110a6d16** = `patches/0018` (series 0001-0018 verified: identical t
 - Shortcuts: a texture is decoded once (later uploads into it unseen); arena never freed; header slot rewrites
   do not wait for the GPU.
 
+### Twelfth pass, continued: the race on the host GPU
+Fork ship **3cde5150e** = `patches/0019` (series 0001-0019 verified); probe **c26bdcf63** (built, worktree on it).
+- **Race-start frame, host GPU vs Eglantine** (`bench/pt-live-vs-vulkan-race.png`, SYNC mode): geometry, sky and
+  clouds, lighting, Mario and the kart, HUD (coins, lap, 24th, minimap with racers), signs, banners, grass and
+  Toads all as in Eglantine's frame. **Black: the track surface, arch and buildings** = MKW's 8192^2 x 68
+  virtual-texture ASTC arrays (sparse, resident tiles only), left raw as too large. Next quality item:
+  per-tile transcoding of sparse ASTC into a sparse output (tile map from nx2:gpu 216, BC1 2x the guest bytes).
+- The ASTC arena grows in 256 MiB chunks to 8 GiB (boot + menus + race: ~11.5k sampled textures, 4.4 GiB); a
+  2 GiB arena ran full mid-race; pinning the whole cap at start made shutdown take ~3 minutes.
+- RM's page-table pool ran out of video memory mid-race next to Eglantine's Vulkan work (NV_ERR_NO_MEMORY in
+  `virtmemReserveMempool`): device and VA space now allow page tables in system memory (`RETRY_PTE_ALLOC_IN_SYS`);
+  one shader local memory buffer for all channels.
+- **Xid 31 once** (texture unit, PDE fault at 0x1_00000000, recovered, health OK); MKW samples null texture
+  headers at address 0 in its second pool (0x2109895000); a sparse range below the guest's is refused by RM
+  (`NV_ERR_INSUFFICIENT_RESOURCES` at 0, 64 KiB and 4 GiB), so such reads stay faults. Not reproduced in the next
+  three runs. Open.
+- Snapshot address 0 is now the presented image (OnPresent; MKW draws 2560x1440 into it).
+- **Async decode has a visible limit:** a texture sampled before its copy is ready reads black, and a game that
+  renders a one-time capture then (MKW's blurred menu background) keeps it black (`menu8`); fix: decode on the
+  entry thread for headers first seen there, or hold such entries until their copies exist.
+
 ## Phase 2, step 1: channels and submission (2026-11-17)
 **Result:** the RM channel runs inside Eglantine. Fork branch `uscl-passthrough-ship` (`5e536b6a4`, on
 `uscl-gpurw-ship`), USCL `patches/0014`. The same commit sits on top of the probe as `uscl-passthrough`
