@@ -5,6 +5,7 @@
 #include "switchcore.h"
 
 #include <QCoreApplication>
+#include <QColor>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -19,6 +20,10 @@ Launcher::Launcher(QObject* parent)
 	: QObject(parent)
 {
 	m_process.setProcessChannelMode(QProcess::MergedChannels);
+	connect(&m_process, &QProcess::stateChanged, this, [this] {
+		emit runningChanged();
+		emit gameShownChanged();
+	});
 	connect(&m_process, &QProcess::readyRead, this, [this] {
 		for (const QByteArray& line : m_process.readAll().split('\n'))
 		{
@@ -44,6 +49,45 @@ Launcher::Launcher(QObject* parent)
 			emit finished(true, tr("Could not start %1").arg(m_process.program()));
 		}
 	});
+}
+
+QString Launcher::loadingStyle(const QString& background, const QString& foreground, const QString& accent, const QString& panel)
+{
+	const QColor bg(background), fg(foreground), focus(accent), surface(panel);
+	if (!bg.isValid() || !fg.isValid() || !focus.isValid() || !surface.isValid())
+		return {};
+	return QStringLiteral(
+	    "QWidget { background-color: %1; color: %2; } "
+	    "QLabel { background-color: transparent; color: %2; } "
+	    "QProgressBar { background-color: %4; color: %2; border: 1px solid %3; border-radius: 4px; padding: 2px; } "
+	    "QProgressBar::chunk { background-color: %3; border-radius: 2px; } "
+	    "QPushButton { background-color: %4; color: %2; border: 1px solid %3; padding: 6px 18px; } "
+	    "QPushButton:focus { border: 2px solid %3; }")
+	    .arg(bg.name(), fg.name(), focus.name(), surface.name());
+}
+
+void Launcher::setLoadingTheme(const QString& theme, const QString& background, const QString& foreground,
+                               const QString& accent, const QString& panel)
+{
+	static const QStringList allowed = {"ps3", "ps4", "ps5", "x360classic", "x360", "xboxone", "switch", "switch2"};
+	m_loading_style = allowed.contains(theme) ? loadingStyle(background, foreground, accent, panel) : QString();
+	m_theme = m_loading_style.isEmpty() ? QString() : theme;
+	m_loading_colors = m_theme.isEmpty() ? QString() : QColor(background).name().mid(1) + "," +
+	    QColor(foreground).name().mid(1) + "," + QColor(accent).name().mid(1);
+}
+
+void Launcher::applyLoadingEnvironment(QProcessEnvironment& env, bool game) const
+{
+	// No inherited styling leaks into classic/settings tools or unconfigured launches.
+	env.remove("USCL_THEME");
+	env.remove("USCL_LOADING_STYLE");
+	env.remove("USCL_LOADING_COLORS");
+	if (game && !m_theme.isEmpty())
+	{
+		env.insert("USCL_THEME", m_theme);
+		env.insert("USCL_LOADING_STYLE", m_loading_style);
+		env.insert("USCL_LOADING_COLORS", m_loading_colors);
+	}
 }
 
 QString Launcher::corePath()
@@ -91,7 +135,7 @@ bool Launcher::start(const QStringList& args, const QString& title, bool online,
 	// a game's PS button comes to us (uscl-rpcs3 0008); the classic window keeps RPCS3's own home menu
 	if (std::exchange(m_auto_pads, false) && !core.isEmpty())
 		env.insert("USCL_AUTO_PADS", "1");
-	if (game && core.isEmpty())
+	if (game)
 		env.insert("USCL_SHELL", "1");
 	else
 		env.remove("USCL_SHELL");
@@ -107,6 +151,7 @@ bool Launcher::start(const QStringList& args, const QString& title, bool online,
 	{
 		m_process.setWorkingDirectory({});
 	}
+	applyLoadingEnvironment(env, game);
 	m_process.setProcessEnvironment(env);
 	if (!core.isEmpty())
 	{
@@ -257,6 +302,7 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 	env.remove("USCL_ONLINE");
 	env.insert("USCL_SHELL", "1");
 	m_process.setWorkingDirectory({});
+	applyLoadingEnvironment(env, true);
 	m_process.setProcessEnvironment(env);
 	m_tail.clear();
 	m_title = title;

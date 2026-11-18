@@ -32,7 +32,7 @@ Settings → All Settings opens the classic RPCS3 window.
   `USCL_ONLINE` (no game patches or debugger), and a joining player's game must match the host's (same
   EBOOT.BIN, so the same update) before it starts.
 - **Friends:** your online Steam friends (`uscl-bridge friends`); ✕ on one in a USCL session joins it.
-- **Settings:** online name, theme (the 14 JStationX colours), menu sounds, controllers, system software,
+- **Settings:** online name, eight console themes (PS3, PS4, PS5, Xbox 360 Classic/2012, Xbox One, Switch and Switch 2), XMB colours, menu sounds, controllers, system software,
   All Settings (the classic RPCS3 window).
 
 Online play used to live in the classic window's USCL > Online panel; the home screen does the same things
@@ -58,8 +58,26 @@ Needs Qt 6.5+ (Quick, Multimedia, Network) and SDL3. Without `USCL_RPCS3` it loo
 packaged. Games come from RPCS3's `games.yml` and `dev_hdd0/game` in USCL's settings folder; titles and icons
 are read from each game's `PARAM.SFO` / `ICON0.PNG`, inside ISOs too.
 
-`shaders/wave.frag.qsb` is compiled from `wave.frag` (command in CMakeLists.txt); rebuild it after changing
-the shader.
+`shaders/tint.frag.qsb` is compiled from `tint.frag` (command in CMakeLists.txt); rebuild it after changing
+the shader. Software rendering uses a gradient fallback for the XMB background.
+
+## Console themes and verification
+
+Choose a look in Settings → Theme Settings → Theme. Modern themes show games directly; the PS3 XMB keeps
+console folders. All themes use the same launch, online, settings, DLC and update actions. On modern home
+screens L1/R1 (Page Up/Down) changes category; on inner pages it jumps five rows. Xbox 360 Classic also uses
+left/right to change blades and up/down to select. Mouse: click to focus, click again to open; right-click for
+options. Long dialogs scroll with up/down or the wheel.
+
+Build the UI tests with `-DUSCL_UI_TESTS=ON`, then run:
+
+```
+ctest --test-dir <build folder> --output-on-failure
+python uscl-shell/tools/theme_smoke.py <path to built uscl>
+```
+
+The smoke test loads each theme with temporary preferences, checks the whole stage fits 16:9, 4:3 and
+ultrawide windows, and rejects QML errors and missing packaged assets. See [theme details and previews](../docs/CONSOLE-THEMES.md).
 
 ## Automatic setup on every PC
 - **Controllers** (Settings → Accessory Settings → Automatic Controller Setup, on by default): when a game starts,
@@ -80,10 +98,26 @@ the shader.
   graphics card and the screen: integrated or under 3.5 GB 100%, under 6 GB 150%, under 10 GB 200%, else 300%,
   never sharper than the screen (1080p 150%, 1440p 200%, 4K 300%). `uscl --hardware` prints what it sees.
 
+## Emulator loading screens
+
+Game launches use a themed shell handoff with game artwork and title. Rebuilt RPCS3, Eden, Eglantine and
+Azahar cores also use the shell palette in native loading widgets; other native frontends keep their own UI.
+The shell stops its indicator when inactive and adds no loading delay. See
+[coverage, patch contract and verification](../docs/LOADING-THEMES.md).
+
+## Changelog
+
+Settings → USCL Changelog reads the bundled root [CHANGELOG.md](../CHANGELOG.md) offline in every theme.
+Scroll with Up/Down, L1/R1 or the mouse wheel; Back closes it. Update that file when changes ship; keep
+development changes under Unreleased until a release is assigned.
+
 ## Assets
 Personal sounds: WAVs in `<settings folder>/sounds/` (cursor, select, category, back, error, notify, startup)
-replace the built-in ones on that PC only; they are never packaged.
+replace the built-in ones on that PC only; they are never packaged. Theme-specific files in
+`<settings folder>/sounds/<theme>/` take priority over these global overrides. Each of the eight themes has
+its own original built-in sound palette, selected automatically when the theme changes
+([palette descriptions and folder IDs](../docs/CONSOLE-THEMES.md#original-audio)).
 
-Sounds: the player's own XMB sounds (JStationX `resource.uisounds.xmb`, synthesized originals). Fonts: Noto Sans,
+Built-in sounds: original stereo synthesis from `tools/menu_sounds.py` (no console recordings or sampled console audio). Run `python uscl-shell/tools/menu_sounds.py` from the repo root to regenerate them. Fonts: Noto Sans,
 Roboto Thin (licences in `fonts/`), Material Design Icons (Pictogrammers, free licence). The background is drawn
 by the shader; no console maker's artwork is included.

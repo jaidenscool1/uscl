@@ -25,3 +25,15 @@ Needs Qt 6 with QtHttpServer.
 - Links with `--exclude-libs,ALL`: its LibreSSL clashed with the system Qt's OpenSSL.
 
 The USCL app writes `shadnet.cfg` the first time it hosts a PS4 game (ports 31513/31515, admin API off).
+
+## USCL release integration
+
+The v0.5.2-alpha release line integrates the reviewed installer/library work and
+console themes. Use the [release page](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.2-alpha)
+for published assets and the [fork matrix](../README.md#fork-maintenance) for build pins.
+This does not update the upstream base or establish new gameplay/online support
+for this fork. Patch changes require rebuilding the corresponding core; updating
+the shell alone does not update a separately installed emulator.
+
+Switch 2 CPU/GPU translation, game evidence and pending work are tracked in
+[SWITCH2-PROGRESS.md](../docs/SWITCH2-PROGRESS.md).

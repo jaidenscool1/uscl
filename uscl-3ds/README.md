@@ -4,7 +4,7 @@
 |---|---|
 | **Console** | Nintendo 3DS |
 | **Emulator** | [Azahar](https://github.com/azahar-emu/azahar) (GPL-2.0) 2126.2, the maintained Citra successor. Offline: the Flathub app `org.azahar_emu.Azahar` is enough. Online: our build (2126.2 + `patches/`, `tools/dev-scripts/build-azahar.sh`) |
-| **Our changes** | `patches/0001` joins a room at startup (`USCL_ROOM`); `0002` makes that work for real players (valid nickname, no chat popup, a booted `.cci` counts as the inserted card so Download Play works); `0003` answers the Nintendo Network login with a server USCL picks (`USCL_NEX`); `0004` names the console after the player. USCL starts it (`uscl-shell` `Launcher::startEmu`), sets up its controller (`uscl-shell/src/padconfig.cpp`) and carries its rooms (`uscl-bridge` preset `3ds`, UDP 24872) |
+| **Our changes** | `patches/0001` joins a room at startup (`USCL_ROOM`); `0002` makes that work for real players (valid nickname, no chat popup, a booted `.cci` counts as the inserted card so Download Play works); `0003` answers the Nintendo Network login with a server USCL picks (`USCL_NEX`); `0004` names the console after the player; `0005` follows the USCL loading palette for shell launches. USCL starts it (`uscl-shell` `Launcher::startEmu`), sets up its controller (`uscl-shell/src/padconfig.cpp`) and carries its rooms (`uscl-bridge` preset `3ds`, UDP 24872) |
 | **Online** | Azahar rooms (local wireless / Download Play) over the Steam tunnel; Nintendo Network online later (Pretendo / NEX) |
 | **Ships in** | both installers: `azahar` + `azahar-room` (Windows: `Azahar\`) |
 | **Status** | 2026-11-14: **Mario Kart 7 local race between two Azahar copies in one room works** (one PC). Steam two-PC test next |
@@ -110,3 +110,25 @@ The home screen does all of this when the Azahar pair is next to `uscl` or set w
 `USCL_AZAHAR_ROOM`. Two copies on one PC: give each its own `XDG_CONFIG_HOME` / `XDG_DATA_HOME` (separate console
 IDs and MACs), and pin each profile's buttons to one pad (`engine:sdl,guid:<guid>,port:<n>,...` instead of
 `maptype:all`).
+
+## Theme-aware loading UI
+
+Patch 0005 applies the active shell palette only to the native loading widget and its progress bar.
+Standalone launches keep upstream styling; compilation, game artwork, progress and fade completion are
+unchanged. Rebuild Azahar for this support. See [coverage and verification](../docs/LOADING-THEMES.md).
+
+## USCL release integration
+
+The v0.5.2-alpha release line integrates the reviewed installer/library work and
+console themes. Use the [release page](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.2-alpha)
+for published assets and the [fork matrix](../README.md#fork-maintenance) for build pins.
+This does not update the upstream base or establish new gameplay/online support
+for this fork. Patch changes require rebuilding the corresponding core; updating
+the shell alone does not update a separately installed emulator.
+
+Switch 2 CPU/GPU translation, game evidence and pending work are tracked in
+[SWITCH2-PROGRESS.md](../docs/SWITCH2-PROGRESS.md).
+
+For v0.5.2-alpha, Linux retains the signed v0.5.1-alpha native core and therefore
+uses the shell launch theme without the new native loading colors. Windows builds
+the loading-color patch from the release manifest. See [packaging provenance](../packaging/README.md#v052-alpha-linux-provenance).

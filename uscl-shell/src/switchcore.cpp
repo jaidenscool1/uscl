@@ -642,15 +642,41 @@ QString SwitchCore::installConsoleFiles(const QVariantMap& found, QString* error
 				source = unpacked.path();
 			}
 		}
-		const QString registered = core + "nand/system/Contents/registered/";
-		QDir(registered).removeRecursively();   // one version only: leftovers of an older one would mix in
-		if (!copyFirmware(source, registered))
+		const QString contents = core + "nand/system/Contents/";
+		if (!QDir().mkpath(contents))
+			return fail(QCoreApplication::translate("SwitchCore", "Couldn't create the system software folder."));
+		// Stage on the destination filesystem. Keep the installed version until every copy succeeds.
+		QTemporaryDir staged(contents + ".uscl-firmware-XXXXXX");
+		const QString replacement = staged.path() + "/new";
+		const QString backup = staged.path() + "/previous";
+		const QString registered = contents + "registered";
+		if (!staged.isValid() || !copyFirmware(source, replacement + '/'))
 			return fail(QCoreApplication::translate("SwitchCore", "Couldn't copy the system software. Check free space."));
 		QSaveFile v(core + "firmware-version.txt");
-		if (v.open(QIODevice::WriteOnly))
+		const QByteArray versionText = version.toString().toLatin1();
+		if (!v.open(QIODevice::WriteOnly) || v.write(versionText) != versionText.size())
+			return fail(QCoreApplication::translate("SwitchCore", "Couldn't save the system software version."));
+		const bool hadInstalled = QFileInfo::exists(registered);
+		if (hadInstalled && !QDir().rename(registered, backup))
+			return fail(QCoreApplication::translate("SwitchCore", "Couldn't replace the installed system software."));
+		auto restore = [&] {
+			if (!hadInstalled || QDir().rename(backup, registered))
+				return;
+			// Preserve the backup if a filesystem failure also prevents rollback.
+			staged.setAutoRemove(false);
+		};
+		if (!QDir().rename(replacement, registered))
 		{
-			v.write(version.toString().toLatin1());
-			v.commit();
+			restore();
+			return fail(QCoreApplication::translate("SwitchCore", "Couldn't install the system software."));
+		}
+		if (!v.commit())
+		{
+			if (QDir().rename(registered, replacement))
+				restore();
+			else
+				staged.setAutoRemove(false);
+			return fail(QCoreApplication::translate("SwitchCore", "Couldn't save the system software version."));
 		}
 		system = true;
 	}

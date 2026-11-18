@@ -4,7 +4,7 @@
 controller-first home screen, emulators set up for you, and small servers that stand in for the consoles' old
 online services. You and your friends connect through Steam, so nobody has to open ports.
 
-PS3 came first. USCL now also runs PS4, Switch, Wii, GameCube, 3DS, Wii U and Xbox 360 games, at different stages
+PS3 came first. USCL now also runs PS4, Switch, Wii, GameCube, 3DS, Wii U, Switch 2 and Xbox 360 games, at different stages
 (see [Platforms](#platforms)). The goal is every console, all from the same home screen.
 
 > **Status: early testing.** Several games already play online in tests; playing between two PCs over Steam is
@@ -12,7 +12,7 @@ PS3 came first. USCL now also runs PS4, Switch, Wii, GameCube, 3DS, Wii U and Xb
 
 **Contents:** [What you get](#what-you-get) · [Platforms](#platforms) · [Get it](#get-it) ·
 [Controllers](#controllers) · [Games](#games) · [How online works](#how-online-works) ·
-[Repository map](#repository-map) · [Branches](#branches) · [Safety](#safety) · [Credits](#credits)
+[Switch 2 progress](docs/SWITCH2-PROGRESS.md) · [Fork maintenance](#fork-maintenance) · [Repository map](#repository-map) · [Branches](#branches) · [Safety](#safety) · [Credits](#credits)
 
 ## What you get
 - 🎮 **One home screen for every console.** Controller first: games, friends, settings, all from the couch.
@@ -31,18 +31,21 @@ PS3 came first. USCL now also runs PS4, Switch, Wii, GameCube, 3DS, Wii U and Xb
 | **PlayStation 3** | RPCS3, our build ([`uscl-rpcs3`](uscl-rpcs3/)) | stand-in servers: [RPCN](uscl-rpcn/) (PSN), [Demonware](uscl-dw/) (Call of Duty), [Blaze](uscl-blaze/) (EA) | 🟢 main platform: Black Ops II, MW2, Minecraft online in tests |
 | **PlayStation 4** | shadPS4, our build ([`uscl-shadps4`](uscl-shadps4/)) | [shadNet](uscl-shadnet/) + our Demonware | 🟡 Black Ops II played between two PCs; PS3 ↔ PS4 crossplay in progress |
 | **Nintendo Switch** | Eden, our build ([`uscl-eden`](uscl-eden/)) | Eden local-wireless rooms over Steam | 🟡 Mario Kart 8 Deluxe races two copies on one PC ([setup](docs/SWITCH.md)) |
-| **Wii / GameCube** | Dolphin ([`uscl-dolphin`](uscl-dolphin/), no fork) | Dolphin NetPlay over Steam | 🟠 games launch from USCL; NetPlay over Steam next |
+| **Wii / GameCube** | Dolphin, our build ([`uscl-dolphin`](uscl-dolphin/)) | Dolphin NetPlay over Steam | 🟡 Wii Sports tested between Linux and Windows over Steam; Friends-list joining still needs testing |
 | **Nintendo 3DS** | Azahar, our build ([`uscl-3ds`](uscl-3ds/) patches) | Azahar rooms over Steam | 🟡 Mario Kart 7 local race between two copies in one room; home screen hosts the room; two PCs next |
 | **Wii U** | Cemu (no fork yet) | later: a Pretendo / NEX stand-in | ⚪ starts Cemu from USCL (untested) |
 | **Xbox 360** | Xenia (Wine on Linux) | later | ⚪ experimental launch |
+| **Nintendo Switch 2** | Eglantine, our build ([`uscl-eglantine`](uscl-eglantine/)) | none yet | 🟠 Mario Kart World plays offline; online room integration pending |
+| **Nintendo DS** | melonDS, our build ([`uscl-melonds`](uscl-melonds/)) | per-game agent + LAN link over Steam | 🟠 HeartGold tested with two local copies; agent launch only, no home-screen launch yet |
 | **More** | | | planned: see [PLAN.md](PLAN.md) |
 
 🟢 works online in tests · 🟡 online works on one PC or between two in early tests · 🟠 runs, online not yet ·
 ⚪ runs, online not started.
 
 Where we change an emulator, we keep our changes as patch files against a pinned upstream commit (the `uscl-*`
-folders), and both installers ship those builds. Only Cemu (Wii U) is used unchanged: on Linux USCL starts its
-Flathub app.
+folders). The packaging recipes include those builds; actual contents depend on the release and, on Linux,
+which local builds were available when packaging. Cemu and Xenia have no maintained USCL patch set here; on
+Linux Cemu uses its Flathub app and Xenia uses Wine.
 
 ## Get it
 Download the newest version from **[Releases](https://github.com/jaidenscool1/uscl/releases)**.
@@ -57,9 +60,10 @@ You'll need **Steam running and signed in**, and **your own copies of your games
 games, or the console's game files). USCL doesn't include any games, console keys or firmware. On first start it
 walks you through the rest.
 
-Both installers include our builds of every emulator USCL uses: RPCS3 (PS3), shadPS4 (PS4), Dolphin (Wii,
+The installer recipes include our builds of: RPCS3 (PS3), shadPS4 (PS4), Dolphin (Wii,
 GameCube), Azahar (3DS), Eden (Switch), Eglantine (Switch 2) and melonDS (DS). Switch and Switch 2 need your own
-console keys and firmware ([docs/SWITCH.md](docs/SWITCH.md)); Wii U uses Cemu from Flathub (Linux).
+console keys and firmware ([docs/SWITCH.md](docs/SWITCH.md)); Wii U uses Cemu from Flathub (Linux). Check the
+release notes for the binaries actually included. DS currently starts through its per-game agent.
 
 ## Controllers
 Any controller works, USB or Bluetooth: DualSense, DualShock, Xbox, Switch Pro, Joy-Cons, and other pads SDL
@@ -134,6 +138,41 @@ Old console games expect servers that are gone. USCL uses one of two ways, depen
 Either way, [`uscl-bridge`](uscl-bridge/) carries the traffic between the host's PC and their friends' over a Steam
 connection. The servers only listen on your own PC, and nothing leaves Steam's network except the game itself.
 
+Read the bundled [changelog](CHANGELOG.md) in **Settings → USCL Changelog** in any theme, even offline.
+The v0.5.2-alpha release line includes the reviewed console-theme and installer work.
+See [release assets and notes](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.2-alpha).
+The [Switch 2 tracker](docs/SWITCH2-PROGRESS.md) separates the release baseline from pending CPU/GPU translation work.
+
+## Fork maintenance
+
+This branch contains build recipes and patch sets for the following emulator bases. These are the revisions
+used by the recipes, not a claim that they are the latest upstream versions or already published releases.
+
+| Emulator | Pinned base | USCL patch documentation | Upstream update handling |
+|---|---|---|---|
+| RPCS3 | `eee3f0f` | [PS3](uscl-rpcs3/README.md) | `emu-sync` tracks `master` in a separate development clone |
+| shadPS4 | `3eecea94ddaca360b19f4b800523b609a8b2ffcc` | [PS4](uscl-shadps4/README.md) | `emu-sync` tracks `main` |
+| Dolphin | `2609a` | [Wii / GameCube](uscl-dolphin/README.md) | Manual pinned-base update; preserve NetPlay version compatibility |
+| Azahar | `2126.2` | [3DS](uscl-3ds/README.md) | Manual pinned-base update; preserve room version compatibility |
+| Eden | `v0.2.1` (`58c1e20ee58efa3900ba616207d460886214480b`) | [Switch](uscl-eden/README.md) | Manual pinned-base update |
+| Eglantine | `30181ba05b484a4beefa838457b02d6ab5aa7baa` | [Switch 2](uscl-eglantine/README.md) | `emu-sync` tracks `nx2-experimental` |
+| melonDS | `497aa6cdd26f45f8064b78916b00a773eab4ded7` | [DS](uscl-melonds/README.md) | Manual pinned-base update |
+
+Sources: [Windows emulator manifest](packaging/windows/emulators.sh),
+[RPCS3 / server build pins](.github/workflows/windows-installer.yml), and the linked patch documentation.
+Linux packaging consumes prebuilt local cores through [build-linux.sh](packaging/build-linux.sh); it does not
+fetch these pins itself. The [upstream checker](tools/emu-sync/README.md) also covers RPCN, shadNet and
+open-bitdemon. Updating a development clone does not regenerate this repository's patches, change build pins,
+rebuild installers or publish an update. Those steps need a reviewed change and build/game verification.
+
+The home screen has eight selectable themes: PS3, PS4, PS5, Xbox 360 Classic, Xbox 360 2012, Xbox One,
+Switch and Switch 2. Each separates software from console-style system menus; a full library provides console filters,
+a persistent sidebar for Add Games, updates and help. Libraries offer saved sorting by title or console and preserve their console filter and selected game when returning from nested menus. Mouse, wheel and keyboard navigation share the same visible selection. Xbox One includes persistent game pins. PS5 Control Center cards show live library previews, and long Nintendo HOME titles scroll within a bounded region. Selected tiles resize smoothly, quick menus slide in, and game backdrops crossfade after loading. All share USCL's settings and update controls. A theme changes the interface;
+it does not add emulation of its console (there is no PS5 or Xbox One emulator integration here).
+See the [online screenshot/video reference audit](docs/CONSOLE-REFERENCES.md),
+[theme behavior, checks and remaining manual verification](docs/CONSOLE-THEMES.md) and
+[emulator loading-screen coverage](docs/LOADING-THEMES.md).
+
 ## Repository map
 | Folder | What it is |
 |---|---|
@@ -145,8 +184,10 @@ connection. The servers only listen on your own PC, and nothing leaves Steam's n
 | [`uscl-rpcs3`](uscl-rpcs3/) | PS3: RPCS3 |
 | [`uscl-shadps4`](uscl-shadps4/) | PS4: shadPS4 |
 | [`uscl-eden`](uscl-eden/) | Switch: Eden |
-| [`uscl-dolphin`](uscl-dolphin/) | Wii / GameCube: Dolphin (unchanged, platform notes) |
-| [`uscl-3ds`](uscl-3ds/) | 3DS: Azahar (unchanged, platform notes) |
+| [`uscl-dolphin`](uscl-dolphin/) | Wii / GameCube: Dolphin, patched startup and NetPlay integration |
+| [`uscl-3ds`](uscl-3ds/) | 3DS: Azahar, patched room startup and integration |
+| [`uscl-eglantine`](uscl-eglantine/) | Switch 2: Eglantine, offline integration and performance patches |
+| [`uscl-melonds`](uscl-melonds/) | DS: melonDS, patched wireless link and local debugger for per-game agents |
 | **Online services** (stand-ins for the old servers) | |
 | [`uscl-rpcn`](uscl-rpcn/) | PSN (PS3): RPCN |
 | [`uscl-shadnet`](uscl-shadnet/) | PSN (PS4): shadNet |
@@ -159,12 +200,13 @@ connection. The servers only listen on your own PC, and nothing leaves Steam's n
 | [`tools/`](tools/) | Test automation, dev scripts, emulator update checks ([`emu-sync`](tools/emu-sync/)), Ghidra helpers |
 
 ## Branches
-Every branch has this same README. What each one is for:
+Branch documentation can differ while changes are under review. This theme work targets
+`agent/jaiden-pc/all-emulators`; see the pull request for its current base. General branch roles:
 
 | Branch | What's on it |
 |---|---|
 | `main` | Stable code. Changes only arrive through reviewed pull requests. |
-| `dev`, `agent/jaiden-pc/steam-tunnel` | Where finished work is combined before it goes to `main` (steam-tunnel is the current one). |
+| `dev`, integration branches | Work combined for testing before review and release. |
 | `agent/<name>/<topic>` | Work in progress, one branch per topic, each with a pull request (e.g. `agent/dysco-pc/windows-bridge`). |
 | `status` | Only the game status badges above. |
 

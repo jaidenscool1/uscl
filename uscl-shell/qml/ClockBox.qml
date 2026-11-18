@@ -4,6 +4,8 @@ import QtQuick
 // laptop battery, date and time. 560x64 on the 1920x1080 stage.
 Item {
     id: box
+    property string theme: "ps3"
+    ThemePalette { id: themeStyle; theme: box.theme }
     property string avatar: ""
     property int internet: -1       // 1 online, 0 offline, -1 unknown
     property int pads: 0
@@ -13,8 +15,11 @@ Item {
     property bool clock24: false
 
     readonly property string ui: "qrc:/qt/qml/Uscl/xmb/ui/"
-    width: 560; height: 64
+    width: theme === "ps3" ? 560 : themeStyle.nintendo ? 430 : 260; height: 64
 
+    Item {
+        anchors.fill: parent
+        visible: box.theme === "ps3"
     Image { anchors.fill: parent; source: "qrc:/qt/qml/Uscl/xmb/clockbox.png" }
     Image { x: 12; y: 7; width: 50; height: 50; source: box.avatar; smooth: true; mipmap: true }
 
@@ -39,18 +44,30 @@ Item {
         }
         Image { x: 178; y: 6; width: 20; height: 20; visible: box.charging; source: box.ui + "badge_bolt.png"; mipmap: true }
     }
+    }
     Text {
         id: clock
-        anchors.right: parent.right; anchors.rightMargin: 28
+        anchors.right: parent.right; anchors.rightMargin: themeStyle.nintendo ? 210 : 28
         height: 64; verticalAlignment: Text.AlignVCenter
-        color: "#f0ffffff"; font.pixelSize: 30
-        style: Text.Raised; styleColor: "#80000000"
+        color: box.theme === "ps3" ? "#f0ffffff" : themeStyle.text; font.pixelSize: 30
+        style: box.theme === "ps3" ? Text.Raised : Text.Normal; styleColor: "#80000000"
         function tick() {
             var now = new Date()
-            text = Qt.formatDate(now, box.dateFormat) + "  " + Qt.formatTime(now, box.clock24 ? "H:mm" : "h:mm AP")
+            text = (box.theme === "ps3" ? Qt.formatDate(now, box.dateFormat) + "  " : "") + Qt.formatTime(now, box.clock24 ? "H:mm" : "h:mm AP")
         }
         Component.onCompleted: tick()
-        Connections { target: box; function onDateFormatChanged() { clock.tick() } function onClock24Changed() { clock.tick() } }
+        Connections { target: box; function onThemeChanged() { clock.tick() } function onDateFormatChanged() { clock.tick() } function onClock24Changed() { clock.tick() } }
+    }
+    Row {
+        visible: themeStyle.nintendo
+        spacing: 18; x: box.width-180; y: 15; height: 34
+        ConsoleGlyph { width: 34; height: 34; kind: "wifi"; ink: box.internet === 1 ? themeStyle.text : themeStyle.muted }
+        Rectangle {
+            visible: box.battery >= 0; y: 4; width: 52; height: 28; radius: 3; color: "transparent"; border.width: 3; border.color: themeStyle.text
+            Rectangle { x: 5; y: 5; width: 40*Math.max(0,Math.min(1,box.battery/100)); height: 18; color: box.battery < 15 ? themeStyle.danger : themeStyle.text }
+            Rectangle { x: 52; y: 8; width: 4; height: 12; color: themeStyle.text }
+        }
+        Text { height: 34; verticalAlignment: Text.AlignVCenter; text: box.battery >= 0 ? String(box.battery)+"%" : ""; color: themeStyle.text; font.pixelSize: 22 }
     }
     Timer { interval: 1000; running: true; repeat: true; onTriggered: clock.tick() }
 }

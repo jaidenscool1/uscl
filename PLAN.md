@@ -3,6 +3,15 @@
 Goal: PS3 games (your own dumps) running in RPCS3 use Steam for friends, invites, lobbies and P2P, without
 patching each game. Status: Steam bridge service working (see Phases).
 
+## Home screen themes (2026-11-16)
+
+Eight selectable looks now share the launcher's game, friend, online, settings and update actions: PS3 XMB,
+PS4, PS5, Xbox 360 Classic/2012, Xbox One, Switch and Switch 2. Modern looks expose the game library directly;
+inner pages and modals follow the theme too. All eight themes have original synthesized audio and a saved menu-volume setting.
+Game launch/return screens now follow the palette, with opt-in native loading patches for RPCS3, Eden,
+Eglantine and Azahar ([coverage and remaining game checks](docs/LOADING-THEMES.md)). See [console theme validation and limits](docs/CONSOLE-THEMES.md). Physical controller,
+Windows/macOS runtime and subjective visual/audio acceptance are not replaced by automated UI tests.
+
 ## How it works
 PS3 games never talk to PSN directly. They call Sony's libraries (`sceNp*`). RPCS3 already answers those
 calls itself, backed by RPCN (its PSN replacement). USCL makes Steam the network between players:
@@ -222,3 +231,9 @@ Phases:
   Next: a battle between two PCs over Steam, the agents answering the attendant's menus, the nearest Pokémon Center
   instead of Cherrygrove's, more than two players per link (LAN clients connect to each other by address).
 - **D4:** trades the same way; other Gen 4 games (SoulSilver, Platinum) get their own address tables.
+
+## Switch 2 evidence tracking (2026-11-18)
+
+[CPU/GPU translation tracker](docs/SWITCH2-PROGRESS.md) records the release baseline,
+measured games, pending PR #18 fixes and acceptance checks. Its newer development
+results are not treated as shipped or as broad compatibility.

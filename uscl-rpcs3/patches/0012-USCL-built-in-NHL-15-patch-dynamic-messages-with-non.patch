@@ -1,8 +1,8 @@
-From f3860352c936481f59c72d814a8eb3c4df3fe92b Mon Sep 17 00:00:00 2001
+From 96a30814f3012f32df37cce18b7ea13607462519 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 14:59:26 -0700
-Subject: [PATCH] USCL: built-in NHL 15 patch: dynamic messages with none to
- show
+Subject: [PATCH 12/14] USCL: built-in NHL 15 patch: dynamic messages with none
+ to show
 
 NHL 15's OSDK message rotation (0x7f94e4) reads the first message of its list without checking
 that the list has one. EA's servers always sent messages; a community server may send none, and

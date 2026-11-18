@@ -32,11 +32,21 @@ qt_add_executable(uscl
 # the JStationX XMB artwork (tools/xmb_assets.py)
 file(GLOB_RECURSE XMB_ASSETS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS xmb/*.png)
 
+file(GLOB_RECURSE MENU_SOUNDS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS sounds/*.wav)
+
 qt_add_qml_module(uscl
     URI Uscl
     QML_FILES
         qml/Main.qml
         qml/Background.qml
+        qml/ConsolePage.qml
+        qml/ThemePalette.qml
+        qml/ConsoleFocusRing.qml
+        qml/ConsoleBackdrop.qml
+        qml/ConsoleHome.qml
+        qml/ScrollingTitle.qml
+        qml/ConsoleGlyph.qml
+        qml/RoundedCoverMask.qml
         qml/Xmb.qml
         qml/Page.qml
         qml/OptionsPanel.qml
@@ -45,27 +55,28 @@ qt_add_qml_module(uscl
         qml/Notice.qml
         qml/ClockBox.qml
         qml/Boot.qml
+        qml/GameLaunch.qml
         qml/Setup.qml
         qml/TextPrompt.qml
     RESOURCES
+        ${MENU_SOUNDS}
         fonts/MaterialDesignIcons.ttf
         fonts/NotoSans-Regular.ttf
         fonts/NotoSans-Light.ttf
         fonts/Roboto-Thin.ttf
-        sounds/xmb/back.wav
-        sounds/xmb/cancel.wav
-        sounds/xmb/category.wav
-        sounds/xmb/cursor.wav
-        sounds/xmb/error.wav
-        sounds/xmb/notify.wav
-        sounds/xmb/select.wav
-        sounds/xmb/startup.wav
         # compiled from tint.frag, so builds don't need Qt Shader Tools:
         # qsb --glsl "100es,120,150" --hlsl 50 --msl 12 -o shaders/tint.frag.qsb shaders/tint.frag
         shaders/tint.frag.qsb
         input/sdl_player.yml
         input/null_player.yml
         ${XMB_ASSETS}
+)
+
+# One source for repository and offline in-app release notes.
+qt_add_resources(uscl "uscl_changelog"
+    PREFIX "/uscl"
+    BASE "${CMAKE_CURRENT_SOURCE_DIR}/.."
+    FILES "${CMAKE_CURRENT_SOURCE_DIR}/../CHANGELOG.md"
 )
 
 # the release tag sets the version (CI: -DUSCL_VERSION=${tag}); updates come from the public releases repo
@@ -103,3 +114,21 @@ if(WIN32)
     target_sources(uscl PRIVATE uscl.rc)   # uscl.exe's icon: the USCL orb (icons/uscl.ico)
 endif()
 install(TARGETS uscl RUNTIME DESTINATION bin)
+
+# Opt-in UI regression tests include the same artwork as the installed shell.
+option(USCL_UI_TESTS "Build console theme interaction tests" OFF)
+if(USCL_UI_TESTS)
+    find_package(Qt6 REQUIRED COMPONENTS QuickTest)
+    enable_testing()
+    qt_add_executable(uscl-ui-tests tests/quicktest.cpp)
+    target_link_libraries(uscl-ui-tests PRIVATE Qt6::QuickTest Qt6::Quick)
+    qt_add_resources(uscl-ui-tests theme_test_assets
+        PREFIX "/qt/qml/Uscl"
+        BASE "${CMAKE_CURRENT_SOURCE_DIR}"
+        FILES ${XMB_ASSETS} shaders/tint.frag.qsb
+            fonts/NotoSans-Regular.ttf fonts/NotoSans-Light.ttf fonts/Roboto-Thin.ttf
+    )
+    add_test(NAME console-theme-interactions COMMAND uscl-ui-tests -input "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    set_tests_properties(console-theme-interactions PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_FORCE_STDERR_LOGGING=1")
+endif()

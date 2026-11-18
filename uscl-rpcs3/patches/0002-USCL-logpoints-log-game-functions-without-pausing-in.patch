@@ -1,7 +1,7 @@
-From f9cb5ece07fc8a9fd538229b94beb289a43aabf8 Mon Sep 17 00:00:00 2001
+From 6469cbc8a86a673a309e69497f39a2a24e28b3b5 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:28:28 -0700
-Subject: [PATCH 02/11] USCL logpoints: log game functions without pausing
+Subject: [PATCH 02/14] USCL logpoints: log game functions without pausing
  (interpreter)
 
 USCL_LOGPOINTS=<file>, lines "PPU-<hash> <hex address> <name>". The first
@@ -16,7 +16,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 90 insertions(+)
 
 diff --git a/rpcs3/Emu/Cell/PPUModule.cpp b/rpcs3/Emu/Cell/PPUModule.cpp
-index 1ff5784..8b8ddea 100644
+index 1ff578491..8b8ddead2 100644
 --- a/rpcs3/Emu/Cell/PPUModule.cpp
 +++ b/rpcs3/Emu/Cell/PPUModule.cpp
 @@ -2505,6 +2505,9 @@ bool ppu_load_exec(const ppu_exec_object& elf, bool virtual_load, const std::str
@@ -30,7 +30,7 @@ index 1ff5784..8b8ddea 100644
  	{
  		ppu_loader.warning("PPU executable hash: %s", hash);
 diff --git a/rpcs3/Emu/Cell/PPUThread.cpp b/rpcs3/Emu/Cell/PPUThread.cpp
-index 7186ad8..30113e2 100644
+index 7186ad85d..30113e236 100644
 --- a/rpcs3/Emu/Cell/PPUThread.cpp
 +++ b/rpcs3/Emu/Cell/PPUThread.cpp
 @@ -1242,6 +1242,92 @@ static void ppu_break(ppu_thread& ppu, ppu_opcode_t, be_t<u32>* this_op, ppu_int

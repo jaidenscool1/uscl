@@ -1,7 +1,7 @@
-From 96e6149a996434dfcedc9cd562a574715ca2b259 Mon Sep 17 00:00:00 2001
+From 285056e43fd2c65ee9925710ee6b947a3fa4b99f Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 15:32:00 -0700
-Subject: [PATCH 03/11] USCL: GDB server survives a client leaving; '!'
+Subject: [PATCH 03/14] USCL: GDB server survives a client leaving; '!'
  logpoints dump game memory
 
 A closed connection or 'D' (detach) ended in a fatal error that froze
@@ -15,7 +15,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 56 insertions(+)
 
 diff --git a/rpcs3/Emu/Cell/PPUThread.cpp b/rpcs3/Emu/Cell/PPUThread.cpp
-index 30113e2..4757d04 100644
+index 30113e236..4757d04bb 100644
 --- a/rpcs3/Emu/Cell/PPUThread.cpp
 +++ b/rpcs3/Emu/Cell/PPUThread.cpp
 @@ -1246,6 +1246,7 @@ static void ppu_break(ppu_thread& ppu, ppu_opcode_t, be_t<u32>* this_op, ppu_int
@@ -62,7 +62,7 @@ index 30113e2..4757d04 100644
  
  	return ppu_cache(addr)(ppu, op, this_op, next_fn);
 diff --git a/rpcs3/Emu/GDB.cpp b/rpcs3/Emu/GDB.cpp
-index afb7800..833ee73 100644
+index afb780034..833ee7339 100644
 --- a/rpcs3/Emu/GDB.cpp
 +++ b/rpcs3/Emu/GDB.cpp
 @@ -320,6 +320,19 @@ bool gdb_thread::read_cmd(gdb_cmd& out_cmd)

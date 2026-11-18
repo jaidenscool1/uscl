@@ -18,6 +18,10 @@
 #include <QSettings>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQmlExpression>
+#include <QQuickItem>
+#include <QQuickWindow>
+#include <QKeyEvent>
 #include <QBuffer>
 #include <QCryptographicHash>
 #include <QDir>
@@ -31,6 +35,7 @@
 #include <QtEndian>
 
 #include <cstdio>
+#include <memory>
 
 namespace
 {
@@ -124,6 +129,27 @@ namespace
 		check(Online::yamlValue(Online::setYamlValue("", "Net", "PSN status", "RPCN"), "Net", "PSN status") == "RPCN", "YAML new file");
 		const QString rpcn = Online::setYamlValue("Version: 2\nNPID: old\n", {}, "NPID", "new_name");
 		check(Online::yamlValue(rpcn, {}, "NPID") == "new_name" && Online::yamlValue(rpcn, {}, "Version") == "2", "YAML top level");
+
+		check(Launcher::loadingStyle("not-a-color", "white", "red", "black").isEmpty(), "invalid loading palette rejected");
+		{
+			QTemporaryDir missing;
+			const QByteArray old = qgetenv("USCL_RPCS3");
+			const bool was_set = qEnvironmentVariableIsSet("USCL_RPCS3");
+			qputenv("USCL_RPCS3", missing.filePath("missing-core").toUtf8());
+			Launcher failed_launch;
+			QEventLoop loop;
+			bool failed_start = false, hidden = false;
+			QObject::connect(&failed_launch, &Launcher::gameShownChanged, &loop, [&] { hidden = !failed_launch.gameShown(); });
+			QObject::connect(&failed_launch, &Launcher::finished, &loop, [&](bool crashed, const QString&) { failed_start = crashed; loop.quit(); });
+			QTimer::singleShot(3000, &loop, &QEventLoop::quit);
+			check(failed_launch.startGame("unused", "Missing", false), "failed core launch can enter starting state");
+			loop.exec();
+			check(failed_start && hidden && !failed_launch.running() && !failed_launch.starting() && !failed_launch.gameShown(), "failed launch clears themed handoff state");
+			if (was_set) qputenv("USCL_RPCS3", old); else qunsetenv("USCL_RPCS3");
+		}
+		const QString style = Launcher::loadingStyle("#073ba0", "#ffffff", "#79c9ff", "#114ca9");
+		check(style.contains("#073ba0") && style.contains("#ffffff") && style.contains("#79c9ff") &&
+		      style.contains("#114ca9") && style.contains("QProgressBar::chunk"), "loading stylesheet uses validated palette colors");
 
 		check(System::cdnUrl("Dest=84;ImageVersion=1;CDN=http://x.y/a/PS3PATCH.PUP;\nDest=84;CDN=http://x.y/b/PS3UPDAT.PUP;CDN_Timeout=30;") ==
 		      "http://x.y/b/PS3UPDAT.PUP", "Sony update list");
@@ -374,11 +400,40 @@ namespace
 			}
 			check(!SwitchCore::importKeys(kart).isEmpty(), "Switch rejects a game as a key file");
 			check(!SwitchCore::importFirmware(root.filePath("games")).isEmpty(), "Switch rejects firmware folder without NCAs");
+			{
+				const QString core = SwitchCore::dataDir();
+				const QString registered = core + "nand/system/Contents/registered/";
+				QDir().mkpath(registered);
+				QFile oldFirmware(registered + "old.nca");
+				check(oldFirmware.open(QIODevice::WriteOnly) && oldFirmware.write("old firmware") == 12, "firmware preservation fixture");
+				oldFirmware.close();
+				QFile version(core + "firmware-version.txt");
+				check(version.open(QIODevice::WriteOnly) && version.write("1.0.0") == 5, "firmware version preservation fixture");
+				version.close();
+				QString error;
+				SwitchCore::installConsoleFiles({{"firmware", root.filePath("games")}, {"version", "2.0.0"}, {"master", -1}}, &error);
+				check(!error.isEmpty() && oldFirmware.open(QIODevice::ReadOnly) && oldFirmware.readAll() == "old firmware" &&
+				      version.open(QIODevice::ReadOnly) && version.readAll() == "1.0.0", "failed firmware import preserves installed files and version");
+				oldFirmware.close();
+				version.close();
+				write("new-firmware/new.nca", "new firmware");
+				error.clear();
+				SwitchCore::installConsoleFiles({{"firmware", root.filePath("games/new-firmware")}, {"version", "2.0.0"}, {"master", -1}}, &error);
+				check(error.isEmpty() && !QFileInfo::exists(registered + "old.nca") && QFileInfo::exists(registered + "new.nca") &&
+				      version.open(QIODevice::ReadOnly) && version.readAll() == "2.0.0", "successful firmware replacement contains only the new version");
+				version.close();
+				QDir(root.filePath("games/new-firmware")).removeRecursively();
+				for (const QString& installedCore : {core, SwitchCore::profileDir() + "data/eglantine/"})
+				{
+					QDir(installedCore + "nand/system/Contents/registered").removeRecursively();
+					QFile::remove(installedCore + "firmware-version.txt");
+				}
+			}
 #ifndef _WIN32
 			{
 				const QByteArray old_core = qgetenv("USCL_SWITCH_CORE");
 				const bool core_set = qEnvironmentVariableIsSet("USCL_SWITCH_CORE");
-				const QString program = write("fake-core", "#!/bin/sh\nprintf '%s\\n' \"$@\"\nprintf 'DATA=%s\\n' \"$XDG_DATA_HOME\"\nprintf 'ONLINE=%s\\n' \"$USCL_ONLINE\"\n");
+				const QString program = write("fake-core", "#!/bin/sh\nprintf '%s\\n' \"$@\"\nprintf 'DATA=%s\\n' \"$XDG_DATA_HOME\"\nprintf 'ONLINE=%s\\n' \"$USCL_ONLINE\"\nprintf 'THEME=%s\\n' \"$USCL_THEME\"\nprintf 'STYLE=%s\\n' \"$USCL_LOADING_STYLE\"\nprintf 'COLORS=%s\\n' \"$USCL_LOADING_COLORS\"\n");
 				QFile::setPermissions(program, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
 				qputenv("USCL_SWITCH_CORE", program.toUtf8());
 				const QString test_keys = write("test-prod.keys", "header_key = " + QByteArray(64, '0') + '\n');
@@ -426,17 +481,77 @@ namespace
 				if (display_set) qputenv("DISPLAY", old_display); else qunsetenv("DISPLAY");
 #endif
 				Launcher launcher;
+				launcher.setLoadingTheme("ps4", "#073ba0", "white", "#79c9ff", "#114ca9");
 				QEventLoop loop;
 				bool completed = false;
 				QObject::connect(&launcher, &Launcher::finished, &loop, [&](bool crashed, const QString& details) {
 					completed = !crashed && details.contains("--multiplayer") && details.contains("TestPlayer@127.0.0.1:24872") &&
-					            details.contains("DATA=" + SwitchCore::profileDir() + "data") && details.contains("ONLINE=") && !details.contains("--no-gui");
+					            details.contains("DATA=" + SwitchCore::profileDir() + "data") && details.contains("ONLINE=") &&
+					            details.contains("THEME=ps4") && details.contains("STYLE=QWidget") && details.contains("COLORS=073ba0,ffffff,79c9ff") && !details.contains("--no-gui");
 					loop.quit();
 				});
 				QTimer::singleShot(3000, &loop, &QEventLoop::quit);
 				check(launcher.startGame(homebrew, "Homebrew", true, "Switch", "TestPlayer"), "Switch core process starts");
 				loop.exec();
-				check(completed, "Switch core process receives isolated profile and room arguments");
+				check(completed && !launcher.running() && !launcher.starting(), "Switch core receives profile, room arguments and loading palette; process state resets");
+				// Other native launch routes use the same child-only theme contract without real emulators.
+				for (const auto& route : {qMakePair(QString("Wii"), QByteArray("USCL_DOLPHIN")),
+				                          qMakePair(QString("3DS"), QByteArray("USCL_AZAHAR")),
+				                          qMakePair(QString("DS"), QByteArray("USCL_MELONDS"))})
+				{
+					const bool set = qEnvironmentVariableIsSet(route.second.constData());
+					const QByteArray old = qgetenv(route.second.constData());
+					qputenv(route.second.constData(), program.toUtf8());
+					Launcher other;
+					other.setLoadingTheme("switch2", "#ebebeb", "#2a2d28", "#39e3d2", "white");
+					QEventLoop route_loop;
+					bool passed = false;
+					QObject::connect(&other, &Launcher::finished, &route_loop, [&](bool crashed, const QString& details) {
+						passed = !crashed && details.contains("THEME=switch2") && details.contains("COLORS=ebebeb,2a2d28,39e3d2");
+						route_loop.quit();
+					});
+					QTimer::singleShot(3000, &route_loop, &QEventLoop::quit);
+					check(other.startEmu("unused", "Fixture", route.first), "native fake core launch");
+					route_loop.exec();
+					check(passed && !other.gameShown(), "native routes receive theme and clear handoff on exit");
+					if (set) qputenv(route.second.constData(), old); else qunsetenv(route.second.constData());
+				}
+				{
+					const bool set = qEnvironmentVariableIsSet("USCL_RPCS3");
+					const QByteArray old = qgetenv("USCL_RPCS3");
+					qputenv("USCL_RPCS3", program.toUtf8());
+					Launcher classic;
+					classic.setLoadingTheme("ps4", "#073ba0", "white", "#79c9ff", "#114ca9");
+					QEventLoop classic_loop;
+					bool passed = false;
+					QObject::connect(&classic, &Launcher::finished, &classic_loop, [&](bool crashed, const QString& details) {
+						passed = !crashed && details.contains("THEME=\nSTYLE=\nCOLORS=");
+						classic_loop.quit();
+					});
+					QTimer::singleShot(3000, &classic_loop, &QEventLoop::quit);
+					check(classic.openClassic(), "classic fake core launch");
+					classic_loop.exec();
+					check(passed && !classic.running(), "classic tools do not receive native loading override");
+					for (const bool stopping : {false, true})
+					{
+						const QString fake = write(stopping ? "fake-stop" : "fake-crash", stopping ? "#!/bin/sh\nread line\n" : "#!/bin/sh\nexit 9\n");
+						QFile::setPermissions(fake, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+						qputenv("USCL_RPCS3", fake.toUtf8());
+						Launcher lifecycle;
+						QEventLoop life_loop;
+						bool finished = false;
+						QObject::connect(&lifecycle, &Launcher::finished, &life_loop, [&](bool crashed, const QString&) {
+							finished = crashed != stopping;
+							life_loop.quit();
+						});
+						QTimer::singleShot(3000, &life_loop, &QEventLoop::quit);
+						check(lifecycle.startGame("unused", "Fixture", false), "lifecycle fake core starts");
+						if (stopping) QTimer::singleShot(50, &lifecycle, &Launcher::stop);
+						life_loop.exec();
+						check(finished && !lifecycle.running() && !lifecycle.gameShown(), "crash/stop clears themed handoff with correct exit status");
+					}
+					if (set) qputenv("USCL_RPCS3", old); else qunsetenv("USCL_RPCS3");
+				}
 				if (core_set) qputenv("USCL_SWITCH_CORE", old_core); else qunsetenv("USCL_SWITCH_CORE");
 			}
 #endif
@@ -555,6 +670,29 @@ int main(int argc, char* argv[])
 		return 0;
 	}
 
+	const bool smoke_test = app.arguments().contains("--qml-smoke-test");
+	std::unique_ptr<QTemporaryDir> smoke_dir;
+	QString smoke_theme = "ps3";
+	if (smoke_test)
+	{
+		// QML smoke tests must never alter a player's preferences or library.
+		smoke_dir = std::make_unique<QTemporaryDir>();
+		if (!smoke_dir->isValid()) return 1;
+		qputenv("XDG_CONFIG_HOME", smoke_dir->path().toUtf8());
+		QSettings::setDefaultFormat(QSettings::IniFormat);
+		QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, smoke_dir->path());
+		const int theme_arg = app.arguments().indexOf("--theme");
+		if (theme_arg >= 0 && theme_arg + 1 < app.arguments().size()) smoke_theme = app.arguments()[theme_arg + 1];
+		QSettings settings;
+		settings.setValue("theme", smoke_theme);
+		settings.setValue("setupDone", true);
+        settings.setValue("librarySort", "titleDescending");
+		settings.setValue("bootScreen", false);
+		settings.setValue("autoUpdate", false);
+		settings.setValue("sounds", false);
+		settings.sync();
+	}
+
 	for (const char* font : {"MaterialDesignIcons.ttf", "NotoSans-Regular.ttf", "NotoSans-Light.ttf", "Roboto-Thin.ttf"})
 		QFontDatabase::addApplicationFont(QString(":/qt/qml/Uscl/fonts/") + font);
 	QGuiApplication::setFont(QFont("Noto Sans"));
@@ -566,6 +704,9 @@ int main(int argc, char* argv[])
 	Online online;
 	Updater updater;
 
+	GameUpdates gameUpdates;
+	Dlc dlc;
+	DiscordParty party;
 	QQmlApplicationEngine engine;
 	engine.rootContext()->setContextProperty("games", &games);
 	engine.rootContext()->setContextProperty("gamepad", &gamepad);
@@ -573,18 +714,249 @@ int main(int argc, char* argv[])
 	engine.rootContext()->setContextProperty("system", &system);
 	engine.rootContext()->setContextProperty("online", &online);
 	engine.rootContext()->setContextProperty("updater", &updater);
-	GameUpdates gameUpdates;
 	engine.rootContext()->setContextProperty("gameUpdates", &gameUpdates);
-	Dlc dlc;
 	engine.rootContext()->setContextProperty("dlc", &dlc);
-	DiscordParty party;
 	engine.rootContext()->setContextProperty("party", &party);
 	engine.rootContext()->setContextProperty("windowed", app.arguments().contains("--windowed"));
-	const bool smoke_test = app.arguments().contains("--qml-smoke-test");
 	engine.rootContext()->setContextProperty("smokeTest", smoke_test);
 	QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
 	engine.loadFromModule("Uscl", "Main");
-	if (smoke_test)
-		QTimer::singleShot(1500, &app, &QCoreApplication::quit);
+	if (smoke_test && !engine.rootObjects().isEmpty())
+	{
+        const QString soundTheme = smoke_theme == "ps3" ? "xmb" : smoke_theme;
+        for (const QString& cue : {"cursor", "category", "select", "back", "cancel", "error", "notify", "startup"})
+        {
+            const QString resource = ":/qt/qml/Uscl/sounds/" + soundTheme + "/" + cue + ".wav";
+            if (!QFile::exists(resource) || system.soundUrl(cue, smoke_theme) != "qrc" + resource)
+            {
+                std::fprintf(stderr, "qml-smoke-test: missing or incorrect themed sound\n");
+                return 1;
+            }
+        }
+        // Isolated smoke profile: test global and per-theme override priority without player files.
+        const QString sounds = GameModel::rpcs3ConfigDir() + "sounds/";
+        QDir().mkpath(sounds + smoke_theme);
+        const QString global = sounds + "cursor.wav", themed = sounds + smoke_theme + "/cursor.wav";
+        QFile globalFile(global), themeFile(themed);
+        if (!globalFile.open(QIODevice::WriteOnly)) return 1;
+        globalFile.close();
+        if (system.soundUrl("cursor", smoke_theme) != QUrl::fromLocalFile(global).toString()) return 1;
+        if (!themeFile.open(QIODevice::WriteOnly)) return 1;
+        themeFile.close();
+        if (system.soundUrl("cursor", smoke_theme) != QUrl::fromLocalFile(themed).toString()) return 1;
+        QFile::remove(global); QFile::remove(themed);
+        if (system.soundUrl("cursor", "unknown") != "qrc:/qt/qml/Uscl/sounds/xmb/cursor.wav" ||
+            !system.soundUrl("../cursor", smoke_theme).isEmpty()) return 1;
+		const QString active = engine.rootObjects().first()->property("activeTheme").toString();
+		if (active != smoke_theme)
+		{
+			std::fprintf(stderr, "qml-smoke-test: requested %s, loaded %s\n", qPrintable(smoke_theme), qPrintable(active));
+			return 1;
+		}
+		auto* root = engine.rootObjects().first();
+		auto* stage = root->findChild<QQuickItem*>("consoleStage");
+		if (!stage) return 1;
+		for (const QSize size : {QSize(1280, 720), QSize(800, 600), QSize(2560, 1080)})
+		{
+			root->setProperty("width", size.width());
+			root->setProperty("height", size.height());
+			QCoreApplication::processEvents();
+			if (stage->x() < -0.1 || stage->y() < -0.1 || stage->width() * stage->scale() > size.width() + 0.1 || stage->height() * stage->scale() > size.height() + 0.1)
+			{
+				std::fprintf(stderr, "qml-smoke-test: clipped stage at %dx%d (root %dx%d, stage %.1f,%.1f %.1fx%.1f scale %.4f)\n", size.width(), size.height(), root->property("width").toInt(), root->property("height").toInt(), stage->x(), stage->y(), stage->width(), stage->height(), stage->scale());
+				return 1;
+			}
+		}
+		root->setProperty("width", 1280);
+		root->setProperty("height", 720);
+		std::fprintf(stderr, "qml-smoke-test: loaded %s\n", qPrintable(active));
+		QTimer::singleShot(800, &app, [root, active, &app] {
+			auto* navigation = root->findChild<QQuickItem*>("homeNavigation");
+			auto* page = root->findChild<QQuickItem*>("settingsPage");
+			auto* options = root->findChild<QQuickItem*>("themeOptions");
+			auto* window = qobject_cast<QQuickWindow*>(root);
+			const auto fail = [&app](const char* reason) {
+				std::fprintf(stderr, "qml-smoke-test: keyboard flow failed: %s\n", reason);
+				app.exit(1);
+			};
+			if (!navigation || !page || !options || !window) { fail("missing control"); return; }
+            const auto soundBindingsOk = [root]() {
+                const QString theme = root->property("activeTheme").toString();
+                const QString folder = theme == "ps3" ? "xmb" : theme;
+                const QStringList ids = {"sCursor", "sCategory", "sSelect", "sBack", "sError", "sNotify", "sStartup"};
+                const QStringList cues = {"cursor", "category", "select", "back", "error", "notify", "startup"};
+                for (int i = 0; i < ids.size(); ++i)
+                {
+                    auto* effect = root->findChild<QObject*>(ids[i]);
+                    if (!effect || effect->property("source").toUrl().toString() !=
+                        "qrc:/qt/qml/Uscl/sounds/" + folder + "/" + cues[i] + ".wav" ||
+                        effect->property("volume").toDouble() != root->property("menuSoundGain").toDouble()) return false;
+                }
+                return true;
+            };
+            if (!soundBindingsOk()) { fail("initial sound palette or volume"); return; }
+            auto* prefs = root->findChild<QObject*>("preferences");
+            if (!prefs) { fail("missing sound preferences"); return; }
+            prefs->setProperty("sounds", true);
+            for (const int volume : {0, 25, 50, 75, 100})
+            {
+                prefs->setProperty("menuVolume", volume);
+                const double expected = (volume / 100.0) * (volume / 100.0);
+                if (root->property("menuSoundGain").toDouble() != expected || !soundBindingsOk())
+                { fail("menu volume adjustment"); return; }
+            }
+            prefs->setProperty("sounds", false);
+            if (root->property("menuSoundGain").toDouble() != 0 || !soundBindingsOk())
+            { fail("menu mute"); return; }
+
+			const auto key = [window](int code) {
+				QKeyEvent press(QEvent::KeyPress, code, Qt::NoModifier);
+				QKeyEvent release(QEvent::KeyRelease, code, Qt::NoModifier);
+				QCoreApplication::sendEvent(window, &press);
+				QCoreApplication::sendEvent(window, &release);
+			};
+            const auto openThemeSettings = [root, navigation, page, &key]() {
+                if (root->property("activeTheme").toString() == "ps3") {
+                    navigation->setProperty("cat", 1);
+                    QMetaObject::invokeMethod(navigation, "setItem", Q_ARG(QVariant, QVariant(5)));
+                } else {
+                    QMetaObject::invokeMethod(root, "openConsoleSection", Q_ARG(QVariant, QVariant("settings")));
+                    page->setProperty("current", 5);
+                }
+                key(Qt::Key_Return);
+                return page->isVisible();
+            };
+            const auto returnHome = [page, &key]() {
+                for (int i = 0; i < 4 && page->isVisible(); ++i) key(Qt::Key_Escape);
+            };
+            // Exercise the real dashboard -> root -> page connections, including empty libraries.
+            auto* dashboard = root->findChild<QQuickItem*>("consoleDashboard");
+            if (!dashboard) { fail("missing console dashboard"); return; }
+            for (const QString section : {QStringLiteral("library"), QStringLiteral("settings"),
+                                          QStringLiteral("controllers"), QStringLiteral("sound"), QStringLiteral("profile")})
+            {
+                if (!QMetaObject::invokeMethod(dashboard, "sectionRequested", Q_ARG(QString, section)) ||
+                    !page->isVisible() || page->property("heading").toString().isEmpty())
+                { fail("dashboard section routing"); return; }
+                key(Qt::Key_Down);
+                key(Qt::Key_Up);
+                returnHome();
+                if (page->isVisible()) { fail("dashboard section back navigation"); return; }
+            }
+            // The previous smoke flow used an empty library. Exercise loaded models and
+            // nested-page restoration through Main's real routing with inert synthetic rows.
+            if (active != "ps3")
+            {
+                QQmlExpression audit(qmlContext(root), root, QStringLiteral(R"JS(
+                    (function() {
+                        var original = cats, originalSort = page.sortMode;
+                        try {
+                            if (originalSort !== "titleDescending") throw new Error("saved library sort not loaded");
+                            page.setSort("library");
+                            var copy = cats.slice(), rows = [];
+                            for (var i=0; i<53; ++i) rows.push({gameId:"UI-AUDIT-"+i, title:"Audit game "+i, console:i%2 ? "PS4":"PS3", disabled:true});
+                            copy[gamesCat] = {id:"games",name:"Games",icon:original[gamesCat].icon,items:rows}; cats = copy;
+                            openConsoleSection("library");
+                            if (!page.modernSoftware || page.displayRows.length !== 53) throw new Error("loaded library model");
+                            page.current = page.gridColumns === 1 ? 51 : 49; page.input("down");
+                            if (page.current !== 52) throw new Error("short final library row");
+                            page.selectFilter(2); page.current = 12;
+                            var selected = page.cur.gameId;
+                            openConsoleSection("sound"); popPage();
+                            if (page.filters[page.filterIndex] !== "PS4" || page.cur.gameId !== selected) throw new Error("library filter/selection restoration");
+                            page.sortRequested();
+                            if (!options.open || options.options.length !== 4) throw new Error("sort menu routing");
+                            options.current = 1; options.input("accept");
+                            if (page.sortMode !== "title" || prefs.librarySort !== "title" || page.cur.gameId !== selected) throw new Error("sort choice persistence/selection");
+                            openConsoleSection("sound"); popPage();
+                            if (page.sortMode !== "title" || page.cur.gameId !== selected) throw new Error("sorted nested return");
+                            return true;
+                        } finally { closePages(); cats = original; page.setSort(originalSort); }
+                    })()
+                )JS"));
+                if (!audit.evaluate().toBool() || audit.hasError())
+                {
+                    if (audit.hasError()) std::fprintf(stderr, "qml-smoke-test: %s\n", qPrintable(audit.error().description()));
+                    fail("loaded library navigation/restoration"); return;
+                }
+            }
+            // Open every settings section through actual key routing. These actions
+            // display menus only; no setting, install, emulator or network action is selected.
+            for (int sectionIndex = 0; sectionIndex < 10; ++sectionIndex)
+            {
+                QMetaObject::invokeMethod(root, "openConsoleSection", Q_ARG(QVariant, QVariant("settings")));
+                page->setProperty("current", sectionIndex);
+                key(Qt::Key_Return);
+                if (!page->isVisible() || page->property("heading").toString().isEmpty())
+                { fail("settings section did not open"); return; }
+                key(Qt::Key_Escape);
+                if (!page->isVisible() || page->property("current").toInt() != sectionIndex)
+                { fail("settings section selection restoration"); return; }
+                returnHome();
+            }
+            if (active != "ps3")
+            {
+                key(Qt::Key_Home);
+                if (!dashboard->property("guideOpen").toBool()) { fail("home button quick menu"); return; }
+                key(Qt::Key_Escape);
+                if (dashboard->property("guideOpen").toBool()) { fail("quick menu back navigation"); return; }
+            }
+            QMetaObject::invokeMethod(root, "togglePin", Q_ARG(QVariant, QVariant("USCL-UI-TEST-PIN")));
+            if (!prefs->property("pinnedGames").toString().contains("USCL-UI-TEST-PIN"))
+            { fail("pin persistence"); return; }
+            QMetaObject::invokeMethod(root, "togglePin", Q_ARG(QVariant, QVariant("USCL-UI-TEST-PIN")));
+            if (prefs->property("pinnedGames").toString() != "[]") { fail("unpin persistence"); return; }
+            if (!openThemeSettings()) { fail("theme settings selection was not applied"); return; }
+			if (!page->isVisible()) { fail("theme page did not open"); return; }
+			key(Qt::Key_Return);
+			if (!options->property("open").toBool()) { fail("theme choices did not open"); return; }
+			const int original_option = options->property("current").toInt();
+			const int direction = original_option == 0 ? Qt::Key_Down : Qt::Key_Up;
+			key(direction);
+			key(Qt::Key_Return); // Switch looks while the theme page is open.
+			if (options->property("open").toBool()) { fail("theme choice did not close"); return; }
+			if (root->property("activeTheme").toString() == active) { fail("theme did not change"); return; }
+            if (!soundBindingsOk()) { fail("sound palette did not follow theme switch"); return; }
+            returnHome();
+            if (page->isVisible()) { fail("back did not return home"); return; }
+            if (!openThemeSettings()) { fail("theme settings could not reopen after changing themes"); return; }
+			key(Qt::Key_Return);
+			if (!options->property("open").toBool()) { fail("theme choices did not reopen"); return; }
+			key(direction == Qt::Key_Up ? Qt::Key_Down : Qt::Key_Up);
+			key(Qt::Key_Return);
+			if (root->property("activeTheme").toString() != active) { fail("original theme was not restored"); return; }
+            returnHome();
+            if (!soundBindingsOk()) { fail("restored sound palette"); return; }
+            // The changelog is a main Settings entry in every theme and must work offline.
+            QMetaObject::invokeMethod(root, "openConsoleSection", Q_ARG(QVariant, QVariant("changelog")));
+            auto* log = root->findChild<QQuickItem*>("mainDialog");
+            if (!log || !log->property("open").toBool() || !log->property("markdown").toBool() ||
+                !log->property("text").toString().contains("# USCL Changelog") ||
+                !log->property("text").toString().contains("## "))
+            { fail("offline changelog did not open"); return; }
+            QTimer::singleShot(100, &app, [log, window, &app] {
+                const auto sendKey = [window](int code) {
+                    QKeyEvent press(QEvent::KeyPress, code, Qt::NoModifier);
+                    QKeyEvent release(QEvent::KeyRelease, code, Qt::NoModifier);
+                    QCoreApplication::sendEvent(window, &press);
+                    QCoreApplication::sendEvent(window, &release);
+                };
+                sendKey(Qt::Key_Down);
+                if (!log->property("scrollable").toBool() || log->property("scrollPosition").toDouble() <= 0)
+                { std::fprintf(stderr, "qml-smoke-test: changelog did not scroll\n"); app.exit(1); return; }
+                sendKey(Qt::Key_Escape);
+                if (log->property("open").toBool())
+                { std::fprintf(stderr, "qml-smoke-test: changelog did not close\n"); app.exit(1); return; }
+                std::fprintf(stderr, "qml-smoke-test: offline changelog passed\n");
+                app.exit(0);
+            });
+			std::fprintf(stderr, "qml-smoke-test: keyboard flow passed\n");
+		});
+		// Finish only after the final asynchronous assertion, not an elapsed-time guess.
+        QTimer::singleShot(10000, &app, [&app] {
+            std::fprintf(stderr, "qml-smoke-test: timed out before completion\n");
+            app.exit(1);
+        });
+	}
 	return app.exec();
 }

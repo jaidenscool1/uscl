@@ -1,7 +1,7 @@
-From 73ce5b4e6164dc9ffc3d153fef4df08702b92f6d Mon Sep 17 00:00:00 2001
+From 8cccaf2888560b73e5dda487e0ba9b9b89cc5f12 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 14:55:07 -0700
-Subject: [PATCH 08/11] USCL: the PS button opens USCL's home screen over a
+Subject: [PATCH 08/14] USCL: the PS button opens USCL's home screen over a
  running game (USCL_SHELL)
 
 The game gets the system menu open/close events like on a PS3 and keeps running; RPCS3 prints USCL:home, and USCL answers hide / show on stdin.
@@ -12,7 +12,7 @@ The game gets the system menu open/close events like on a PS3 and keeps running;
  3 files changed, 70 insertions(+), 1 deletion(-)
 
 diff --git a/rpcs3/Input/pad_thread.cpp b/rpcs3/Input/pad_thread.cpp
-index b76ff5d..dd06c64 100644
+index b76ff5d40..dd06c6436 100644
 --- a/rpcs3/Input/pad_thread.cpp
 +++ b/rpcs3/Input/pad_thread.cpp
 @@ -920,6 +920,25 @@ void pad_thread::open_home_menu()
@@ -54,7 +54,7 @@ index b76ff5d..dd06c64 100644
 +	}
 +}
 diff --git a/rpcs3/Input/pad_thread.h b/rpcs3/Input/pad_thread.h
-index 7ea128d..f8383e5 100644
+index 7ea128db6..f8383e5ac 100644
 --- a/rpcs3/Input/pad_thread.h
 +++ b/rpcs3/Input/pad_thread.h
 @@ -34,6 +34,7 @@ public:
@@ -66,7 +66,7 @@ index 7ea128d..f8383e5 100644
  	std::map<pad_handler, std::shared_ptr<PadHandlerBase>>& get_handlers() { return m_handlers; }
  
 diff --git a/rpcs3/rpcs3qt/gui_application.cpp b/rpcs3/rpcs3qt/gui_application.cpp
-index 03ce0da..0996175 100644
+index 03ce0daa2..099617566 100644
 --- a/rpcs3/rpcs3qt/gui_application.cpp
 +++ b/rpcs3/rpcs3qt/gui_application.cpp
 @@ -24,6 +24,10 @@
