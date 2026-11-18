@@ -1,0 +1,91 @@
+From 8654e88ddfd0b2cd979547f9c81e7fa464a0be0a Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 09:57:06 -0700
+Subject: [PATCH 22/23] nx2: passthrough backend: sole mode without SYNC
+ (program reads after a drain, ASTC worker pool)
+
+Async sole mode (EDEN_NX2_PASSTHROUGH_SOLE=1 without _SYNC) raised Xid 13 Shader Program Header once: the host
+GPU is now the only thing that uploads programs (copies still queued), and a newly bound pixel program was
+read for patching before the copy ran. In sole mode a program first seen or changed is read after the host
+channels drained (they never wait for Eglantine there, so the wait cannot deadlock); for the same reason the
+re-read of macro-parameter entries the GPU may have written (EDEN_NX2_PASSTHROUGH_REREAD) is on by default.
+ASTC transcoding runs on EDEN_NX2_PASSTHROUGH_ASTC_THREADS workers (3): sole mode transcodes every header of
+a pool (MKW ~35k) and one worker left HUD and item textures black in the race.
+
+MKW, async sole mode: boot, menus, race; no Xid; race 14.2 fps (13.8 before the pool), as in SYNC mode.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/nx2_passthrough.cpp | 19 ++++++++++++++-----
+ 1 file changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index 5252bd5ed..276f65250 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -546,7 +546,7 @@ public:
+         if (pool.count == count) return;
+         pool.count = count;
+         pool.full = true;
+-        if (!astc_thread.joinable()) StartAstc();
++        if (astc_threads.empty()) StartAstc();
+     }
+ 
+     /// Entry thread: decoded copies become visible, changed guest headers are translated into the shadow pages.
+@@ -1042,7 +1042,10 @@ private:
+         maps.emplace_back(p, astc_size);
+         astc_cpu = static_cast<u8*>(p);
+         GrowAstc();
+-        astc_thread = std::thread([this] { AstcWorker(); });
++        // EDEN_NX2_PASSTHROUGH_ASTC_THREADS (3): sole mode transcodes every header of a pool (MKW ~35k).
++        const char* t = std::getenv("EDEN_NX2_PASSTHROUGH_ASTC_THREADS");
++        const u32 n = std::clamp<u32>(t != nullptr ? static_cast<u32>(std::strtoul(t, nullptr, 0)) : 3u, 1u, 16u);
++        for (u32 i = 0; i < n; ++i) astc_threads.emplace_back([this] { AstcWorker(); });
+         LOG_INFO(HW_GPU, "Nx2 passthrough: ASTC arena up to {} MiB, {} MiB chunks", astc_size >> 20, ASTC_CHUNK >> 20);
+     }
+ 
+@@ -1086,7 +1089,8 @@ private:
+             astc_stop = true;
+         }
+         astc_cv.notify_all();
+-        if (astc_thread.joinable()) astc_thread.join();
++        for (auto& t : astc_threads) t.join();
++        astc_threads.clear();
+     }
+ 
+     void AstcWorker() {
+@@ -1337,7 +1341,7 @@ private:
+     std::deque<AstcJob> astc_jobs;
+     std::vector<std::pair<Header, std::pair<NvU64, u32>>> astc_done;
+     bool astc_stop = false;
+-    std::thread astc_thread;
++    std::vector<std::thread> astc_threads;
+     u8* astc_cpu = nullptr;
+     NvU64 astc_size = 0;
+     std::atomic<NvU64> astc_used{0};
+@@ -1408,6 +1412,10 @@ public:
+         // Binds run ~20k/s: a program that shares no page with a patched one needs nothing (stages 0-4).
+         if (stage != 5 && !TouchesShadow(va, pr.size != 0 ? pr.size : MAX_PROGRAM)) return false;
+         if (pr.size != 0 && GuestEquals(va, pr.unpatched) && ShadowsIntact(va, pr.size)) return false;
++        // Sole mode: the host GPU may be what uploads the program (a copy still queued): read it once the channels
++        // ran what they were given (they never wait for Eglantine there). Read too early, a patch of the old bytes
++        // raised Xid 13 Shader Program Header in an async run.
++        if (Sole() && live && !Drain()) throw Error("drain before reading a program", 0);
+         std::vector<u8> image(MAX_PROGRAM);
+         image.resize(ReadGuest(va, image));
+         if (image.size() < 0x100) return false;
+@@ -3055,9 +3063,10 @@ void SubmitEntry(s32 channel, size_t to, bool final) {
+             // (bisecting) reads such an entry again once every channel ran what came before it: a CPU wait on
+             // the entry thread, which deadlocked against Eglantine. shortcut: Eglantine's words are used; a
+             // GPU-timeline copy of the parameters is the fix.
++            // Sole mode: on by default (the host never waits for Eglantine, so the drain cannot deadlock).
+             static const bool reread = [] {
+                 const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_REREAD");
+-                return v != nullptr && v[0] == '1';
++                return v != nullptr ? v[0] == '1' : Sole();
+             }();
+             std::span<const u32> words{reinterpret_cast<const u32*>(commands.data()), commands.size()};
+             std::vector<u32> fresh;
+-- 
+2.56.0
+
