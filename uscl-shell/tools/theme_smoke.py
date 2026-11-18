@@ -22,6 +22,7 @@ def main():
         ok = run.returncode == 0 and not errors and "qml-smoke-test: loaded " + theme in log and "keyboard flow passed" in log and "offline changelog passed" in log
         print(f"{theme}: {'PASS' if ok else 'FAIL'}")
         if not ok:
+            print(f"exit code: {run.returncode}")
             print(log)
             failed = True
     return int(failed)

@@ -918,10 +918,15 @@ int main(int argc, char* argv[])
                 if (log->property("open").toBool())
                 { std::fprintf(stderr, "qml-smoke-test: changelog did not close\n"); app.exit(1); return; }
                 std::fprintf(stderr, "qml-smoke-test: offline changelog passed\n");
+                app.exit(0);
             });
 			std::fprintf(stderr, "qml-smoke-test: keyboard flow passed\n");
 		});
-		QTimer::singleShot(1500, &app, &QCoreApplication::quit);
+		// Finish only after the final asynchronous assertion, not an elapsed-time guess.
+        QTimer::singleShot(10000, &app, [&app] {
+            std::fprintf(stderr, "qml-smoke-test: timed out before completion\n");
+            app.exit(1);
+        });
 	}
 	return app.exec();
 }
