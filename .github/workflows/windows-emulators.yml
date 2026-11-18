@@ -193,7 +193,5 @@ jobs:
         run: |
           (cd out && 7z a -tzip "../$KEY.zip" . >/dev/null)
           gh release upload ci-cache -R $GITHUB_REPOSITORY "$KEY.zip" --clobber
-          # only the current build of each emulator is worth keeping
-          for old in $(gh release view ci-cache -R $GITHUB_REPOSITORY --json assets -q '.assets[].name' | grep "^emu-$EMU-"); do
-            [ "$old" = "$KEY.zip" ] || gh release delete-asset ci-cache "$old" -R $GITHUB_REPOSITORY -y
-          done
+          # Retain other content-addressed builds: another branch/tag may still need them.
+          # Pruning here races concurrent release builds and can remove their required inputs.
