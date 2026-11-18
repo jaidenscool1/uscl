@@ -71,3 +71,9 @@ core development changes. Linux native loading-color patches are not included in
 those retained cores; the shell's themed launch screen is included. Windows builds
 the release patch manifest through its installer workflow. Neither platform includes
 the unmerged Switch 2 work in PR #18 or the native PS4 preview in PR #19.
+
+The added Linux room server was built in a separate build directory against clean
+Eden revision `96b55457d499e63853d6f8b6a9476e89fabcc4b9` (pinned base plus patches
+0001–0012). Patch 0013 changes only the graphical loading screen and does not affect
+the standalone room. Its help command and private loopback UDP startup passed on
+Linux; this does not establish a new two-PC game-session result.
