@@ -72,6 +72,9 @@ def main():
         s0, c0 = status(), proc_cpu_seconds(pid)
         seq((["A"], 300))
         s1, c1 = status(), proc_cpu_seconds(pid)
+        if os.environ.get("BENCH_CHUNK_SHOTS"):  # a frame per chunk: the countdown is in one of the first
+            subprocess.run([sys.executable, "-I", DBG, "--call", json.dumps({"method": "screenshot", "params": {}}),
+                            "--out", shot.replace(".png", f"-c{len(samples)}.png")], capture_output=True, timeout=120)
         dt = s1["uptime_s"] - s0["uptime_s"]
         util, vram = gpu()
         samples.append({"fps": round((s1["presents"] - s0["presents"]) / dt, 1), "cpu_cores": round((c1 - c0) / dt, 2),

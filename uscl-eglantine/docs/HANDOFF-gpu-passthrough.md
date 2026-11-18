@@ -4,7 +4,7 @@ Goal and plan: `PROMPT-gpu-passthrough-continue.md`. Hand the game's own NVIDIA 
 shaders to the host RTX 4060 (AD107) through the RM ioctls, instead of translating every draw to Vulkan.
 Host: driver 615.78.08 (open kernel module), Arch Linux.
 
-## Status (2026-11-18, thirteenth pass)
+## Status (2026-11-18, fourteenth pass)
 
 | Gate / phase | Result |
 |---|---|
@@ -14,7 +14,7 @@ Host: driver 615.78.08 (open kernel module), Arch Linux.
 | Gate 3 (shader compatibility) | **Pass (decode level)**; guest compute SASS has started to **execute** on the RTX 4060 (Phase 1), no per-instruction failure seen yet |
 | Phase 1 (capture + replay one frame) | **Road and seams localized, new capture** (eleventh pass): mkw19's near road / mid band / pylon / beam are MKW's virtual-texture pages the capture lacks (8192x8192x68 ASTC arrays: Eglantine keeps written layers only in host-only SparseLayers images; not a passthrough bug); the dashed seams come from `PT_HELPER_LOADS` zeroing per-instance UV loads in helper lanes (fix designed: quad-neighbour value); new capture `mkw21` (race-start countdown, pack in view) with per-pass HDR snapshots 300-7900: 19.9 dB, 0.93x, trees only in ours from entry 6784 (a macro-40 draw split across GPFIFO entries; which side is right is open). Before: **Shadow mask fixed, open course checked** (tenth pass): the race-start slabs were the cached Z16 atlas read in the depth GOB arrangement (guest depth PTE kinds; the capture holds Eglantine's colour-arrangement download): depth twins in `ptcap.py build` take `mkw19`'s shadow mask from 17.8 to **28.0 dB** vs Eglantine; `SET_SRGB_WRITE` forced to 0; the 3D macro trace is paired by call order (21 pixel programs the helper-lane patch had missed). `mkw19` 17.6 dB, 1.015x; open-course `mkw20` **22.9 dB world, 0.986x**, dirt 30.6 dB. Left, localized to entries: mkw19 near road / pylon / top beam / Mario's shadow; mkw20 post-chain wedges and seams (entry 2926). Before: **Exit check done, helper-lane fix** (ninth pass, 2026-11-17): the `PT_HELPER_LOADS` trampoline zeroed global loads in *covered* pixels (PIXLD.COVMASK's predicate is no helper test); with `SR_THREAD_KILL` the race-start frames replay lit: `mkw17` 9.6 -> **13.9 dB** (brightness 0.38 -> 0.89x), `mkw19` **17.6 dB** (1.03x), no Xid. Left: the shadow mask (cached shadow atlas tiles), gantry darker, foliage. Earlier in the pass: the replay matches Eglantine wherever the capture holds the frame's inputs (`mkw16`: 22.6 dB, HDR main view 1.00-1.05x of Eglantine's per-pass snapshots); the remaining mismatches are inputs Eglantine keeps only in host images it never writes back to guest memory (superseded: the zero virtual-texture samples were the trampoline bug, see "Ninth pass, continued"). Phase 2 plan written (see "Phase 2 plan"). Before: **Close to Eglantine** (eighth pass, 2026-11-17): capture `mkw16` replays to Eglantine's own render within **PSNR 22.6 dB, mean abs 9.1, brightness ratio 1.04**, HUD identical; left: Toad heads dark, terrain dirt paler, foliage differs (see "mkw16" below). Before: **Textured racing frame, exact reference**: capture `mkw15` replays with every sampled ASTC texture decoded (`PT_ASTC=decode`) to the right image: arch, signs, track, karts, HUD all match Eglantine's own render of the same frame (taken from the capture's end dump), aligned to the pixel; lit surfaces are 0.33-0.65x as bright as the reference (sky 1.00x): a missing light contribution, the next Phase 1 item. Before: **Lit racing frame** (seventh pass, 2026-11-17): capture `mkw14` (probe 0003 now flushes GPU-written images) replays to the lit scene; only ASTC (white stand-in) is left between it and the reference. Before: **Whole racing frame replays** (sixth pass, 2026-11-17): all 7757 entries of capture `mkw13` (racing, 3 channels) run on the RTX 4060 with no Xid, **~36 ms of GPU wait in total** (slowest entry 0.7 ms) with guest memory in VRAM. The fix was emulator-wide: Ada does not perform global loads in pixel-shader helper lanes, so `PT_HELPER_LOADS=1` routes every LDG of every pixel program through a trampoline that zeroes the destination in helper lanes. Output not yet right: the HUD layer matches the reference, the G-buffer shows the right scene (karts, track), but the lit scene composited under the HUD is black (next: find the lighting/composite passes). Earlier: the intro-flyover frame `mkw10` replays to a recognisable course image (third pass) |
 | New: texture formats | **ASTC done for replay** (eighth pass; Phase 2: transcode on upload to BC7/BC3, see "Phase 2 plan"): the frame's 1455 sampled ASTC textures are decoded with Eglantine's own decoder to A8B8G8R8 in a host arena and their headers repointed. 28% of MKW's texture headers are ASTC (8x8, 6x6, 4x4, 5x5); the RTX 4060 has no ASTC sampling. Phase 2 needs the same on upload, and a smaller target (BC1/BC3) for VRAM |
-| Phase 2 | **Sole executor works, async** (thirteenth pass, continued; textures in video memory and fresher copies: `patches/0024`-`0025`; GPU thread woken on host progress: `patches/0026`, race 29-34 fps; textures at a course's start arrive late): `EDEN_NX2_PASSTHROUGH_SOLE=1` (`patches/0021`-`0022`): Eglantine parses, the host GPU alone executes (draws, copies, queries, releases; syncpoints after the host's fences; acquires split the submission); MKW boots, menus and races in async mode with complete frames, no deadlock, no Xid. **Phase 3 started** (`patches/0023`): GPU-only regions in video memory: race **26.3-26.8 fps vs Vulkan 54.6-54.8** (interleaved pairs; 14.2 with everything in system memory). Next: textures in video memory (ASTC arena 4.3 GiB and VT copies 2.3 GiB are system memory the GPU samples over PCIe), helper-lane seams, one-time captures before their textures are transcoded. Before: **Virtual textures on the host GPU** (thirteenth pass): MKW's 8192^2 x 84 ASTC arrays (and its 8192^2 images) transcoded per 64x64-block cell into sparse BC3 copies (`patches/0020`); the race frame's track, canyon and buildings are textured (`bench/pt-live-vs-vulkan-race-vt.png`), menu vs Vulkan 26.1 dB, 0.998x; ~2.3 GiB of BC3 mapped in a race; no Xid in 8 runs. Open: dual-executor deadlocks on zeroed NVN semaphores (2 of 8 runs), SYNC racing drops to ~3 fps after ~45 s. Next: sole executor (plan below), then VRAM residency. Before: **The guest's own words run** (twelfth pass): `EDEN_NX2_PASSTHROUGH_WORDS=1` (fork e5091605d = `patches/0017`); MKW boots to the menu and race on the RTX 4060; menu vs Vulkan **20.7 dB, 1.01x** with sampled ASTC transcoded to BC1/BC3 (`patches/0018`); race frame matches except the virtual-texture track/buildings (black, `patches/0019`); `SYNC=1` correct (~7 fps), async stable for ~10M entries without Xid but races Eglantine's memory writes: next: virtual-texture (sparse ASTC) transcoding, host-as-sole-executor, VRAM residency. Before: **Steps 2b-3 done** (eleventh pass, continued): every guest channel on its own host channel with async submission (-1% racing fps next to Vulkan with doorbell batching), pixel programs patched for helper lanes on bind (C++ port byte-identical to ptcap on 210 programs; 237/237 patched programs read back right at their guest VAs). Fork 043f82389 = `patches/0016`. Next: the guest's own words (QMD dependence, inline-QMD macros, texture header pool, host-class rewrites). Before: **Step 2 done** (eleventh pass): guest VA space mirrored inside Eglantine (sparse RM range, guest memory as OS descriptors at the guest's VAs and kinds), checked live: 128556 entries read back at their guest VA by the host copy engine, 0 differ; hole punching off under passthrough (pinned pages went stale). Fork 65397093a = `patches/0015`. Next: submit the guest's own words (async), then steps 3-5. Before: **Step 1 done** (tenth pass): an RM channel follows guest channel 1 inside Eglantine (`EDEN_NX2_PASSTHROUGH=1`, fork `uscl-passthrough-ship` / `patches/0014`), 15.45M serialized submissions in an MKW race, no Xid; the per-entry wait costs 37-43 -> 13-21 fps, so later steps submit asynchronously. Next: step 2 (guest VA space) |
+| Phase 2 | **Textures ready at the race start** (fourteenth pass, `patches/0027`-`0028`): sole mode decodes ASTC on the otherwise idle Vulkan device (37k textures by the menus, median error 1.97 vs the CPU decoder) and sweeps virtual textures by raw chunk hashes (~1 s a pass): every racer, Lakitu, the HUD and the ground are textured at the race start (`bench/pt-sole-gpuastc-start.png`). Racing itself is **~12-13 fps vs Vulkan ~36** (earlier 29-34 fps figures were mostly the course intro); profiled: no busy stage (front 58%, host GPU 51-60%), a serial chain; next: measure it off-CPU. Before: **Sole executor works, async** (thirteenth pass, continued; textures in video memory and fresher copies: `patches/0024`-`0025`; GPU thread woken on host progress: `patches/0026`, race 29-34 fps; textures at a course's start arrive late): `EDEN_NX2_PASSTHROUGH_SOLE=1` (`patches/0021`-`0022`): Eglantine parses, the host GPU alone executes (draws, copies, queries, releases; syncpoints after the host's fences; acquires split the submission); MKW boots, menus and races in async mode with complete frames, no deadlock, no Xid. **Phase 3 started** (`patches/0023`): GPU-only regions in video memory: race **26.3-26.8 fps vs Vulkan 54.6-54.8** (interleaved pairs; 14.2 with everything in system memory). Next: textures in video memory (ASTC arena 4.3 GiB and VT copies 2.3 GiB are system memory the GPU samples over PCIe), helper-lane seams, one-time captures before their textures are transcoded. Before: **Virtual textures on the host GPU** (thirteenth pass): MKW's 8192^2 x 84 ASTC arrays (and its 8192^2 images) transcoded per 64x64-block cell into sparse BC3 copies (`patches/0020`); the race frame's track, canyon and buildings are textured (`bench/pt-live-vs-vulkan-race-vt.png`), menu vs Vulkan 26.1 dB, 0.998x; ~2.3 GiB of BC3 mapped in a race; no Xid in 8 runs. Open: dual-executor deadlocks on zeroed NVN semaphores (2 of 8 runs), SYNC racing drops to ~3 fps after ~45 s. Next: sole executor (plan below), then VRAM residency. Before: **The guest's own words run** (twelfth pass): `EDEN_NX2_PASSTHROUGH_WORDS=1` (fork e5091605d = `patches/0017`); MKW boots to the menu and race on the RTX 4060; menu vs Vulkan **20.7 dB, 1.01x** with sampled ASTC transcoded to BC1/BC3 (`patches/0018`); race frame matches except the virtual-texture track/buildings (black, `patches/0019`); `SYNC=1` correct (~7 fps), async stable for ~10M entries without Xid but races Eglantine's memory writes: next: virtual-texture (sparse ASTC) transcoding, host-as-sole-executor, VRAM residency. Before: **Steps 2b-3 done** (eleventh pass, continued): every guest channel on its own host channel with async submission (-1% racing fps next to Vulkan with doorbell batching), pixel programs patched for helper lanes on bind (C++ port byte-identical to ptcap on 210 programs; 237/237 patched programs read back right at their guest VAs). Fork 043f82389 = `patches/0016`. Next: the guest's own words (QMD dependence, inline-QMD macros, texture header pool, host-class rewrites). Before: **Step 2 done** (eleventh pass): guest VA space mirrored inside Eglantine (sparse RM range, guest memory as OS descriptors at the guest's VAs and kinds), checked live: 128556 entries read back at their guest VA by the host copy engine, 0 differ; hole punching off under passthrough (pinned pages went stale). Fork 65397093a = `patches/0015`. Next: submit the guest's own words (async), then steps 3-5. Before: **Step 1 done** (tenth pass): an RM channel follows guest channel 1 inside Eglantine (`EDEN_NX2_PASSTHROUGH=1`, fork `uscl-passthrough-ship` / `patches/0014`), 15.45M serialized submissions in an MKW race, no Xid; the per-entry wait costs 37-43 -> 13-21 fps, so later steps submit asynchronously. Next: step 2 (guest VA space) |
 | Gate 4 (memory) | **Pass** (eleventh pass): sparse range + OS descriptors, no size limit up to 12 GiB, ~210 ms/GiB to pin, every MKW kind maps, live readback check 0 differences |
 | Gates 5-6 | not started |
 
@@ -1295,3 +1295,86 @@ The race's last chunk is ~13-19 fps in every passthrough run (Vulkan ~35 there).
    bookkeeping) still reads them early. No symptom seen in MKW yet.
 6. The dual-executor deadlocks and the Xid 31 (null headers at 0) were not seen in sole mode (13 runs); the dual mode
    stays as it was.
+
+## Fourteenth pass (2026-11-18): ASTC on the Vulkan device, faster VT sweep, the race profiled
+Fork probe `uscl-passthrough` **49a6d197b** (5d700c68f, 49a6d197b), ship `uscl-passthrough-ship` **091f9f488**
+(92b7b813f, 091f9f488) = `patches/0027`-`0028` (`git am` 0001-0028 onto 30181ba05: identical tree 9f0ab31b; ship's
+changed files syntax-checked from the ship tree with and without `NX2_PASSTHROUGH`). No Xid in any run of the pass;
+`nvrm_probe clear` OK after each.
+
+**`patches/0027`: ASTC decoded on the Vulkan device (sole mode).** Measured first (thirteenth pass, prof1): six CPU
+workers did ~20-50 large textures/s, 60% of it Eglantine's software ASTC decoder, most of the rest stb BC encode.
+Eglantine's Vulkan texture cache already has a GPU transcode (`astc_decoder.comp` + `bc_encoder.comp`,
+`TextureCacheRuntime::TranscodeAstcToBcn`) and the Vulkan device is idle in sole mode, so that was reused rather
+than writing a new path (RM-side shaders would need SASS; CUDA/NVRTC is not installed):
+- `TranscodeAstcToBcn` split into `EncodeAstcAsBcn` (decode + encode into a buffer) and the image upload;
+  `TranscodeAstcForPassthrough` encodes into a host-visible (Download, deferred) buffer and
+  `PollPassthroughTranscodes` hands finished blocks out, one submission per batch. `RecycleTranscodes` also runs
+  there (decode images are freed between presents).
+- `RasterizerVulkan` registers it in sole mode (`Nx2Passthrough::SetGpuAstc`). Flow: a worker checks a texture's
+  opacity on the guest bytes (`ASTC::IsOpaque`: block order does not matter) -> `astc_gpu` queue -> the entry thread
+  (`OnEntryDone`, **outside the state lock**: the back takes it in `SoleSyncpoint`, and a full split ring would make
+  the front wait for the back) defers a batch to the GPU back thread (`GpuSplit::DeferFunction`, the scheduler's
+  owner), at most `EDEN_NX2_PASSTHROUGH_GPU_ASTC_MB` (512) of decode images in flight -> blocks back through
+  `gpu_done` -> a worker swizzles them into the arena (`Place`, shared with the CPU path).
+- Two bugs found on the way, both fixed in the patch:
+  1. **SIGSEGV in `vkDestroyImageView`** (ga1, ga2; core truncated, so dynarmic's unhandled-SIGSEGV path was made to
+     print `[rsp]` symbolized, probe only): in sole mode a present runs on the GPU **front** (a guest syncpoint
+     action calls `Composite`, which calls `TickFrame`) while the back records these batches: two threads recycling
+     the same decode images. `RendererVulkan::Composite` takes `Nx2Passthrough::VulkanMutex()` in sole mode, and so do
+     the batches. (Pre-existing hazard, harmless while sole mode recorded nothing on the back.)
+  2. **Every other 8x8 block black** (ga3-ga4: dithered HUD, minimap, item box): `ImageInfo(tic)` leaves
+     `native_tiling` false, the texture cache sets it from `MemoryManager::UsesNativeTiling()`; the GPU decoder read
+     the guest bytes in the wrong GOB arrangement. Found with `EDEN_NX2_PASSTHROUGH_GPU_ASTC_CHECK=<n>` (first n
+     textures: level 0 decoded by the CPU vs the GPU's blocks decoded back): median error 20 -> **1.97** per channel
+     (p90 4.6, worst 10.4: BC1 quantization). The image pairs showed consecutive blocks at every other position.
+- `EDEN_NX2_PASSTHROUGH_GPU_ASTC=0` keeps the CPU path.
+
+**`patches/0028`: VT sweep by raw chunk hashes.** A swept level's raw guest bytes are hashed per 64 KiB first; only
+cells over changed chunks (`VtChunkCells`, the inverse of `VtRectRanges`) are unswizzled. Paced by bytes,
+`EDEN_NX2_PASSTHROUGH_VT_SWEEP_MBS` (2048: MKW's ~2 GiB of arrays about once a second; was ~10 s a pass).
+Measured, ga6: 69.7k level sweeps, 2.1k with changed chunks, VT workers 154 s busy (vtc2: 238 s).
+
+| Run | Result |
+|---|---|
+| ga1 / ga2 | GPU ASTC works (26k textures decoded on the Vulkan device by 41 s into boot, 0 failed); SIGSEGV ~5 s into the race (bug 1) |
+| ga3 / ga4 | no crash; race frame complete but dithered (bug 2); 23.2 / 25.9 fps (ga4: one submission per decode, same picture: batching is not the cause) |
+| cpu1 | same build, `GPU_ASTC=0`: HUD and minimap clean, so the dithering follows the GPU path; countdown frame: black DK, Lakitu, Mario's head, blocky ground (the old readiness gap) |
+| chk1 / chk2 | check mode: median error 20, worst shapes 64x9..64x16 and 12x12 (ASTC 8x8); image dumps: blocks at every other 8-px column |
+| ga5 | `native_tiling` fixed: median error 1.97; race frames clean (`bench-ga5-end.png`) |
+| ga6 | **race start fully textured** (`bench/pt-sole-gpuastc-start.png`: left st2's countdown with the CPU path, right ga6's race start: every racer, Lakitu, arch, ground, HUD); chunk shots `bench-ga6-c0..c5.png` (`BENCH_CHUNK_SHOTS=1`, new in bench.py); 25.0 fps mean (35.2, 36.8, 29.5, 23.0, **12.5, 13.1**) |
+| lat1 | poller period 20 us (was 200) + doorbells unbatched (staleness 0, was 250 us): racing chunks 12.0 / 12.6, **no gain**; reverted |
+| prof3 / prof3b | `EDEN_NX2_GPU_PROFILE=1` + sole mode: **wedged at ~50-55 s both times** (the front parses an entry one word shifted against memory, `DumpCurrentEntry`, then floods "Special puller engine method 1"); never seen without the profile flag (ga1-ga6, lat1, cs1, cpu1, chk1-2). Not chased |
+
+**Reading the fps numbers (correction):** in sole mode bench.py's first screenshot is still a menu, and the first four
+300-frame chunks are the course intro (flyover, close-ups); **racing is chunks 4-5: ~12-13 fps** in every passthrough
+run of this pass (and cpu1's last chunk 14.4; Vulkan's racing chunk vkA 35.8). The "29-34 fps" of earlier passes
+was mostly intro. The real gap is ~13 vs ~36 fps while racing.
+
+**Profile of the race (perf, ga6, 54 s window, 99 Hz, DWARF stacks):** busy share of one core: GPU front **58%**,
+GPUBack 46% (almost all spinning in `GpuSplit::BackLoop` waiting for work), the game's six CPU threads 23-28% each,
+VT workers ~5% each, ASTC workers ~0 (all decoded by then); host GPU utilisation 51-60%. No hotspot in the front
+(`Host::Drain` 1.9%, `GpuSplit::Publish` 1.6%, `FrontWrite` 1.5%, swizzle 1.4%). Backend counters while racing: ~980
+acquires left to Eglantine/s, ~850 macro-parameter re-reads/s (each a `Host::Drain` of every channel, `_REREAD`),
+4.1 M words/s, ~190 syncpoint callbacks/s; but the drains total only 6.8 s in the run (~28 us each: the GPU is
+nearly empty when drained), and the poller / doorbell latency is not it (lat1). Front, GPU and the game's threads
+are all part idle: the frame is a serial chain, not a busy stage. Off-CPU time could not be profiled:
+`perf_event_paranoid` 2 allows user-space samples only (context-switch samples come out empty), no tracepoints,
+and `EDEN_NX2_GPU_PROFILE` wedges sole mode (above). Its one report before the wedge (menus, 46 s): front per
+second 195 ms pending sleep, 501 ms resume pending, 140 ms idle, 100 ms push, 50 ms split drain.
+
+### Next (after the fourteenth pass)
+1. **Racing speed (~13 vs Vulkan ~36 fps):** find the serial chain. Options: (a) let perf see the kernel
+   (`sudo sysctl kernel.perf_event_paranoid=1` for a session: then `perf record -e sched:sched_switch` or
+   `-e context-switches` with kernel stacks shows where the front, the game's threads and the poller block); (b)
+   timestamps in the backend per acquire (host release passed -> front resumed -> words submitted -> doorbell) and
+   per frame (game's present -> host done); (c) the `EDEN_NX2_GPU_PROFILE` wedge, so its zone report works in sole
+   mode. Candidates once measured: the 1 ms pending-sleep granularity outside host progress, macro-parameter
+   entries (a GPU-timeline fetch of the parameters instead of `Drain`: the guest's own GP-entry sync, but mind Xid
+   13 MISSING_MACRO_DATA), and textures sampled from system memory (below).
+2. **Video memory placement:** with every texture decoded the arena is ~5.5-6.9 GiB but only 2 GiB has video memory
+   twins, first come first served: boot and menu textures got them, a course's textures are sampled over PCIe. Per
+   texture twins with eviction of textures no pool header points at any more (the arena is a bump allocator now).
+   VRAM is at ~7.2 GiB of 8 in a race (the Vulkan device's decode images and staging included).
+3. Seams (helper-lane loads), the kart shadow square, one-time captures (unchanged from the thirteenth pass).
+4. A black-and-white sprite flies over the course in some race frames (ga5 end shot, upper left): not looked at.
