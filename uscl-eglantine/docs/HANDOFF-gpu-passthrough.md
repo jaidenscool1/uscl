@@ -802,6 +802,28 @@ reference the tenth pass lacked), composite and swapchain window. Replay: all 84
 
 **5. Clipmaps / VT pages: not done** (Phase 2 does not need it; the readback design is under item 2).
 
+## Twelfth pass (2026-11-17): the guest's own words, first live runs
+Fork `uscl-passthrough-ship` WIP commit on 043f82389 (not yet a patch file; the `ptcap` worktree is on the
+ship branch: switch back to `uscl-passthrough` and rebuild before any capture). `EDEN_NX2_PASSTHROUGH_WORDS=1`.
+- **Measured (mkw21):** no plain QMD launch from memory; every inline QMD (139) has DEPENDENT_QMD0 decrement;
+  NVN's barrier QMDs are scheduled from memory (PCAS2 3) with counter 2, raised by 0xC, lowered by 7 and by
+  inline QMDs; 19 report releases to VA 0 (dropped live). No macro emits SET_SRGB_WRITE.
+- **Raw ASTC headers on Ada: sample black, no fault** (mkw21 replay, 37590 raw headers, no Xid, `replay-astcraw/`).
+  The header pool shadow is a quality item (transcode, plan step 6), not a safety gate. Z16: covered by the
+  mirror's guest kinds.
+- Translator (Words in nx2_passthrough.cpp): decode + re-encode (encoder self-test), host-class rewrites,
+  local memory per host channel (72 MiB), compute macro calls replaced by the front's traces (paired per channel;
+  `OnStep` fixes calls resumed after an acquire: 30k unpaired -> 0), 470M words out per session translate-only.
+- **Runs** (MKW, no Xid in any): markers / translate-only boot and race (~53 fps). Async words: stall at boot
+  (our GPU runs behind Eglantine: its writes land after the guest moved on). `SYNC=1`: boots to ~205 presents,
+  then Eglantine deadlocks on two semaphores released by NVN barrier QMDs. Bisect (`DROP`): compute launches.
+  Cause found with `WATCH`: launching a barrier QMD at schedule time releases the payload NVN patches *later*
+  (0 instead of 4..0xf). Fix written (dependence tracked in stream order with Eglantine's native_qmd.h rules,
+  barrier copied on the GPU timeline by the copy engine + semaphore AND, launched when it reaches 0):
+  **built, not yet run.**
+- Next: run `ptS` (SYNC) with the scheduler; then the async hazard (plan step 5: guest fences gate on the host
+  GPU); `DROP=4` run froze the emulator later (~262 presents), not yet looked at.
+
 ## Phase 2, step 1: channels and submission (2026-11-17)
 **Result:** the RM channel runs inside Eglantine. Fork branch `uscl-passthrough-ship` (`5e536b6a4`, on
 `uscl-gpurw-ship`), USCL `patches/0014`. The same commit sits on top of the probe as `uscl-passthrough`
