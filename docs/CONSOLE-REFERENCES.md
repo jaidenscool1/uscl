@@ -74,3 +74,13 @@ stops while hidden, while quick access is open and when motion is disabled. The 
 60 stage-pixels/second travel and 1000 ms ending pause are conservative implementation choices, not
 frame-exact measurements. Regression tests check timing order, reset/visibility behavior, card bounds
 and empty-library actions on software and OpenGL renderers.
+
+## Library sorting references
+
+[Nintendo's Switch 2 sorting instructions](https://en-americas-support.nintendo.com/app/answers/detail/a_id/68326)
+show separate filter and reorder controls, including Title, and state that library sorting leaves HOME
+icons unchanged. [Sony's library support guide](https://www.playstation.com/en-sg/support/games/hide-games-playstation-library/)
+identifies a Filter and Sort control. USCL now provides a working sort chooser across modern libraries.
+Its title and console orders use available USCL data; recent play, play time and publisher orders are
+not shown because those fields are not tracked. This improves the workflow without claiming identical
+platform services, metadata or library geometry.

@@ -657,6 +657,7 @@ int main(int argc, char* argv[])
 		QSettings settings;
 		settings.setValue("theme", smoke_theme);
 		settings.setValue("setupDone", true);
+        settings.setValue("librarySort", "titleDescending");
 		settings.setValue("bootScreen", false);
 		settings.setValue("autoUpdate", false);
 		settings.setValue("sounds", false);
@@ -819,8 +820,10 @@ int main(int argc, char* argv[])
             {
                 QQmlExpression audit(qmlContext(root), root, QStringLiteral(R"JS(
                     (function() {
-                        var original = cats;
+                        var original = cats, originalSort = page.sortMode;
                         try {
+                            if (originalSort !== "titleDescending") throw new Error("saved library sort not loaded");
+                            page.setSort("library");
                             var copy = cats.slice(), rows = [];
                             for (var i=0; i<53; ++i) rows.push({gameId:"UI-AUDIT-"+i, title:"Audit game "+i, console:i%2 ? "PS4":"PS3", disabled:true});
                             copy[gamesCat] = {id:"games",name:"Games",icon:original[gamesCat].icon,items:rows}; cats = copy;
@@ -832,8 +835,14 @@ int main(int argc, char* argv[])
                             var selected = page.cur.gameId;
                             openConsoleSection("sound"); popPage();
                             if (page.filters[page.filterIndex] !== "PS4" || page.cur.gameId !== selected) throw new Error("library filter/selection restoration");
+                            page.sortRequested();
+                            if (!options.open || options.options.length !== 4) throw new Error("sort menu routing");
+                            options.current = 1; options.input("accept");
+                            if (page.sortMode !== "title" || prefs.librarySort !== "title" || page.cur.gameId !== selected) throw new Error("sort choice persistence/selection");
+                            openConsoleSection("sound"); popPage();
+                            if (page.sortMode !== "title" || page.cur.gameId !== selected) throw new Error("sorted nested return");
                             return true;
-                        } finally { closePages(); cats = original; }
+                        } finally { closePages(); cats = original; page.setSort(originalSort); }
                     })()
                 )JS"));
                 if (!audit.evaluate().toBool() || audit.hasError())

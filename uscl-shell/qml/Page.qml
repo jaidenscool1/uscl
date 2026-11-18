@@ -8,6 +8,26 @@ Item {
     property string theme: "ps3"
     property string heading: ""
     property string presentation: ""
+    property string sortMode: "library"
+    property bool sortFocus: false
+    readonly property var sortChoices: [{key:"library",title:qsTr("Library Order")},{key:"title",title:qsTr("Title: A–Z")},{key:"titleDescending",title:qsTr("Title: Z–A")},{key:"console",title:qsTr("Console, then Title")}]
+    readonly property string sortTitle: (sortChoices.find(function(c) { return c.key === sortMode }) || sortChoices[0]).title
+    signal sortRequested()
+    function setSort(mode) {
+        if (!sortChoices.some(function(c) { return c.key === mode })) mode = "library";
+        var selectedId = cur && cur.gameId, fallback = current;
+        sortMode = mode;
+        var match = selectedId ? displayRows.findIndex(function(e) { return e.gameId === selectedId }) : -1;
+        current = Math.max(0,Math.min(displayRows.length-1,match >= 0 ? match : fallback));
+    }
+    function sortedRows(source) {
+        if (!modernSoftware || sortMode === "library") return source;
+        return source.map(function(row,index) { return {row:row,index:index} }).sort(function(a,b) {
+            var title = String(a.row.title || "").toLocaleLowerCase().localeCompare(String(b.row.title || "").toLocaleLowerCase());
+            var byConsole = sortMode === "console" ? String(a.row.console || "").localeCompare(String(b.row.console || "")) : 0;
+            return byConsole || (sortMode === "titleDescending" ? -title : title) || a.index-b.index;
+        }).map(function(item) { return item.row });
+    }
     property int filterIndex: 0
     property bool filterFocus: false
     property int libraryNavIndex: 0
@@ -20,9 +40,9 @@ Item {
     signal settingsSectionChosen(int section)
     onSettingsSectionChanged: { sectionCursor = Math.max(0,settingsSection); sectionFocus = false }
     readonly property var filters: [qsTr("All Games")].concat(Array.from(new Set(rows.filter(function(e) { return !!e.console }).map(function(e) { return e.console }))))
-    readonly property var displayRows: modernSoftware && filterIndex > 0 ? rows.filter(function(e) { return e.console === filters[filterIndex] }) : rows
+    readonly property var displayRows: sortedRows(modernSoftware && filterIndex > 0 ? rows.filter(function(e) { return e.console === filters[filterIndex] }) : rows)
     readonly property int gridColumns: theme === "x360classic" ? 1 : 5
-    onPresentationChanged: { filterIndex = 0; libraryNavIndex = 0; filterFocus = false }
+    onPresentationChanged: { sortFocus = false; filterIndex = 0; libraryNavIndex = 0; filterFocus = false }
     onFiltersChanged: { if (filterIndex >= filters.length) filterIndex = 0 }
     function selectFilter(index) { filterIndex = Math.max(0, Math.min(filters.length-1,index)); libraryNavIndex = filterIndex; current = 0; sound("cursor") }
     readonly property bool modernSoftware: theme !== "ps3" && (presentation === "library" || rows.some(function(row) { return !!row.console }))
@@ -44,11 +64,11 @@ Item {
     onDisplayRowsChanged: { if (current >= displayRows.length) current = Math.max(0, displayRows.length - 1) }
 
     function resetNavigation() {
-        filterIndex = 0; filterFocus = false; libraryNavIndex = 0;
+        sortFocus = false; filterIndex = 0; filterFocus = false; libraryNavIndex = 0;
         sectionFocus = false; sectionCursor = Math.max(0,settingsSection); current = 0;
     }
     function saveNavigation() {
-        return {current:current, filter:filters[filterIndex], filterFocus:filterFocus,
+        return {current:current, sortFocus:sortFocus, filter:filters[filterIndex], filterFocus:filterFocus,
                 libraryNavIndex:libraryNavIndex, sectionFocus:sectionFocus, sectionCursor:sectionCursor,
                 gameId:cur && cur.gameId ? cur.gameId : ""};
     }
@@ -58,7 +78,7 @@ Item {
         filterIndex = Math.max(0,filters.indexOf(state.filter));
         var match = state.gameId ? displayRows.findIndex(function(e) { return e.gameId === state.gameId }) : -1;
         current = Math.max(0,Math.min(displayRows.length-1,match >= 0 ? match : state.current || 0));
-        filterFocus = !!state.filterFocus;
+        sortFocus = !!state.sortFocus; filterFocus = !!state.filterFocus;
         libraryNavIndex = Math.max(0,Math.min(filters.length+libraryTools.length-1,state.libraryNavIndex || 0));
         sectionFocus = !!state.sectionFocus; sectionCursor = Math.max(0,state.sectionCursor || 0);
     }
@@ -73,6 +93,13 @@ Item {
             if (b === "left") { sectionFocus = true; return }
         }
         if (modernSoftware) {
+            if (sortFocus) {
+                if (b === "accept" || b === "options") { sound("select"); sortRequested(); }
+                else if (b === "down") sortFocus = false;
+                else if (b === "left") { sortFocus = false; filterFocus = true; libraryNavIndex = filterIndex; }
+                else if (b === "back") { sound("back"); back(); }
+                return;
+            }
             if (filterFocus) {
                 if (b === "up" || b === "down") {
                     libraryNavIndex = Math.max(0,Math.min(filters.length+libraryTools.length-1,libraryNavIndex+(b === "down" ? 1 : -1)))
@@ -85,6 +112,7 @@ Item {
             }
             if (["left", "right", "up", "down", "l1", "r1"].indexOf(b) >= 0) {
                 if (b === "left" && current % gridColumns === 0) { filterFocus = true; libraryNavIndex = filterIndex; return }
+                if (b === "up" && current < gridColumns) { sortFocus = true; sound("cursor"); return; }
                 var next = current;
                 var row = Math.floor(current / gridColumns), col = current % gridColumns;
                 if (b === "left") next = current - 1;

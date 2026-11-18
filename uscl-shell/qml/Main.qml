@@ -31,6 +31,7 @@ Window {
         objectName: "preferences"
         property string theme: "ps3"
         property string pinnedGames: "[]"
+        property string librarySort: "library"
         property int bgColor: 0          // 0 automatic (month), 1..13 fixed
         property bool nightShade: true
         property bool sounds: true
@@ -432,7 +433,7 @@ Window {
         }
     }
     function guide() {
-        var navigationHelp = activeTheme === "ps3" ? "" : qsTr("\nHome screen: L1 / R1 changes categories. Esc / Back focuses the category shortcuts. On Xbox 360 Classic, left / right changes blades and up / down selects items. Mouse: click to focus, click again to open; right-click for options.")
+        var navigationHelp = activeTheme === "ps3" ? "" : qsTr("\nHome screen: Home opens quick access. L1 / R1 changes Xbox tabs or focuses system shortcuts. On Xbox 360 Classic, left / right changes blades and up / down selects items. Library: Up from the first row focuses Sort; Left from the first column focuses console filters and library tools. Sorting keeps the same game selected. Mouse: click to focus, click again to open; right-click for options.")
         dialog.show(qsTr("User's Guide"), (xboxPad
             ? qsTr("D-pad or left stick: move     A: select     B: back     Y: options\nLB / RB: jump through long lists\nGuide button in a game: back here while the game keeps running. To close it: Y on the game → Close Game.\nOnline: start a game and it goes online by itself; friends join you from Friends.")
             : qsTr("D-pad or left stick: move     ✕: select     ○: back     △: options\nL1 / R1: jump through long lists\nPS button in a game: back here while the game keeps running. To close it: △ on the game → Close Game.\nOnline: start a game and it goes online by itself; friends join you from Friends.")) + navigationHelp)
@@ -606,7 +607,7 @@ Window {
             { title: qsTr("Run Setup Again"), help: qsTr("Online ID, system software and games"), action: function() { setup.start() } },
             { title: qsTr("Restore Default Settings"), help: qsTr("Menu settings back to how they started (games and online ID stay)"),
               action: function() { dialog.confirm(qsTr("Restore Default Settings"), qsTr("Restore the menu settings to their defaults?"), function() {
-                  prefs.pinnedGames = "[]"; prefs.theme = "ps3"; prefs.bgColor = 0; prefs.nightShade = true; prefs.sounds = true; prefs.menuVolume = 100; prefs.clock24 = false; prefs.dateFormat = "MM/dd/yy"
+                  page.setSort("library"); prefs.pinnedGames = "[]"; prefs.theme = "ps3"; prefs.bgColor = 0; prefs.nightShade = true; prefs.sounds = true; prefs.menuVolume = 100; prefs.clock24 = false; prefs.dateFormat = "MM/dd/yy"
                   notice.show(qsTr("Settings restored"), ic("it_system"))
               }) } },
             allSettingsRow()
@@ -1236,6 +1237,12 @@ Window {
                 settingsSection: root.topPage ? root.topPage.settingsSection === undefined ? -1 : root.topPage.settingsSection : -1
                 onSettingsSectionChosen: function(index) { root.chooseSettingsSection(index) }
                 onLibraryAction: function(section) { root.openConsoleSection(section) }
+                property bool sortReady: false
+                Component.onCompleted: { setSort(prefs.librarySort); sortReady = true; prefs.librarySort = sortMode; }
+                onSortModeChanged: if (sortReady) prefs.librarySort = sortMode
+                onSortRequested: options.show(page.sortChoices.map(function(choice) {
+                    return {title:choice.title,checked:choice.key === page.sortMode,action:function() { page.setSort(choice.key); }};
+                }))
                 anchors.fill: parent
                 visible: !!root.topPage
                 rows: root.topPage ? root.topPage.rows() : []

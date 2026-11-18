@@ -28,7 +28,7 @@ Item {
             failOnWarning(/(ReferenceError|TypeError|Unable to assign|Binding loop|Cannot open)/)
             menu.close(); dialog.close(); prompt.close(); page.visible = false
             home.visible = true; navigation.visible = false; home.animate = true
-            page.rows = []; page.resetNavigation()
+            page.rows = []; page.setSort("library"); page.resetNavigation()
             home.reset()
             page.presentation = ""; page.filterIndex = 0; page.filterFocus = false; page.settingsSection = -1; page.sectionFocus = false; home.pinnedIds = []
             sectionSpy.clear()
@@ -189,6 +189,40 @@ Item {
             page.rows = rows; page.visible = true; page.resetNavigation(); page.open()
             wait(140)
             return findChild(page,"libraryGrid")
+        }
+        function test_library_sorting_data() { return test_themes_data() }
+        function test_library_sorting(data) {
+            libraryFixture(3,data.theme)
+            page.rows = [{gameId:"z",title:"Zebra",console:"PS3"},{gameId:"a",title:"Alpha",console:"PS4"},{gameId:"b",title:"Alpha",console:"PS3"}]
+            page.current = 0; page.setSort("title")
+            compare(page.displayRows.map(function(e){return e.gameId}).join(","),"a,b,z"); compare(page.cur.gameId,"z")
+            page.setSort("titleDescending"); compare(page.current,0)
+            page.setSort("console"); compare(page.displayRows.map(function(e){return e.gameId}).join(","),"b,z,a"); compare(page.cur.gameId,"z")
+            compare(page.rows[0].gameId,"z") // Sorting must not mutate the live source model.
+            page.selectFilter(1); compare(page.displayRows.length,2)
+            page.current = 1; page.setSort("title"); compare(page.cur.gameId,"z")
+            var saved = page.saveNavigation(); page.resetNavigation(); page.restoreNavigation(saved)
+            compare(page.cur.gameId,"z"); compare(page.filters[page.filterIndex],"PS3")
+            page.setSort("invalid"); compare(page.sortMode,"library"); compare(page.cur.gameId,"z")
+        }
+        function test_library_sort_focus_data() { return test_themes_data() }
+        function test_library_sort_focus(data) {
+            libraryFixture(20,data.theme)
+            var spy = Qt.createQmlObject('import QtTest; SignalSpy { signalName:"sortRequested" }',page); spy.target=page
+            page.input("up"); verify(page.sortFocus)
+            page.input("accept"); compare(spy.count,1); compare(launches,0)
+            var button = findChild(page,"librarySort")
+            verify(button.visible); verify(button.border.width > 1)
+            mouseClick(button,button.width/2,button.height/2); compare(spy.count,2)
+            var game = findChild(page,"libraryGame1")
+            mouseClick(game,game.width/2,game.height/2); verify(!page.sortFocus); compare(page.current,1); compare(launches,0)
+            page.current=0; page.sortFocus=true
+            page.input("down"); verify(!page.sortFocus)
+            page.input("up"); page.input("left"); verify(page.filterFocus); verify(!page.sortFocus)
+            page.input("right"); verify(!page.filterFocus)
+            page.input("up"); var state = page.saveNavigation(); page.resetNavigation(); page.restoreNavigation(state); verify(page.sortFocus)
+            page.rows=[]; page.input("accept"); compare(spy.count,3); compare(launches,0)
+            spy.destroy()
         }
         function test_library_last_row_and_real_layout_data() { return test_themes_data() }
         function test_library_last_row_and_real_layout(data) {

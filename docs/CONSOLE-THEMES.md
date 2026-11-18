@@ -176,3 +176,30 @@ control row spaced across the screen. Nintendo HOME titles use bounded delayed s
 the selected name overflows; hidden labels and disabled motion do not keep an animation running.
 Tests cover card geometry and empty-library actions, plus title scrolling, selection changes, quick
 menu interruption and focus changes in both Nintendo themes.
+
+## Library sorting
+
+All seven modern themes expose a Sort button above the library. Press Up from its first row, then
+Select, or click the button. Down returns to the grid; Left reaches filters. The chooser offers
+Library Order, Title A–Z, Title Z–A and Console, then Title. The preference is shared across themes and
+restored on startup. Sorting preserves the selected game by ID, does not mutate the source model,
+and leaves HOME ordering alone. Filters combine with the chosen order. The original PS3 XMB keeps
+its established ordering. Duplicate titles retain their source order.
+
+Nintendo's reorder control and Sony's Filter and Sort workflow inform this functional substitution;
+USCL does not invent recent-play, play-time or publisher metadata that the library does not track.
+
+### Testing without a visible monitor
+
+The normal CTest and packaged-theme checks run offscreen. For the separate OpenGL path on this Linux
+host, use a surfaceless offscreen RHI context and a timer-driven render loop:
+
+```sh
+QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=rhi QSG_RHI_BACKEND=opengl \
+QSG_RENDER_LOOP=basic EGL_PLATFORM=surfaceless QSG_INFO=1 \
+/tmp/uscl-theme-build/uscl-ui-tests -input uscl-shell/tests
+```
+
+The QRhi pipeline log verifies that this exercises OpenGL rather than silently repeating the software
+renderer. No window, focus or injected input reaches the active desktop. These commands depend on
+headless EGL support and are verified on this host, not claimed portable to every graphics driver.

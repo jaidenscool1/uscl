@@ -52,7 +52,7 @@ Item {
     Text {
         objectName: "librarySelectionTitle"
         visible: screen.software
-        x: screen.contentLeft; y: 177; width: screen.width-x-230; height: 46
+        x: screen.contentLeft; y: 177; width: screen.width-x-550; height: 46
         text: screen.controller.cur ? screen.controller.cur.title : qsTr("No games")
         color: style.text; font.pixelSize: 28; elide: Text.ElideRight
     }
@@ -61,6 +61,17 @@ Item {
         x: screen.width-220; y: 177; width: 124; height: 46
         text: screen.controller.displayRows.length ? qsTr("%1 / %2").arg(screen.controller.current+1).arg(screen.controller.displayRows.length) : "0 / 0"
         color: style.muted; font.pixelSize: 23; horizontalAlignment: Text.AlignRight
+    }
+    Rectangle {
+        objectName: "librarySort"
+        visible: screen.software
+        x: screen.width-520; y: 177; width: 280; height: 48
+        color: screen.controller.sortFocus ? style.focusFill : style.panel
+        radius: style.radius
+        border.width: screen.controller.sortFocus ? 3 : 1
+        border.color: screen.controller.sortFocus ? style.accent : style.divider
+        Text { anchors.fill: parent; anchors.margins: 8; text: qsTr("Sort: %1").arg(screen.controller.sortTitle); color: screen.controller.sortFocus ? style.focusText : style.text; font.pixelSize: 22; verticalAlignment: Text.AlignVCenter; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight }
+        MouseArea { anchors.fill: parent; onClicked: { screen.controller.filterFocus = false; screen.controller.sortFocus = true; screen.controller.sound("select"); screen.controller.sortRequested(); } }
     }
     // Tools remain visible while the console filter list scrolls independently.
     ListView {
@@ -82,8 +93,8 @@ Item {
             color: selected ? style.focusFill : "transparent"
             border.width: selected ? 3 : 0; border.color: style.accent
             Rectangle { x: 0; y: 16; width: 4; height: 32; visible: parent.index === screen.controller.filterIndex; color: style.accent }
-            Text { x: 15; width: parent.width-30; height: parent.height; text: parent.modelData; color: parent.selected ? style.focusText : style.text; font.pixelSize: 25; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight }
-            MouseArea { anchors.fill: parent; onClicked: { screen.controller.selectFilter(parent.index); screen.controller.filterFocus = true; } }
+            Text { x: 15; width: parent.width-30; height: parent.height; text: ({Switch2:"Switch 2",Xbox360:"Xbox 360",WiiU:"Wii U"})[parent.modelData] || parent.modelData; color: parent.selected ? style.focusText : style.text; font.pixelSize: 25; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight }
+            MouseArea { anchors.fill: parent; onClicked: { screen.controller.sortFocus = false; screen.controller.selectFilter(parent.index); screen.controller.filterFocus = true; } }
         }
     }
     Column {
@@ -101,7 +112,7 @@ Item {
                 color: selected ? style.focusFill : "transparent"
                 border.width: selected ? 3 : 0; border.color: style.accent
                 Text { x: 15; width: parent.width-30; height: parent.height; text: parent.modelData.title; color: parent.selected ? style.focusText : style.text; font.pixelSize: 24; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight }
-                MouseArea { anchors.fill: parent; onClicked: { screen.controller.filterFocus = true; screen.controller.libraryNavIndex = screen.controller.filters.length+parent.index; screen.controller.libraryAction(parent.modelData.key); } }
+                MouseArea { anchors.fill: parent; onClicked: { screen.controller.sortFocus = false; screen.controller.filterFocus = true; screen.controller.libraryNavIndex = screen.controller.filters.length+parent.index; screen.controller.libraryAction(parent.modelData.key); } }
             }
         }
     }
@@ -134,7 +145,7 @@ Item {
             radius: style.radius
             readonly property bool selected: index === screen.controller.current
             color: style.panel
-            border.width: selected && !screen.controller.filterFocus ? 4 : 0
+            border.width: selected && !screen.controller.filterFocus && !screen.controller.sortFocus ? 4 : 0
             border.color: style.accent
             opacity: modelData.disabled ? .45 : 1
             Rectangle {
@@ -163,7 +174,7 @@ Item {
             }
             ConsoleFocusRing {
                 anchors.fill: parent; radius: game.radius; z: 2
-                visible: style.lightSwitch && game.selected && !screen.controller.filterFocus
+                visible: style.lightSwitch && game.selected && !screen.controller.filterFocus && !screen.controller.sortFocus
             }
             Text {
                 x: style.blades ? 100 : 12
@@ -182,7 +193,7 @@ Item {
                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                 onClicked: function (mouse) {
                     var was = game.selected;
-                    screen.controller.filterFocus = false;
+                    screen.controller.sortFocus = false; screen.controller.filterFocus = false;
                     screen.controller.current = game.index;
                     if (mouse.button === Qt.RightButton)
                         screen.controller.input("options");
@@ -431,7 +442,7 @@ Item {
         width: parent.width - 192
         text: qsTr(
                   "%1 / Enter: Select    %2 / Esc: Back    %3 / Space: Options    Page Up / Down: Scroll").arg(
-                  style.confirmGlyph).arg(style.backGlyph).arg(style.optionsGlyph)
+                  style.confirmGlyph).arg(style.backGlyph).arg(style.optionsGlyph) + (screen.software ? qsTr("    ↑ from first row: Sort") : "")
         color: style.muted
         font.pixelSize: 24
         elide: Text.ElideRight
