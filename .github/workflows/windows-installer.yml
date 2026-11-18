@@ -215,11 +215,8 @@ jobs:
           cd ..
           if [ "$RPCS3_CACHED" != 1 ]; then (cd rpcs3/bin && 7z a -tzip "../../$RPCS3_KEY.zip" . >/dev/null); gh release upload ci-cache -R $GITHUB_REPOSITORY "$RPCS3_KEY.zip" --clobber; fi
           if [ "$SERVERS_CACHED" != 1 ]; then (cd servers && 7z a -tzip "../$SERVERS_KEY.zip" . >/dev/null); gh release upload ci-cache -R $GITHUB_REPOSITORY "$SERVERS_KEY.zip" --clobber; fi
-          # only the current pair is worth keeping
-          for old in $(gh release view ci-cache -R $GITHUB_REPOSITORY --json assets -q '.assets[].name'); do
-            case "$old" in discord-social-sdk-*) continue;; esac  # the Discord SDK lives here too
-            [ "$old" = "$RPCS3_KEY.zip" ] || [ "$old" = "$SERVERS_KEY.zip" ] || gh release delete-asset ci-cache "$old" -R $GITHUB_REPOSITORY -y
-          done
+          # Retain other content-addressed builds while concurrent tags/branches may need them.
+
 
       - uses: actions/upload-artifact@v4
         with:

@@ -85,8 +85,8 @@ under the emulator’s control. Standalone launches retain the upstream appearan
 
 ## USCL release integration
 
-The v0.5.2-alpha release line integrates the reviewed installer/library work and
-console themes. Use the [release page](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.2-alpha)
+The v0.5.3-alpha release line integrates the reviewed installer/library work and
+console themes. Use the [release page](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.3-alpha)
 for published assets and the [fork matrix](../README.md#fork-maintenance) for build pins.
 This does not update the upstream base or establish new gameplay/online support
 for this fork. Patch changes require rebuilding the corresponding core; updating
@@ -95,6 +95,6 @@ the shell alone does not update a separately installed emulator.
 Switch 2 CPU/GPU translation, game evidence and pending work are tracked in
 [SWITCH2-PROGRESS.md](../docs/SWITCH2-PROGRESS.md).
 
-For v0.5.2-alpha, Linux retains the signed v0.5.1-alpha native core and therefore
+For v0.5.3-alpha, Linux retains the signed v0.5.1-alpha native core and therefore
 uses the shell launch theme without the new native loading colors. Windows builds
-the loading-color patch from the release manifest. See [packaging provenance](../packaging/README.md#v052-alpha-linux-provenance).
+the loading-color patch from the release manifest. See [packaging provenance](../packaging/README.md#v053-alpha-linux-provenance).

@@ -90,8 +90,8 @@ tried makes BO2 drop the lobby connection right after, every 30 s. Missing servi
 
 ## USCL release integration
 
-The v0.5.2-alpha release line integrates the reviewed installer/library work and
-console themes. Use the [release page](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.2-alpha)
+The v0.5.3-alpha release line integrates the reviewed installer/library work and
+console themes. Use the [release page](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.3-alpha)
 for published assets and the [fork matrix](../README.md#fork-maintenance) for build pins.
 This does not update the upstream base or establish new gameplay/online support
 for this fork. Patch changes require rebuilding the corresponding core; updating

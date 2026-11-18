@@ -22,8 +22,9 @@ case "${1:-}" in
 list) awk 'NF {print $1}' <<< "$TABLE" ;;
 key)
   read -r name url base dir mode subs < <(row "$2"); [ -n "${name:-}" ] || { echo "unknown emulator $2" >&2; exit 1; }
-  # bump "w1" when a build recipe in windows-emulators.yml changes what comes out
-  echo "emu-$name-w1-${base:0:9}-$(cat "$REPO/$dir"/patches/*.patch | tr -d '\r' | sha256sum | cut -c1-16)" ;;   # same on CRLF checkouts
+  # bump the recipe number when a build recipe in windows-emulators.yml changes what comes out (eden w2: + eden-room)
+  rev=w1; [ "$name" = eden ] && rev=w2
+  echo "emu-$name-$rev-${base:0:9}-$(cat "$REPO/$dir"/patches/*.patch | tr -d '\r' | sha256sum | cut -c1-16)" ;;   # same on CRLF checkouts
 fetch)
   read -r name url base dir mode subs < <(row "$2"); [ -n "${name:-}" ] || { echo "unknown emulator $2" >&2; exit 1; }
   src=$3; git init -q "$src"; g() { git -C "$src" -c core.autocrlf=false "$@"; }   # LF patches apply byte for byte

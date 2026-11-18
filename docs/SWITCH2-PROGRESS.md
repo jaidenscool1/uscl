@@ -8,7 +8,8 @@ percentage is assigned: a boot or benchmark does not establish broad compatibili
 ## Release baseline versus pending development
 
 The release baseline uses patches 0001–0008 plus the theme-loading patch.
-[PR #18](https://github.com/jaidenscool1/uscl/pull/18) contains additional
+[PR #18](https://github.com/jaidenscool1/uscl/pull/18), reviewed at
+`9f3764e3812a0782e029ec4646a32c1b98bb2a96`, contains additional
 performance/correctness work; its results below are development evidence, not
 features shipped in this baseline. The PR's body predates some of its commits;
 consult its current files before relying on the earlier summary.
@@ -27,7 +28,7 @@ consult its current files before relying on the earlier summary.
 ## Game evidence
 
 Measurements below come from [the fork notes](../uscl-eglantine/README.md),
-[GAMES.md](../GAMES.md) and [PR #18's current branch](https://github.com/jaidenscool1/uscl/tree/agent/jaiden-pc/switch2-grace/uscl-eglantine).
+[GAMES.md](../GAMES.md) and [the reviewed PR #18 snapshot](https://github.com/jaidenscool1/uscl/tree/9f3764e3812a0782e029ec4646a32c1b98bb2a96/uscl-eglantine).
 The reported PC is an i5-10600K with RTX 4060 8 GB on Linux, NVIDIA 615.78.
 These are prior recorded runs, not new tests performed for this tracker.
 
