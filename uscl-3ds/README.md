@@ -116,3 +116,15 @@ IDs and MACs), and pin each profile's buttons to one pad (`engine:sdl,guid:<guid
 Patch 0005 applies the active shell palette only to the native loading widget and its progress bar.
 Standalone launches keep upstream styling; compilation, game artwork, progress and fade completion are
 unchanged. Rebuild Azahar for this support. See [coverage and verification](../docs/LOADING-THEMES.md).
+
+## USCL release integration
+
+The v0.5.2-alpha release line integrates the reviewed installer/library work and
+console themes. Use the [release page](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.2-alpha)
+for published assets and the [fork matrix](../README.md#fork-maintenance) for build pins.
+This does not update the upstream base or establish new gameplay/online support
+for this fork. Patch changes require rebuilding the corresponding core; updating
+the shell alone does not update a separately installed emulator.
+
+Switch 2 CPU/GPU translation, game evidence and pending work are tracked in
+[SWITCH2-PROGRESS.md](../docs/SWITCH2-PROGRESS.md).

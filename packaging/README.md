@@ -12,7 +12,7 @@ One program: the home screen (`uscl-shell`, what USCL opens to), the emulators, 
 | 3DS: our Azahar + room server (`uscl-3ds`) | ✅ `Azahar\` | ✅ |
 | Switch: our Eden (`uscl-eden`) | ✅ `Eden\` | ✅ |
 | Switch 2: our Eglantine (`uscl-eglantine`) | ✅ `Eglantine\` | ✅ |
-| DS: our melonDS (`uscl-melonds`) | ✅ `melonDS\` (the home screen doesn't start DS games yet) | ✅ |
+| DS: our melonDS (`uscl-melonds`) | ✅ `melonDS\` | ✅ |
 | Wii U: Cemu | no | no: USCL starts the player's Flathub app |
 
 Windows: `.github/workflows/windows-emulators.yml` builds each emulator (pinned base + our patches, table in

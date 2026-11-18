@@ -107,3 +107,15 @@ dolphin-emu                                   # NetPlay → Connect → 127.0.0.
   as our Demonware/Blaze work); Pretendo Network doesn't support its online play yet. A future Cemu + NEX layer.
 - **Nintendo Switch Sports** (2022) runs on live Nintendo Switch Online, so there's nothing dead to replace. Its
   local wireless could go through Eden rooms like Mario Kart ([uscl-eden](../uscl-eden/)).
+
+## USCL release integration
+
+The v0.5.2-alpha release line integrates the reviewed installer/library work and
+console themes. Use the [release page](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.2-alpha)
+for published assets and the [fork matrix](../README.md#fork-maintenance) for build pins.
+This does not update the upstream base or establish new gameplay/online support
+for this fork. Patch changes require rebuilding the corresponding core; updating
+the shell alone does not update a separately installed emulator.
+
+Switch 2 CPU/GPU translation, game evidence and pending work are tracked in
+[SWITCH2-PROGRESS.md](../docs/SWITCH2-PROGRESS.md).

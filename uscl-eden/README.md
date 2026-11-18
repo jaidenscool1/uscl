@@ -52,3 +52,15 @@ Shell-launched games receive the selected USCL palette for their native loading 
 changes colors only: progress values, compilation, game artwork and the existing loading lifecycle stay
 under the emulator’s control. Standalone launches retain the upstream appearance. See
 [loading UI coverage and verification](../docs/LOADING-THEMES.md). Rebuild the patched core to use this feature.
+
+## USCL release integration
+
+The v0.5.2-alpha release line integrates the reviewed installer/library work and
+console themes. Use the [release page](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.2-alpha)
+for published assets and the [fork matrix](../README.md#fork-maintenance) for build pins.
+This does not update the upstream base or establish new gameplay/online support
+for this fork. Patch changes require rebuilding the corresponding core; updating
+the shell alone does not update a separately installed emulator.
+
+Switch 2 CPU/GPU translation, game evidence and pending work are tracked in
+[SWITCH2-PROGRESS.md](../docs/SWITCH2-PROGRESS.md).

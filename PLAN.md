@@ -231,3 +231,9 @@ Phases:
   Next: a battle between two PCs over Steam, the agents answering the attendant's menus, the nearest Pokémon Center
   instead of Cherrygrove's, more than two players per link (LAN clients connect to each other by address).
 - **D4:** trades the same way; other Gen 4 games (SoulSilver, Platinum) get their own address tables.
+
+## Switch 2 evidence tracking (2026-11-18)
+
+[CPU/GPU translation tracker](docs/SWITCH2-PROGRESS.md) records the release baseline,
+measured games, pending PR #18 fixes and acceptance checks. Its newer development
+results are not treated as shipped or as broad compatibility.

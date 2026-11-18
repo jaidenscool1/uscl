@@ -12,7 +12,7 @@ PS3 came first. USCL now also runs PS4, Switch, Wii, GameCube, 3DS, Wii U, Switc
 
 **Contents:** [What you get](#what-you-get) · [Platforms](#platforms) · [Get it](#get-it) ·
 [Controllers](#controllers) · [Games](#games) · [How online works](#how-online-works) ·
-[Fork maintenance](#fork-maintenance) · [Repository map](#repository-map) · [Branches](#branches) · [Safety](#safety) · [Credits](#credits)
+[Switch 2 progress](docs/SWITCH2-PROGRESS.md) · [Fork maintenance](#fork-maintenance) · [Repository map](#repository-map) · [Branches](#branches) · [Safety](#safety) · [Credits](#credits)
 
 ## What you get
 - 🎮 **One home screen for every console.** Controller first: games, friends, settings, all from the couch.
@@ -139,7 +139,9 @@ Either way, [`uscl-bridge`](uscl-bridge/) carries the traffic between the host's
 connection. The servers only listen on your own PC, and nothing leaves Steam's network except the game itself.
 
 Read the bundled [changelog](CHANGELOG.md) in **Settings → USCL Changelog** in any theme, even offline.
-Development entries are marked Unreleased until assigned to a release.
+The v0.5.2-alpha release line includes the reviewed console-theme and installer work.
+See [release assets and notes](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.2-alpha).
+The [Switch 2 tracker](docs/SWITCH2-PROGRESS.md) separates the release baseline from pending CPU/GPU translation work.
 
 ## Fork maintenance
 

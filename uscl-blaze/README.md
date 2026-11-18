@@ -93,3 +93,15 @@ After the online bootstrap NHL's PPU dereferences null at a settings lookup (`"s
 `0x008b1aec`, every time). Not an emulator bug: the PPU interpreter crashes the same way. The ticker settings group
 `O_SG_TCKR` is never created, and it doesn't come from config. Next: answer the `OsdkTicker2` component (2249) with
 an error so the game skips the ticker, or work out its `RegisterResponse` so the group gets created.
+
+## USCL release integration
+
+The v0.5.2-alpha release line integrates the reviewed installer/library work and
+console themes. Use the [release page](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.2-alpha)
+for published assets and the [fork matrix](../README.md#fork-maintenance) for build pins.
+This does not update the upstream base or establish new gameplay/online support
+for this fork. Patch changes require rebuilding the corresponding core; updating
+the shell alone does not update a separately installed emulator.
+
+Switch 2 CPU/GPU translation, game evidence and pending work are tracked in
+[SWITCH2-PROGRESS.md](../docs/SWITCH2-PROGRESS.md).
