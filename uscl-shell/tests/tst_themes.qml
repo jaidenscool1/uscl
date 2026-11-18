@@ -142,6 +142,15 @@ Item {
             home.input("up"); home.input("accept")
             compare(sectionSpy.signalArguments[0][0],"library"); compare(launches,0)
         }
+        function test_ps5_card_previews_survive_closing_fade() {
+            home.theme = "ps5"; home.reset(); home.input("home"); wait(270)
+            var previews = findChild(findChild(home,"controlCenterCard0"),"controlCenterThumbnails")
+            compare(previews.count,4)
+            for (var i=1; i<3; ++i) compare(findChild(findChild(home,"controlCenterCard"+i),"controlCenterThumbnails").count,0)
+            home.input("back"); wait(40); compare(previews.count,4)
+            tryCompare(findChild(home,"consoleQuickMenu"),"visible",false)
+            compare(previews.count,0)
+        }
         function test_ps5_options_action() {
             home.theme = "ps5"; home.reset(); home.input("down"); home.input("right")
             compare(home.detailsAction,1); home.input("accept")

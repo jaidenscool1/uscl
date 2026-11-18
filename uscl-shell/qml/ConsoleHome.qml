@@ -1252,6 +1252,7 @@ Item {
                 delegate: Rectangle {
                     required property var modelData
                     required property int index
+                    id: controlCard
                     objectName: "controlCenterCard" + index
                     width: 438; height: 528; radius: 18
                     color: "#20262e"
@@ -1269,7 +1270,8 @@ Item {
                             anchors.fill: parent; columns: 2; spacing: 4
                             visible: parent.parent.index === 0 && home.games.length > 0
                             Repeater {
-                                model: home.guideOpen && style.ps5 ? home.games.slice(0,4) : []
+                                objectName: "controlCenterThumbnails"
+                                model: controlCard.index === 0 && quickMenu.visible && style.ps5 ? home.games.slice(0,4) : []
                                 delegate: Rectangle {
                                     required property var modelData
                                     width: 189; height: 113; color: "#273242"
