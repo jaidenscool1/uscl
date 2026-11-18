@@ -5,6 +5,47 @@ import QtQuick
 // values in a grey column on the right, the focused row's help under its name.
 Item {
     id: page
+    property string theme: "ps3"
+    property string heading: ""
+    property string presentation: ""
+    property string sortMode: "library"
+    property bool sortFocus: false
+    readonly property var sortChoices: [{key:"library",title:qsTr("Library Order")},{key:"title",title:qsTr("Title: A–Z")},{key:"titleDescending",title:qsTr("Title: Z–A")},{key:"console",title:qsTr("Console, then Title")}]
+    readonly property string sortTitle: (sortChoices.find(function(c) { return c.key === sortMode }) || sortChoices[0]).title
+    signal sortRequested()
+    function setSort(mode) {
+        if (!sortChoices.some(function(c) { return c.key === mode })) mode = "library";
+        var selectedId = cur && cur.gameId, fallback = current;
+        sortMode = mode;
+        var match = selectedId ? displayRows.findIndex(function(e) { return e.gameId === selectedId }) : -1;
+        current = Math.max(0,Math.min(displayRows.length-1,match >= 0 ? match : fallback));
+    }
+    function sortedRows(source) {
+        if (!modernSoftware || sortMode === "library") return source;
+        return source.map(function(row,index) { return {row:row,index:index} }).sort(function(a,b) {
+            var title = String(a.row.title || "").toLocaleLowerCase().localeCompare(String(b.row.title || "").toLocaleLowerCase());
+            var byConsole = sortMode === "console" ? String(a.row.console || "").localeCompare(String(b.row.console || "")) : 0;
+            return byConsole || (sortMode === "titleDescending" ? -title : title) || a.index-b.index;
+        }).map(function(item) { return item.row });
+    }
+    property int filterIndex: 0
+    property bool filterFocus: false
+    property int libraryNavIndex: 0
+    readonly property var libraryTools: [{key:"add",title:qsTr("Add Games")},{key:"updates",title:qsTr("Game Updates")},{key:"help",title:qsTr("How to Play")}]
+    signal libraryAction(string section)
+    property var settingsSections: []
+    property int settingsSection: -1
+    property bool sectionFocus: false
+    property int sectionCursor: 0
+    signal settingsSectionChosen(int section)
+    onSettingsSectionChanged: { sectionCursor = Math.max(0,settingsSection); sectionFocus = false }
+    readonly property var filters: [qsTr("All Games")].concat(Array.from(new Set(rows.filter(function(e) { return !!e.console }).map(function(e) { return e.console }))))
+    readonly property var displayRows: sortedRows(modernSoftware && filterIndex > 0 ? rows.filter(function(e) { return e.console === filters[filterIndex] }) : rows)
+    readonly property int gridColumns: theme === "x360classic" ? 1 : 5
+    onPresentationChanged: { sortFocus = false; filterIndex = 0; libraryNavIndex = 0; filterFocus = false }
+    onFiltersChanged: { if (filterIndex >= filters.length) filterIndex = 0 }
+    function selectFilter(index) { filterIndex = Math.max(0, Math.min(filters.length-1,index)); libraryNavIndex = filterIndex; current = 0; sound("cursor") }
+    readonly property bool modernSoftware: theme !== "ps3" && (presentation === "library" || rows.some(function(row) { return !!row.console }))
     property string catIcon: ""
     property string parentIcon: ""
     property var rows: []           // [{ title, value, help, icon, disabled, action }]
@@ -18,14 +59,82 @@ Item {
     readonly property int focTop: 440
     readonly property int rowH: 84
     readonly property int focH: 150
-    readonly property var cur: rows[current]
+    readonly property var cur: displayRows[current]
 
+    onDisplayRowsChanged: { if (current >= displayRows.length) current = Math.max(0, displayRows.length - 1) }
+
+    function resetNavigation() {
+        sortFocus = false; filterIndex = 0; filterFocus = false; libraryNavIndex = 0;
+        sectionFocus = false; sectionCursor = Math.max(0,settingsSection); current = 0;
+    }
+    function saveNavigation() {
+        return {current:current, sortFocus:sortFocus, filter:filters[filterIndex], filterFocus:filterFocus,
+                libraryNavIndex:libraryNavIndex, sectionFocus:sectionFocus, sectionCursor:sectionCursor,
+                gameId:cur && cur.gameId ? cur.gameId : ""};
+    }
+    function restoreNavigation(state) {
+        resetNavigation();
+        if (!state) return;
+        filterIndex = Math.max(0,filters.indexOf(state.filter));
+        var match = state.gameId ? displayRows.findIndex(function(e) { return e.gameId === state.gameId }) : -1;
+        current = Math.max(0,Math.min(displayRows.length-1,match >= 0 ? match : state.current || 0));
+        sortFocus = !!state.sortFocus; filterFocus = !!state.filterFocus;
+        libraryNavIndex = Math.max(0,Math.min(filters.length+libraryTools.length-1,state.libraryNavIndex || 0));
+        sectionFocus = !!state.sectionFocus; sectionCursor = Math.max(0,state.sectionCursor || 0);
+    }
     function input(b) {
+        if ((theme === "switch" || theme === "switch2") && settingsSection >= 0) {
+            if (sectionFocus) {
+                if (b === "up" || b === "down") { sectionCursor = Math.max(0,Math.min(settingsSections.length-1,sectionCursor+(b === "down" ? 1 : -1))); sound("cursor") }
+                else if (b === "right" || b === "accept") settingsSectionChosen(sectionCursor)
+                else if (b === "back") { sound("back"); back() }
+                return
+            }
+            if (b === "left") { sectionFocus = true; return }
+        }
+        if (modernSoftware) {
+            if (sortFocus) {
+                if (b === "accept" || b === "options") { sound("select"); sortRequested(); }
+                else if (b === "down") sortFocus = false;
+                else if (b === "left") { sortFocus = false; filterFocus = true; libraryNavIndex = filterIndex; }
+                else if (b === "back") { sound("back"); back(); }
+                return;
+            }
+            if (filterFocus) {
+                if (b === "up" || b === "down") {
+                    libraryNavIndex = Math.max(0,Math.min(filters.length+libraryTools.length-1,libraryNavIndex+(b === "down" ? 1 : -1)))
+                    if (libraryNavIndex < filters.length) { filterIndex = libraryNavIndex; current = 0 }
+                    sound("cursor")
+                } else if (b === "accept" && libraryNavIndex >= filters.length) libraryAction(libraryTools[libraryNavIndex-filters.length].key)
+                else if (b === "right" || b === "accept") filterFocus = false
+                else if (b === "back") { sound("back"); back() }
+                return
+            }
+            if (["left", "right", "up", "down", "l1", "r1"].indexOf(b) >= 0) {
+                if (b === "left" && current % gridColumns === 0) { filterFocus = true; libraryNavIndex = filterIndex; return }
+                if (b === "up" && current < gridColumns) { sortFocus = true; sound("cursor"); return; }
+                var next = current;
+                var row = Math.floor(current / gridColumns), col = current % gridColumns;
+                if (b === "left") next = current - 1;
+                else if (b === "right" && col < gridColumns-1) next = Math.min(displayRows.length-1,current+1);
+                else if (b === "up" && row > 0) next = current-gridColumns;
+                else if (b === "down" && (row+1)*gridColumns < displayRows.length) next = Math.min(displayRows.length-1,current+gridColumns);
+                else if (b === "l1" || b === "r1") next = Math.max(0,Math.min(displayRows.length-1,current+(b === "l1" ? -1 : 1)*gridColumns*2));
+                if (next >= 0 && next < displayRows.length && next !== current) { current = next; sound("cursor") }
+                return
+            }
+        }
+        // A wheel/drag can leave focus offscreen. Reveal it before allowing activation.
+        if (modernSoftware && visible && ["accept","options","info"].indexOf(b) >= 0 && cur && !modernPage.selectionVisible()) {
+            modernPage.revealSelection(); sound("cursor"); return;
+        }
+        if (b === "info" && cur && cur.info) { sound("select"); cur.info(); return }
+
         if ((b === "back" || b === "left")) { sound("back"); back() }
         else if (b === "up" && current > 0) { current--; sound("cursor") }
-        else if (b === "down" && current < rows.length - 1) { current++; sound("cursor") }
+        else if (b === "down" && current < displayRows.length - 1) { current++; sound("cursor") }
         else if (b === "l1" && current > 0) { current = Math.max(0, current - 5); sound("cursor") }
-        else if (b === "r1" && current < rows.length - 1) { current = Math.min(rows.length - 1, current + 5); sound("cursor") }
+        else if (b === "r1" && current < displayRows.length - 1) { current = Math.min(displayRows.length - 1, current + 5); sound("cursor") }
         else if (b === "options" && cur && cur.options) { sound("select"); showOptions(cur) }
         else if ((b === "accept" || b === "right" || b === "options") && cur) {
             if (cur.disabled) { if (b === "accept") sound("error"); return }
@@ -38,6 +147,7 @@ Item {
     // ---- breadcrumb ----
     Item {
         id: crumb
+        visible: page.theme === "ps3"
         width: page.width; height: page.height
         transform: Translate { id: crumbShift }
         Image {
@@ -56,6 +166,7 @@ Item {
     // ---- rows ----
     Item {
         id: list
+        visible: page.theme === "ps3"
         width: page.width; height: page.height
         transform: Translate { id: listShift }
 
@@ -66,7 +177,7 @@ Item {
             visible: page.rows.length > 0
             SequentialAnimation on opacity {
                 loops: Animation.Infinite
-                running: halo.Window.active // see Xmb.qml: no redraws while a game has focus
+                running: page.visible && page.theme === "ps3" && halo.Window.active // see Xmb.qml: no redraws while a game has focus
                 NumberAnimation { from: 0.09; to: 0.25; duration: 1700; easing.type: Easing.InOutSine }
                 NumberAnimation { to: 0.09; duration: 1700; easing.type: Easing.InOutSine }
             }
@@ -86,6 +197,18 @@ Item {
                 visible: y > -page.rowH && y < page.height
                 opacity: modelData.disabled ? 0.45 : 1
                 Behavior on y { NumberAnimation { duration: 180; easing.type: Easing.OutSine } }
+
+                MouseArea {
+                    anchors.fill: parent; enabled: page.theme === "ps3"
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onClicked: function(mouse) {
+                        var wasSelected = row.sel
+                        page.current = index
+                        if (mouse.button === Qt.RightButton) page.input("options")
+                        else if (wasSelected) page.input("accept")
+                        else page.sound("cursor")
+                    }
+                }
 
                 // wide: a PS3 game icon (320x176), right-aligned to the same edge so titles line up
                 Image {
@@ -129,9 +252,30 @@ Item {
         }
     }
 
+    ThemePalette { id: pagePalette; theme: page.theme }
+    Rectangle { anchors.fill: parent; visible: page.theme !== "ps3"; color: pagePalette.background }
+    ConsolePage {
+        id: modernPage
+        anchors.fill: parent
+        visible: page.theme !== "ps3"
+        controller: page
+        theme: page.theme
+        heading: page.heading
+    }
+
     // ---- open / close: rows slide in from the right; from the crossbar the breadcrumb shrinks into place ----
     function open() {
-        enter.restart()
+        enter.stop()
+        modernEnter.stop()
+        if (theme === "ps3") enter.restart()
+        else {
+            page.opacity = 1
+            modernEnter.restart()
+        }
+    }
+    ParallelAnimation {
+        id: modernEnter
+        NumberAnimation { target: modernPage; property: "opacity"; from: .6; to: 1; duration: 120 }
     }
     ParallelAnimation {
         id: enter

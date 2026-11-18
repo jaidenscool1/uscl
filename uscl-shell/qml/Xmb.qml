@@ -10,7 +10,7 @@ Item {
     signal sound(string name)
     signal showOptions(var entry)
 
-    readonly property var items: cats.length ? cats[cat].items : []
+    readonly property var items: cats.length && cats[cat] ? cats[cat].items : []
     readonly property int item: Math.min(itemIndex[cat] || 0, Math.max(0, items.length - 1))
     readonly property var current: items[item]
 
@@ -25,11 +25,12 @@ Item {
 
     function setItem(i) {
         var a = itemIndex.slice()
-        a[cat] = i
+        a[cat] = Math.max(0, Math.min(i, items.length - 1))
         itemIndex = a
     }
 
     function input(b) {
+        if (b === "info" && current && current.info) { sound("select"); current.info(); return }
         if (b === "left" && cat > 0) { cat--; sound("category") }
         else if (b === "right" && cat < cats.length - 1) { cat++; sound("category") }
         else if (b === "up" && item > 0) { setItem(item - 1); sound("cursor") }
@@ -43,6 +44,7 @@ Item {
         else if (b === "options" && current && current.options) { sound("select"); showOptions(current) }
     }
 
+    onItemsChanged: setItem(itemIndex[cat] || 0)
     onCatChanged: { colShow.restart(); previewShow.restart() }
     onItemChanged: previewShow.restart()
 
@@ -60,8 +62,12 @@ Item {
             visible: x > -xmb.catW && x < xmb.width
             Behavior on x { NumberAnimation { duration: 260; easing.type: Easing.OutSine } }
 
+            MouseArea {
+                anchors.fill: parent; enabled: xmb.visible && xmb.opacity > 0
+                onClicked: { if (xmb.cat !== index) { xmb.cat = index; xmb.sound("category") } }
+            }
             Image {
-                source: c.modelData.icon
+                source: xmb.visible ? (c.modelData.icon || "") : ""
                 width: c.sel ? 150 : 100; height: width
                 x: (200 - width) / 2; y: c.sel ? 15 : 40
                 opacity: c.sel ? 1 : 0.63
@@ -100,7 +106,7 @@ Item {
             visible: xmb.items.length > 0
             SequentialAnimation on opacity {
                 loops: Animation.Infinite
-                running: halo.Window.active // a running animation redraws the window every frame, also behind a game
+                running: xmb.visible && xmb.opacity > 0 && halo.Window.active // a running animation redraws the window every frame, also behind a game
                 NumberAnimation { from: 0.11; to: 0.31; duration: 1700; easing.type: Easing.InOutSine }
                 NumberAnimation { to: 0.11; duration: 1700; easing.type: Easing.InOutSine }
             }
@@ -128,6 +134,19 @@ Item {
                 opacity: modelData.disabled ? 0.45 : modelData.dim ? 0.6 : 1
                 Behavior on y { NumberAnimation { duration: 200; easing.type: Easing.OutSine } }
 
+                MouseArea {
+                    objectName: "xmbEntryMouse" + index
+                    x: 0; y: row.sel ? 235 : 0; width: parent.width; height: row.sel ? 150 : xmb.rowH
+                    enabled: xmb.visible && xmb.opacity > 0
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onClicked: function(mouse) {
+                        var wasSelected = row.sel
+                        xmb.setItem(index)
+                        if (mouse.button === Qt.RightButton) xmb.input("options")
+                        else if (wasSelected) xmb.input("accept")
+                        else xmb.sound("cursor")
+                    }
+                }
                 Rectangle {
                     visible: row.fr && row.sel
                     x: icon.x - 4; y: icon.y + 8
@@ -161,7 +180,7 @@ Item {
                     width: row.wide ? h * 1.82 : h; height: h
                     x: 220 - width / 2
                     y: row.sel ? 235 : 10
-                    source: row.modelData.icon || ""
+                    source: xmb.visible && row.visible ? (row.modelData.icon || "") : ""
                     fillMode: Image.PreserveAspectFit
                     opacity: row.sel || row.fr ? 1 : 0.71
                     asynchronous: true; mipmap: true
@@ -173,7 +192,7 @@ Item {
                        : row.sel ? (row.wide ? 220 + icon.width / 2 + 40 : 325) : (row.wide ? 220 + icon.width / 2 + 40 : 310)
                     y: row.fr ? icon.y + icon.height / 2 - (row.sel ? 44 : 38) : row.sel ? 262 : 10
                     height: row.fr ? 50 : row.sel ? 56 : 100
-                    width: 1200
+                    width: Math.max(0, row.width - x - 90)
                     verticalAlignment: Text.AlignVCenter
                     text: row.modelData.title
                     color: row.sel || row.fr ? "white" : "#b4ffffff"
@@ -204,7 +223,7 @@ Item {
                     visible: (row.sel || row.fr) && !!row.modelData.desc
                     x: row.fr ? titleText.x + 2 : row.wide ? 220 + icon.width / 2 + 42 : 327
                     y: row.fr ? titleText.y + titleText.height - 6 : 322
-                    height: row.fr ? 34 : 40; width: row.fr ? 880 : 1200
+                    height: row.fr ? 34 : 40; width: Math.max(0, row.width - x - 90)
                     font.pixelSize: row.fr ? (row.sel ? 25 : 22) : 25
                     verticalAlignment: Text.AlignVCenter
                     text: row.modelData.desc || ""

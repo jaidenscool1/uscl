@@ -1,4 +1,7 @@
-# USCL console UI (plan, 2026-10-24)
+# USCL console UI
+
+Theme implementation updated 2026-11-16: [eight console looks, controls, previews and verification](CONSOLE-THEMES.md).
+The original design notes below explain the shared launcher architecture.
 
 Goal: USCL opens to a console-style home screen you drive with a controller, like a PS3. Every feature is still
 there, but in a simpler format. The look comes from the player's JStationX Kodi skins on the TV server
@@ -14,7 +17,7 @@ controller service (`service.xmb.padkeys`), the XMB helper (`service.xmb.startup
   (`✕ Enter  ○ Back`, user on the right).
 - **Controls:** ✕ select, ○ back, △ options, □ info, L1/R1 page up/down. Every move plays a sound: cursor,
   category, select, back, cancel, error, notify, plus a startup chime.
-- **Themes:** one switch between the four looks, and a background colour for the XMB look.
+- **Themes:** one switch between eight looks, and a background colour for the XMB look.
 
 ## How it fits together
 ```
@@ -34,7 +37,7 @@ USCL (one install, one icon)
 - **Controller input:** SDL3, which our RPCS3 build already uses, so any pad works the same everywhere
   (DualSense, DualShock, Xbox, Switch, Steam Deck). Qt has no gamepad support of its own in Qt 6.
 - **Themes are QML packs** over one shared model (categories → items → actions). Every theme gets every feature
-  for free; a theme only decides how things look and sound. XMB comes first, then PS4, then the two Xbox looks.
+  for free; a theme only decides how things look and sound. XMB, PS4, PS5, Xbox 360 Classic/2012, Xbox One and Switch 1/2 share these actions.
 - **Online play needs no buttons:** the USCL panel's logic moves into the shell. Starting a game that needs our
   servers starts them, a Steam invite from a friend joins their session, and a Friends column shows Steam
   friends who are in USCL sessions.
@@ -87,4 +90,4 @@ USCL (one install, one icon)
 2. **Settings and online** (done 2026-10-24; Steam name is the default online name): the main settings, first-run setup, the Online/Friends columns (replacing the USCL
    panel), Test Connection.
 3. **Hardening:** auto-configuration, crash handling and log viewer, updater, Windows PC tests.
-4. **More looks:** the PS4 theme, then Xbox 360 Classic and Metro. More cores come later.
+4. **More looks** (implemented 2026-11-16): PS4, PS5, Xbox 360 Classic and Metro, Xbox One, Switch and Switch 2; shared game/settings pages, options and dialogs. Automated interaction and packaged-QML tests cover all eight looks. Physical Windows/controller and visual acceptance remain separate checks.

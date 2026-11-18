@@ -5,7 +5,7 @@
 | **Console** | PlayStation 3 |
 | **Upstream** | [RPCS3/rpcs3](https://github.com/RPCS3/rpcs3) (GPL-2.0) |
 | **Pinned base** | `eee3f0f` (upstream 2026-11-05) |
-| **Our changes** | `patches/0001`–`0013`, applied with `git am` |
+| **Our changes** | `patches/0001`–`0014`, applied with `git am` |
 | **Ships in** | Windows installer and Linux AppImage (`packaging/`) |
 | **Online services it talks to** | [uscl-rpcn](../uscl-rpcn/) (PSN), [uscl-dw](../uscl-dw/) (Call of Duty), [uscl-blaze](../uscl-blaze/) (EA) |
 
@@ -75,3 +75,26 @@ Then build as in RPCS3's `BUILDING.md`. Things that bite:
   game state encodes alike (crossplay).
 - 0012: built-in NHL 15 patch (`PPU-04d55e4c…`), "dynamic messages with none to show": the OSDK message rotation
   (0x7f94e4) checks its list has a message before reading it; a community server may send none (`games/BLUS31436.md`).
+
+## Theme-aware loading UI
+
+Shell-launched games receive the selected USCL palette for their native loading UI. The new loading patch
+changes colors only: progress values, compilation, game artwork and the existing loading lifecycle stay
+under the emulator’s control. Standalone launches retain the upstream appearance. See
+[loading UI coverage and verification](../docs/LOADING-THEMES.md). Rebuild the patched core to use this feature.
+
+## USCL release integration
+
+The v0.5.2-alpha release line integrates the reviewed installer/library work and
+console themes. Use the [release page](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.2-alpha)
+for published assets and the [fork matrix](../README.md#fork-maintenance) for build pins.
+This does not update the upstream base or establish new gameplay/online support
+for this fork. Patch changes require rebuilding the corresponding core; updating
+the shell alone does not update a separately installed emulator.
+
+Switch 2 CPU/GPU translation, game evidence and pending work are tracked in
+[SWITCH2-PROGRESS.md](../docs/SWITCH2-PROGRESS.md).
+
+For v0.5.2-alpha, Linux retains the signed v0.5.1-alpha native core and therefore
+uses the shell launch theme without the new native loading colors. Windows builds
+the loading-color patch from the release manifest. See [packaging provenance](../packaging/README.md#v052-alpha-linux-provenance).

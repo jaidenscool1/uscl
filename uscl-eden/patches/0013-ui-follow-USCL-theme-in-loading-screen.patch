@@ -1,0 +1,44 @@
+From c61a4ea57f009e25b45d299890164ebbf3ea9d23 Mon Sep 17 00:00:00 2001
+From: USCL <uscl@localhost>
+Date: Mon, 16 Nov 2026 12:49:57 -0700
+Subject: [PATCH] ui: follow the USCL palette in the loading screen
+
+Opt in only for shell launches with a supplied loading stylesheet. Keep game artwork, stage updates, real progress, cancellation and the existing fade-to-game lifecycle unchanged. Standalone launches retain their upstream appearance.
+---
+ src/yuzu/loading_screen.cpp | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/src/yuzu/loading_screen.cpp b/src/yuzu/loading_screen.cpp
+index d67667a..c26329f 100644
+--- a/src/yuzu/loading_screen.cpp
++++ b/src/yuzu/loading_screen.cpp
+@@ -57,6 +57,13 @@ LoadingScreen::LoadingScreen(QWidget* parent)
+     : QWidget(parent), ui(std::make_unique<Ui::LoadingScreen>()),
+       previous_stage(VideoCore::LoadCallbackStage::Complete) {
+     ui->setupUi(this);
++    // USCL palette is scoped to this loading widget; normal standalone launches retain upstream styling.
++    if (qEnvironmentVariable("USCL_SHELL") == QStringLiteral("1")) {
++        const auto style = qEnvironmentVariable("USCL_LOADING_STYLE");
++        if (!style.isEmpty()) {
++            setStyleSheet(style);
++        }
++    }
+     setMinimumSize(Layout::MinimumSize::Width, Layout::MinimumSize::Height);
+ 
+     // Create a fade out effect to hide this loading screen widget.
+@@ -135,6 +142,12 @@ void LoadingScreen::OnLoadProgress(VideoCore::LoadCallbackStage stage, std::size
+     // reset the timer if the stage changes
+     if (stage != previous_stage) {
+         ui->progress_bar->setStyleSheet(QString::fromUtf8(progressbar_style[stage]));
++        if (qEnvironmentVariable("USCL_SHELL") == QStringLiteral("1")) {
++            const auto style = qEnvironmentVariable("USCL_LOADING_STYLE");
++            if (!style.isEmpty()) {
++                ui->progress_bar->setStyleSheet(style);
++            }
++        }
+         // Hide the progress bar during the prepare stage
+         if (stage == VideoCore::LoadCallbackStage::Prepare) {
+             ui->progress_bar->hide();
+-- 
+2.56.0
+

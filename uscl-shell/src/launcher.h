@@ -10,6 +10,7 @@ class Launcher : public QObject
 {
 	Q_OBJECT
 	Q_PROPERTY(bool running READ running NOTIFY runningChanged)
+	Q_PROPERTY(bool starting READ starting NOTIFY runningChanged)
 	Q_PROPERTY(QString title READ title NOTIFY runningChanged)
 	// a running game's window is on screen (false while the home screen is shown over it)
 	Q_PROPERTY(bool gameShown READ gameShown NOTIFY gameShownChanged)
@@ -18,9 +19,14 @@ public:
 	explicit Launcher(QObject* parent = nullptr);
 
 	bool running() const { return m_process.state() != QProcess::NotRunning; }
+	bool starting() const { return m_process.state() == QProcess::Starting; }
 	QString title() const { return m_title; }
 	bool gameShown() const { return running() && m_shown; }
 
+	// Snapshot the active shell palette for the next game process; never changes emulator config files.
+	Q_INVOKABLE void setLoadingTheme(const QString& theme, const QString& background, const QString& foreground,
+	                                const QString& accent, const QString& panel);
+	static QString loadingStyle(const QString& background, const QString& foreground, const QString& accent, const QString& panel);
 	Q_INVOKABLE bool startGame(const QString& path, const QString& title, bool online, const QString& console = "PS3", const QString& nickname = "USCLPlayer");
 	// Wii->Dolphin, 3DS->Azahar, ... netplay "host"/"join" (Wii, our Dolphin): a NetPlay session over the Steam tunnel
 	Q_INVOKABLE bool startEmu(const QString& path, const QString& title, const QString& console, const QString& netplay = {},
@@ -62,9 +68,11 @@ signals:
 	void finished(bool crashed, const QString& details);
 
 private:
+	void applyLoadingEnvironment(QProcessEnvironment& env, bool game) const;
 	bool start(const QStringList& args, const QString& title, bool online, bool game, bool ps4 = false, const QString& core = {});
 	void command(const char* line, bool shown);
 
+	QString m_theme, m_loading_style, m_loading_colors;
 	QProcess m_process;
 	QString m_title;
 	QStringList m_tail;

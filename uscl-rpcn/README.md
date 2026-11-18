@@ -64,3 +64,15 @@ In RPCN settings (`rpcn.yml`): `Host: 127.0.0.1`, any NPID/password. The first l
   3757, because the bridge owns 3657.
 - 0004: with `USCL_LOCAL`, a new account is friends with every other account on the server (everyone there is
   in the same Steam session; Minecraft only lists friends' worlds). Online players are notified.
+
+## USCL release integration
+
+The v0.5.2-alpha release line integrates the reviewed installer/library work and
+console themes. Use the [release page](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.2-alpha)
+for published assets and the [fork matrix](../README.md#fork-maintenance) for build pins.
+This does not update the upstream base or establish new gameplay/online support
+for this fork. Patch changes require rebuilding the corresponding core; updating
+the shell alone does not update a separately installed emulator.
+
+Switch 2 CPU/GPU translation, game evidence and pending work are tracked in
+[SWITCH2-PROGRESS.md](../docs/SWITCH2-PROGRESS.md).

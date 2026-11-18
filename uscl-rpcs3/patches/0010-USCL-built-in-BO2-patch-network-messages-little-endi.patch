@@ -1,7 +1,7 @@
-From be82a9abf54a2684e7c3202224da75dff06e7b08 Mon Sep 17 00:00:00 2001
+From 3f716416bbc0e3405891789f4b9f5a6a644e38b7 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Thu, 29 Oct 2026 06:41:05 -0700
-Subject: [PATCH 10/11] USCL: built-in BO2 patch: network messages
+Subject: [PATCH 10/14] USCL: built-in BO2 patch: network messages
  little-endian like the PS4 build (crossplay)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -10,7 +10,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 21 insertions(+)
 
 diff --git a/Utilities/bin_patch.cpp b/Utilities/bin_patch.cpp
-index 72f48d4..2b330f4 100644
+index 72f48d465..2b330f4c6 100644
 --- a/Utilities/bin_patch.cpp
 +++ b/Utilities/bin_patch.cpp
 @@ -1496,6 +1496,27 @@ PPU-d26243d3556a8d446a97da71df8c12da4b7867a1:

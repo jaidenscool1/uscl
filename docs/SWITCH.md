@@ -50,3 +50,6 @@ Mario Kart tests on November 10 passed a two-instance local Wireless Play race, 
 Protocol/CLI references: [Eden command line](https://git.eden-emu.dev/eden-emu/eden/src/tag/v0.2.1/docs/user/CommandLine.md), [multiplayer](https://git.eden-emu.dev/eden-emu/eden/src/tag/v0.2.1/docs/user/Multiplayer.md), and the v0.2.1 SDL frontend's `--help` output. The documented CLI options were checked against the downloaded release, not assumed from another emulator.
 
 The separate [USCL Switch online-service prototype](../uscl-switch-online/README.md) is being built for a future private native-menu adapter, similar in architecture to RPCN. Its room API and Eden connection probe do not yet make Mario Kart’s **Online Play** menu functional. Continue using **Wireless Play** for the tested route.
+
+CPU/GPU translation milestones, game evidence and pending fixes are maintained in
+the [Switch 2 progress tracker](SWITCH2-PROGRESS.md).

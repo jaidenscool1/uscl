@@ -5,7 +5,7 @@
 | **Console** | Nintendo Switch |
 | **Upstream** | [eden-emu/eden](https://git.eden-emu.dev/eden-emu/eden.git) (GPL-3.0-or-later, with per-file notices: keep its licenses and corresponding source with any build you share) |
 | **Pinned base** | `58c1e20ee58efa3900ba616207d460886214480b` (`v0.2.1`) |
-| **Our changes** | `patches/0001`–`0012`, applied with `git am` |
+| **Our changes** | `patches/0001`–`0013`, applied with `git am` |
 | **Ships in** | both installers (`eden` + `eden-cli`; Windows: `Eden\`) |
 | **Online** | Eden local-wireless rooms over the Steam tunnel (`uscl-bridge host switch`, UDP 24872); native Online Play in development ([uscl-switch-online](../uscl-switch-online/)) |
 | **Status** | Mario Kart 8 Deluxe: two copies raced on one PC through a room ([setup](../docs/SWITCH.md), [notes](../games/0100152000022000.md)) |
@@ -45,3 +45,26 @@ Install Visual Studio 2022 with **Desktop development with C++** (it supplies CM
 For the two-player native Online Play test on one PC, run `tools\dev-scripts\switch-native-test.ps1 -Setup -Keys <prod.keys>` once, then `-Game <MK8 Deluxe file>`. It starts the room service, the adapter on 127.0.0.1:443 and two Eden instances with separate identities. Built and launched on Windows 10 with VS 2022 (MSVC 19.44) on 2026-11-11; the result is one static `eden.exe` needing only the VC++ runtime. The two-player game run is not yet done.
 
 See [Switch setup](../docs/SWITCH.md) and [Mario Kart notes](../games/0100152000022000.md) for test results and remaining limits.
+
+## Theme-aware loading UI
+
+Shell-launched games receive the selected USCL palette for their native loading UI. The new loading patch
+changes colors only: progress values, compilation, game artwork and the existing loading lifecycle stay
+under the emulator’s control. Standalone launches retain the upstream appearance. See
+[loading UI coverage and verification](../docs/LOADING-THEMES.md). Rebuild the patched core to use this feature.
+
+## USCL release integration
+
+The v0.5.2-alpha release line integrates the reviewed installer/library work and
+console themes. Use the [release page](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.2-alpha)
+for published assets and the [fork matrix](../README.md#fork-maintenance) for build pins.
+This does not update the upstream base or establish new gameplay/online support
+for this fork. Patch changes require rebuilding the corresponding core; updating
+the shell alone does not update a separately installed emulator.
+
+Switch 2 CPU/GPU translation, game evidence and pending work are tracked in
+[SWITCH2-PROGRESS.md](../docs/SWITCH2-PROGRESS.md).
+
+For v0.5.2-alpha, Linux retains the signed v0.5.1-alpha native core and therefore
+uses the shell launch theme without the new native loading colors. Windows builds
+the loading-color patch from the release manifest. See [packaging provenance](../packaging/README.md#v052-alpha-linux-provenance).

@@ -1,7 +1,7 @@
-From 429d53e09b0d4d618163ffb9309b39cf60312295 Mon Sep 17 00:00:00 2001
+From da8b811b308499c0a2ae18dcf5f3ef68b4599465 Mon Sep 17 00:00:00 2001
 From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 16:42:47 -0700
-Subject: [PATCH] USCL: built-in NHL 15 patches for update 1.01: dynamic
+Subject: [PATCH 13/14] USCL: built-in NHL 15 patches for update 1.01: dynamic
  messages, the game's own rosters are current
 
 USCL goes online only on a game's newest update. NHL 15 1.01 moves the dynamic-messages fix by +0x240; the new roster patch lets matchmaking start without EA's roster download (the check compares the server's version with a hash of the local roster database).
