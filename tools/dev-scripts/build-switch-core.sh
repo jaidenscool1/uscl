@@ -29,7 +29,7 @@ cmake -S "$source_dir" -B "$source_dir/build-uscl" -G Ninja \
   -DENABLE_WEB_SERVICE=OFF -DYUZU_USE_BUNDLED_FFMPEG=OFF \
   -DYUZU_ROOM_STANDALONE=ON -DYUZU_DISABLE_LLVM=ON \
   -DVulkanHeaders_FORCE_BUNDLED=ON "${extra[@]}"
-cmake --build "$source_dir/build-uscl" --target eden eden-cli yuzu_room_standalone -j "${USCL_BUILD_JOBS:-8}"
+cmake --build "$source_dir/build-uscl" --target yuzu yuzu-cmd yuzu_room_standalone -j "${USCL_BUILD_JOBS:-8}"
 install -m755 "$source_dir/build-uscl/bin/eden" "$prefix/bin/eden-native"
 install -m755 "$source_dir/build-uscl/bin/eden-cli" "$prefix/bin/eden-cli"
 install -m755 "$source_dir/build-uscl/bin/eden-room" "$prefix/bin/eden-room"
