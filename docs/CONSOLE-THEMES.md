@@ -132,13 +132,13 @@ On Visual Studio use `ctest --test-dir shell-build -C Release --output-on-failur
 
 The interaction suite covers empty/live lists, 240-game libraries, console filters, keyboard access to
 library tools, every Xbox tile's directional reachability, multiple pin pages, Nintendo section navigation,
-shortcut routing, launch/options/info actions, disabled rows, dialogs and launch screens. QML binding,
+shortcut routing, launch/options/info actions, disabled rows, dialogs and launch screens. Additional checks exercise mouse/wheel input in all seven modern libraries, partial final rows, real delegate positions after filtering, nested-menu selection restoration, offscreen activation protection, Xbox tile bounds and long titles. QML binding,
 resource and JavaScript warnings fail these tests.
 
 The compiled-shell smoke test loads all eight packaged themes with isolated temporary preferences. It
 checks stage bounds at 1280×720, 800×600 and 2560×1080, real dashboard-to-page connections, Back navigation,
 Home-key quick access, pin preference updates, switching/restoring themes, theme-specific sound bindings,
-mute/volume settings and opening/scrolling/closing the offline changelog.
+mute/volume settings and opening/scrolling/closing the offline changelog. Every theme opens all ten Settings sections and returns to the selected row; modern themes also exercise a synthetic 53-game library through Main.qml routing, including filter and selection restoration.
 
 For synthetic captures, run `uscl-ui-tests -input uscl-shell/tools/tst_theme_previews.qml`. It writes home,
 functions, quick-menu, settings, library and loading captures to the system temporary directory. The
@@ -161,10 +161,10 @@ closes this menu entry in all eight themes.
 PS4 shelf movement and tile resizing share a 150 ms ease-out, with a 100 ms title delay followed by a
 100 ms fade. Function-area travel uses 270 ms; quick access opens and closes over 250 ms and can reverse
 while moving. These timings follow local PS4 reference measurements; other consoles use conservative
-approximations rather than claimed frame-exact timing. Modern pages use a brief fade and vertical entrance.
+approximations rather than claimed frame-exact timing. Modern pages keep an opaque, stationary background and fade their content over 120 ms. PS4 additional function icons wait 120 ms before fading in over 150 ms; the compact profile exits first.
 Game backdrops decode asynchronously before crossfading, and stale image completions cannot replace the
 current selection. Closing quick menus stop accepting mouse input immediately. The interaction suite
-checks rapid navigation, interrupted menu transitions, disabled home motion and latest-request artwork.
+checks rapid navigation, interrupted menu transitions, intermediate PS4 icon positions, disabled home motion and latest-request artwork. Reusing an outgoing image buffer settles its opacity before replacing its source. Closing overlays are hidden when their opening theme changes.
 
 The later online-reference pass adds directional Xbox pivot/blade entrances, PS4 function-icon travel
 and profile fades, a more compact PS5 strip and controls, functional PS5 cards/Options, and distinct

@@ -18,6 +18,7 @@
 #include <QSettings>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQmlExpression>
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QKeyEvent>
@@ -811,6 +812,49 @@ int main(int argc, char* argv[])
                 key(Qt::Key_Up);
                 returnHome();
                 if (page->isVisible()) { fail("dashboard section back navigation"); return; }
+            }
+            // The previous smoke flow used an empty library. Exercise loaded models and
+            // nested-page restoration through Main's real routing with inert synthetic rows.
+            if (active != "ps3")
+            {
+                QQmlExpression audit(qmlContext(root), root, QStringLiteral(R"JS(
+                    (function() {
+                        var original = cats;
+                        try {
+                            var copy = cats.slice(), rows = [];
+                            for (var i=0; i<53; ++i) rows.push({gameId:"UI-AUDIT-"+i, title:"Audit game "+i, console:i%2 ? "PS4":"PS3", disabled:true});
+                            copy[gamesCat] = {id:"games",name:"Games",icon:original[gamesCat].icon,items:rows}; cats = copy;
+                            openConsoleSection("library");
+                            if (!page.modernSoftware || page.displayRows.length !== 53) throw new Error("loaded library model");
+                            page.current = page.gridColumns === 1 ? 51 : 49; page.input("down");
+                            if (page.current !== 52) throw new Error("short final library row");
+                            page.selectFilter(2); page.current = 12;
+                            var selected = page.cur.gameId;
+                            openConsoleSection("sound"); popPage();
+                            if (page.filters[page.filterIndex] !== "PS4" || page.cur.gameId !== selected) throw new Error("library filter/selection restoration");
+                            return true;
+                        } finally { closePages(); cats = original; }
+                    })()
+                )JS"));
+                if (!audit.evaluate().toBool() || audit.hasError())
+                {
+                    if (audit.hasError()) std::fprintf(stderr, "qml-smoke-test: %s\n", qPrintable(audit.error().description()));
+                    fail("loaded library navigation/restoration"); return;
+                }
+            }
+            // Open every settings section through actual key routing. These actions
+            // display menus only; no setting, install, emulator or network action is selected.
+            for (int sectionIndex = 0; sectionIndex < 10; ++sectionIndex)
+            {
+                QMetaObject::invokeMethod(root, "openConsoleSection", Q_ARG(QVariant, QVariant("settings")));
+                page->setProperty("current", sectionIndex);
+                key(Qt::Key_Return);
+                if (!page->isVisible() || page->property("heading").toString().isEmpty())
+                { fail("settings section did not open"); return; }
+                key(Qt::Key_Escape);
+                if (!page->isVisible() || page->property("current").toInt() != sectionIndex)
+                { fail("settings section selection restoration"); return; }
+                returnHome();
             }
             if (active != "ps3")
             {

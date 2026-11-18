@@ -8,6 +8,8 @@ Item {
     property string theme: "ps3"
     ThemePalette { id: themeStyle; theme: panel.theme }
     property bool open: false
+    property string openingTheme: theme
+    onThemeChanged: { if (!open) { dimFade.complete(); sideSlide.complete(); } }
     enabled: open
     property var options: []       // [{ title, action, checked, disabled }]
     property int current: 0
@@ -16,6 +18,7 @@ Item {
     function show(opts, start) {
         options = opts || []
         current = Math.max(0, Math.min(options.length - 1, start !== undefined ? start : Math.max(0, options.findIndex(function(o) { return o.checked }))))
+        openingTheme = theme
         open = true
         list.positionViewAtIndex(current, ListView.Contain)
     }
@@ -33,20 +36,20 @@ Item {
     }
 
     anchors.fill: parent
-    visible: dim.opacity > 0
+    visible: dim.opacity > 0 && openingTheme === theme
 
     Rectangle {
         id: dim
         anchors.fill: parent; color: "black"
         opacity: panel.open ? 0.55 : 0
-        Behavior on opacity { NumberAnimation { duration: panel.open ? 220 : 160 } }
+        Behavior on opacity { NumberAnimation { id: dimFade; duration: panel.open ? 220 : 160 } }
     }
     MouseArea { anchors.fill: parent; onClicked: panel.input("back"); onWheel: function(wheel) { wheel.accepted = true } }
     Item {
         id: side
         width: 700; height: parent.height
         x: parent.width - 700 + (panel.open ? 0 : 640)
-        Behavior on x { NumberAnimation { duration: panel.open ? 240 : 180; easing.type: panel.open ? Easing.OutSine : Easing.InSine } }
+        Behavior on x { NumberAnimation { id: sideSlide; duration: panel.open ? 240 : 180; easing.type: panel.open ? Easing.OutSine : Easing.InSine } }
         MouseArea { anchors.fill: parent }
         Rectangle { anchors.fill: parent; visible: panel.theme !== "ps3"; color: themeStyle.panel }
         Image { visible: panel.theme === "ps3"; anchors.fill: parent; source: "qrc:/qt/qml/Uscl/xmb/ui/options_panel.png" }

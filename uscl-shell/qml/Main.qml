@@ -731,11 +731,12 @@ Window {
         if (pageStack.length) {
             var stack = pageStack.slice()
             stack[stack.length - 1].selected = page.current
+            stack[stack.length - 1].navigation = page.saveNavigation()
             pageStack = stack
         }
         var catIcon = cats[catIndex !== undefined ? catIndex : xmb.cat].icon
         pageStack = pageStack.concat([{ rows: rowsFn, parentIcon: parentIcon, catIcon: catIcon, title: heading, settingsSection: cats[1].items.findIndex(function(e) { return e.title === heading }), presentation: presentation || "", selected: 0, back: backFn || null }])
-        page.current = 0
+        page.resetNavigation()
         page.fromHome = pageStack.length === 1
         page.open()
     }
@@ -780,7 +781,7 @@ Window {
     function popPage() {
         pageStack = pageStack.slice(0, -1)
         if (pageStack.length) {
-            page.current = Math.min(topPage.selected || 0, Math.max(0, page.rows.length - 1))
+            page.restoreNavigation(topPage.navigation || {current:topPage.selected || 0})
             page.open()
         }
     }

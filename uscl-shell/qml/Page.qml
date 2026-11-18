@@ -43,6 +43,25 @@ Item {
 
     onDisplayRowsChanged: { if (current >= displayRows.length) current = Math.max(0, displayRows.length - 1) }
 
+    function resetNavigation() {
+        filterIndex = 0; filterFocus = false; libraryNavIndex = 0;
+        sectionFocus = false; sectionCursor = Math.max(0,settingsSection); current = 0;
+    }
+    function saveNavigation() {
+        return {current:current, filter:filters[filterIndex], filterFocus:filterFocus,
+                libraryNavIndex:libraryNavIndex, sectionFocus:sectionFocus, sectionCursor:sectionCursor,
+                gameId:cur && cur.gameId ? cur.gameId : ""};
+    }
+    function restoreNavigation(state) {
+        resetNavigation();
+        if (!state) return;
+        filterIndex = Math.max(0,filters.indexOf(state.filter));
+        var match = state.gameId ? displayRows.findIndex(function(e) { return e.gameId === state.gameId }) : -1;
+        current = Math.max(0,Math.min(displayRows.length-1,match >= 0 ? match : state.current || 0));
+        filterFocus = !!state.filterFocus;
+        libraryNavIndex = Math.max(0,Math.min(filters.length+libraryTools.length-1,state.libraryNavIndex || 0));
+        sectionFocus = !!state.sectionFocus; sectionCursor = Math.max(0,state.sectionCursor || 0);
+    }
     function input(b) {
         if ((theme === "switch" || theme === "switch2") && settingsSection >= 0) {
             if (sectionFocus) {
@@ -66,11 +85,20 @@ Item {
             }
             if (["left", "right", "up", "down", "l1", "r1"].indexOf(b) >= 0) {
                 if (b === "left" && current % gridColumns === 0) { filterFocus = true; libraryNavIndex = filterIndex; return }
-                var delta = b === "left" ? -1 : b === "right" ? 1 : b === "up" ? -gridColumns : b === "down" ? gridColumns : b === "l1" ? -gridColumns*2 : gridColumns*2
-                var next = current+delta
-                if (next >= 0 && next < displayRows.length) { current = next; sound("cursor") }
+                var next = current;
+                var row = Math.floor(current / gridColumns), col = current % gridColumns;
+                if (b === "left") next = current - 1;
+                else if (b === "right" && col < gridColumns-1) next = Math.min(displayRows.length-1,current+1);
+                else if (b === "up" && row > 0) next = current-gridColumns;
+                else if (b === "down" && (row+1)*gridColumns < displayRows.length) next = Math.min(displayRows.length-1,current+gridColumns);
+                else if (b === "l1" || b === "r1") next = Math.max(0,Math.min(displayRows.length-1,current+(b === "l1" ? -1 : 1)*gridColumns*2));
+                if (next >= 0 && next < displayRows.length && next !== current) { current = next; sound("cursor") }
                 return
             }
+        }
+        // A wheel/drag can leave focus offscreen. Reveal it before allowing activation.
+        if (modernSoftware && visible && ["accept","options","info"].indexOf(b) >= 0 && cur && !modernPage.selectionVisible()) {
+            modernPage.revealSelection(); sound("cursor"); return;
         }
         if (b === "info" && cur && cur.info) { sound("select"); cur.info(); return }
 
@@ -196,10 +224,11 @@ Item {
         }
     }
 
+    ThemePalette { id: pagePalette; theme: page.theme }
+    Rectangle { anchors.fill: parent; visible: page.theme !== "ps3"; color: pagePalette.background }
     ConsolePage {
         id: modernPage
         anchors.fill: parent
-        transform: Translate { id: modernShift }
         visible: page.theme !== "ps3"
         controller: page
         theme: page.theme
@@ -218,8 +247,7 @@ Item {
     }
     ParallelAnimation {
         id: modernEnter
-        NumberAnimation { target: modernPage; property: "opacity"; from: 0; to: 1; duration: 180 }
-        NumberAnimation { target: modernShift; property: "y"; from: page.theme === "ps4" || page.theme === "ps5" ? 24 : 12; to: 0; duration: 200; easing.type: Easing.OutCubic }
+        NumberAnimation { target: modernPage; property: "opacity"; from: .6; to: 1; duration: 120 }
     }
     ParallelAnimation {
         id: enter

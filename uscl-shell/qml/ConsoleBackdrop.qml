@@ -8,15 +8,28 @@ Item {
     property bool animate: true
     property int front: -1
     function request() {
-        if (source.toString() === "") { front = -1; return; }
+        if (source.toString() === "") { firstFade.stop(); secondFade.stop(); first.opacity = 0; second.opacity = 0; front = -1; return; }
+        // Reusing a buffer while it is fading out must not expose newly decoded art
+        // at the old image's partial opacity. Settle that blend before replacing it.
+        firstFade.stop(); secondFade.stop();
+        first.opacity = front === 0 ? 1 : 0;
+        second.opacity = front === 1 ? 1 : 0;
         var next = front === 0 ? second : first;
         next.source = source;
         if (next.status === Image.Ready) present(next);
     }
     function present(image) {
         if (image.status === Image.Ready && image.source.toString() === source.toString())
+        {
             front = image === first ? 0 : 1;
+            firstFade.stop(); secondFade.stop();
+            firstFade.to = front === 0 ? 1 : 0;
+            secondFade.to = front === 1 ? 1 : 0;
+            firstFade.start(); secondFade.start();
+        }
     }
+    NumberAnimation { id: firstFade; target: first; property: "opacity"; duration: backdrop.animate ? 220 : 0; easing.type: Easing.OutCubic }
+    NumberAnimation { id: secondFade; target: second; property: "opacity"; duration: backdrop.animate ? 220 : 0; easing.type: Easing.OutCubic }
     onSourceChanged: request()
     Image {
         id: first
@@ -24,9 +37,9 @@ Item {
         anchors.fill: parent
         asynchronous: true
         fillMode: Image.PreserveAspectCrop
-        opacity: backdrop.front === 0 ? 1 : 0
+        opacity: 0
         onStatusChanged: backdrop.present(first)
-        Behavior on opacity { NumberAnimation { duration: backdrop.animate ? 220 : 0; easing.type: Easing.OutCubic } }
+
     }
     Image {
         id: second
@@ -34,8 +47,8 @@ Item {
         anchors.fill: parent
         asynchronous: true
         fillMode: Image.PreserveAspectCrop
-        opacity: backdrop.front === 1 ? 1 : 0
+        opacity: 0
         onStatusChanged: backdrop.present(second)
-        Behavior on opacity { NumberAnimation { duration: backdrop.animate ? 220 : 0; easing.type: Easing.OutCubic } }
+
     }
 }

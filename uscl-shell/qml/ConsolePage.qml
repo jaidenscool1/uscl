@@ -25,7 +25,7 @@ Item {
     Text {
         x: style.blades ? 270 : style.ps4 ? 107 : 96
         y: style.ps4 ? 48 : 65
-        width: parent.width - 192
+        width: parent.width - x - 520
         height: 80
         text: screen.heading || qsTr("Settings")
         color: style.text
@@ -40,62 +40,68 @@ Item {
         height: 2
         color: style.divider
     }
-    // Library filters are a separate navigation region; no game is hidden behind a utility tile.
+    function revealSelection() {
+        library.forceLayout();
+        if (library.count > 0) library.positionViewAtIndex(screen.controller.current, GridView.Contain);
+    }
+    function selectionVisible() {
+        library.forceLayout();
+        var item = library.currentItem;
+        return !!item && item.y >= library.contentY-1 && item.y+item.height <= library.contentY+library.height+1;
+    }
+    Text {
+        objectName: "librarySelectionTitle"
+        visible: screen.software
+        x: screen.contentLeft; y: 177; width: screen.width-x-230; height: 46
+        text: screen.controller.cur ? screen.controller.cur.title : qsTr("No games")
+        color: style.text; font.pixelSize: 28; elide: Text.ElideRight
+    }
+    Text {
+        visible: screen.software
+        x: screen.width-220; y: 177; width: 124; height: 46
+        text: screen.controller.displayRows.length ? qsTr("%1 / %2").arg(screen.controller.current+1).arg(screen.controller.displayRows.length) : "0 / 0"
+        color: style.muted; font.pixelSize: 23; horizontalAlignment: Text.AlignRight
+    }
+    // Tools remain visible while the console filter list scrolls independently.
     ListView {
         id: librarySidebar
         objectName: "librarySidebar"
         visible: screen.software
-        x: 96
-        y: 230
-        width: 245
-        height: 690
-        clip: true
-        spacing: 8
-        model: screen.controller.filters.map(function (title, index) {
-            return {
-                title: title,
-                filter: index
-            };
-        }).concat(screen.controller.libraryTools)
-        currentIndex: screen.controller.libraryNavIndex
-        onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
+        x: 96; y: 246; width: 245; height: 370
+        clip: true; spacing: 8
+        boundsBehavior: Flickable.StopAtBounds
+        model: screen.controller.filters
+        currentIndex: Math.min(screen.controller.libraryNavIndex, count-1)
+        onCurrentIndexChanged: Qt.callLater(function() { librarySidebar.positionViewAtIndex(librarySidebar.currentIndex,ListView.Contain); })
         delegate: Rectangle {
-            required property var modelData
+            required property string modelData
             required property int index
-            width: 245
-            height: 72
-            readonly property bool selected: screen.controller.filterFocus && index
-                                             === screen.controller.libraryNavIndex
+            objectName: "libraryFilter"+index
+            width: 245; height: 64
+            readonly property bool selected: screen.controller.filterFocus && index === screen.controller.libraryNavIndex
             color: selected ? style.focusFill : "transparent"
-            border.width: selected ? 3 : 0
-            border.color: style.accent
-            Rectangle {
-                x: 0
-                y: 18
-                width: 4
-                height: 36
-                visible: parent.modelData.filter === screen.controller.filterIndex
-                color: style.accent
-            }
-            Text {
-                x: 15
-                width: parent.width - 30
-                height: parent.height
-                text: parent.modelData.title
-                color: parent.selected ? style.focusText : style.text
-                font.pixelSize: 25
-                verticalAlignment: Text.AlignVCenter
-                elide: Text.ElideRight
-            }
-            MouseArea {
-                anchors.fill: parent
-                onClicked: {
-                    if (parent.modelData.filter !== undefined) {
-                        screen.controller.selectFilter(parent.modelData.filter);
-                        screen.controller.filterFocus = true;
-                    } else
-                        screen.controller.libraryAction(parent.modelData.key);
-                }
+            border.width: selected ? 3 : 0; border.color: style.accent
+            Rectangle { x: 0; y: 16; width: 4; height: 32; visible: parent.index === screen.controller.filterIndex; color: style.accent }
+            Text { x: 15; width: parent.width-30; height: parent.height; text: parent.modelData; color: parent.selected ? style.focusText : style.text; font.pixelSize: 25; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight }
+            MouseArea { anchors.fill: parent; onClicked: { screen.controller.selectFilter(parent.index); screen.controller.filterFocus = true; } }
+        }
+    }
+    Column {
+        objectName: "libraryTools"
+        visible: screen.software
+        x: 96; y: 656; width: 245; spacing: 8
+        Repeater {
+            model: screen.controller.libraryTools
+            delegate: Rectangle {
+                required property var modelData
+                required property int index
+                objectName: "libraryTool_"+modelData.key
+                width: 245; height: 72
+                readonly property bool selected: screen.controller.filterFocus && screen.controller.libraryNavIndex === screen.controller.filters.length+index
+                color: selected ? style.focusFill : "transparent"
+                border.width: selected ? 3 : 0; border.color: style.accent
+                Text { x: 15; width: parent.width-30; height: parent.height; text: parent.modelData.title; color: parent.selected ? style.focusText : style.text; font.pixelSize: 24; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight }
+                MouseArea { anchors.fill: parent; onClicked: { screen.controller.filterFocus = true; screen.controller.libraryNavIndex = screen.controller.filters.length+parent.index; screen.controller.libraryAction(parent.modelData.key); } }
             }
         }
     }
@@ -104,16 +110,20 @@ Item {
         objectName: "libraryGrid"
         visible: screen.software
         x: screen.contentLeft
-        y: 230
+        y: 246
         width: screen.width - x - 96
-        height: 690
-        cellWidth: width / screen.controller.gridColumns
+        height: 660
+        cellWidth: Math.floor(width / screen.controller.gridColumns)
         cellHeight: style.blades ? 92 : style.nintendo ? 300 : 330
         clip: true
         model: screen.software ? screen.controller.displayRows : []
         currentIndex: screen.controller.current
-        highlightMoveDuration: 140
-        onCurrentIndexChanged: positionViewAtIndex(currentIndex, GridView.Contain)
+        boundsBehavior: Flickable.StopAtBounds
+        maximumFlickVelocity: 1800
+        function reveal() { if (visible) screen.revealSelection(); }
+        onCurrentIndexChanged: Qt.callLater(reveal)
+        onModelChanged: Qt.callLater(reveal)
+        onVisibleChanged: Qt.callLater(reveal)
         delegate: Rectangle {
             id: game
             required property var modelData
@@ -192,6 +202,26 @@ Item {
             font.pixelSize: 32
             wrapMode: Text.Wrap
             horizontalAlignment: Text.AlignHCenter
+        }
+    }
+    Rectangle {
+        visible: screen.software && library.contentHeight > library.height
+        x: library.x+library.width+12; y: library.y; width: 4; height: library.height
+        color: style.divider
+        Rectangle {
+            width: 4; radius: 2; color: style.muted
+            height: Math.max(32,parent.height*library.height/library.contentHeight)
+            y: Math.max(0,Math.min(parent.height-height,(parent.height-height)*library.contentY/Math.max(1,library.contentHeight-library.height)))
+        }
+    }
+    Rectangle {
+        visible: screen.software && librarySidebar.contentHeight > librarySidebar.height
+        x: librarySidebar.x+librarySidebar.width+8; y: librarySidebar.y; width: 3; height: librarySidebar.height
+        color: style.divider
+        Rectangle {
+            width: 3; color: style.muted
+            height: Math.max(24,parent.height*librarySidebar.height/librarySidebar.contentHeight)
+            y: Math.max(0,Math.min(parent.height-height,(parent.height-height)*librarySidebar.contentY/Math.max(1,librarySidebar.contentHeight-librarySidebar.height)))
         }
     }
     ListView {
@@ -343,7 +373,10 @@ Item {
         Text {
             y: 130
             width: parent.width
-            height: 100
+            height: 120
+            maximumLineCount: 3
+            elide: Text.ElideRight
+            clip: true
             text: screen.controller.cur ? screen.controller.cur.desc || "" : ""
             color: style.muted
             font.pixelSize: 27

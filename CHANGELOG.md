@@ -24,6 +24,11 @@ These changes are included in this development branch. They are not a list of pu
 - Added asynchronous game-backdrop crossfades that retain the previous image until the selected artwork is ready.
 - Kept opaque game artwork inside Switch 2 rounded cards on Home and in the library.
 
+- Fixed incomplete library rows, filter relayout and restoration of the selected game when returning from nested menus.
+- Kept library tools visible, added selection/scroll indicators and prevented activation of a game scrolled offscreen.
+- Removed Xbox focus-tile overlap, bounded long titles and settings descriptions, and staged PS4 function icons to avoid collisions during transitions.
+- Settled reused backdrop buffers before loading new artwork and hid closing overlays when switching themes.
+
 ### Emulator launch screens
 
 - Added a themed shell launch/return screen for every home-screen emulator path, with game artwork and title.

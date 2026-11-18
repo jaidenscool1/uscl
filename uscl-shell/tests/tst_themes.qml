@@ -27,7 +27,8 @@ Item {
         function init() {
             failOnWarning(/(ReferenceError|TypeError|Unable to assign|Binding loop|Cannot open)/)
             menu.close(); dialog.close(); prompt.close(); page.visible = false
-            home.visible = true; navigation.visible = false
+            home.visible = true; navigation.visible = false; home.animate = true
+            page.rows = []; page.resetNavigation()
             home.reset()
             page.presentation = ""; page.filterIndex = 0; page.filterFocus = false; page.settingsSection = -1; page.sectionFocus = false; home.pinnedIds = []
             sectionSpy.clear()
@@ -46,6 +47,9 @@ Item {
             var tile = findChild(home, "homeTile9")
             tryCompare(tile, "width", 342)
             tryCompare(tile, "height", 412)
+            var oldTile = findChild(home,"homeTile10")
+            tryCompare(oldTile,"height",200,200)
+            compare(oldTile.height,oldTile.width)
             tryCompare(findChild(home, "softwareTitle"), "opacity", 1)
             home.input("home"); wait(40); home.input("back"); wait(40); home.input("home")
             var quick = findChild(home, "consoleQuickMenu")
@@ -130,6 +134,129 @@ Item {
             verify(home.tab >= 0 && home.tab < home.tabs.length)
             var before = home.tab; home.input("accept")
             compare(home.tab,before)
+        }
+        function libraryFixture(count, theme) {
+            var rows = []
+            for (var i = 0; i < count; i++) rows.push({gameId:"AUDIT"+i, title:"Long game title with distinct ending "+i,console:i%2 ? "PS4":"PS3",action:function() { launches++ },options:function() { return [] }})
+            home.visible = false; page.theme = theme || "ps5"; page.presentation = "library";
+            page.rows = rows; page.visible = true; page.resetNavigation(); page.open()
+            wait(140)
+            return findChild(page,"libraryGrid")
+        }
+        function test_library_last_row_and_real_layout_data() { return test_themes_data() }
+        function test_library_last_row_and_real_layout(data) {
+            var grid = libraryFixture(53,data.theme)
+            page.current = page.gridColumns === 1 ? 51 : 49; page.input("down"); compare(page.current,52)
+            tryVerify(function() { return grid.currentItem && grid.currentItem.y >= grid.contentY && grid.currentItem.y+grid.currentItem.height <= grid.contentY+grid.height+1 })
+            page.input("right"); compare(page.current,52)
+            page.current = page.gridColumns-1; page.input("right"); compare(page.current,page.gridColumns-1)
+            page.input("down"); compare(page.current,2*page.gridColumns-1)
+            tryVerify(function() { return grid.currentItem && grid.currentItem.y >= grid.contentY && grid.currentItem.y+grid.currentItem.height <= grid.contentY+grid.height+1 })
+            compare(grid.currentItem.x,(page.gridColumns-1)*grid.cellWidth)
+            page.input("options"); compare(optionsSpy.count,0) // Page has its own signal.
+            var spy = Qt.createQmlObject('import QtTest; SignalSpy { signalName:"showOptions" }',page); spy.target = page
+            page.input("options"); compare(spy.count,1); compare(spy.signalArguments[0][0].gameId,"AUDIT"+(2*page.gridColumns-1)); spy.destroy()
+        }
+        function test_library_filter_relayout_and_offscreen_activation() {
+            var grid = libraryFixture(73)
+            page.current = 72; wait(30); page.selectFilter(1); page.selectFilter(2)
+            tryVerify(function() { return grid.currentItem && grid.currentItem.y >= grid.contentY && grid.currentItem.y+grid.currentItem.height <= grid.contentY+grid.height+1 })
+            compare(page.cur.gameId,"AUDIT1")
+            grid.contentY = grid.contentHeight-grid.height
+            page.input("accept"); compare(launches,0)
+            tryVerify(function() { return grid.currentItem && grid.currentItem.y >= grid.contentY && grid.currentItem.y+grid.currentItem.height <= grid.contentY+grid.height+1 })
+            page.input("accept"); compare(launches,1)
+        }
+        function test_library_saved_state_and_persistent_tools() {
+            libraryFixture(73); page.selectFilter(2); page.current = 12; wait(30)
+            var state = page.saveNavigation(), gameId = page.cur.gameId
+            page.presentation = ""; page.rows = [{title:"Sound settings"}]; page.resetNavigation()
+            page.presentation = "library";
+            var rows = []; for (var i = 0; i < 73; i++) rows.push({gameId:"AUDIT"+i, title:"Game "+i,console:i%2 ? "PS4":"PS3"})
+            page.rows = rows; page.restoreNavigation(state)
+            compare(page.filters[page.filterIndex],"PS4"); compare(page.cur.gameId,gameId)
+            for (var tool of ["add","updates","help"]) {
+                var item = findChild(page,"libraryTool_"+tool)
+                verify(item.visible); var pos = item.mapToItem(page,0,0)
+                verify(pos.y >= 0 && pos.y+item.height < 920)
+            }
+        }
+        function test_xbox_tiles_do_not_overlap() {
+            home.theme = "x360"; home.reset()
+            for (var selected = 0; selected < home.panelEntries.length; selected++) {
+                home.tileIndex = selected; wait(130)
+                for (var a = 0; a < home.panelEntries.length; a++) for (var b = a+1; b < home.panelEntries.length; b++) {
+                    var one = findChild(home,"dashboardTile"+a), two = findChild(home,"dashboardTile"+b)
+                    var p = one.mapToItem(home,0,0), q = two.mapToItem(home,0,0)
+                    verify(p.x+one.width*one.scale <= q.x || q.x+two.width*two.scale <= p.x || p.y+one.height*one.scale <= q.y || q.y+two.height*two.scale <= p.y,"Xbox focus must not cover adjacent tiles")
+                }
+            }
+        }
+        function test_long_game_titles_do_not_cover_actions_data() { return [{tag:"ps4",theme:"ps4"},{tag:"ps5",theme:"ps5"}] }
+        function test_long_game_titles_do_not_cover_actions(data) {
+            home.theme = data.theme; home.reset()
+            var rows = navigation.cats[0].items.slice(); rows[0] = Object.assign({},rows[0],{title:Array(12).fill("A long subtitle with more words").join(" ")})
+            navigation.cats = [{id:"games",name:"Games",items:rows}]
+            wait(240)
+            var title = findChild(home,"softwareTitle"), description = findChild(home,"homeGameDescription")
+            verify(title.contentHeight <= title.height+1)
+            verify(title.mapToItem(home,0,title.height).y <= description.mapToItem(home,0,0).y)
+        }
+        function test_library_mouse_and_wheel_data() { return test_themes_data() }
+        function test_library_mouse_and_wheel(data) {
+            var grid = libraryFixture(73,data.theme)
+            var index = page.gridColumns === 1 ? 2 : 6
+            var game = findChild(page,"libraryGame"+index)
+            verify(game !== null)
+            mouseClick(game,game.width/2,game.height/2); compare(page.current,index); compare(launches,0)
+            wait(30)
+            mouseClick(game,game.width/2,game.height/2); compare(launches,1)
+            var spy = Qt.createQmlObject('import QtTest; SignalSpy { signalName:"showOptions" }',page); spy.target = page
+            mouseClick(game,game.width/2,game.height/2,Qt.RightButton)
+            compare(spy.count,1); compare(spy.signalArguments[0][0].gameId,"AUDIT"+index); spy.destroy()
+            mouseWheel(grid,grid.width/2,grid.height/2,0,-720)
+            wait(160)
+            verify(grid.contentY > 0)
+            var before = launches; page.input("accept")
+            compare(launches,before)
+            wait(30); page.input("accept"); compare(launches,before+1)
+        }
+        function test_theme_switch_drops_closing_overlays() {
+            home.theme = "ps5"; home.reset(); home.input("home"); wait(40)
+            home.theme = "ps4"
+            compare(findChild(home,"consoleQuickMenu").visible,false)
+            menu.theme = "ps5"; menu.show([{title:"Setting"}]); wait(40); menu.close(); menu.theme = "switch2"
+            compare(menu.visible,false)
+        }
+        function test_ps4_function_transition_has_no_icon_collisions() {
+            home.theme = "ps4"; home.reset(); wait(280); home.input("up")
+            var previous = 0
+            for (var sample of [40,100,160,240,300]) {
+                wait(sample-previous); previous = sample
+                var glyphs = []
+                for (var shortcut of home.shortcuts) {
+                    var fn = findChild(home,"homeShortcut_"+shortcut.key)
+                    if (fn.visible && fn.opacity > .1) glyphs.push(findChild(fn,"functionGlyph"))
+                }
+                for (var i = 0; i < glyphs.length; ++i) for (var j = i+1; j < glyphs.length; ++j) {
+                    var p = glyphs[i].mapToItem(home,0,0), q = glyphs[j].mapToItem(home,0,0)
+                    verify(p.x+glyphs[i].width <= q.x || q.x+glyphs[j].width <= p.x || p.y+glyphs[i].height <= q.y || q.y+glyphs[j].height <= p.y,"Function icons collided at "+sample+" ms")
+                }
+                if (sample >= 160) compare(findChild(home,"consoleProfile").opacity,0)
+            }
+        }
+        function test_backdrop_reused_buffer_is_not_partially_visible() {
+            backdrop.animate = true; backdrop.source = "qrc:/qt/qml/Uscl/xmb/icons/cat_ps3.png"
+            wait(250); backdrop.source = "qrc:/qt/qml/Uscl/xmb/icons/cat_ps4.png"
+            tryVerify(function() { return backdrop.front >= 0 && findChild(backdrop,backdrop.front === 0 ? "backdropFirst":"backdropSecond").source.toString().endsWith("cat_ps4.png") })
+            wait(35)
+            var inactive = findChild(backdrop,backdrop.front === 0 ? "backdropSecond":"backdropFirst")
+            backdrop.source = "qrc:/qt/qml/Uscl/xmb/icons/cat_switch.png"
+            compare(inactive.opacity,0)
+            wait(260)
+            var active = findChild(backdrop,backdrop.front === 0 ? "backdropFirst":"backdropSecond")
+            verify(active.source.toString().endsWith("cat_switch.png")); compare(active.opacity,1)
+            backdrop.source = ""
         }
         function test_themes_data() {
             return ["ps4", "ps5", "x360classic", "x360", "xboxone", "switch", "switch2"].map(function(t) { return {tag: t, theme: t} })

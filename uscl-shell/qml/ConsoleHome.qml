@@ -168,6 +168,19 @@ Item {
         softwareIndex = 0;
         tab = theme === "xboxone" || theme === "x360classic" ? 1 : 0;
     }
+    property real functionExtrasOpacity: 0
+    onCategoryFocusChanged: {
+        if (style.ps4 && categoryFocus && animate) functionExtrasArrival.restart();
+        else { functionExtrasArrival.stop(); functionExtrasOpacity = categoryFocus ? 1 : 0; }
+    }
+    SequentialAnimation {
+        id: functionExtrasArrival
+        PropertyAction { target: home; property: "functionExtrasOpacity"; value: 0 }
+        PauseAnimation { duration: 120 }
+        NumberAnimation { target: home; property: "functionExtrasOpacity"; to: 1; duration: 150 }
+    }
+    property real pivotStart: 0
+    property real pivotFadeStart: 1
     property int previousTab: 0
     property int pivotDirection: 1
     property real pivotOffset: 0
@@ -175,14 +188,22 @@ Item {
     onTabChanged: {
         pivotDirection = tab >= previousTab ? 1 : -1;
         previousTab = tab;
-        if (style.xbox && animate && visible) pivotArrival.restart();
+        if (style.xbox && animate && visible) {
+            pivotStart = Math.max(-60,Math.min(60,pivotOffset + pivotDirection*40));
+            pivotFadeStart = pivotArrival.running ? pivotOpacity : .6;
+            pivotArrival.restart();
+        }
     }
     ParallelAnimation {
         id: pivotArrival
-        NumberAnimation { target: home; property: "pivotOffset"; from: home.pivotDirection * 60; to: 0; duration: 200; easing.type: Easing.OutCubic }
-        NumberAnimation { target: home; property: "pivotOpacity"; from: .25; to: 1; duration: 160 }
+        NumberAnimation { target: home; property: "pivotOffset"; from: home.pivotStart; to: 0; duration: 200; easing.type: Easing.OutCubic }
+        NumberAnimation { target: home; property: "pivotOpacity"; from: home.pivotFadeStart; to: 1; duration: 160 }
     }
-    onThemeChanged: { pivotArrival.stop(); pivotOffset = 0; pivotOpacity = 1; reset(); }
+    onThemeChanged: {
+        pivotArrival.stop(); pivotOffset = 0; pivotOpacity = 1;
+        functionExtrasArrival.stop(); functionExtrasOpacity = 0;
+        reset(); quickReveal.complete();
+    }
     Component.onCompleted: reset()
     onGamesChanged: softwareIndex = Math.min(softwareIndex, Math.max(0, entries.length - 1))
     function choose(index) {
@@ -432,13 +453,14 @@ Item {
     }
     // Profile lives where the console puts it, separate from the status clock.
     Item {
+        objectName: "consoleProfile"
         x: home.nintendo ? 64 : style.one ? 96 : style.ps4 ? 850 : 1550
         y: home.nintendo ? 60 : style.one ? 58 : style.ps5 ? 34 : 78
         width: home.nintendo ? 110 : style.ps5 ? 64 : 390
         height: home.nintendo ? 110 : 80
         visible: !style.blades && !style.metro
         opacity: style.ps4 && home.categoryFocus ? 0 : 1
-        Behavior on opacity { NumberAnimation { duration: home.animate ? 270 : 0 } }
+        Behavior on opacity { NumberAnimation { duration: home.animate ? (home.categoryFocus ? 100 : 270) : 0 } }
         Rectangle {
             anchors.fill: parent
             color: "transparent"
@@ -506,22 +528,19 @@ Item {
                 id: fn
                 required property var modelData
                 required property int index
+                readonly property bool compactVisible: ["updates","friends","settings","power"].indexOf(modelData.key) >= 0
                 readonly property bool included: home.nintendo ? index > 0 : style.ps5 ? modelData.key
                                                                                          === "settings"
                                                                                          || modelData.key
                                                                                          === "updates" :
-                                                                                         home.categoryFocus
-                                                                                         || ["updates",
-                                                                                             "friends",
-                                                                                             "settings",
-                                                                                             "power"].indexOf(
-                                                                                             modelData.key)
-                                                                                         >= 0
+                                                                                         true
                 readonly property int slot: home.nintendo ? index - 1 : style.ps5 ? (modelData.key === "updates"
                                                                                      ? 0 : 1) : index
                 objectName: "homeShortcut_" + modelData.key
                 visible: included
-                x: style.ps4 && !home.categoryFocus ? ({
+                opacity: style.ps4 && !compactVisible ? home.functionExtrasOpacity : 1
+                enabled: opacity > .9
+                x: style.ps4 && !home.categoryFocus && compactVisible ? ({
                                                            updates: 115,
                                                            friends: 644,
                                                            settings: 1490,
@@ -532,7 +551,7 @@ Item {
                                                                                                           / home.shortcuts.length)
                 width: home.nintendo ? (style.lightSwitch ? 120 : 152) : style.ps5 ? 90 : 150
                 height: style.ps5 ? 70 : home.nintendo && !style.lightSwitch ? 170 : 140
-                Behavior on x { NumberAnimation { duration: home.animate && style.ps4 ? 270 : 0; easing.type: Easing.OutCubic } }
+                Behavior on x { NumberAnimation { duration: home.animate && style.ps4 && fn.compactVisible ? 270 : 0; easing.type: Easing.OutCubic } }
                 readonly property bool selected: home.categoryFocus && home.shortcutIndex === index
                 Rectangle {
                     x: 10
@@ -545,6 +564,7 @@ Item {
                     border.color: style.accent
                 }
                 ConsoleGlyph {
+                    objectName: "functionGlyph"
                     x: style.ps5 ? 24 : home.nintendo && !style.lightSwitch ? 44 : 28
                     y: style.ps5 ? 10 : home.nintendo && !style.lightSwitch ? 34 : 18
                     width: style.ps5 ? 36 : fn.selected && !home.nintendo ? 80 : 64
@@ -654,17 +674,17 @@ Item {
                 y: 6
                 width: home.nintendo ? 384 : style.ps5 ? (selected ? 180 : 108) : selected &&
                                                          !home.categoryFocus ? 342 : 200
-                height: style.ps4 && selected && !home.categoryFocus ? 412 : width
+                property real startStripHeight: style.ps4 && selected && !home.categoryFocus ? 70 : 0
+                Behavior on startStripHeight {
+                    NumberAnimation { duration: home.animate ? 150 : 0; easing.type: Easing.OutCubic }
+                }
+                height: width + startStripHeight
                 radius: style.ps5 ? 16 : style.lightSwitch ? 24 : 0
                 color: home.nintendo ? "#505050" : "#123979"
                 border.width: selected && home.region === "software" && !style.lightSwitch ? (home.nintendo ? 5 : style.ps5 ? 2 : 4) : 0
                 border.color: style.ps4 ? "#cdd8ed" : style.accent
                 opacity: modelData.disabled ? .45 : 1
                 Behavior on width {
-                    NumberAnimation { duration: home.animate ? 150 : 0; easing.type: Easing.OutCubic }
-                }
-                Behavior on height {
-                    enabled: style.ps4
                     NumberAnimation { duration: home.animate ? 150 : 0; easing.type: Easing.OutCubic }
                 }
                 Behavior on x {
@@ -765,7 +785,10 @@ Item {
         x: home.nintendo ? 159 : style.ps4 ? 638 : 171
         y: home.nintendo ? (style.lightSwitch ? 234 : 210) : style.ps4 ? 538 : 600
         width: home.width - x - 96
-        height: style.ps5 ? 150 : 80
+        height: home.nintendo ? 50 : 130
+        clip: true
+        fontSizeMode: home.nintendo ? Text.FixedSize : Text.Fit
+        minimumPixelSize: 32
         id: softwareTitle
         objectName: "softwareTitle"
         text: home.current ? home.current.title : ""
@@ -815,6 +838,7 @@ Item {
             color: style.divider
         }
         Text {
+            objectName: "homeGameDescription"
             y: style.ps5 ? 0 : 67
             width: style.ps5 ? 720 : parent.width
             height: 85
@@ -927,7 +951,8 @@ Item {
                 color: style.one && home.tab === 1 && index >= 8 ? "#171717" : xboxTile.modelData.key === "changelog" ? "#1c334a" : "#107c10"
                 border.width: index === home.tileIndex && home.region === "software" ? (style.metro ? 3 : 2) :
                                                                                        0
-                scale: style.metro && index === home.tileIndex && home.region === "software" ? 1.06 : 1
+                // Grow the focus frame inside its own tile; scaling the whole tile overlapped its neighbors.
+                scale: 1
                 z: index === home.tileIndex ? 2 : 0
                 Behavior on scale {
                     NumberAnimation {
@@ -1136,6 +1161,7 @@ Item {
                 y: 355
                 width: 470
                 height: 270
+                maximumLineCount: 7; elide: Text.ElideRight; clip: true
                 text: home.panelEntries[home.tileIndex] ? home.panelEntries[home.tileIndex].desc || qsTr(
                                                               "Open %1").arg(
                                                               home.panelEntries[home.tileIndex].title) : ""
@@ -1194,11 +1220,13 @@ Item {
         objectName: "consoleQuickMenu"
         id: quickMenu
         property real reveal: home.guideOpen ? 1 : 0
-        visible: reveal > 0
+        property string openingTheme: home.theme
+        Connections { target: home; function onGuideOpenChanged() { if (home.guideOpen) quickMenu.openingTheme = home.theme } }
+        visible: reveal > 0 && openingTheme === home.theme
         enabled: home.guideOpen
         opacity: reveal
         Behavior on reveal {
-            NumberAnimation { duration: home.animate ? 250 : 0; easing.type: Easing.OutCubic }
+            NumberAnimation { id: quickReveal; duration: home.animate ? 250 : 0; easing.type: Easing.OutCubic }
         }
         anchors.fill: parent
         color: "#99000000"
