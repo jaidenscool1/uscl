@@ -931,7 +931,8 @@ int main(int argc, char* argv[])
             QMetaObject::invokeMethod(root, "openConsoleSection", Q_ARG(QVariant, QVariant("changelog")));
             auto* log = root->findChild<QQuickItem*>("mainDialog");
             if (!log || !log->property("open").toBool() || !log->property("markdown").toBool() ||
-                !log->property("text").toString().contains("## Unreleased"))
+                !log->property("text").toString().contains("# USCL Changelog") ||
+                !log->property("text").toString().contains("## "))
             { fail("offline changelog did not open"); return; }
             QTimer::singleShot(100, &app, [log, window, &app] {
                 const auto sendKey = [window](int code) {
