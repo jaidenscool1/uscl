@@ -374,6 +374,35 @@ namespace
 			}
 			check(!SwitchCore::importKeys(kart).isEmpty(), "Switch rejects a game as a key file");
 			check(!SwitchCore::importFirmware(root.filePath("games")).isEmpty(), "Switch rejects firmware folder without NCAs");
+			{
+				const QString core = SwitchCore::dataDir();
+				const QString registered = core + "nand/system/Contents/registered/";
+				QDir().mkpath(registered);
+				QFile oldFirmware(registered + "old.nca");
+				check(oldFirmware.open(QIODevice::WriteOnly) && oldFirmware.write("old firmware") == 12, "firmware preservation fixture");
+				oldFirmware.close();
+				QFile version(core + "firmware-version.txt");
+				check(version.open(QIODevice::WriteOnly) && version.write("1.0.0") == 5, "firmware version preservation fixture");
+				version.close();
+				QString error;
+				SwitchCore::installConsoleFiles({{"firmware", root.filePath("games")}, {"version", "2.0.0"}, {"master", -1}}, &error);
+				check(!error.isEmpty() && oldFirmware.open(QIODevice::ReadOnly) && oldFirmware.readAll() == "old firmware" &&
+				      version.open(QIODevice::ReadOnly) && version.readAll() == "1.0.0", "failed firmware import preserves installed files and version");
+				oldFirmware.close();
+				version.close();
+				QDir().mkpath(root.filePath("new-firmware"));
+				write("new-firmware/new.nca", "new firmware");
+				error.clear();
+				SwitchCore::installConsoleFiles({{"firmware", root.filePath("new-firmware")}, {"version", "2.0.0"}, {"master", -1}}, &error);
+				check(error.isEmpty() && !QFileInfo::exists(registered + "old.nca") && QFileInfo::exists(registered + "new.nca") &&
+				      version.open(QIODevice::ReadOnly) && version.readAll() == "2.0.0", "successful firmware replacement contains only the new version");
+				version.close();
+				for (const QString& installedCore : {core, SwitchCore::profileDir() + "data/eglantine/"})
+				{
+					QDir(installedCore + "nand/system/Contents/registered").removeRecursively();
+					QFile::remove(installedCore + "firmware-version.txt");
+				}
+			}
 #ifndef _WIN32
 			{
 				const QByteArray old_core = qgetenv("USCL_SWITCH_CORE");
