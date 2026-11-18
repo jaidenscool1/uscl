@@ -1,0 +1,703 @@
+From 2110a6d1679d149cd556eeb65fb50f4e1a250a8d Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 04:20:43 -0700
+Subject: [PATCH] nx2: passthrough backend: ASTC textures transcoded for the
+ host GPU, output target snapshots
+
+The RTX samples no ASTC (a raw header reads black, no fault). The guest's texture header pools
+(SET_TEX_HEADER_POOL, 3D and compute) become shadow pages, mapped with one unmap of the guest range (page by
+page, RM's page-table walk ran out of memory); an ASTC header there points at a copy decoded by a worker
+thread with Eglantine's own ASTC decoder and compressed with its BCn encoder (BC1 when opaque, else BC3;
+EDEN_NX2_PASSTHROUGH_ASTC_FORMAT=rgba: A8B8G8R8), re-swizzled to the header's block layout
+(SwizzleImageToBuffer, new in texture_cache/util) in a host arena (EDEN_NX2_PASSTHROUGH_ASTC_MB, 2048).
+Only headers Eglantine's texture cache reads (DescriptorTable, new or changed descriptors) are decoded:
+decoding the whole pool filled 2 GiB with 29k textures, the sampled ones are ~1800 (1.1 GiB) on MKW's menus.
+Until a copy is ready a header stays raw.
+
+EDEN_NX2_PASSTHROUGH_SNAP takes a trigger file (seconds < 0: when <file>.now appears) and address 0 means
+the largest sRGB A8B8G8R8 colour target, now tracked from the 3D front (OnColorTarget: MKW sets its targets
+from macros). RM mappings that fail with NV_ERR_NO_MEMORY are retried up to 8 times.
+
+MKW "Start Grand Prix?" screen, host GPU vs Eglantine's own frame: before 15.9 dB, 0.65x brightness (ASTC
+black); after 20.7 dB, 1.01x (outside a button Eglantine's frame glitches on), thumbnails, labels and badge
+art all present.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/engines/maxwell_3d.cpp         |   5 +
+ src/video_core/nx2_passthrough.cpp            | 382 +++++++++++++++++-
+ src/video_core/nx2_passthrough.h              |   8 +
+ .../texture_cache/descriptor_table.h          |   2 +
+ src/video_core/texture_cache/util.cpp         |  29 ++
+ src/video_core/texture_cache/util.h           |   5 +
+ 6 files changed, 410 insertions(+), 21 deletions(-)
+
+diff --git a/src/video_core/engines/maxwell_3d.cpp b/src/video_core/engines/maxwell_3d.cpp
+index 234f130e6..a4907e154 100644
+--- a/src/video_core/engines/maxwell_3d.cpp
++++ b/src/video_core/engines/maxwell_3d.cpp
+@@ -1535,6 +1535,11 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
+             Nx2Passthrough::OnProgramBind(
+                 stage, (static_cast<u64>(regs.pipelines[stage].reserved[0] & 0xff) << 32) | argument, from_macro);
+         }
++        // SET_COLOR_TARGET_FORMAT(j) (word 4 of a 16-word slot from 0x800 / 4), macros included.
++        if (method >= 0x200 && method < 0x200 + 8 * 16 && (method & 0xF) == 4) {
++            Nx2Passthrough::OnColorTarget((static_cast<u64>(fs.regs[method - 4] & 0xff) << 32) | fs.regs[method - 3],
++                                          fs.regs[method - 2], fs.regs[method - 1], argument);
++        }
+     }
+     if (Profile::Enabled()) [[unlikely]] {
+         // The uniform stream is the bulk of what a native title writes: count it separately.
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index 61e237b6f..1182b009e 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -19,6 +19,7 @@
+ #include <map>
+ #include <optional>
+ #include <chrono>
++#include <condition_variable>
+ #include <cstdlib>
+ #include <memory>
+ #include <mutex>
+@@ -29,8 +30,15 @@
+ #include <fmt/format.h>
+ 
+ #include "common/logging.h"
++#include "video_core/memory_manager.h"
+ #include "video_core/nx2_helper_loads.h"
+ #include "video_core/nx2_passthrough.h"
++#include "video_core/surface.h"
++#include "video_core/texture_cache/image_info.h"
++#include "video_core/texture_cache/util.h"
++#include "video_core/textures/astc.h"
++#include "video_core/textures/bcn.h"
++#include "video_core/textures/texture.h"
+ 
+ #if defined(NX2_PASSTHROUGH) && defined(__linux__)
+ 
+@@ -115,7 +123,10 @@ NvU32 Hdr(NvU32 subc, NvU32 mthd, NvU32 n) {
+ 
+ class Host {
+ public:
+-    ~Host() { Close(); }
++    ~Host() {
++        StopAstc();
++        Close();
++    }
+ 
+     void Open() {
+         ctl = open("/dev/nvidiactl", O_RDWR | O_CLOEXEC);
+@@ -473,6 +484,283 @@ public:
+         Control(subdevice, NV2080_CTRL_CMD_GR_CTXSW_PREEMPTION_BIND, &b, "preemption bind");
+     }
+ 
++    // --- Step 6, first version: ASTC ---
++    // The RTX samples no ASTC (a raw header reads black, no fault: measured on mkw21's replay). The guest's
++    // texture header pools become shadow pages; an ASTC header there points at an A8B8G8R8 copy in a host
++    // arena, decoded by a worker with Eglantine's own decoder and re-swizzled to the header's block layout.
++    // Until its copy is ready (or when it is too large) a header stays as the guest wrote it.
++    // shortcut: decoded once; data the guest uploads later into the same texture is not seen; the arena is a
++    // bump allocator never freed (EDEN_NX2_PASSTHROUGH_ASTC_MB, 2048 by default). BC7/BC1 targets: plan step 6.
++    static bool IsAstc(u32 w0) {
++        const u32 f = w0 & 0x7F;
++        return (f >= 0x40 && f <= 0x46) || (f >= 0x50 && f <= 0x57);
++    }
++    using Header = std::array<u32, 8>;
++    struct Pool {
++        u32 count = 0;
++        std::vector<u8> copy; // the guest's headers as last translated
++        bool full = true;     // translate every page at the next refresh
++        std::set<NvU64> dirty; // page offsets to translate (newly sampled headers)
++    };
++
++    /// Headers the game samples (Eglantine read them): their pages are translated at the next refresh.
++    void MarkUsed(std::span<const u64> addresses) {
++        for (const u64 a : addresses) {
++            auto it = pools.upper_bound(a);
++            if (it == pools.begin()) continue;
++            --it;
++            if (a >= it->first + u64{it->second.count} * 32 || (a - it->first) % 32 != 0) continue;
++            if (used_headers.insert(a).second) it->second.dirty.insert((a - it->first) & ~(PAGE - 1));
++        }
++    }
++
++    void SetHeaderPool(NvU64 va, u32 count) {
++        if (va < GUEST_VA_LO || count == 0 || count > (1u << 20)) return;
++        Pool& pool = pools[va];
++        if (pool.count == count) return;
++        pool.count = count;
++        pool.full = true;
++        if (!astc_thread.joinable()) StartAstc();
++    }
++
++    /// Entry thread: decoded copies become visible, changed guest headers are translated into the shadow pages.
++    void RefreshPools(u64 epoch) {
++        if (pools.empty() || epoch == pools_epoch || astc_cpu == nullptr) return;
++        pools_epoch = epoch;
++        bool fresh = false;
++        {
++            std::scoped_lock lk{astc_mutex};
++            for (auto& [header, result] : astc_done) {
++                decoded[header] = result;
++                fresh = true;
++                result.first != 0 ? ++astc_decoded : ++astc_failed;
++            }
++            astc_done.clear();
++        }
++        for (auto& [va, pool] : pools) {
++            const size_t bytes = size_t{pool.count} * 32;
++            std::vector<u8> cur(bytes);
++            cur.resize(ReadGuest(va, cur));
++            const bool full = pool.full || fresh || pool.copy.size() != cur.size();
++            if (pool.full) ShadowRange(va, cur.size());
++            for (size_t o = 0; o < cur.size(); o += PAGE) {
++                const size_t n = std::min<size_t>(PAGE, cur.size() - o);
++                if (!full && !pool.dirty.contains(o) && std::memcmp(cur.data() + o, pool.copy.data() + o, n) == 0) {
++                    continue;
++                }
++                std::vector<u8> page(cur.begin() + o, cur.begin() + o + n);
++                for (size_t h = 0; h + 32 <= n; h += 32) TranslateHeader(page.data() + h, va + o + h);
++                WriteShadow(va + o, page, true, false); // shortcut: no wait for a header slot the GPU may read
++            }
++            pool.copy = std::move(cur);
++            pool.full = false;
++            pool.dirty.clear();
++        }
++    }
++
++    /// Makes [va, va + bytes) shadow pages with one unmap of the guest mapping (page by page, every page split
++    /// and re-mapped the large rest of it: RM ran out of page-table memory, NV_ERR_NO_MEMORY).
++    void ShadowRange(NvU64 va, NvU64 bytes) {
++        std::vector<std::pair<NvU64, const u8*>> todo;
++        for (NvU64 page = va & ~(PAGE - 1); page < va + bytes; page += PAGE) {
++            const auto it = pieces.find(page);
++            if (it != pieces.end() && it->second.shadow != ~0u) continue;
++            if (const u8* src = MirroredHost(page)) todo.emplace_back(page, src);
++        }
++        if (todo.empty()) return;
++        for (size_t i = 0; i < todo.size();) { // runs of consecutive pages (shadow pages between them stay)
++            size_t j = i + 1;
++            while (j < todo.size() && todo[j].first == todo[j - 1].first + PAGE) ++j;
++            Unmap(todo[i].first, todo[j - 1].first + PAGE - todo[i].first, true);
++            i = j;
++        }
++        for (const auto& [page, src] : todo) {
++            if (NewShadowPage(page, src) == ~0u) {
++                MapOff(page, static_cast<NvU64>(src - guest_base), PAGE); // pool full: the guest page back
++            }
++        }
++    }
++
++    void TranslateHeader(u8* raw, NvU64 header_va) {
++        Header h;
++        std::memcpy(h.data(), raw, 32);
++        if (!IsAstc(h[0])) return;
++        if (const auto it = decoded.find(h); it != decoded.end()) {
++            const auto [va, components] = it->second;
++            if (va == 0) return;
++            h[0] = (h[0] & ~0x7Fu) | components;                                // COMPONENTS
++            h[1] = (h[1] & 0x1FFu) | (static_cast<u32>(va) & ~0x1FFu);          // ADDRESS_BITS31TO9
++            h[2] = (h[2] & ~0x1FFFFu) | (static_cast<u32>(va >> 32) & 0x1FFFFu); // ADDRESS_BITS48TO32
++            std::memcpy(raw, h.data(), 32);
++            ++astc_headers;
++            return;
++        }
++        if (astc_queued.contains(h) || !used_headers.contains(header_va)) return; // decoded once the game samples it
++        Tegra::Texture::TICEntry tic{};
++        std::memcpy(&tic, h.data(), 32);
++        const VideoCommon::ImageInfo info(tic);
++        VideoCommon::ImageInfo rgba = info;
++        rgba.format = VideoCore::Surface::PixelFormat::A8B8G8R8_UNORM;
++        const u64 guest_size = VideoCommon::CalculateGuestSizeInBytes(info);
++        const bool block_linear = info.type != VideoCommon::ImageType::Linear;
++        if (!block_linear || !VideoCore::Surface::IsPixelFormatASTC(info.format) || guest_size == 0 ||
++            guest_size > (64ull << 20) || VideoCommon::CalculateGuestSizeInBytes(rgba) > (128ull << 20)) {
++            decoded[h] = {0, 0}; // left raw (MKW: 8192^2 x 68 virtual-texture arrays)
++            ++astc_too_large;
++            return;
++        }
++        std::array<u8, 4096> head{};
++        const size_t probe = std::min<size_t>(guest_size, head.size());
++        if (ReadGuest(tic.Address(), std::span<u8>(head).first(probe)) != probe ||
++            std::all_of(head.begin(), head.begin() + probe, [](u8 b) { return b == 0; })) {
++            return; // not there yet: looked at again at a later refresh
++        }
++        AstcJob job{h, std::vector<u8>(guest_size)};
++        if (ReadGuest(tic.Address(), job.guest) != guest_size) return;
++        astc_queued.insert(h);
++        std::scoped_lock lk{astc_mutex};
++        astc_jobs.push_back(std::move(job));
++        astc_cv.notify_one();
++    }
++
++    void SetMemoryManager(Tegra::MemoryManager* mm) { memory_manager = mm; }
++    NvU64 astc_decoded = 0, astc_failed = 0, astc_too_large = 0, astc_headers = 0;
++    NvU64 AstcArenaUsed() const { return astc_used.load(); }
++
++private:
++    struct AstcJob {
++        Header header;
++        std::vector<u8> guest;
++    };
++
++    void StartAstc() {
++        const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_ASTC_MB");
++        astc_size = (v != nullptr ? std::strtoull(v, nullptr, 0) : 2048ull) << 20;
++        if (astc_size == 0) return;
++        void* p = mmap(nullptr, astc_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++        if (p == MAP_FAILED) throw Error("ASTC arena", 0);
++        maps.emplace_back(p, astc_size);
++        nv_ioctl_nvos02_parameters_with_fd d{};
++        d.fd = -1;
++        d.params.hRoot = root;
++        d.params.hObjectParent = device;
++        d.params.hObjectNew = 0x73000000u;
++        d.params.hClass = NV01_MEMORY_SYSTEM_OS_DESCRIPTOR;
++        d.params.flags = DRF_DEF(OS02, _FLAGS, _PHYSICALITY, _NONCONTIGUOUS) |
++                         DRF_DEF(OS02, _FLAGS, _COHERENCY, _CACHED) | DRF_DEF(OS02, _FLAGS, _MAPPING, _NO_MAP);
++        d.params.pMemory = reinterpret_cast<NvP64>(p);
++        d.params.limit = astc_size - 1;
++        Ioctl(fds.at(0), NV_ESC_RM_ALLOC_MEMORY, &d, "import ASTC arena");
++        if (d.params.status != NV_OK) throw Error("import ASTC arena", d.params.status);
++        astc_gva = MapGpu(d.params.hObjectNew, astc_size);
++        astc_cpu = static_cast<u8*>(p);
++        astc_thread = std::thread([this] { AstcWorker(); });
++        LOG_INFO(HW_GPU, "Nx2 passthrough: ASTC arena {} MiB at {:#x}", astc_size >> 20, astc_gva);
++    }
++
++    void StopAstc() {
++        {
++            std::scoped_lock lk{astc_mutex};
++            astc_stop = true;
++        }
++        astc_cv.notify_all();
++        if (astc_thread.joinable()) astc_thread.join();
++    }
++
++    void AstcWorker() {
++        for (;;) {
++            AstcJob job;
++            {
++                std::unique_lock lk{astc_mutex};
++                astc_cv.wait(lk, [&] { return astc_stop || !astc_jobs.empty(); });
++                if (astc_stop) return;
++                job = std::move(astc_jobs.front());
++                astc_jobs.pop_front();
++            }
++            std::pair<NvU64, u32> result{};
++            try {
++                result = Decode(job);
++            } catch (...) {
++                result = {};
++            }
++            std::scoped_lock lk{astc_mutex};
++            astc_done.emplace_back(job.header, result);
++        }
++    }
++
++    /// The texture `job` describes, decoded, in the header's own block-linear layout, in the arena: VA and
++    /// the TIC COMPONENTS code (0: none). BC1 when it is opaque, else BC3 (EDEN_NX2_PASSTHROUGH_ASTC_FORMAT=rgba:
++    /// A8B8G8R8, 4x the memory): the RTX samples BCn.
++    std::pair<NvU64, u32> Decode(const AstcJob& job) {
++        using namespace VideoCommon;
++        using VideoCore::Surface::PixelFormat;
++        static const bool rgba_only = [] {
++            const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_ASTC_FORMAT");
++            return v != nullptr && std::string_view{v} == "rgba";
++        }();
++        Tegra::Texture::TICEntry tic{};
++        std::memcpy(&tic, job.header.data(), 32);
++        const ImageInfo info(tic);
++        std::vector<u8> linear(CalculateUnswizzledSizeBytes(info));
++        auto copies = UnswizzleImage(*memory_manager, tic.Address(), info, job.guest, linear);
++        const bool bc1 = !rgba_only && Tegra::Texture::ASTC::IsOpaque(linear);
++        ImageInfo out_info = info;
++        out_info.format = rgba_only ? PixelFormat::A8B8G8R8_UNORM : bc1 ? PixelFormat::BC1_RGBA_UNORM : PixelFormat::BC3_UNORM;
++        const u32 bw = VideoCore::Surface::DefaultBlockWidth(info.format);
++        const u32 bh = VideoCore::Surface::DefaultBlockHeight(info.format);
++        size_t total = 0;
++        for (const BufferImageCopy& copy : copies) {
++            total += size_t{(copy.image_extent.width + 3) & ~3u} * ((copy.image_extent.height + 3) & ~3u) *
++                     copy.image_subresource.num_layers * copy.image_extent.depth * 4;
++        }
++        std::vector<u8> pixels(total), rgba;
++        size_t out = 0;
++        for (BufferImageCopy& copy : copies) {
++            const u32 w = copy.image_extent.width, h = copy.image_extent.height;
++            const u32 depth = copy.image_subresource.num_layers * copy.image_extent.depth;
++            rgba.resize(size_t{w} * h * depth * 4);
++            Tegra::Texture::ASTC::Decompress(std::span<const u8>(linear).subspan(copy.buffer_offset), w, h, depth, bw,
++                                             bh, rgba);
++            copy.buffer_offset = out;
++            if (rgba_only) {
++                std::memcpy(pixels.data() + out, rgba.data(), rgba.size());
++                out += rgba.size();
++                continue;
++            }
++            const size_t bytes = size_t{(w + 3) & ~3u} * ((h + 3) & ~3u) * depth / (bc1 ? 2 : 1);
++            (bc1 ? Tegra::Texture::BCN::CompressBC1 : Tegra::Texture::BCN::CompressBC3)(
++                rgba, w, h, depth, std::span<u8>(pixels).subspan(out, bytes));
++            out += bytes;
++        }
++        std::vector<u8> swizzled(CalculateGuestSizeInBytes(out_info));
++        SwizzleImageToBuffer(out_info, copies, pixels, swizzled, memory_manager->UsesNativeTiling());
++        // 4 KiB: the header takes 512-byte aligned addresses (64 KiB padding filled 2 GiB with 26k small textures)
++        const NvU64 size = (swizzled.size() + 0xFFF) & ~NvU64{0xFFF};
++        NvU64 at = astc_used.load();
++        do {
++            if (at + size > astc_size) return {0, 0}; // arena full
++        } while (!astc_used.compare_exchange_weak(at, at + size));
++        std::memcpy(astc_cpu + at, swizzled.data(), swizzled.size());
++        return {astc_gva + at, rgba_only ? 0x08u : bc1 ? 0x24u : 0x26u}; // A8B8G8R8, DXT1, DXT45
++    }
++
++    std::map<NvU64, Pool> pools;
++    u64 pools_epoch = 0;
++    std::map<Header, std::pair<NvU64, u32>> decoded; // entry thread: header -> its copy's VA (0: raw), format
++    std::set<Header> astc_queued;
++    std::set<NvU64> used_headers; // header VAs Eglantine sampled
++    Tegra::MemoryManager* memory_manager = nullptr;
++    std::mutex astc_mutex;
++    std::condition_variable astc_cv;
++    std::deque<AstcJob> astc_jobs;
++    std::vector<std::pair<Header, std::pair<NvU64, u32>>> astc_done;
++    bool astc_stop = false;
++    std::thread astc_thread;
++    u8* astc_cpu = nullptr;
++    NvU64 astc_gva = 0, astc_size = 0;
++    std::atomic<NvU64> astc_used{0};
++
++public:
+     // --- Step 2: the guest VA space ---
+ 
+     /// Maps [va, va + size) to guest memory at `off` (bytes from the guest memory base), replacing what was there.
+@@ -496,6 +784,7 @@ public:
+             RmUnmap(pva, p.mem);
+             if (p.shadow != ~0u) { // the guest remaps code: the page is rebuilt at the next bind
+                 free_shadow.push_back(p.shadow);
++                for (auto& [pva_, pool] : pools) pool.full = true; // a pool page may have been one
+                 continue;
+             }
+             if (pva < va) MapPiece(pva, va - pva, p.off, p.kind);
+@@ -619,7 +908,7 @@ public:
+     }
+ 
+     // Counters for the log.
+-    NvU64 doorbells = 0;
++    NvU64 doorbells = 0, map_retries = 0;
+     NvU64 ring_waits = 0, pinned = 0, rm_maps = 0, rm_unmaps = 0, kind_changes = 0, kind_fallbacks = 0;
+     std::chrono::nanoseconds import_time{};
+     size_t Pieces() const { return pieces.size(); }
+@@ -686,7 +975,7 @@ private:
+ 
+     /// Writes `bytes` at va into shadow pages: `create` makes missing shadow pages (copies of the guest page);
+     /// otherwise only pages already shadowed are written. True when a shadow page changed.
+-    bool WriteShadow(NvU64 va, std::span<const u8> bytes, bool create) {
++    bool WriteShadow(NvU64 va, std::span<const u8> bytes, bool create, bool quiesce = true) {
+         bool changed = false;
+         for (NvU64 page = va & ~(PAGE - 1); page < va + bytes.size(); page += PAGE) {
+             auto it = pieces.find(page);
+@@ -699,7 +988,7 @@ private:
+             const NvU64 lo = std::max(va, page), hi = std::min<NvU64>(va + bytes.size(), page + PAGE);
+             u8* copy = shadow_copy.data() + index * PAGE + (lo - page);
+             if (std::memcmp(copy, bytes.data() + (lo - va), hi - lo) == 0) continue; // as the GPU has it already
+-            if (!fresh_shadow.contains(index)) {
++            if (!fresh_shadow.contains(index) && quiesce) {
+                 ++quiesce_sites[1];
+                 Quiesce(); // the GPU may be running code in this page
+             }
+@@ -712,8 +1001,9 @@ private:
+     }
+ 
+     /// Replaces the guest page at `page` with a shadow copy of it; ~0u when the pool is full or nothing is mapped.
+-    u32 NewShadowPage(NvU64 page) {
+-        const u8* src = MirroredHost(page);
++    /// `src`: the guest memory the page stands for, when the caller already unmapped it.
++    u32 NewShadowPage(NvU64 page, const u8* src = nullptr) {
++        if (src == nullptr) src = MirroredHost(page);
+         if (src == nullptr || (free_shadow.empty() && shadow_next == SHADOW_POOL / PAGE)) return ~0u;
+         const u32 index = free_shadow.empty() ? shadow_next++ : free_shadow.back();
+         if (!free_shadow.empty() && index == free_shadow.back()) free_shadow.pop_back();
+@@ -787,9 +1077,12 @@ private:
+         p.kindOverride = kind;
+         p.dmaOffset = va;
+         Ioctl(ctl, NV_ESC_RM_MAP_MEMORY_DMA, &p, "map guest memory");
+-        if (p.status == NV_ERR_NO_MEMORY) { // seen once per session in RM's page-table walk; a retry succeeds
++        for (int retry = 0; retry < 8 && p.status == NV_ERR_NO_MEMORY; ++retry) {
++            // RM's page-table walk fails now and then (once a session, more with many 4 KiB pieces)
++            std::this_thread::sleep_for(std::chrono::milliseconds(1 << retry));
+             p.dmaOffset = va;
+             Ioctl(ctl, NV_ESC_RM_MAP_MEMORY_DMA, &p, "map guest memory");
++            ++map_retries;
+         }
+         if (p.status != NV_OK && kind != 0) { // a kind the host does not take: pitch keeps the bytes reachable
+             if (++kind_fallbacks <= 8) {
+@@ -1039,6 +1332,7 @@ constexpr u32 INSTRUMENTATION_A = 0x150 / 4, INSTRUMENTATION_B = 0x154 / 4, LINE
+               SEND_SIGNALING_PCAS2_B = 0x2C0 / 4, LM_NON_THROTTLED_B = 0x2E8 / 4, SPA_VERSION = 0x310 / 4,
+               INLINE_QMD_ADDRESS_A = 0x318 / 4, INLINE_QMD_ADDRESS_B = 0x31C / 4, INLINE_QMD_DATA = 0x320 / 4,
+               LM_A = 0x790 / 4, LM_B = 0x794 / 4, LM_D = 0x79C / 4, SRGB_WRITE = 0x15B8 / 4, SET_ZCULL = 0x1968 / 4,
++              TEX_HEADER_POOL_A = 0x1574 / 4, TEX_HEADER_POOL_B = 0x1578 / 4, TEX_HEADER_POOL_C = 0x157C / 4,
+               REPORT_A = 0x1B00 / 4, REPORT_B = 0x1B04 / 4, REPORT_D = 0x1B0C / 4, BINDLESS_TEXTURE = 0x2608 / 4,
+               MACRO = 0xE00;
+ } // namespace Mthd
+@@ -1093,7 +1387,7 @@ struct Xlate {
+     std::array<u32, 8> report_a{}, report_b{};
+     u32 sem_a = 0, sem_b = 0, sem_lo = 0, sem_hi = 0, pcas_a = 0, qmd_word = 0, i2m_len = 0, i2m_count = 0;
+     NvU64 qmd_slot = 0; // the host slot inline QMDs go to
+-    std::array<std::array<u32, 5>, 8> color_targets{}; // A, B, WIDTH, HEIGHT, FORMAT
++    std::array<u32, 2> header_pool{};
+     u32 qmd_guest_a = 0, qmd_guest_b = 0; // the guest's inline QMD address (SHIFTED8)
+     std::array<u32, 64> qmd{};
+     bool in_call = false, invalidate = false, release = false, first = false, held = false;
+@@ -1169,7 +1463,10 @@ struct State {
+     s32 entry_channel = 0;
+     std::map<s32, Xlate> xlate;
+     std::array<u64, CountEnd> counts{};
+-    NvU64 output_target = 0; // the last 2560x1440 sRGB colour target bound (Words)
++    std::mutex used_mutex; // OnDescriptorRead (Eglantine's back thread) -> the entry thread
++    std::vector<u64> used_new;
++    NvU64 output_target = 0; // the largest sRGB A8B8G8R8 colour target set (OnColorTarget)
++    u64 output_area = 0;
+     std::chrono::nanoseconds drain_time{};
+ };
+ 
+@@ -1246,6 +1543,9 @@ void LogStats(State& s) {
+         for (size_t i = 0; i < CountEnd; ++i) {
+             if (s.counts[i] != 0) line += fmt::format("{}{} {}", line.empty() ? "" : ", ", s.counts[i], COUNT_NAMES[i]);
+         }
++        LOG_INFO(HW_GPU, "Nx2 passthrough ASTC: {} textures decoded ({} MiB), {} failed, {} left raw (too large), {} "
++                 "headers repointed", h.astc_decoded, h.AstcArenaUsed() >> 20, h.astc_failed, h.astc_too_large,
++                 h.astc_headers);
+         LOG_INFO(HW_GPU, "Nx2 passthrough words: {}; {} doorbells, {} ms draining, {} waits before mirror changes ({} new shadow pages, {} shadow rewrites, {}; {} ms)",
+                  line, h.doorbells, std::chrono::duration_cast<std::chrono::milliseconds>(s.drain_time).count(),
+                  h.quiesces, h.quiesce_sites[0], h.quiesce_sites[1], h.quiesce_sites[2], std::chrono::duration_cast<std::chrono::milliseconds>(h.quiesce_time).count());
+@@ -1433,6 +1733,11 @@ struct Words {
+             }
+             case LINE_LENGTH_IN: x.i2m_len = v; break;
+             case LINE_COUNT: x.i2m_count = v; break;
++            case TEX_HEADER_POOL_A: x.header_pool[0] = v; break;
++            case TEX_HEADER_POOL_B: x.header_pool[1] = v; break;
++            case TEX_HEADER_POOL_C:
++                h.SetHeaderPool((NvU64{x.header_pool[0] & 0xFF} << 32) | x.header_pool[1], v + 1);
++                break;
+             case REPORT_A: x.report_a[sc] = v; break;
+             case REPORT_B: x.report_b[sc] = v; break;
+             case REPORT_D: {
+@@ -1458,14 +1763,6 @@ struct Words {
+             }
+             default: break;
+             }
+-            if (!compute && m >= 0x800 / 4 && m < 0xA00 / 4 && (m & 0xF) <= 4) { // SET_COLOR_TARGET_A..FORMAT(j)
+-                auto& ct = x.color_targets[(m - 0x800 / 4) >> 4];
+-                ct[m & 0xF] = v;
+-                // The game's output (2560x1440 sRGB RGBA8) for EDEN_NX2_PASSTHROUGH_SNAP address 0.
+-                if ((m & 0xF) == 4 && v == 0xD6 && ct[2] == 2560 && ct[3] == 1440) {
+-                    s.output_target = (NvU64{ct[0] & 0xFF} << 32) | ct[1];
+-                }
+-            }
+             if (!compute && m == SRGB_WRITE && v != 0) {
+                 // With it set, Ada sRGB-encodes writes into plain UNORM targets too; NVN sets 1 and keeps data in
+                 // UNORM targets, so the guest GPU does not encode them (Phase 1, tenth pass).
+@@ -1772,7 +2069,10 @@ void OnMap(const void* memory_manager, GPUVAddr gpu_addr, const u8* host, u64 si
+     if (!Ready(s)) return;
+     if (s.memory_manager == nullptr) {
+         s.memory_manager = memory_manager;
+-        Guarded(s, "guest memory", [&](Host& h) { h.SetGuestMemory(guest_memory); });
++        Guarded(s, "guest memory", [&](Host& h) {
++            h.SetGuestMemory(guest_memory);
++            h.SetMemoryManager(const_cast<Tegra::MemoryManager*>(static_cast<const Tegra::MemoryManager*>(memory_manager)));
++        });
+         if (!s.host) return;
+     }
+     if (memory_manager != s.memory_manager) {
+@@ -1829,6 +2129,25 @@ void OnStep(s32 channel) {
+     s.entry_channel = channel;
+ }
+ 
++void OnDescriptorRead(GPUVAddr address) {
++    if (!Requested()) [[likely]] {
++        return;
++    }
++    State& s = Get();
++    std::scoped_lock lk{s.used_mutex};
++    if (s.used_new.size() < (1u << 20)) s.used_new.push_back(address);
++}
++
++void OnColorTarget(GPUVAddr address, u32 width, u32 height, u32 format) {
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    const u64 area = u64{width} * height;
++    if (format == 0xD6 && address != 0 && area >= s.output_area) {
++        s.output_area = area;
++        s.output_target = address;
++    }
++}
++
+ void OnComputeMacro() {
+     State& s = Get();
+     std::scoped_lock lk{s.mutex};
+@@ -1928,6 +2247,17 @@ void OnEntryDone(s32 channel) {
+     const auto start = std::chrono::steady_clock::now();
+     bool tail = true, flush = false, hold = false;
+     if (x != nullptr) {
++        std::vector<u64> used;
++        {
++            std::scoped_lock lk{s.used_mutex};
++            used.swap(s.used_new);
++        }
++        Guarded(s, "texture header pools", [&](Host& h) {
++            h.MarkUsed(used);
++            h.RefreshPools(static_cast<u64>(std::chrono::steady_clock::now().time_since_epoch() /
++                                            std::chrono::milliseconds(100)));
++        });
++        if (!s.host) return;
+         if (!x->held) { // else the words of entries that ended inside a method run are still here
+             x->out.clear();
+             x->run_n = 0;
+@@ -2030,7 +2360,8 @@ void OnEntryDone(s32 channel) {
+         done = hold || h.Submit(*c, out, check || (sync && tail), tail, flush);
+         h.FlushStale();
+     });
+-    // EDEN_NX2_PASSTHROUGH_SNAP=<seconds>:<va>:<size>:<file>[,...]: once that long after the backend came up,
++    // EDEN_NX2_PASSTHROUGH_SNAP=<seconds>:<va>:<size>:<file>[,...]: once that long after the backend came up (or
++    // when <file>.now appears: seconds < 0),
+     // waits for the host channels and writes guest memory at va (what the host GPU rendered there) to file.
+     static auto snaps = [] {
+         std::vector<std::tuple<double, NvU64, NvU64, std::string>> out;
+@@ -2054,11 +2385,19 @@ void OnEntryDone(s32 channel) {
+     for (auto it = snaps.begin(); s.host && it != snaps.end();) {
+         auto [sec, va, size, path] = *it;
+         if (va == 0) va = s.output_target; // 0: the game's output
+-        if (std::chrono::duration<double>(std::chrono::steady_clock::now() - snap_start).count() < sec) {
++        // A negative time: when <file>.now exists (removed once taken).
++        const std::string trigger = path + ".now";
++        if (sec < 0 ? access(trigger.c_str(), F_OK) != 0
++                    : std::chrono::duration<double>(std::chrono::steady_clock::now() - snap_start).count() < sec) {
+             ++it;
+             continue;
+         }
++        if (sec < 0) unlink(trigger.c_str());
+         Guarded(s, "snapshot", [&](Host& h) {
++            if (va == 0) {
++                LOG_WARNING(HW_GPU, "Nx2 passthrough snapshot: no output target seen yet");
++                return;
++            }
+             if (!h.Drain()) throw Error("drain for a snapshot", 0);
+             std::vector<u8> bytes(size);
+             NvU64 mapped = 0;
+@@ -2073,7 +2412,6 @@ void OnEntryDone(s32 channel) {
+                 std::fwrite(bytes.data(), 1, bytes.size(), f);
+                 std::fclose(f);
+             }
+-            if (va == 0) return;
+             LOG_INFO(HW_GPU, "Nx2 passthrough snapshot: {:#x} +{:#x} ({:#x} mapped) after entry {} -> {}", va, size,
+                      mapped, s.entries, path);
+         });
+@@ -2183,6 +2521,8 @@ void OnGuestKind(GPUVAddr, u64, u32, u32) {}
+ void OnProgramBind(u32, GPUVAddr, bool) {}
+ void OnEntryDone(s32) {}
+ void OnStep(s32) {}
++void OnDescriptorRead(GPUVAddr) {}
++void OnColorTarget(GPUVAddr, u32, u32, u32) {}
+ void OnComputeMacro() {}
+ void OnComputeMacroEmit(u32, u32) {}
+ void Shutdown() {}
+diff --git a/src/video_core/nx2_passthrough.h b/src/video_core/nx2_passthrough.h
+index 3cfa7e549..360e2be87 100644
+--- a/src/video_core/nx2_passthrough.h
++++ b/src/video_core/nx2_passthrough.h
+@@ -52,6 +52,14 @@ void OnProgramBind(u32 stage, GPUVAddr program, bool from_macro);
+ void OnComputeMacro();
+ void OnComputeMacroEmit(u32 method, u32 value);
+ 
++/// The guest set colour target format `format` at `address` (width x height), from the 3D front (macros
++/// included): the largest sRGB A8B8G8R8 one is the output EDEN_NX2_PASSTHROUGH_SNAP address 0 reads.
++void OnColorTarget(GPUVAddr address, u32 width, u32 height, u32 format);
++
++/// Eglantine's texture cache read a new or changed descriptor at `address` (any thread): the textures the
++/// game samples, which the passthrough's ASTC transcoding decodes first.
++void OnDescriptorRead(GPUVAddr address);
++
+ /// Frees the host channel and RM client (also done at process exit).
+ void Shutdown();
+ 
+diff --git a/src/video_core/texture_cache/descriptor_table.h b/src/video_core/texture_cache/descriptor_table.h
+index b3dd1a9fa..f2853f4b2 100644
+--- a/src/video_core/texture_cache/descriptor_table.h
++++ b/src/video_core/texture_cache/descriptor_table.h
+@@ -20,6 +20,7 @@
+ #include "common/assert.h"
+ #include "core/memory.h"
+ #include "video_core/memory_manager.h"
++#include "video_core/nx2_passthrough.h"
+ #include "video_core/rasterizer_interface.h"
+ 
+ namespace VideoCommon {
+@@ -97,6 +98,7 @@ public:
+         }
+         if (result.second) {
+             descriptors[index] = result.first;
++            Tegra::Nx2Passthrough::OnDescriptorRead(gpu_addr); // new or changed: rare
+         }
+         return result;
+     }
+diff --git a/src/video_core/texture_cache/util.cpp b/src/video_core/texture_cache/util.cpp
+index 91f52c42c..3921b2696 100644
+--- a/src/video_core/texture_cache/util.cpp
++++ b/src/video_core/texture_cache/util.cpp
+@@ -1516,6 +1516,35 @@ void SwizzleImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const Ima
+     }
+ }
+ 
++void SwizzleImageToBuffer(const ImageInfo& info, std::span<const BufferImageCopy> copies,
++                          std::span<const u8> input, std::span<u8> output, bool native_tiling) {
++    const LevelInfo level_info = MakeLevelInfo(info);
++    const Extent2D tile_size = DefaultBlockSize(info.format);
++    const u32 bytes_per_block = BytesPerBlock(info.format);
++    const u32 num_levels = info.resources.levels;
++    const std::array sizes = CalculateLevelSizes(level_info, num_levels);
++    const size_t layer_stride = AlignLayerSize(CalculateLevelBytes(sizes, num_levels), info.size, level_info.block,
++                                               tile_size.height, info.tile_width_spacing);
++    for (const BufferImageCopy& copy : copies) {
++        const s32 level = copy.image_subresource.base_level;
++        const Extent3D level_size = AdjustMipSize(info.size, level);
++        const Extent3D num_tiles = AdjustTileSize(level_size, tile_size);
++        const Extent3D block = AdjustMipBlockSize(num_tiles, level_info.block, level, level_info.num_levels);
++        const size_t host_bytes_per_layer = size_t{NumBlocks(level_size, tile_size)} * bytes_per_block;
++        size_t host_offset = copy.buffer_offset, guest_offset = CalculateLevelBytes(sizes, level);
++        for (s32 layer = 0; layer < info.resources.layers; ++layer) {
++            if (guest_offset + sizes[level] > output.size() || host_offset >= input.size()) {
++                break;
++            }
++            SwizzleTexture(output.subspan(guest_offset, sizes[level]), input.subspan(host_offset), bytes_per_block,
++                           num_tiles.width, num_tiles.height, num_tiles.depth, block.height, block.depth, 1,
++                           native_tiling);
++            host_offset += host_bytes_per_layer;
++            guest_offset += layer_stride;
++        }
++    }
++}
++
+ bool IsBlockLinearSizeCompatible(const ImageInfo& lhs, const ImageInfo& rhs, u32 lhs_level,
+                                  u32 rhs_level, bool strict_size) noexcept {
+     ASSERT(lhs.type != ImageType::Linear);
+diff --git a/src/video_core/texture_cache/util.h b/src/video_core/texture_cache/util.h
+index 0e560120b..8d4290d59 100644
+--- a/src/video_core/texture_cache/util.h
++++ b/src/video_core/texture_cache/util.h
+@@ -145,6 +145,11 @@ void SwizzleImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const Ima
+                   std::span<const BufferImageCopy> copies, std::span<const u8> memory,
+                   Common::ScratchBuffer<u8>& tmp_buffer);
+ 
++/// SwizzleImage into `output` (the image's guest layout, CalculateGuestSizeInBytes bytes) instead of guest
++/// memory; block-linear images only.
++void SwizzleImageToBuffer(const ImageInfo& info, std::span<const BufferImageCopy> copies,
++                          std::span<const u8> input, std::span<u8> output, bool native_tiling);
++
+ [[nodiscard]] bool IsBlockLinearSizeCompatible(const ImageInfo& new_info,
+                                                const ImageInfo& overlap_info, u32 new_level,
+                                                u32 overlap_level, bool strict_size) noexcept;
+-- 
+2.56.0
+
