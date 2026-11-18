@@ -7,6 +7,11 @@
 #   USCL_DW_SRC       uscl-dw checkout                             default ~/src/obde-uscl
 #   USCL_SHADPS4_BUILD / USCL_SHADNET_BUILD  PS4 games: shadPS4 (uscl-shadps4) and shadNet (uscl-shadnet) build dirs;
 #                     left out of the AppImage when missing     default ~/src/shadps4-uscl/build, ~/src/shadnet-uscl/build
+#   USCL_DOLPHIN_BUILD  Wii games online: Dolphin (uscl-dolphin) build dir, configured as in uscl-dolphin/README.md;
+#                     left out when missing                     default ~/src/dolphin-uscl/build-appimage
+#   USCL_AZAHAR_BIN / USCL_EDEN_BIN / USCL_EGLANTINE_BIN / USCL_MELONDS_BIN  folders with azahar + azahar-room (3DS),
+#                     eden + eden-cli (Switch), eglantine (Switch 2), melonDS (DS); each left out when missing.
+#                     Build them portable (no -march=native): pinned base + that folder's patches, see each README
 # Output: build/USCL-x86_64.AppImage. Tools (linuxdeploy) are cached in ~/.cache/uscl-build.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -24,7 +29,7 @@ echo "== servers"
 echo "== home screen (uscl-shell)"
 DSDK=${USCL_DISCORD_SDK:-$HOME/src/discord-social-sdk/sdk/discord_social_sdk}; [ -d "$DSDK" ] || DSDK=""
 # the version the updater compares, like the Windows workflow: the release tag at HEAD without its "v"
-VERSION=${USCL_VERSION:-$(git -C "$REPO" describe --tags --exact-match 2>/dev/null | sed 's/^v//')}
+VERSION=${USCL_VERSION:-$( (git -C "$REPO" describe --tags --exact-match 2>/dev/null || true) | sed 's/^v//')}   # untagged: dev
 cmake -S "$REPO/uscl-shell" -B "$REPO/uscl-shell/build-release" -G Ninja -DCMAKE_BUILD_TYPE=Release -DUSCL_DISCORD_SDK="$DSDK" \
   -DUSCL_VERSION="${VERSION:-0.0.0-dev}" >/dev/null
 echo "version ${VERSION:-0.0.0-dev}"
@@ -44,6 +49,21 @@ cp "$(find "$REPO/uscl-bridge/target/release/build" -name libsteam_api.so | head
 SHADPS4_BUILD=${USCL_SHADPS4_BUILD:-$HOME/src/shadps4-uscl/build}; SHADNET_BUILD=${USCL_SHADNET_BUILD:-$HOME/src/shadnet-uscl/build}
 [ -x "$SHADPS4_BUILD/shadps4" ] && install -m755 "$SHADPS4_BUILD/shadps4" "$BIN/"
 [ -x "$SHADNET_BUILD/shadnet" ] && install -m755 "$SHADNET_BUILD/shadnet" "$BIN/"
+# Wii online: our Dolphin (built with LINUX_LOCAL_DEV, so it reads Sys/ next to itself)
+DOLPHIN_BUILD=${USCL_DOLPHIN_BUILD:-$HOME/src/dolphin-uscl/build-appimage}
+if [ -x "$DOLPHIN_BUILD/Binaries/dolphin-emu" ]; then
+  install -m755 "$DOLPHIN_BUILD/Binaries/dolphin-emu" "$BIN/"
+  cp -rL "$DOLPHIN_BUILD/Binaries/Sys" "$BIN/"
+  mkdir -p "$APPDIR/usr/share/licenses" && cp -rL "$DOLPHIN_BUILD/Binaries/Licenses" "$APPDIR/usr/share/licenses/dolphin"
+fi
+# 3DS (uscl-3ds), Switch (uscl-eden), Switch 2 (uscl-eglantine), DS (uscl-melonds): the home screen finds them next to uscl
+AZAHAR_BIN=${USCL_AZAHAR_BIN:-$HOME/src/azahar-uscl/build/bin/Release}
+EDEN_BIN=${USCL_EDEN_BIN:-$HOME/.cache/uscl-build/eden-src/build-uscl/bin}
+EGLANTINE_BIN=${USCL_EGLANTINE_BIN:-$HOME/src/eglantine/build-portable/bin}
+MELONDS_BIN=${USCL_MELONDS_BIN:-$HOME/.cache/uscl-build/melonds-src/build}
+for exe in "$AZAHAR_BIN/azahar" "$AZAHAR_BIN/azahar-room" "$EDEN_BIN/eden" "$EDEN_BIN/eden-cli" "$EGLANTINE_BIN/eglantine" "$MELONDS_BIN/melonDS"; do
+  if [ -x "$exe" ]; then install -m755 "$exe" "$BIN/"; else echo "left out (not built): $exe"; fi
+done
 
 echo "== data templates (copied to the user's USCL folder when they first host)"
 DATA=$APPDIR/usr/share/uscl
@@ -63,8 +83,10 @@ python3 "$REPO/uscl-shadps4/mk_mm_patch.py" "$DATA/shadps4/user/patches/uscl" >/
 
 echo "== desktop entry"
 DESKTOP=$(ls "$APPDIR"/usr/share/applications/*.desktop | head -1)
-sed -i -e 's/^Name=.*/Name=USCL/' -e 's/^GenericName=.*/GenericName=PS3 emulator with online play over Steam/' \
-  -e 's/^Comment=.*/Comment=Play PS3 games online with your Steam friends/' "$DESKTOP"
+sed -i -e 's/^Name=.*/Name=USCL/' -e 's/^GenericName=.*/GenericName=Play your console games online with Steam friends/' \
+  -e 's/^Comment=.*/Comment=PS3, PS4, Wii, 3DS, Switch and DS games online over Steam/' -e 's/^Icon=.*/Icon=uscl/' "$DESKTOP"
+# the USCL orb (uscl-shell/tools/xmb_assets.py icons); linuxdeploy links it as the AppImage's icon
+install -Dm644 "$REPO/uscl-shell/icons/uscl.png" "$APPDIR/usr/share/icons/hicolor/512x512/apps/uscl.png"
 
 echo "== AppImage"
 for t in linuxdeploy linuxdeploy-plugin-qt; do
@@ -88,10 +110,10 @@ cd "$OUT"
 mkdir -p "$APPDIR/usr/plugins"
 cp -r "$QT_PLUGINS/wayland-graphics-integration-client" "$APPDIR/usr/plugins/"
 export QML_SOURCES_PATHS="$REPO/uscl-shell/qml"   # so the Qt plugin bundles the QML modules the home screen imports
-PS4_EXES=(); for e in shadps4 shadnet; do [ -x "$BIN/$e" ] && PS4_EXES+=(--executable "$BIN/$e"); done
-# shadNet needs QtHttpServer, which a system Qt may lack (built to ~/.local/qt6-extra here)
-LD_LIBRARY_PATH=$HOME/.local/qt6-extra/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} \
-linuxdeploy --appdir "$APPDIR" --plugin qt --executable "$BIN/uscl" --executable "$BIN/uscl-rpcn" --executable "$BIN/dw-server" "${PS4_EXES[@]}" \
+EXTRA_EXES=(); for e in shadps4 shadnet dolphin-emu azahar azahar-room eden eden-cli eglantine melonDS; do [ -x "$BIN/$e" ] && EXTRA_EXES+=(--executable "$BIN/$e"); done
+# shadNet needs QtHttpServer and Eden/Eglantine Qt Charts, which a system Qt may lack (~/.local/qt6-extra, ~/.local/opt/qt6charts here)
+LD_LIBRARY_PATH=$HOME/.local/qt6-extra/lib:$HOME/.local/opt/qt6charts/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} \
+linuxdeploy --appdir "$APPDIR" --plugin qt --executable "$BIN/uscl" --executable "$BIN/uscl-rpcn" --executable "$BIN/dw-server" "${EXTRA_EXES[@]}" \
   --deploy-deps-only "$APPDIR/usr/plugins/wayland-graphics-integration-client"
 # same cleanup as RPCS3's .ci/deploy-linux.sh: these break other distros / gamescope
 rm -f "$APPDIR"/usr/lib/libwayland-client.so* "$APPDIR"/usr/lib/libvulkan.so* \

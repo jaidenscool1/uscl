@@ -1,0 +1,199 @@
+name: windows-emulators
+# The emulators the Windows installer ships besides RPCS3, each its pinned base + our uscl-*/patches
+# (packaging/windows/emulators.sh), built with its upstream's own Windows CI steps. Each result is a zip on the
+# ci-cache draft release named by `emulators.sh key`, laid out as it goes next to uscl.exe; a job whose zip is
+# already there does nothing. windows-installer.yml runs this first and unpacks the zips.
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'Build only this emulator (empty: all)'
+        default: ''
+  workflow_call:
+  # keeps ci-cache current when a base or our patches change (unchanged emulators skip in seconds)
+  push:
+    paths:
+      - 'packaging/windows/emulators.sh'
+      - '.github/workflows/windows-emulators.yml'
+      - 'tools/dev-scripts/build-switch-core.ps1'
+      - 'uscl-*/patches/**'
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: write   # the ci-cache draft release
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {emu: shadps4,   runner: windows-2025-vs2026}
+          - {emu: shadnet,   runner: windows-2025}
+          - {emu: dolphin,   runner: windows-2025-vs2026}   # 2609a needs VS 2026 (Source/PCH/pch.h)
+          - {emu: azahar,    runner: windows-2025}
+          - {emu: eden,      runner: windows-2025}
+          - {emu: eglantine, runner: windows-2025}
+          - {emu: melonds,   runner: windows-2025-vs2026}
+    name: ${{ matrix.emu }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      EMU: ${{ matrix.emu }}
+      GH_TOKEN: ${{ github.token }}
+      VULKAN_VER: '1.4.341.1'
+    steps:
+      # our patches are LF and must apply byte for byte
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          path: uscl
+
+      - name: Already built?
+        run: |
+          if [ -n "${{ inputs.only }}" ] && [ "${{ inputs.only }}" != "$EMU" ]; then echo "SKIP=1" >> $GITHUB_ENV; exit 0; fi
+          key=$(bash uscl/packaging/windows/emulators.sh key $EMU); echo "KEY=$key" >> $GITHUB_ENV
+          if gh release view ci-cache -R $GITHUB_REPOSITORY --json assets -q '.assets[].name' | grep -qx "$key.zip"; then
+            echo "SKIP=1" >> $GITHUB_ENV; echo "already built: $key"
+          fi
+
+      - name: Sources
+        if: env.SKIP != '1' && matrix.emu != 'eden'   # Eden: build-switch-core.ps1 clones it
+        # melonDS at the workspace root: its vcpkg/CMake actions below are upstream's, which expect that
+        run: bash uscl/packaging/windows/emulators.sh fetch $EMU ${{ matrix.emu == 'melonds' && '.' || 'src' }}
+
+      - name: Vulkan SDK
+        if: env.SKIP != '1' && (matrix.emu == 'azahar' || matrix.emu == 'eden' || matrix.emu == 'eglantine')
+        shell: pwsh
+        run: |
+          $exe = "vulkansdk-windows-X64-$env:VULKAN_VER.exe"
+          Invoke-WebRequest -OutFile $exe "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VER/windows/$exe"
+          Start-Process -Wait -FilePath ".\$exe" -ArgumentList "--root C:\VulkanSDK\$env:VULKAN_VER --accept-licenses --default-answer --confirm-command install"
+          "VULKAN_SDK=C:\VulkanSDK\$env:VULKAN_VER" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "C:\VulkanSDK\$env:VULKAN_VER\Bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: env.SKIP != '1' && (matrix.emu == 'dolphin' || matrix.emu == 'azahar' || matrix.emu == 'shadnet' || matrix.emu == 'eglantine')
+      - uses: jurplel/install-qt-action@v4
+        if: env.SKIP != '1' && (matrix.emu == 'shadnet' || matrix.emu == 'eglantine')
+        with:
+          version: '6.8.3'
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: ${{ matrix.emu == 'shadnet' && 'qthttpserver qtwebsockets' || 'qtcharts' }}
+          cache: true
+
+      # ---- one build per emulator; each leaves what goes next to uscl.exe in out/
+      - name: Build shadPS4
+        if: env.SKIP != '1' && matrix.emu == 'shadps4'
+        shell: pwsh
+        run: |
+          cmake -G Ninja -S src -B src/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE=ON -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
+          if ($LASTEXITCODE) { exit 1 }
+          cmake --build src/build --parallel $env:NUMBER_OF_PROCESSORS
+          if ($LASTEXITCODE) { exit 1 }
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item src/build/shadPS4.exe out/shadps4.exe
+
+      - name: Build shadNet
+        if: env.SKIP != '1' && matrix.emu == 'shadnet'
+        shell: pwsh
+        run: |
+          cmake -G Ninja -S src -B src/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
+          if ($LASTEXITCODE) { exit 1 }
+          cmake --build src/build --parallel $env:NUMBER_OF_PROCESSORS
+          if ($LASTEXITCODE) { exit 1 }
+          New-Item -ItemType Directory -Force out/shadNet/licenses | Out-Null
+          Copy-Item src/build/shadnet.exe out/shadNet/
+          windeployqt --release --no-translations out/shadNet/shadnet.exe
+          Copy-Item src/externals/libressl/COPYING out/shadNet/licenses/LibreSSL.txt
+
+      - name: Build Dolphin
+        if: env.SKIP != '1' && matrix.emu == 'dolphin'
+        shell: pwsh
+        working-directory: src
+        run: |
+          cmake --preset ninja-release-x64 -DENABLE_ANALYTICS=OFF -DENABLE_AUTOUPDATE=OFF
+          if ($LASTEXITCODE) { exit 1 }
+          cmake --build build/release/x64
+          if ($LASTEXITCODE) { exit 1 }
+          $bin = (Get-ChildItem -Recurse -Filter Dolphin.exe build | Select-Object -First 1).DirectoryName
+          New-Item -ItemType Directory -Force ../out | Out-Null
+          Copy-Item -Recurse $bin ../out/Dolphin
+
+      - name: Build Azahar
+        if: env.SKIP != '1' && matrix.emu == 'azahar'
+        run: |
+          cmake -S src -B src/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=OFF -DENABLE_QT_UPDATE_CHECKER=OFF
+          ninja -C src/build
+          ninja -C src/build bundle
+          mkdir -p out && cp -r src/build/bundle out/Azahar
+          [ -f out/Azahar/azahar-room.exe ] || cp src/build/bin/Release/azahar-room.exe out/Azahar/
+          ls out/Azahar
+
+      - name: Build Eden
+        if: env.SKIP != '1' && matrix.emu == 'eden'
+        shell: pwsh
+        env:
+          USCL_EDEN_SOURCE: ${{ github.workspace }}\src
+        run: |
+          # the script throws on failure; $LASTEXITCODE afterwards is robocopy's (1 = files copied)
+          ./uscl/tools/dev-scripts/build-switch-core.ps1
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item -Recurse uscl/build/switch-core/bin out/Eden
+          foreach ($exe in 'eden.exe', 'eden-cli.exe') { if (-not (Test-Path out/Eden/$exe)) { throw "$exe was not built" } }
+          $global:LASTEXITCODE = 0
+
+      - name: Build Eglantine
+        if: env.SKIP != '1' && matrix.emu == 'eglantine'
+        run: |
+          cmake -S src -B src/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DYUZU_TESTS=OFF \
+            -DYUZU_CMD=OFF -DYUZU_ROOM=OFF -DYUZU_ROOM_STANDALONE=OFF -DYUZU_USE_BUNDLED_QT=OFF -DYUZU_USE_BUNDLED_SDL3=ON \
+            -DENABLE_QT_TRANSLATION=ON -DENABLE_UPDATE_CHECKER=OFF -DUSE_DISCORD_PRESENCE=OFF -DNIGHTLY_BUILD=OFF
+          cmake --build src/build --target yuzu --parallel
+          windeployqt --release --no-translations src/build/bin/eglantine.exe
+          mkdir -p out && cp -r src/build/bin out/Eglantine
+
+      - name: Restore vcpkg cache (melonDS)
+        if: env.SKIP != '1' && matrix.emu == 'melonds'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/vcpkg_cache
+          key: vcpkg-x86_64-windows-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-x86_64-windows-
+      - name: Set up vcpkg (melonDS)
+        if: env.SKIP != '1' && matrix.emu == 'melonds'
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgJsonGlob: vcpkg.json
+      - name: Build melonDS
+        if: env.SKIP != '1' && matrix.emu == 'melonds'
+        uses: lukka/run-cmake@v10
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg_cache,readwrite
+        with:
+          configurePreset: release-windows-x86_64
+          configurePresetAdditionalArgs: "['-DENABLE_DEBUG_DEPS=OFF']"
+          buildPreset: release-windows-x86_64
+      - name: Save vcpkg cache (melonDS)
+        if: env.SKIP != '1' && matrix.emu == 'melonds' && always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/vcpkg_cache
+          key: vcpkg-x86_64-windows-${{ hashFiles('vcpkg.json') }}
+      - name: Collect melonDS
+        if: env.SKIP != '1' && matrix.emu == 'melonds'
+        run: mkdir -p out/melonDS && cp build/release-windows-x86_64/melonDS.exe out/melonDS/
+
+      - name: Keep it on ci-cache
+        if: env.SKIP != '1'
+        run: |
+          (cd out && 7z a -tzip "../$KEY.zip" . >/dev/null)
+          gh release upload ci-cache -R $GITHUB_REPOSITORY "$KEY.zip" --clobber
+          # only the current build of each emulator is worth keeping
+          for old in $(gh release view ci-cache -R $GITHUB_REPOSITORY --json assets -q '.assets[].name' | grep "^emu-$EMU-"); do
+            [ "$old" = "$KEY.zip" ] || gh release delete-asset ci-cache "$old" -R $GITHUB_REPOSITORY -y
+          done

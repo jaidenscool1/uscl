@@ -89,7 +89,7 @@ Window {
                                     { title: qsTr("Keep Running"), action: resumeGame }] })
             return
         }
-        if (g.console === "Wii" || g.console === "WiiU" || g.console === "3DS" || g.console === "Xbox360") { launchGame(g); return }   // emulator games: no PS3 firmware / RPCN
+        if (emuConsoles.indexOf(g.console) >= 0) { launchGame(g); return }   // emulator games: no PS3 firmware / RPCN
         if (!ps4 && g.console !== "Switch" && !system.firmwareInstalled) {
             sound("error")
             dialog.show(qsTr("System Update"), qsTr("Games need the PS3 system software. Install it now?"),
@@ -130,9 +130,9 @@ Window {
     }
     function launchGame(g) {
         if (prefs.autoControllers) launcher.prepareInput(gamepad.names, g.console)   // every console: pads -> players 1, 2...
-        if (g.console === "Wii" || g.console === "WiiU" || g.console === "3DS" || g.console === "Xbox360") {   // Wii -> Dolphin, 3DS -> Azahar
+        if (emuConsoles.indexOf(g.console) >= 0) {   // Wii -> Dolphin, 3DS -> Azahar
             // in a session: our Dolphin hosts or joins NetPlay (Wii), our Azahar joins the room (3DS), over the tunnel
-            var netplay = g.console !== "Wii" && g.console !== "3DS" ? "" : online.state === "hosting" ? "host" : online.state === "joined" ? "join" : ""
+            var netplay = ["Wii", "GameCube", "3DS"].indexOf(g.console) < 0 ? "" : online.state === "hosting" ? "host" : online.state === "joined" ? "join" : ""
             if (launcher.startEmu(g.path, g.title, g.console, netplay, system.onlineName || online.steamName, online.players.length)) runningGame = g
             return
         }
@@ -447,7 +447,10 @@ Window {
     function offerUpdate() {
         offeredVersion = updater.latest
         sound("notify")
-        var notes = updater.notes ? "\n\n" + updater.notes.split("\n").slice(0, 6).join("\n") : ""
+        // the release notes' first paragraph as plain text, short enough to fit above the buttons
+        var summary = (updater.notes || "").split(/\n\s*\n/)[0].replace(/[*_`#>]/g, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").trim()
+        if (summary.length > 220) summary = summary.substring(0, 217).replace(/\s+\S*$/, "") + "..."
+        var notes = summary ? "\n\n" + summary : ""
         dialog.show(qsTr("USCL Update"), qsTr("Version %1 is available. You have %2.").arg(updater.latest).arg(system.version) + notes,
                     { buttons: [{ title: qsTr("Update Now"), action: startUpdate }, { title: qsTr("Later") }] })
     }
@@ -601,6 +604,24 @@ Window {
         if (problem) dialog.show(qsTr("Switch Emulation"), problem)
         else notice.show(qsTr("Saved"), ic("it_games"))
     }
+    // Eden's / Eglantine's load errors (core/loader/loader.cpp) about keys or system software, in plain words
+    function switchFailure(details) {
+        var have = launcher.switchFiles()
+        var keys = have.master >= 0 ? qsTr("Your console keys go up to master key %1.").arg(("0" + have.master.toString(16)).slice(-2)) : ""
+        if (/titlekey/i.test(details))
+            return qsTr("This game needs its title key. Put title.keys from your Switch (or the one that came with the game) on this PC: USCL picks it up when it starts, or use Settings → Switch Emulation → Find Keys and System Software.")
+        if (/key area key|crypto revision|NCA Header key|keyfile could not be found|Key Generation Source/i.test(details))
+            return qsTr("The emulator couldn't decrypt this game: it needs newer console keys than the ones installed. %1 Dump prod.keys from a Switch updated to the newest system software and put it on this PC.").arg(keys)
+        if (/firmware|system archive|SystemArchive/i.test(details))
+            return qsTr("This game needs Switch system software that isn't installed (%1). Put a newer firmware folder or .zip on this PC and use Find Keys and System Software in Settings → Switch Emulation.")
+                .arg(have.version || qsTr("none installed"))
+        return ""
+    }
+    function switchFilesText() {
+        var have = launcher.switchFiles()
+        if (have.master < 0) return qsTr("No keys")
+        return qsTr("Keys %1").arg(("0" + have.master.toString(16)).slice(-2)) + (have.version ? " · " + have.version : have.firmware ? qsTr(" · system software") : "")
+    }
     function switchSettingsPage() {
         cfgTick;
         return [
@@ -609,8 +630,11 @@ Window {
             { title: qsTr("Use Alternative CLI Emulator"), help: qsTr("Advanced: select an eden-cli build with multiplayer support"), action: function() { switchToolDialog.kind = "CORE"; switchToolDialog.open() } },
             { title: qsTr("Choose Switch Settings App"), help: qsTr("Select eden"), action: function() { switchToolDialog.kind = "GUI"; switchToolDialog.open() } },
             { title: qsTr("Choose Switch Room Server"), help: qsTr("Select eden-room for hosting friends"), action: function() { switchToolDialog.kind = "ROOM"; switchToolDialog.open() } },
-            { title: qsTr("Import Console Keys"), help: qsTr("Choose prod.keys dumped from your Switch"), action: switchKeysDialog.open },
-            { title: qsTr("Import System Software"), help: qsTr("Some games require firmware. Choose your extracted Switch firmware folder."), action: switchFirmwareDialog.open },
+            { title: qsTr("Find Keys and System Software"), value: switchFilesText(),
+              help: qsTr("Looks on this PC (Downloads, Desktop, Documents, other Switch emulators) and installs newer ones. USCL also does this when it starts and after Add Games."),
+              action: function() { switchLookRequested = true; games.setupSwitchFiles(); notice.show(qsTr("Looking for Switch keys and system software..."), ic("cat_switch")) } },
+            { title: qsTr("Import Console Keys"), help: qsTr("Choose prod.keys dumped from your Switch (title.keys next to it comes too)"), action: switchKeysDialog.open },
+            { title: qsTr("Import System Software"), help: qsTr("Choose an extracted Switch firmware folder; a firmware .zip is found by the search above"), action: switchFirmwareDialog.open },
             { title: qsTr("Controllers, Updates and DLC"), help: qsTr("Configure controllers and install game updates in Eden"), action: launcher.openSwitchSettings },
             { title: qsTr("Test Switch Connection"), help: qsTr("Check the Switch core, console files, room port and Steam"), action: function() { testConnection("Switch") } },
             { title: qsTr("Playing with Friends"), action: function() {
@@ -703,16 +727,21 @@ Window {
 
     // column order: Users, Settings, Online, Games, Party, Friends. Games has one entry per console you have games
     // for; ✕ on one opens its games, like the PS3's Game column entries open their lists
+    // games that run in Dolphin, Azahar, melonDS, Cemu, Xenia: no PS3 system software or RPCN
+    readonly property var emuConsoles: ["Wii", "GameCube", "WiiU", "3DS", "DS", "Xbox360"]
+    // the Games entry a game is listed under: Switch 2 games (program ids starting 04) get their own
+    function menuConsole(g) { var c = g.console || "PS3"; return c === "Switch" && /^04/.test(g.serial) ? "Switch2" : c }
     readonly property var presentConsoles: {
         games.count
-        var order = ["PS3", "PS4", "Switch", "Wii", "WiiU", "3DS", "Xbox360"], set = ({})
-        for (var i = 0; i < games.count; i++) set[games.get(i).console || "PS3"] = true
+        var order = ["PS3", "PS4", "Switch", "Switch2", "Wii", "GameCube", "WiiU", "3DS", "DS", "Xbox360"], set = ({})
+        for (var i = 0; i < games.count; i++) set[menuConsole(games.get(i))] = true
         return order.filter(function(c) { return set[c] }).concat(Object.keys(set).filter(function(c) { return order.indexOf(c) < 0 }))
     }
     readonly property var consoleMeta: ({ "PS3": [qsTr("PlayStation 3"), "cat_ps3"], "PS4": [qsTr("PlayStation 4"), "cat_ps4"],
-                                          "Switch": [qsTr("Nintendo Switch"), "cat_switch"],
-                                          "Wii": [qsTr("Wii"), "cat_wii"], "WiiU": [qsTr("Wii U"), "cat_wiiu"],
-                                          "3DS": [qsTr("Nintendo 3DS"), "cat_3ds"], "Xbox360": [qsTr("Xbox 360"), "cat_x360"] })
+                                          "Switch": [qsTr("Nintendo Switch"), "cat_switch"], "Switch2": [qsTr("Nintendo Switch 2"), "cat_switch2"],
+                                          "Wii": [qsTr("Wii"), "cat_wii"], "GameCube": [qsTr("GameCube"), "cat_gamecube"], "WiiU": [qsTr("Wii U"), "cat_wiiu"],
+                                          "3DS": [qsTr("Nintendo 3DS"), "cat_3ds"], "DS": [qsTr("Nintendo DS"), "cat_ds"],
+                                          "Xbox360": [qsTr("Xbox 360"), "cat_x360"] })
     readonly property int gamesCat: 3
     readonly property int partyCat: 4
     readonly property int friendsCat: 5
@@ -769,7 +798,7 @@ Window {
     function wideIcon(g) { return (g.console || "PS3") === "PS3" }
     function consoleGamesPage(c) {
         var rows = []
-        for (var i = 0; i < games.count; i++) { let g = games.get(i); if ((g.console || "PS3") === c) rows.push(gameItem(g)) }
+        for (var i = 0; i < games.count; i++) { let g = games.get(i); if (menuConsole(g) === c) rows.push(gameItem(g)) }
         return rows.length ? rows : [{ title: qsTr("No games"), disabled: true }]
     }
 
@@ -788,7 +817,7 @@ Window {
         presentConsoles.forEach(function(c) {
             var meta = consoleMeta[c] || [c, "cat_game"]
             var titles = []
-            for (var i = 0; i < games.count; i++) if ((games.get(i).console || "PS3") === c) titles.push(games.get(i).title)
+            for (var i = 0; i < games.count; i++) if (menuConsole(games.get(i)) === c) titles.push(games.get(i).title)
             gameItems.push({ title: meta[0], icon: ic(meta[1]), desc: titles.length === 1 ? qsTr("1 game") : qsTr("%1 games").arg(titles.length), preview: titles,
                              action: function() { openPage(function() { return consoleGamesPage(c) }, ic(meta[1]), gamesCat) } })
         })
@@ -926,6 +955,7 @@ Window {
             sound("category")
         }
         function onFinished(crashed, details) {
+            var wasSwitch = !!runningGame && runningGame.console === "Switch"
             runningGame = null
             if (ownSession) { ownSession = false; online.stop() } // the game's own session ends with it
             // the window manager may have taken us out of full screen when the game's window appeared
@@ -933,7 +963,11 @@ Window {
             games.reload()
             system.refresh()
             cfgTick++
-            if (crashed) {
+            var why = wasSwitch ? switchFailure(details) : ""
+            if (why) {
+                sound("error")
+                dialog.show(qsTr("Switch Emulation"), why)
+            } else if (crashed) {
                 sound("error")
                 dialog.show(qsTr("Error"), qsTr("The game stopped unexpectedly.\n\n") + details.split("\n").slice(-4).join("\n"))
             } else if (nextGame) {
@@ -965,18 +999,34 @@ Window {
         target: games
         function onScanFailed(message) { dialog.show(qsTr("Add Games"), message) }
         function onCountChanged() { checkGameUpdates() }
-        function onScanFinished(added, known, encrypted) {
+        function onScanFinished(added, known, encrypted, archives) {
             sound("notify")
             if (added)
                 notice.show(qsTr("%n game(s) added", "", added), ic("it_addgames"))
             else if (known)
                 notice.show(qsTr("Those games are already in your library"), ic("it_addgames"))
-            if (encrypted)
+            if (archives)   // e.g. a Switch game still in its .nsp.rar: nothing can read it until it's extracted
+                dialog.show(qsTr("Add Games"), qsTr("%n game file(s) there are still packed in .rar, .7z or .zip archives, so USCL can't read them. Extract them (7-Zip, WinRAR, or your file manager), then Add Games again.", "", archives))
+            else if (encrypted)
                 dialog.show(qsTr("Add Games"), qsTr("%n disc image(s) there are still encrypted, so no emulator can read them. Decrypt them first (a .dec.iso, or the extracted disc folder), then add them again.", "", encrypted))
             else if (!added && !known)
-                dialog.show(qsTr("Add Games"), qsTr("No games were found. Choose PS3 disc folders or ISOs, or extracted Switch .nsp, .xci or .nro files. Extract .rar and .zip archives first; Switch updates and DLC are installed through Switch Settings."))
+                dialog.show(qsTr("Add Games"), qsTr("No games were found. USCL finds PS3 disc folders and ISOs, PS4 games, Switch .nsp/.nsz/.xci/.xcz/.nro, Wii and GameCube discs (.iso, .wbfs, .rvz, .gcz), Wii U (.wua, .wux, extracted games), 3DS (.3ds, .cci, .cxi), DS (.nds) and Xbox 360 ISOs. Extract .rar, .7z and .zip archives first; Switch updates and DLC are installed through Switch Settings."))
+        }
+        // Switch keys / system software (at start, after Add Games, from Settings): say what changed
+        function onSwitchFilesDone(installed, tooNew, error) {
+            if (setup.open) return   // the setup screen shows it
+            if (error) dialog.show(qsTr("Switch Emulation"), error)
+            else if (installed) {
+                notice.show(qsTr("Switch: installed %1").arg(installed), ic("cat_switch"))
+                if (tooNew.length) dialog.show(qsTr("Switch Emulation"), qsTr("System software %1 is on this PC too, but it needs newer console keys than yours, so %2 was installed.")
+                                                                         .arg(tooNew.join(", ")).arg(launcher.switchFiles().version || qsTr("an older one")))
+            } else if (switchLookRequested)
+                notice.show(qsTr("No newer Switch keys or system software found"), ic("cat_switch"))
+            switchLookRequested = false
+            cfgTick++
         }
     }
+    property bool switchLookRequested: false
     Connections {
         target: online
         function onStateChanged() {
@@ -1145,6 +1195,7 @@ Window {
         if (!smokeTest) {
             online.startSteam()
             checkGameUpdates()
+            games.setupSwitchFiles()   // Switch keys / system software put on the PC since: installed in the background
         }
         if (prefs.bootScreen) boot.start()
         else { boot.quick(); sound("startup") }

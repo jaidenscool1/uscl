@@ -496,7 +496,7 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, code: Option<Strin
         println!("uscl-bridge: forwarding {} ports to the host's server", fwd.len() - failed.len());
         if !failed.is_empty() {
             if fwd == [(true, 24872)] {
-                return Err("the Switch room port UDP 24872 is in use; close other Switch rooms and try again".into());
+                return Err("the room port UDP 24872 is in use; close other Switch or 3DS rooms and try again".into());
             }
             // e.g. port 80 on Linux needs privileges
             eprintln!("uscl-bridge: couldn't listen on {} (in use, or a port below 1024 on Linux)", failed.join(", "));
@@ -689,6 +689,11 @@ pub fn run(client: Client, host: bool, join: Option<LobbyId>, code: Option<Strin
                     }
                     Err(e) => eprintln!("uscl-bridge: session lost, retrying: {e}"),
                 }
+            } else if !host && !list.contains(&me) && join_session(&client, lobby).is_ok() {
+                // our own Steam client reconnected: Steam took us out of the lobby, which the host still has
+                changed = true;
+                host_gone = false;
+                println!("uscl-bridge: Steam reconnected; back in session {}", lobby.raw());
             } else if !host && !list.contains(&host_id) {
                 if !host_gone {
                     host_gone = true;

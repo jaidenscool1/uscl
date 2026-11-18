@@ -99,4 +99,7 @@ if(USCL_DISCORD_SDK)
 endif()
 
 set_target_properties(uscl PROPERTIES WIN32_EXECUTABLE ON)
+if(WIN32)
+    target_sources(uscl PRIVATE uscl.rc)   # uscl.exe's icon: the USCL orb (icons/uscl.ico)
+endif()
 install(TARGETS uscl RUNTIME DESTINATION bin)

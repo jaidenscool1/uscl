@@ -23,16 +23,17 @@ OutputBaseFilename=USCL-Setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
-UninstallDisplayIcon={app}\rpcs3.exe
+UninstallDisplayIcon={app}\uscl.exe
+SetupIconFile=..\..\uscl-shell\icons\uscl.ico
 
 [Files]
 Source: "{#Stage}\*"; DestDir: "{app}"; Excludes: "vc_redist.x64.exe"; Flags: recursesubdirs ignoreversion
 Source: "{#Stage}\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall skipifsourcedoesntexist
 
 [Icons]
-Name: "{autoprograms}\USCL"; Filename: "{app}\uscl.exe"; IconFilename: "{app}\rpcs3.exe"
+Name: "{autoprograms}\USCL"; Filename: "{app}\uscl.exe"
 Name: "{autoprograms}\USCL (classic window)"; Filename: "{app}\rpcs3.exe"
-Name: "{autodesktop}\USCL"; Filename: "{app}\uscl.exe"; IconFilename: "{app}\rpcs3.exe"; Tasks: desktopicon
+Name: "{autodesktop}\USCL"; Filename: "{app}\uscl.exe"; Tasks: desktopicon
 
 [Tasks]
 Name: desktopicon; Description: "Create a desktop shortcut"

@@ -1,5 +1,5 @@
 # Build the pinned, patched Eden frontend on Windows (MSVC). Windows twin of build-switch-core.sh.
-# Needs Visual Studio 2022 with "Desktop development with C++" (it supplies CMake and Ninja)
+# Needs Visual Studio 2022 or 2026 with "Desktop development with C++" (it supplies CMake and Ninja)
 # and the Vulkan SDK (for glslangValidator).
 # Eden's MSVC configuration downloads Qt, SDL2, FFmpeg and OpenSSL itself.
 $ErrorActionPreference = 'Continue'  # PS 5.1 makes native stderr fatal under Stop; exit codes are checked instead
@@ -28,8 +28,8 @@ foreach ($patch in $patches | Select-Object -Skip $applied) {
 }
 
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-$vs = & $vswhere -version '[17.0,18.0)' -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vs) { throw 'Visual Studio 2022 with the C++ workload is required.' }
+$vs = & $vswhere -version '[17.0,19.0)' -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+if (-not $vs) { throw 'Visual Studio 2022 or 2026 with the C++ workload is required.' }
 Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
 Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64' | Out-Null
 
@@ -40,12 +40,18 @@ if (-not $glslang -and $env:VULKAN_SDK) { $glslang = "$env:VULKAN_SDK\Bin\glslan
 if (-not $glslang -or -not (Test-Path $glslang)) { $glslang = "$repo\build\tools\glslang\bin\glslang.exe" }
 if (-not (Test-Path $glslang)) { throw 'glslangValidator not found: install the Vulkan SDK, or unzip a Khronos glslang Windows release into build\tools\glslang.' }
 
+# CPM patches dependencies (Boost, ...) with the first patch.exe it finds; Strawberry Perl's, first on PATH on
+# GitHub's runners, asserts. Git for Windows ships a working one.
+$extra = @()
+$gitPatch = Join-Path (Split-Path (Split-Path (Get-Command git.exe).Source)) 'usr\bin\patch.exe'
+if (Test-Path $gitPatch) { $extra += "-DPATCH_EXECUTABLE=$gitPatch" }
+
 $build = "$source\build-uscl"
 cmake -S $source -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DGLSLANGVALIDATOR=$glslang" `
     -DENABLE_QT=ON -DYUZU_TESTS=OFF -DBUILD_TESTING=OFF -DENABLE_WEB_SERVICE=OFF `
-    -DYUZU_ROOM_STANDALONE=OFF -DYUZU_DISABLE_LLVM=ON
+    -DYUZU_ROOM_STANDALONE=OFF -DYUZU_DISABLE_LLVM=ON @extra
 if ($LASTEXITCODE) { throw 'cmake configure failed' }
-cmake --build $build --target yuzu -j $jobs
+cmake --build $build --target yuzu yuzu-cmd -j $jobs   # eden.exe (settings) + eden-cli.exe (runs games)
 if ($LASTEXITCODE) { throw 'build failed' }
 
 # The bin folder holds eden.exe plus the Qt/SDL/FFmpeg DLLs Eden's build copies beside it.

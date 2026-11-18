@@ -1,5 +1,6 @@
 name: windows-installer
-# Builds USCL-Setup.exe: RPCS3 + uscl-rpcs3 patches (MSVC, RPCS3's own CI steps), uscl-rpcn, uscl-dw, uscl-bridge.
+# Builds USCL-Setup.exe: RPCS3 + uscl-rpcs3 patches (MSVC, RPCS3's own CI steps), uscl-rpcn, uscl-dw, uscl-bridge,
+# and the other emulators from windows-emulators.yml.
 # Manual or on a v* tag only: a full RPCS3 build takes about an hour of runner time.
 on:
   workflow_dispatch:
@@ -14,7 +15,12 @@ permissions:
   contents: write   # the draft release; nothing else
 
 jobs:
+  # shadPS4, shadNet, Dolphin, Azahar, Eden, Eglantine, melonDS: built once per base + patches, kept on ci-cache
+  emulators:
+    uses: ./.github/workflows/windows-emulators.yml
+
   installer:
+    needs: emulators
     runs-on: windows-2025-vs2026
     env:
       # from RPCS3's .github/workflows/rpcs3.yml at the commit our patches are made against
@@ -168,7 +174,24 @@ jobs:
           python uscl/uscl-dw/bo2-wad/mkwad.py $D/dw/storage/publisher/18396/online_tu19_mp_english.wad \
             uscl/uscl-dw/bo2-wad/leagues.info uscl/uscl-dw/bo2-wad/playlists_mp.info uscl/uscl-dw/bo2-wad/codtv-mp.json
           cp uscl/uscl-dw/mw2-files/{playlists.patch3,motd-english.txt,messageoftheday.info} $D/dw/storage/publisher/5280/
+          # Black Ops II PS4 (title 2430) reads the same playlists from its own file name; shadPS4's settings + game patches
+          mkdir -p $D/dw/storage/publisher/2430 $D/shadps4/user
+          cp $D/dw/storage/publisher/18396/online_tu19_mp_english.wad $D/dw/storage/publisher/2430/online_tu17_mp_english.wad
+          cp uscl/uscl-shadps4/data/user/config.json $D/shadps4/user/
+          python uscl/uscl-shadps4/mk_mm_patch.py $D/shadps4/user/patches/uscl >/dev/null
           ls $S
+
+      # each zip holds its emulator laid out as it goes next to uscl.exe (shadps4.exe, Dolphin\, Azahar\, Eden\, ...)
+      - name: Add the emulators
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for emu in $(bash uscl/packaging/windows/emulators.sh list); do
+            key=$(bash uscl/packaging/windows/emulators.sh key $emu)
+            gh release download ci-cache -R $GITHUB_REPOSITORY -p "$key.zip" -D emus || { echo "::error ::$key.zip missing on ci-cache (windows-emulators failed?)"; exit 1; }
+            7z x -y -ostage "emus/$key.zip" >/dev/null && echo "added $key"
+          done
+          ls stage
 
       - name: Build installer
         shell: pwsh

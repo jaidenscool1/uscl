@@ -12,6 +12,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QStorageInfo>
 #include <QSaveFile>
@@ -377,7 +378,8 @@ void GameModel::loadEmuGames()
 		g.icon = o.value("icon").toString();   // usually empty -> the home screen uses its default game icon
 		g.version = o.value("version").toString();
 		if (!g.title.isEmpty() && !g.path.isEmpty()
-		    && (g.console == "Wii" || g.console == "WiiU" || g.console == "3DS" || g.console == "Xbox360")
+		    && (g.console == "Wii" || g.console == "GameCube" || g.console == "WiiU" || g.console == "3DS" || g.console == "DS"
+		        || g.console == "Xbox360")
 		    && QFileInfo::exists(g.path))
 			m_games.push_back(g);
 	}
@@ -421,7 +423,7 @@ QVariantMap GameModel::get(int row) const
 
 namespace
 {
-	void walk(const QString& dir, int depth, QMap<QString, QString>& out, int& encrypted)
+	void walk(const QString& dir, int depth, QMap<QString, QString>& out, int& encrypted, int& archives)
 	{
 		const auto serialOf = [](const QString& sfo) {
 			QFile f(sfo);
@@ -446,9 +448,22 @@ namespace
 		const QDir d(dir);
 		for (const QFileInfo& file : d.entryInfoList(QDir::Files))
 		{
+			// games still packed in an archive (each multi-part .rar once; Switch keys / firmware zips are found elsewhere)
+			static const QRegularExpression packed("\\.(rar|7z|zip)$", QRegularExpression::CaseInsensitiveOption),
+			                                later_part("\\.part0*([2-9]|\\d{2,})\\.rar$|\\.r\\d\\d$", QRegularExpression::CaseInsensitiveOption),
+			                                not_game("irmware|keys", QRegularExpression::CaseInsensitiveOption);
+			if (packed.match(file.fileName()).hasMatch())
+			{
+				if (!later_part.match(file.fileName()).hasMatch() && !not_game.match(file.fileName()).hasMatch())
+					archives++;
+				continue;
+			}
 			const auto entry = SwitchCore::describe(file.absoluteFilePath());
 			if (!entry.isEmpty())
 				out[entry["serial"].toString()] = file.absoluteFilePath();
+			else if (file.suffix().compare("iso", Qt::CaseInsensitive) != 0)   // ISOs: below, after the PS3 check
+				if (const QVariantMap emu = GameModel::emuGame(file.absoluteFilePath()); !emu.isEmpty() && !out.contains(emu["serial"].toString()))
+					out[emu["serial"].toString()] = file.absoluteFilePath();
 		}
 		for (const QFileInfo& f : d.entryInfoList({"*.iso", "*.ISO"}, QDir::Files))
 		{
@@ -458,22 +473,165 @@ namespace
 				out[serial] = f.absoluteFilePath();
 			else if (serial.isEmpty() && !sfo.isEmpty())
 				encrypted++; // the file is listed but its contents are scrambled: a disc image that isn't decrypted
+			else if (sfo.isEmpty())   // not a PS3 disc: Wii, GameCube or Xbox 360
+				if (const QVariantMap emu = GameModel::emuGame(f.absoluteFilePath()); !emu.isEmpty() && !out.contains(emu["serial"].toString()))
+					out[emu["serial"].toString()] = f.absoluteFilePath();
 		}
 		if (depth > 0)
 		{
 			for (const QFileInfo& sub : d.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks))
-				walk(sub.absoluteFilePath(), depth - 1, out, encrypted);
+				walk(sub.absoluteFilePath(), depth - 1, out, encrypted, archives);
 		}
 	}
 }
 
-QMap<QString, QString> GameModel::findGames(const QString& path, int* encrypted)
+// ---- Wii, GameCube, 3DS, DS, Wii U and Xbox 360 games (they run in Dolphin, Azahar, melonDS, Cemu, Xenia)
+
+namespace
+{
+	QByteArray readAt(QFile& f, qint64 at, int n)
+	{
+		return at + n <= f.size() && f.seek(at) ? f.read(n) : QByteArray();
+	}
+
+	quint32 be32(const QByteArray& b, int at)
+	{
+		return b.size() >= at + 4 ? qFromBigEndian<quint32>(b.constData() + at) : 0;
+	}
+
+	// a file name without dump tags: "Wii Sports (USA) [!]" -> "Wii Sports"
+	QString cleanTitle(QString name)
+	{
+		static const QRegularExpression tags("\\s*[\\[(][^\\])]*[\\])]"), dash("\\s+-\\s+");
+		return name.remove(tags).replace('_', ' ').replace(dash, ": ").simplified();
+	}
+
+	QString idPart(QString s)
+	{
+		static const QRegularExpression other("[^A-Za-z0-9]");
+		return s.remove(other).left(16);
+	}
+
+	// a Wii / GameCube disc header (any container keeps a copy): console, game id, internal name
+	bool discHeader(const QByteArray& h, QString& console, QString& id, QString& title)
+	{
+		const bool wii = be32(h, 0x18) == 0x5D1C9EA3, gc = be32(h, 0x1C) == 0xC2339F3D;
+		if (!wii && !gc)
+			return false;
+		console = wii ? "Wii" : "GameCube";
+		id = QString::fromLatin1(h.left(6));
+		if (const QString name = QString::fromLatin1(h.mid(0x20, 0x40).split('\0').first()).simplified(); !name.isEmpty())
+			title = name;
+		return true;
+	}
+}
+
+bool GameModel::isEmuSerial(const QString& serial)
+{
+	for (const char* c : {"Wii-", "GameCube-", "3DS-", "DS-", "WiiU-", "Xbox360-"})
+		if (serial.startsWith(c))
+			return true;
+	return false;
+}
+
+QVariantMap GameModel::emuGame(const QString& path)
+{
+	const QFileInfo info(path);
+	const QString ext = info.suffix().toLower();
+	static const QStringList known = {"iso", "gcm", "wbfs", "ciso", "rvz", "wia", "gcz", "3ds", "cci", "cxi", "3dsx", "nds",
+	                                  "wua", "wud", "wux", "rpx", "xex"};
+	if (!known.contains(ext))
+		return {};
+	QFile f(path);
+	if (!f.open(QIODevice::ReadOnly))
+		return {};
+	QString console, id, title = cleanTitle(info.completeBaseName());
+	if (ext == "iso" || ext == "gcm")
+		discHeader(readAt(f, 0, 0x60), console, id, title);
+	else if (ext == "wbfs" && readAt(f, 0, 4) == "WBFS")
+		discHeader(readAt(f, 0x200, 0x60), console, id, title);
+	else if (ext == "ciso" && readAt(f, 0, 4) == "CISO")
+		discHeader(readAt(f, 0x8000, 0x60), console, id, title);
+	else if ((ext == "rvz" || ext == "wia") && (readAt(f, 0, 4) == QByteArray("RVZ\x01", 4) || readAt(f, 0, 4) == QByteArray("WIA\x01", 4)))
+		discHeader(readAt(f, 0x58, 0x60), console, id, title);   // the disc header copy in the WIA/RVZ disc struct
+	else if (ext == "gcz" && readAt(f, 0, 4) == QByteArray("\x01\xC0\x0B\xB1", 4))
+		console = qFromLittleEndian<quint32>(readAt(f, 4, 4).constData()) == 1 ? "Wii" : "GameCube";
+	else if ((ext == "3ds" || ext == "cci") && readAt(f, 0x100, 4) == "NCSD")
+	{
+		console = "3DS";   // product code of the game partition, e.g. CTR-P-AMKE
+		const QByteArray at = readAt(f, 0x120, 4);
+		if (at.size() == 4)
+			id = QString::fromLatin1(readAt(f, qint64(qFromLittleEndian<quint32>(at.constData())) * 0x200 + 0x150, 16).split('\0').first());
+	}
+	else if (ext == "cxi" && readAt(f, 0x100, 4) == "NCCH")
+		console = "3DS", id = QString::fromLatin1(readAt(f, 0x150, 16).split('\0').first());
+	else if (ext == "3dsx" && readAt(f, 0, 4) == "3DSX")
+		console = "3DS";
+	else if (ext == "nds" && readAt(f, 0x15C, 2) == QByteArray("\x56\xCF", 2))   // the header's Nintendo logo checksum
+		console = "DS", id = QString::fromLatin1(readAt(f, 0xC, 4));
+	else if (ext == "wua" || ext == "wud" || ext == "wux")
+		console = "WiiU";
+	else if (ext == "rpx")
+	{
+		// an extracted Wii U game: code/<name>.rpx beside meta/meta.xml (updates and DLC have one too: skipped)
+		QFile meta(info.absolutePath() + "/../meta/meta.xml");
+		if (!meta.open(QIODevice::ReadOnly) || meta.size() > 1024 * 1024)
+			return {};
+		const QString xml = QString::fromUtf8(meta.readAll());
+		static const QRegularExpression name("<longname_en[^>]*>([^<]+)</longname_en>"), tid("<title_id[^>]*>([0-9A-Fa-f]{16})</title_id>");
+		id = tid.match(xml).captured(1).toUpper();
+		if (id.startsWith("0005000E") || id.startsWith("0005000C"))
+			return {};
+		console = "WiiU";
+		if (const QString n = name.match(xml).captured(1).simplified(); !n.isEmpty())
+			title = n;
+		else
+			title = cleanTitle(QDir(info.absolutePath() + "/..").dirName());
+	}
+	else if (ext == "xex" && info.fileName().compare("default.xex", Qt::CaseInsensitive) == 0)
+		console = "Xbox360", title = cleanTitle(info.dir().dirName());
+	if (console.isEmpty() && ext == "iso")
+	{
+		// Xbox 360: the XDVDFS signature, at the start of the game partition of each disc layout
+		for (const qint64 base : {qint64(0), qint64(0x2080000), qint64(0xFD90000), qint64(0x18300000)})
+			if (readAt(f, base + 0x10000, 20) == "MICROSOFT*XBOX*MEDIA")
+			{
+				console = "Xbox360";
+				break;
+			}
+	}
+	if (console.isEmpty())
+		return {};
+	const QString key = idPart(id.isEmpty() ? info.completeBaseName() : id);
+	return {{"title", title.isEmpty() ? info.completeBaseName() : title}, {"console", console},
+	        {"serial", console + '-' + (key.isEmpty() ? QString("game") : key)}, {"path", info.absoluteFilePath()}};
+}
+
+void GameModel::setupSwitchFiles(const QString& extraFolder)
+{
+	auto* result = new QVariantMap;
+	QThread* t = QThread::create([result, extraFolder] {
+		const QVariantMap found = SwitchCore::findConsoleFiles(extraFolder.isEmpty() ? QStringList() : QStringList{extraFolder});
+		QString error;
+		*result = {{"installed", SwitchCore::installConsoleFiles(found, &error)}, {"tooNew", found.value("skipped")}, {"error", error}};
+	});
+	connect(t, &QThread::finished, this, [this, t, result] {
+		t->deleteLater();
+		emit switchFilesDone(result->value("installed").toString(), result->value("tooNew").toStringList(), result->value("error").toString());
+		delete result;
+	});
+	t->start();
+}
+
+QMap<QString, QString> GameModel::findGames(const QString& path, int* encrypted, int* archives)
 {
 	QMap<QString, QString> out;
-	int scrambled = 0;
-	walk(QDir::cleanPath(path), 6, out, scrambled);
+	int scrambled = 0, packed = 0;
+	walk(QDir::cleanPath(path), 8, out, scrambled, packed);
 	if (encrypted)
 		*encrypted = scrambled;
+	if (archives)
+		*archives = packed;
 	return out;
 }
 
@@ -491,8 +649,9 @@ void GameModel::scanFolder(const QString& path)
 	emit scanningChanged();
 	auto* found = new QMap<QString, QString>;
 	auto* encrypted = new int(0);
-	QThread* t = QThread::create([found, encrypted, path] { *found = findGames(path, encrypted); });
-	connect(t, &QThread::finished, this, [this, t, found, encrypted] {
+	auto* archives = new int(0);
+	QThread* t = QThread::create([found, encrypted, archives, path] { *found = findGames(path, encrypted, archives); });
+	connect(t, &QThread::finished, this, [this, t, found, encrypted, archives, scanned = path] {
 		t->deleteLater();
 		int added = 0, listed = 0;
 		QString problem;
@@ -521,7 +680,7 @@ void GameModel::scanFolder(const QString& path)
 			int new_here = 0;
 			for (auto it = found->cbegin(); it != found->cend(); ++it)
 			{
-				if (SwitchCore::isSerial(it.key()) || ymlFor(it.key()) != list)
+				if (SwitchCore::isSerial(it.key()) || isEmuSerial(it.key()) || ymlFor(it.key()) != list)
 					continue;
 				if (known.contains(it.key()))
 				{
@@ -545,9 +704,43 @@ void GameModel::scanFolder(const QString& path)
 			}
 			added += new_here;
 		}
-		delete found;
-		const int scrambled = *encrypted;
+		const int scrambled = *encrypted, packed = *archives;
 		delete encrypted;
+		delete archives;
+		// Wii, GameCube, 3DS, DS, Wii U, Xbox 360: emu_games.json (a game already listed by path or serial stays)
+		int emu_added = 0;
+		{
+			QFile f(rpcs3ConfigDir() + "emu_games.json");
+			QJsonArray list = f.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(f.readAll()).array() : QJsonArray();
+			f.close();
+			QSet<QString> paths, serials;
+			for (const QJsonValue& v : list)
+				paths << QFileInfo(v["path"].toString()).absoluteFilePath(), serials << v["serial"].toString();
+			for (auto it = found->cbegin(); it != found->cend(); ++it)
+			{
+				if (!isEmuSerial(it.key()))
+					continue;
+				if (paths.contains(QFileInfo(it.value()).absoluteFilePath()) || serials.contains(it.key()))
+				{
+					listed++;
+					continue;
+				}
+				const QVariantMap g = emuGame(it.value());
+				static const QMap<QString, QString> emu = {{"Wii", "dolphin"}, {"GameCube", "dolphin"}, {"3DS", "azahar"},
+				                                           {"DS", "melonds"}, {"WiiU", "cemu"}, {"Xbox360", "xenia"}};
+				list.append(QJsonObject{{"title", g["title"].toString()}, {"console", g["console"].toString()}, {"path", g["path"].toString()},
+				                        {"serial", g["serial"].toString()}, {"emu", emu.value(g["console"].toString())}});
+				emu_added++;
+			}
+			QSaveFile out(rpcs3ConfigDir() + "emu_games.json");
+			const QByteArray json = QJsonDocument(list).toJson();
+			if (emu_added && (!QDir().mkpath(rpcs3ConfigDir()) || !out.open(QIODevice::WriteOnly) || out.write(json) != json.size() || !out.commit()))
+			{
+				emu_added = 0;
+				problem += tr(" Couldn't save the game library.");
+			}
+		}
+		delete found;
 		if (switch_added && !SwitchCore::saveLibrary(switch_games))
 		{
 			switch_added = 0;
@@ -556,9 +749,10 @@ void GameModel::scanFolder(const QString& path)
 		reload();
 		m_scanning = false;
 		emit scanningChanged();
-		emit scanFinished(added + switch_added, listed, scrambled);
+		emit scanFinished(added + switch_added + emu_added, listed, scrambled, packed);
 		if (!problem.isEmpty())
 			emit scanFailed(problem.trimmed());
+		setupSwitchFiles(scanned);
 	});
 	t->start();
 }

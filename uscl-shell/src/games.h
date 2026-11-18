@@ -33,7 +33,7 @@ public:
 	Q_INVOKABLE QVariantMap get(int row) const;
 
 	// Add Games: PS3 entries go to games.yml; Switch entries go to their separate library.
-	// scanFinished reports persisted additions, known entries, and apparently encrypted PS3 ISOs.
+	// scanFinished reports persisted additions, known entries, apparently encrypted PS3 ISOs and unextracted archives.
 	Q_INVOKABLE void scanFolder(const QString& path);
 	// takes a game off the list (games.yml); its files stay where they are
 	Q_INVOKABLE void remove(const QString& serial);
@@ -42,8 +42,16 @@ public:
 	Q_INVOKABLE static QVariantList roots();
 	Q_INVOKABLE static QVariantList folders(const QString& path);
 	// serial -> path of every game under a folder
-	static QMap<QString, QString> findGames(const QString& path, int* encrypted = nullptr);
+	static QMap<QString, QString> findGames(const QString& path, int* encrypted = nullptr, int* archives = nullptr);
 	static QString ymlLine(const QString& serial, const QString& path);
+	// A Wii, GameCube, 3DS, DS, Wii U or Xbox 360 game file: {title, console, serial, path}, else empty.
+	// Serials are "<console>-<id>" (the disc / product code where the file has one).
+	static QVariantMap emuGame(const QString& path);
+	static bool isEmuSerial(const QString& serial);
+	// Switch keys + system software: look in a folder (a game scan's) or, with none, on this PC, and install what
+	// beats what's there (in the background);
+	// switchFilesDone says what was installed ("" for nothing new), what was found too new for the keys, and errors
+	Q_INVOKABLE void setupSwitchFiles(const QString& extraFolder = {});
 
 	// The executable the game boots (an installed update's, else the disc's), as a short SHA-256: online sessions
 	// check that everyone runs the same game files. Empty when there's no EBOOT.BIN to read.
@@ -62,7 +70,8 @@ public:
 signals:
 	void countChanged();
 	void scanningChanged();
-	void scanFinished(int added, int known, int encrypted);
+	void switchFilesDone(const QString& installed, const QStringList& tooNew, const QString& error);
+	void scanFinished(int added, int known, int encrypted, int archives);   // archives: games still in .rar/.7z/.zip
 	void scanFailed(const QString& message);
 
 private:

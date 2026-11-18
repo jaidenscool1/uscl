@@ -126,13 +126,18 @@ bool Launcher::start(const QStringList& args, const QString& title, bool online,
 }
 
 // Wii and 3DS games don't run in RPCS3 -- they launch in Dolphin / Azahar (flatpaks). A crash or quit comes back
-// here the same way an RPCS3 game does. 3DS: the frontend needs software GL on this NVIDIA/Wayland setup
-// (LIBGL_ALWAYS_SOFTWARE=1); the game still renders on Vulkan. See uscl-3ds/ and uscl-dolphin/.
+// here the same way an RPCS3 game does. 3DS: on Wayland our Azahar runs under XWayland (native Wayland renders
+// black on NVIDIA) with OpenGL; the Flathub app needs software GL for its frontend. See uscl-3ds/ and uscl-dolphin/.
 // Our Dolphin (uscl-dolphin patches: NetPlay host/join without its dialogs), else the Flathub app (offline only)
 QString Launcher::ownDolphin()
 {
 	const QString path = qEnvironmentVariableIsSet("USCL_DOLPHIN") ? qEnvironmentVariable("USCL_DOLPHIN")
+#ifdef Q_OS_WIN
+	// own folder: Dolphin ships its own Qt DLLs, which would clash with RPCS3's next to uscl.exe
+	                                                               : QCoreApplication::applicationDirPath() + "/Dolphin/Dolphin.exe";
+#else
 	                                                               : QCoreApplication::applicationDirPath() + "/dolphin-emu";
+#endif
 	return QFileInfo(path).isExecutable() ? path : QString();
 }
 
@@ -147,8 +152,13 @@ QString Launcher::dolphinConfigDir()
 QString Launcher::ownAzahar(const QString& name)
 {
 	const QString var = name == "azahar-room" ? "USCL_AZAHAR_ROOM" : "USCL_AZAHAR";
+#ifdef _WIN32
+	const QString file = "Azahar/" + name + ".exe";   // own folder: Azahar's Qt DLLs (see ownDolphin)
+#else
+	const QString file = name;
+#endif
 	const QString path = qEnvironmentVariableIsSet(var.toLatin1().constData()) ? qEnvironmentVariable(var.toLatin1().constData())
-	                                                                            : QCoreApplication::applicationDirPath() + "/" + name;
+	                                                                            : QCoreApplication::applicationDirPath() + "/" + file;
 	return QFileInfo(path).isExecutable() ? path : QString();
 }
 
@@ -159,6 +169,14 @@ QString Launcher::azaharConfigFile()
 	                             : GameModel::rpcs3ConfigDir() + "uscl/azahar/config/azahar-emu/qt-config.ini";
 }
 
+// Every Dolphin start: fullscreen like the other consoles; pads count even when the home screen kept the focus (Dolphin
+// drops all input otherwise); the Wii Remote's speaker plays through the PC (Wii Sports' racket and pins; off by default)
+static QStringList dolphinOptions()
+{
+	return {"-C", "Dolphin.Display.Fullscreen=True", "-C", "Dolphin.Input.BackgroundInput=True",
+	        "-C", "Dolphin.Core.WiimoteEnableSpeaker=True"};
+}
+
 bool Launcher::startEmu(const QString& path, const QString& title, const QString& console, const QString& netplay,
                         const QString& nickname, int players)
 {
@@ -167,10 +185,11 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 	QString program = "flatpak";
 	QStringList args;
 	QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-	if (console == "Wii" && !ownDolphin().isEmpty())
+	if ((console == "Wii" || console == "GameCube") && !ownDolphin().isEmpty())
 	{
 		program = ownDolphin();
 		args = {"-u", QDir(dolphinConfigDir()).absoluteFilePath(".."), "-C", "Dolphin.Analytics.PermissionAsked=True"};
+		args << dolphinOptions();
 		if (netplay.isEmpty())
 			args << "-b" << "-e" << path;
 		else
@@ -188,21 +207,40 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 			env.insert("USCL_NETPLAY_PLAYERS", QString::number(std::max(2, players)));
 		}
 	}
-	else if (console == "Wii")
-		args = {"run", "org.DolphinEmu.dolphin-emu", "-b", "-e", path};
+	else if (console == "Wii" || console == "GameCube")
+		args = QStringList{"run", "org.DolphinEmu.dolphin-emu"} + dolphinOptions() + QStringList{"-b", "-e", path};
+	else if (console == "DS")
+	{
+		// our melonDS (uscl-melonds) next to uscl, else the Flathub app
+#ifdef _WIN32
+		const QString melon = QCoreApplication::applicationDirPath() + "/melonDS/melonDS.exe";
+#else
+		const QString melon = QCoreApplication::applicationDirPath() + "/melonDS";
+#endif
+		const QString own = qEnvironmentVariable("USCL_MELONDS", melon);
+		if (QFileInfo(own).isExecutable())
+			program = own, args = {path};
+		else
+			args = {"run", "net.kuribo64.melonDS", path};
+	}
 	else if (console == "3DS" && !ownAzahar().isEmpty())
 	{
 		program = ownAzahar();
-		args = {path};
+		args = {"-f", path};   // fullscreen like the other consoles
 		const QString profile = GameModel::rpcs3ConfigDir() + "uscl/azahar/";
 		env.insert("XDG_CONFIG_HOME", profile + "config");
 		env.insert("XDG_DATA_HOME", profile + "data");
+#ifdef __linux__
+		const QString platform = env.value("QT_QPA_PLATFORM");
+		if (!env.value("DISPLAY").isEmpty() && (platform.isEmpty() || platform.startsWith("wayland")))
+			env.insert("QT_QPA_PLATFORM", "xcb");
+#endif
 		// in a session: the room on the host's PC (UDP 24872), reached through the tunnel (uscl-bridge preset "3ds")
 		if (!netplay.isEmpty())
 			env.insert("USCL_ROOM", nickname + "@127.0.0.1:24872");
 	}
 	else if (console == "3DS")
-		args = {"run", "--env=LIBGL_ALWAYS_SOFTWARE=1", "org.azahar_emu.Azahar", path};
+		args = {"run", "--env=LIBGL_ALWAYS_SOFTWARE=1", "org.azahar_emu.Azahar", "-f", path};
 	else if (console == "WiiU")
 		args = {"run", "info.cemu.Cemu", "-f", "-g", path};   // Cemu: fullscreen, load game
 	else if (console == "Xbox360")
@@ -268,6 +306,7 @@ QString Launcher::switchStatus(const QString& path) { return SwitchCore::prerequ
 QString Launcher::switchProfile() { return SwitchCore::dataDir(); }
 QString Launcher::importSwitchKeys(const QString& path) { return SwitchCore::importKeys(QUrl(path).isLocalFile() ? QUrl(path).toLocalFile() : path); }
 QString Launcher::importSwitchFirmware(const QString& path) { return SwitchCore::importFirmware(QUrl(path).isLocalFile() ? QUrl(path).toLocalFile() : path); }
+QVariantMap Launcher::switchFiles() { return SwitchCore::installedConsoleFiles(); }
 
 QString Launcher::configureSwitchTool(const QString& kind, const QString& path)
 {

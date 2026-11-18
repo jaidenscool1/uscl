@@ -32,7 +32,7 @@ PS3 came first. USCL now also runs PS4, Switch, Wii, GameCube, 3DS, Wii U and Xb
 | **PlayStation 4** | shadPS4, our build ([`uscl-shadps4`](uscl-shadps4/)) | [shadNet](uscl-shadnet/) + our Demonware | 🟡 Black Ops II played between two PCs; PS3 ↔ PS4 crossplay in progress |
 | **Nintendo Switch** | Eden, our build ([`uscl-eden`](uscl-eden/)) | Eden local-wireless rooms over Steam | 🟡 Mario Kart 8 Deluxe races two copies on one PC ([setup](docs/SWITCH.md)) |
 | **Wii / GameCube** | Dolphin ([`uscl-dolphin`](uscl-dolphin/), no fork) | Dolphin NetPlay over Steam | 🟠 games launch from USCL; NetPlay over Steam next |
-| **Nintendo 3DS** | Azahar ([`uscl-3ds`](uscl-3ds/), no fork) | Azahar rooms over Steam | 🟠 Azahar opens from USCL (the game is picked in Azahar for now); rooms over Steam next |
+| **Nintendo 3DS** | Azahar, our build ([`uscl-3ds`](uscl-3ds/) patches) | Azahar rooms over Steam | 🟡 Mario Kart 7 local race between two copies in one room; home screen hosts the room; two PCs next |
 | **Wii U** | Cemu (no fork yet) | later: a Pretendo / NEX stand-in | ⚪ starts Cemu from USCL (untested) |
 | **Xbox 360** | Xenia (Wine on Linux) | later | ⚪ experimental launch |
 | **More** | | | planned: see [PLAN.md](PLAN.md) |
@@ -41,8 +41,8 @@ PS3 came first. USCL now also runs PS4, Switch, Wii, GameCube, 3DS, Wii U and Xb
 ⚪ runs, online not started.
 
 Where we change an emulator, we keep our changes as patch files against a pinned upstream commit (the `uscl-*`
-folders). Dolphin, Azahar and Cemu are used unchanged: on Linux USCL starts their Flathub apps, so install those
-yourself for now.
+folders), and both installers ship those builds. Only Cemu (Wii U) is used unchanged: on Linux USCL starts its
+Flathub app.
 
 ## Get it
 Download the newest version from **[Releases](https://github.com/jaidenscool1/uscl/releases)**.
@@ -50,16 +50,16 @@ Download the newest version from **[Releases](https://github.com/jaidenscool1/us
 | PC | File | How |
 |---|---|---|
 | Windows 10/11 | `USCL-Setup.exe` | Run it. No admin rights needed. USCL goes in the Start menu. |
-| Linux | `USCL-x86_64.AppImage` | Make it executable and run it. To add it to your app menu: [`packaging/linux/install.sh`](packaging/linux/install.sh) `USCL-x86_64.AppImage` |
+| Linux (any x86-64 distro) | `USCL-x86_64.AppImage` + `install.sh` | Put both in one folder and run `bash install.sh`: USCL goes in your app menu. Or just make the AppImage executable and run it. |
+| macOS | | not supported yet |
 
 You'll need **Steam running and signed in**, and **your own copies of your games** (disc folders, ISOs, installed
 games, or the console's game files). USCL doesn't include any games, console keys or firmware. On first start it
 walks you through the rest.
 
-The installers include everything PS3 needs. For other consoles: PS4 is in the Linux AppImage when it is built with
-shadPS4 (not in the Windows installer yet);
-Switch needs the patched Eden core ([docs/SWITCH.md](docs/SWITCH.md)) and your own console keys; Wii, GameCube, 3DS
-and Wii U use Dolphin, Azahar and Cemu from Flathub (Linux).
+Both installers include our builds of every emulator USCL uses: RPCS3 (PS3), shadPS4 (PS4), Dolphin (Wii,
+GameCube), Azahar (3DS), Eden (Switch), Eglantine (Switch 2) and melonDS (DS). Switch and Switch 2 need your own
+console keys and firmware ([docs/SWITCH.md](docs/SWITCH.md)); Wii U uses Cemu from Flathub (Linux).
 
 ## Controllers
 Any controller works, USB or Bluetooth: DualSense, DualShock, Xbox, Switch Pro, Joy-Cons, and other pads SDL
@@ -120,7 +120,7 @@ offline). Click a badge for details.
 | Switch 2 | Mario Kart World (`0400C3F00006E000`) | none yet (Eglantine has no room support) | 🟠 plays offline from the home screen; racing ~41–42 fps ([`uscl-eglantine`](uscl-eglantine/)) |
 | Switch 2 | Nintendo Switch Sports Resort (`04008E001F098000`) | none yet | 🟠 boots, then freezes in the emulator ([`uscl-eglantine`](uscl-eglantine/)) |
 | Wii | Wii Sports + Wii Sports Resort (`SP2E01`) | Dolphin NetPlay | 🟠 boots; NetPlay test next ([notes](games/SP2E01.md)) |
-| 3DS | Mario Kart 7, Pokémon X/Y, Luigi's Mansion 2, ... | Azahar rooms | 🟠 runs in Azahar; room test next ([`uscl-3ds`](uscl-3ds/)) |
+| 3DS | Mario Kart 7, Pokémon X/Y, Luigi's Mansion 2, ... | Azahar rooms | 🟡 MK7 two copies raced in one room ([`uscl-3ds`](uscl-3ds/)) |
 
 ## How online works
 Old console games expect servers that are gone. USCL uses one of two ways, depending on the game:
