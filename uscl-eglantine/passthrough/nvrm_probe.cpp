@@ -1,11 +1,14 @@
 // Phase 0 probe for the Eglantine GPU passthrough backend: reach the host NVIDIA GPU through the
 // RM ioctls the userspace driver itself uses, on our own channel, and run tiny submissions.
 // Steps (argv[1]): "alloc" = objects only, "sem" = + one host semaphore release,
+// "guestvm [GiB] [granule MiB]" = sem, then the Phase 2 guest VA checks (sparse range, OS descriptor import, kinds).
 // "compute <sass>" = + one compute launch writing a buffer, "clear <sass>" = + an ADA_A surface clear,
 // "mthd <offset> <value>" = sem, then one ADA_A method, "barrier <sass> [prog]" = compute, then an empty-grid
 // QMD that only releases a semaphore, "inline <sass> [sys]" = compute, then the same QMD as an inline QMD (slot in host memory with sys).
 // Safety: the root client is freed on every exit path (RM frees all children with it).
 #include "nvrm.h"
+#include <sys/syscall.h>
+#include "class/cl50a0.h" // NV50_MEMORY_VIRTUAL (guestvm: the sparse guest VA range)
 
 int main(int argc, char** argv) {
     const char* step = argc > 1 ? argv[1] : "alloc";
@@ -88,6 +91,85 @@ int main(int argc, char** argv) {
     *sem = 0;
     submit("sem");
     if (!strcmp(step, "sem")) return 0;
+
+    // step "guestvm [GiB] [granule MiB, 0 = one descriptor]" (Phase 2 step 2, gate 4): a guest VA range as one RM
+    // sparse virtual allocation (unmapped reads return 0), guest memory as a memfd shared mapping (as Eglantine's
+    // HostMemory) imported as OS descriptors, mapped inside the range at fixed VAs with MKW's PTE kinds. Checks:
+    // the import (pinning) time, every kind's map status, a semaphore release through the import seen by the CPU,
+    // a copy from an unmapped sparse VA that must read zeros.
+    if (!strcmp(step, "guestvm")) {
+        const NvU64 gib = argc > 2 ? strtoull(argv[2], nullptr, 0) : 4, gran_mib = argc > 3 ? strtoull(argv[3], nullptr, 0) : 64;
+        const NvU64 GBASE = 1ull << 39, GSIZE = 1ull << 38, HSIZE = gib << 30; // our channel memory sits below 1 << 39
+        NV_MEMORY_ALLOCATION_PARAMS va{};
+        va.owner = g_root; va.type = NVOS32_TYPE_IMAGE; va.size = GSIZE; va.offset = GBASE; va.hVASpace = g_vas;
+        va.flags = NVOS32_ALLOC_FLAGS_VIRTUAL | NVOS32_ALLOC_FLAGS_SPARSE | NVOS32_ALLOC_FLAGS_FIXED_ADDRESS_ALLOCATE;
+        va.attr = DRF_DEF(OS32, _ATTR, _PAGE_SIZE, _4KB);
+        NvHandle gvm = rm_alloc(g_device, NV50_MEMORY_VIRTUAL, &va, "sparse guest VA");
+        printf("sparse guest VA: [0x%llx, +0x%llx) at 0x%llx\n", (unsigned long long)GBASE, (unsigned long long)GSIZE,
+               (unsigned long long)va.offset);
+        const int mfd = (int)syscall(SYS_memfd_create, "guestvm", 0);
+        if (mfd < 0 || ftruncate(mfd, (off_t)HSIZE)) die("memfd", 0);
+        auto* host = (NvU8*)mmap(nullptr, HSIZE, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
+        if (host == MAP_FAILED) die("mmap memfd", 0);
+        const NvU64 gran = gran_mib ? gran_mib << 20 : HSIZE;
+        std::vector<NvHandle> descs;
+        timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (NvU64 o = 0; o < HSIZE; o += gran) {
+            nv_ioctl_nvos02_parameters_with_fd d{};
+            d.fd = -1;
+            static NvHandle next = 0x71000000;
+            d.params.hRoot = g_root; d.params.hObjectParent = g_device; d.params.hObjectNew = next++;
+            d.params.hClass = NV01_MEMORY_SYSTEM_OS_DESCRIPTOR;
+            d.params.flags = DRF_DEF(OS02, _FLAGS, _PHYSICALITY, _NONCONTIGUOUS) | DRF_DEF(OS02, _FLAGS, _COHERENCY, _CACHED) |
+                             DRF_DEF(OS02, _FLAGS, _MAPPING, _NO_MAP);
+            d.params.pMemory = (NvP64)(host + o); d.params.limit = gran - 1;
+            nv_ioctl(g_dev, NV_ESC_RM_ALLOC_MEMORY, &d, "os descriptor");
+            if (d.params.status != NV_OK) { printf("os descriptor at +0x%llx: status 0x%x\n", (unsigned long long)o, d.params.status); die("os descriptor", d.params.status); }
+            descs.push_back(d.params.hObjectNew);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+        { FILE* st = fopen("/proc/self/status", "r"); char line[256];
+          while (st && fgets(line, sizeof line, st)) if (!strncmp(line, "RssShmem", 8) || !strncmp(line, "VmPin", 5) || !strncmp(line, "VmLck", 5)) printf("  %s", line);
+          if (st) fclose(st); }
+        printf("import: %llu GiB as %zu descriptor(s) of %llu MiB in %ld ms\n", (unsigned long long)gib, descs.size(),
+               (unsigned long long)(gran >> 20), ms);
+        // Map: the first 1 MiB of descriptor 0 at GBASE + i * 16 MiB for each kind (MKW: 6/6, 8/6, b/1, c/3, d/4, 9/6
+        // as guest kind/fallback; 0 = pitch, 0xfe = generic 16Bx2). Offsets inside a sparse range are absolute VAs.
+        const int kinds[] = {0x00, 0x06, 0x08, 0x09, 0x0b, 0x01, 0x0c, 0x03, 0x0d, 0x04, 0xfe};
+        for (size_t i = 0; i < sizeof kinds / sizeof *kinds; i++) {
+            NVOS46_PARAMETERS p{};
+            p.hClient = g_root; p.hDevice = g_device; p.hDma = gvm; p.hMemory = descs[0]; p.offset = 0; p.length = 1 << 20;
+            p.flags = DRF_DEF(OS46, _FLAGS, _DMA_OFFSET_FIXED, _TRUE) | DRF_DEF(OS46, _FLAGS, _PAGE_SIZE, _4KB) |
+                      DRF_DEF(OS46, _FLAGS, _PAGE_KIND_OVERRIDE, _YES);
+            p.kindOverride = (NvU32)kinds[i];
+            p.dmaOffset = GBASE + i * (16ull << 20);
+            nv_ioctl(g_ctl, NV_ESC_RM_MAP_MEMORY_DMA, &p, "map dma");
+            printf("  kind 0x%02x: status 0x%x at 0x%llx\n", kinds[i], p.status, (unsigned long long)p.dmaOffset);
+        }
+        // GPU checks through the pitch mapping (kind 0 at GBASE): a semaphore release to GBASE + 0x100, and a copy of
+        // 4 KiB from an unmapped sparse VA (GBASE + 0x100000000) to GBASE + 0x1000 (pre-filled with 0xAB).
+        *(volatile NvU32*)(host + 0x100) = 0;
+        memset(host + 0x1000, 0xAB, 0x1000);
+        __sync_synchronize();
+        m(0, NVC56F_SEM_ADDR_LO, {(NvU32)(GBASE + 0x100), (NvU32)((GBASE + 0x100) >> 32), 0x600D5EED, 0,
+            DRF_DEF(C56F, _SEM_EXECUTE, _OPERATION, _RELEASE) | DRF_DEF(C56F, _SEM_EXECUTE, _PAYLOAD_SIZE, _32BIT)});
+        m(4, 0, {AMPERE_DMA_COPY_B});
+        const NvU64 s = GBASE + 0x100000000ull, d = GBASE + 0x1000;
+        m(4, NVC7B5_OFFSET_IN_UPPER, {(NvU32)(s >> 32), (NvU32)s, (NvU32)(d >> 32), (NvU32)d});
+        m(4, NVC7B5_LINE_LENGTH_IN, {0x1000, 1});
+        m(4, NVC7B5_LAUNCH_DMA, {DRF_DEF(C7B5, _LAUNCH_DMA, _DATA_TRANSFER_TYPE, _NON_PIPELINED) |
+            DRF_DEF(C7B5, _LAUNCH_DMA, _FLUSH_ENABLE, _TRUE) | DRF_DEF(C7B5, _LAUNCH_DMA, _SRC_MEMORY_LAYOUT, _PITCH) |
+            DRF_DEF(C7B5, _LAUNCH_DMA, _DST_MEMORY_LAYOUT, _PITCH)});
+        submit("guestvm");
+        int zeros = 0;
+        for (int i = 0; i < 0x1000; i++) zeros += host[0x1000 + i] == 0;
+        printf("guestvm: semaphore through the import 0x%x (want 0x600d5eed); sparse read: %d/4096 bytes zero -> %s\n",
+               *(volatile NvU32*)(host + 0x100), zeros,
+               *(volatile NvU32*)(host + 0x100) == 0x600D5EED && zeros == 0x1000 ? "OK" : "FAIL");
+        return 0; // free_root (atexit) frees the descriptors, mappings and the range
+    }
 
     // step "mthd <offset> <value>": does ADA_A accept one 3D method (e.g. one missing from the public headers)?
     if (!strcmp(step, "mthd")) {

@@ -4,7 +4,7 @@ Goal and plan: `PROMPT-gpu-passthrough-continue.md`. Hand the game's own NVIDIA 
 shaders to the host RTX 4060 (AD107) through the RM ioctls, instead of translating every draw to Vulkan.
 Host: driver 615.78.08 (open kernel module), Arch Linux.
 
-## Status (2026-11-17, tenth pass)
+## Status (2026-11-17, eleventh pass)
 
 | Gate / phase | Result |
 |---|---|
@@ -12,10 +12,11 @@ Host: driver 615.78.08 (open kernel module), Arch Linux.
 | Gate 1 (driver access) | **Pass** on hardware |
 | Gate 2 (method compatibility) | **Pass (real data)**: every 3D/compute/copy method in a captured MKW frame is a named Ampere method, plus three private 3D methods (0xF74/0xF7C/0xF80) that ADA_A accepts; only host-class changes needed (Tegra syncpoints 0x70/0x74 dropped) |
 | Gate 3 (shader compatibility) | **Pass (decode level)**; guest compute SASS has started to **execute** on the RTX 4060 (Phase 1), no per-instruction failure seen yet |
-| Phase 1 (capture + replay one frame) | **Shadow mask fixed, open course checked** (tenth pass): the race-start slabs were the cached Z16 atlas read in the depth GOB arrangement (guest depth PTE kinds; the capture holds Eglantine's colour-arrangement download): depth twins in `ptcap.py build` take `mkw19`'s shadow mask from 17.8 to **28.0 dB** vs Eglantine; `SET_SRGB_WRITE` forced to 0; the 3D macro trace is paired by call order (21 pixel programs the helper-lane patch had missed). `mkw19` 17.6 dB, 1.015x; open-course `mkw20` **22.9 dB world, 0.986x**, dirt 30.6 dB. Left, localized to entries: mkw19 near road / pylon / top beam / Mario's shadow; mkw20 post-chain wedges and seams (entry 2926). Before: **Exit check done, helper-lane fix** (ninth pass, 2026-11-17): the `PT_HELPER_LOADS` trampoline zeroed global loads in *covered* pixels (PIXLD.COVMASK's predicate is no helper test); with `SR_THREAD_KILL` the race-start frames replay lit: `mkw17` 9.6 -> **13.9 dB** (brightness 0.38 -> 0.89x), `mkw19` **17.6 dB** (1.03x), no Xid. Left: the shadow mask (cached shadow atlas tiles), gantry darker, foliage. Earlier in the pass: the replay matches Eglantine wherever the capture holds the frame's inputs (`mkw16`: 22.6 dB, HDR main view 1.00-1.05x of Eglantine's per-pass snapshots); the remaining mismatches are inputs Eglantine keeps only in host images it never writes back to guest memory (superseded: the zero virtual-texture samples were the trampoline bug, see "Ninth pass, continued"). Phase 2 plan written (see "Phase 2 plan"). Before: **Close to Eglantine** (eighth pass, 2026-11-17): capture `mkw16` replays to Eglantine's own render within **PSNR 22.6 dB, mean abs 9.1, brightness ratio 1.04**, HUD identical; left: Toad heads dark, terrain dirt paler, foliage differs (see "mkw16" below). Before: **Textured racing frame, exact reference**: capture `mkw15` replays with every sampled ASTC texture decoded (`PT_ASTC=decode`) to the right image: arch, signs, track, karts, HUD all match Eglantine's own render of the same frame (taken from the capture's end dump), aligned to the pixel; lit surfaces are 0.33-0.65x as bright as the reference (sky 1.00x): a missing light contribution, the next Phase 1 item. Before: **Lit racing frame** (seventh pass, 2026-11-17): capture `mkw14` (probe 0003 now flushes GPU-written images) replays to the lit scene; only ASTC (white stand-in) is left between it and the reference. Before: **Whole racing frame replays** (sixth pass, 2026-11-17): all 7757 entries of capture `mkw13` (racing, 3 channels) run on the RTX 4060 with no Xid, **~36 ms of GPU wait in total** (slowest entry 0.7 ms) with guest memory in VRAM. The fix was emulator-wide: Ada does not perform global loads in pixel-shader helper lanes, so `PT_HELPER_LOADS=1` routes every LDG of every pixel program through a trampoline that zeroes the destination in helper lanes. Output not yet right: the HUD layer matches the reference, the G-buffer shows the right scene (karts, track), but the lit scene composited under the HUD is black (next: find the lighting/composite passes). Earlier: the intro-flyover frame `mkw10` replays to a recognisable course image (third pass) |
+| Phase 1 (capture + replay one frame) | **Road and seams localized, new capture** (eleventh pass): mkw19's near road / mid band / pylon / beam are MKW's virtual-texture pages the capture lacks (8192x8192x68 ASTC arrays: Eglantine keeps written layers only in host-only SparseLayers images; not a passthrough bug); the dashed seams come from `PT_HELPER_LOADS` zeroing per-instance UV loads in helper lanes (fix designed: quad-neighbour value); new capture `mkw21` (race-start countdown, pack in view) with per-pass HDR snapshots 300-7900: 19.9 dB, 0.93x, trees only in ours from entry 6784 (a macro-40 draw split across GPFIFO entries; which side is right is open). Before: **Shadow mask fixed, open course checked** (tenth pass): the race-start slabs were the cached Z16 atlas read in the depth GOB arrangement (guest depth PTE kinds; the capture holds Eglantine's colour-arrangement download): depth twins in `ptcap.py build` take `mkw19`'s shadow mask from 17.8 to **28.0 dB** vs Eglantine; `SET_SRGB_WRITE` forced to 0; the 3D macro trace is paired by call order (21 pixel programs the helper-lane patch had missed). `mkw19` 17.6 dB, 1.015x; open-course `mkw20` **22.9 dB world, 0.986x**, dirt 30.6 dB. Left, localized to entries: mkw19 near road / pylon / top beam / Mario's shadow; mkw20 post-chain wedges and seams (entry 2926). Before: **Exit check done, helper-lane fix** (ninth pass, 2026-11-17): the `PT_HELPER_LOADS` trampoline zeroed global loads in *covered* pixels (PIXLD.COVMASK's predicate is no helper test); with `SR_THREAD_KILL` the race-start frames replay lit: `mkw17` 9.6 -> **13.9 dB** (brightness 0.38 -> 0.89x), `mkw19` **17.6 dB** (1.03x), no Xid. Left: the shadow mask (cached shadow atlas tiles), gantry darker, foliage. Earlier in the pass: the replay matches Eglantine wherever the capture holds the frame's inputs (`mkw16`: 22.6 dB, HDR main view 1.00-1.05x of Eglantine's per-pass snapshots); the remaining mismatches are inputs Eglantine keeps only in host images it never writes back to guest memory (superseded: the zero virtual-texture samples were the trampoline bug, see "Ninth pass, continued"). Phase 2 plan written (see "Phase 2 plan"). Before: **Close to Eglantine** (eighth pass, 2026-11-17): capture `mkw16` replays to Eglantine's own render within **PSNR 22.6 dB, mean abs 9.1, brightness ratio 1.04**, HUD identical; left: Toad heads dark, terrain dirt paler, foliage differs (see "mkw16" below). Before: **Textured racing frame, exact reference**: capture `mkw15` replays with every sampled ASTC texture decoded (`PT_ASTC=decode`) to the right image: arch, signs, track, karts, HUD all match Eglantine's own render of the same frame (taken from the capture's end dump), aligned to the pixel; lit surfaces are 0.33-0.65x as bright as the reference (sky 1.00x): a missing light contribution, the next Phase 1 item. Before: **Lit racing frame** (seventh pass, 2026-11-17): capture `mkw14` (probe 0003 now flushes GPU-written images) replays to the lit scene; only ASTC (white stand-in) is left between it and the reference. Before: **Whole racing frame replays** (sixth pass, 2026-11-17): all 7757 entries of capture `mkw13` (racing, 3 channels) run on the RTX 4060 with no Xid, **~36 ms of GPU wait in total** (slowest entry 0.7 ms) with guest memory in VRAM. The fix was emulator-wide: Ada does not perform global loads in pixel-shader helper lanes, so `PT_HELPER_LOADS=1` routes every LDG of every pixel program through a trampoline that zeroes the destination in helper lanes. Output not yet right: the HUD layer matches the reference, the G-buffer shows the right scene (karts, track), but the lit scene composited under the HUD is black (next: find the lighting/composite passes). Earlier: the intro-flyover frame `mkw10` replays to a recognisable course image (third pass) |
 | New: texture formats | **ASTC done for replay** (eighth pass; Phase 2: transcode on upload to BC7/BC3, see "Phase 2 plan"): the frame's 1455 sampled ASTC textures are decoded with Eglantine's own decoder to A8B8G8R8 in a host arena and their headers repointed. 28% of MKW's texture headers are ASTC (8x8, 6x6, 4x4, 5x5); the RTX 4060 has no ASTC sampling. Phase 2 needs the same on upload, and a smaller target (BC1/BC3) for VRAM |
-| Phase 2 | **Step 1 done** (tenth pass): an RM channel follows guest channel 1 inside Eglantine (`EDEN_NX2_PASSTHROUGH=1`, fork `uscl-passthrough-ship` / `patches/0014`), 15.45M serialized submissions in an MKW race, no Xid; the per-entry wait costs 37-43 -> 13-21 fps, so later steps submit asynchronously. Next: step 2 (guest VA space) |
-| Gates 4-6 | not started (Phase 1 uses pinned host memory at the guest's own VAs, pitch kind only: first evidence for gate 4) |
+| Phase 2 | **Step 2 done** (eleventh pass): guest VA space mirrored inside Eglantine (sparse RM range, guest memory as OS descriptors at the guest's VAs and kinds), checked live: 128556 entries read back at their guest VA by the host copy engine, 0 differ; hole punching off under passthrough (pinned pages went stale). Fork 65397093a = `patches/0015`. Next: submit the guest's own words (async), then steps 3-5. Before: **Step 1 done** (tenth pass): an RM channel follows guest channel 1 inside Eglantine (`EDEN_NX2_PASSTHROUGH=1`, fork `uscl-passthrough-ship` / `patches/0014`), 15.45M serialized submissions in an MKW race, no Xid; the per-entry wait costs 37-43 -> 13-21 fps, so later steps submit asynchronously. Next: step 2 (guest VA space) |
+| Gate 4 (memory) | **Pass** (eleventh pass): sparse range + OS descriptors, no size limit up to 12 GiB, ~210 ms/GiB to pin, every MKW kind maps, live readback check 0 differences |
+| Gates 5-6 | not started |
 
 ## Phase 0 tool: `uscl-eglantine/passthrough/nvrm_probe.cpp`
 
@@ -717,6 +718,90 @@ local and starts in the post chain, not in lighting. Images in `~/.local/share/u
   has no per-pass snapshots, and mkw19's open windows need them). mkw20 keeps metadata, `replay/` (minus the
   arena) and images.
 
+### Eleventh pass (2026-11-17): patch 0014 verified, the road's missing virtual-texture pages, seams
+**1. Patch 0014 on its own: verified.** `uscl-passthrough-ship` (5e536b6a4) had never been compiled. Built in the
+`ptcap` worktree's build dir (checkout of the ship branch, incremental ninja: 103 targets, 2 min, no errors, only
+the usual `-Wno-error-all` warning), then the probe branch rebuilt the same way. MKW with `EDEN_NX2_PASSTHROUGH=1`
+on that build (`runs.py pt2stop`, `BENCH_FRAMES=900`), SIGTERM: the live `eden_log.txt` read before the next run
+shows `Nx2 passthrough: shutting down after 3118193 entries` then `RM client freed (status 0x0)`; no Xid, health
+check OK, VRAM back to 752 MiB. (Racing 54.6-60 fps in that short run, against 13-21 in the step-1 measurement on the
+probe build: not investigated; the step-1 number is the one to re-measure in step 2.) Note: `runs.py` needs
+`USCL_GAME` in the environment; without it `launch.py` dies at once and the "live log" is the previous run's.
+No backend change, so `patches/0014` is unchanged.
+
+**2. mkw19 per-draw windows: near road, pylon, top beam.** Readbacks at every entry in each window
+(`tools/winmeans.py`, regions picked from `tools/ratiomap.py`):
+
+| Window | Entry | Draw (pixel program) | Ours / Eglantine after it |
+|---|---|---|---|
+| road (6200-6250) | **6249** (also the frame's slowest entry, 8.3 ms) | one draw, `114d3ad600` | near road **0.51x**, mid band 1.68x |
+| pylon (6350-6400) | **6366** | one draw, `114d251900` | pylon 0.96 -> 1.33x |
+| pylon + top beam (6500-6550) | **6502** | one draw, `114d2b4200` | pylon 1.66x, beam 0.94x |
+
+All three are the same material family (~980 instructions; the same 20 fetches). Inputs checked against Eglantine's
+end dump (race start: static camera, as in the tenth pass): shadow mask `811844e000` (0.8% bytes differ), half-res
+RGBA16 `81176c1000` (float noise), G8R8 `81069fe400` (1.1%), froxel R8 volume `8105c4a200` (identical), specular
+LUT `227fbd1000` and reflection cube array `227f6c4000` (identical), the light grid at `c[0][0x520]` (`21f52f4000`,
+all zero in both: no local lights) and the per-instance records at `c[0][0x540]` (identical).
+Instrumented (PT_PATCH, `passthrough/tools/movpatch.py` writes `MOV Rd, Rs` [+ `WAIT=1`: wait on all scoreboards], checked with
+nvdisasm; `passthrough/tools/slice.py` = backward data slice of a register in nvdisasm output; `tools/exp.sh` = build + replay
+to an entry + readback + Xid/health check; `tools/instr.py` = per-row means and a PNG). Results on the road:
+- the final colour is `A + B`, A (emissive) ~0; the lighting sum (sun included) is a uniform ~1.41-1.44 over the
+  road: **the light is right**. The difference is the material colour: raw albedo (`R20`, handle 0xe = ASTC 8x8
+  `217c4b4800`, our decode checked mip by mip: consistent) is grey asphalt in ours; Eglantine's near road is brown.
+- the material blends its layers with weights read from MKW's **virtual-texture page cache**: handles 0x8/0xa/0xc =
+  8192x8192x68, 12-mip arrays (`81a7a30000` ASTC 8x8 sRGB, `82027b0000` BC6H, `836d530000` ASTC 8x8). Read right
+  after the fetch (E8): **both ASTC arrays return exactly 0 over the whole road**, near and mid; only BC6H has data.
+- **Cause: the capture lacks the VT pages.** In guest memory only layers 0-1 of the ASTC arrays hold data (start and
+  end dumps identical; layers 2-67: 0-2% non-zero blocks), and the replay writes none during the frame. Eglantine's
+  image for them (`run-ptcap19.log`, `PtCapture dump image`) has flags `0x4c12f3` = Converted | Sparse | Unbacked |
+  TrimmedLevels | **SparseLayers**, `gpu_modified false downloadable false`: a layer gets host memory when something
+  writes it and is never downloaded. So pages written into those layers (by the GPU, in earlier frames) live only in
+  Eglantine's host image. Same class as the unbacked clipmaps (item 5), **not a passthrough bug**: in Phase 2 the
+  guest's own writes land in guest memory. Pylon (6366) and beam (6502) bind the same three arrays (handles read
+  back): consistent with the same cause, not instrumented per draw. Mario's shadow on the near road: our mask's R has
+  it; the surface it multiplies is the one with zero VT terms (not instrumented separately). The bush: not looked at.
+- To close it in Phase 1 the probe would need a dump-only readback of backed layers of SparseLayers/Unbacked
+  Converted images (decoded RGBA8, as side files the ASTC arena could use directly) plus the trimmed-level base
+  (Eglantine samples from `host_level_offset`). Not done: Phase 2 does not need it.
+
+**Dashed seams (road, also mkw20's wall).** Isolated in the road shader's additive term (`R19`). Its slice holds the
+per-instance UV transform loaded with LDG at the program start (`0x60`/`0x90`) feeding implicit-LOD fetches and
+`TMML.LOD` (derivatives across the 2x2 quad). `PT_HELPER_LOADS` zeroes LDG results in helper lanes, so in quads on a
+triangle edge the helper lanes' UVs are garbage and the derivatives (LOD) of the covered pixels are wrong: seams
+along edges. The console's helper lanes load the real value. Fix (also for Phase 2 step 3): give a helper lane a
+covered quad neighbour's loaded value (`SHFL` within the quad: exact for per-instance data) instead of 0; it needs
+a scratch register (raise the stage's register count, `SET_PIPELINE_REGISTER_COUNT`). Hypothesis from the slice,
+not yet tested (skipping the trampoline for this program is unsafe: its light loop is the Xid 109 case).
+
+**3. Post-chain wedges (mkw20 entry 2926): not done this pass.** The seams above are the part of item 3 that was
+localized. mkw21's composite snapshots (`811e4ff000`, 2900-3010 and 7680-7780 every 10) exist, but mkw21 is a long
+frame and writes its output after 7780 (the swapchain window snapshots up to 7780 are identical in ours and
+Eglantine's: previous frames), so the next look starts from mkw21's readbacks at 7750-7850.
+
+**4. New capture `mkw21`** (`mkw21/capture21.sh`: capture20.sh touched at +50 s, snapshots spread over both frame
+lengths). The race had **not started** at +50 s: it is the race-start countdown again (lights on the gantry), the
+pack in view (racers, DK, Toads), KTV trucks not. Next time touch at ~+80-90 s for lap 1 with the pack ahead.
+8439 entries, 3 channels; all 194 snapshots fired: **HDR `8110901000` every 50 from 300 to 7900** (the per-pass
+reference the tenth pass lacked), composite and swapchain window. Replay: all 8442 entries, 78 ms GPU wait, no Xid.
+- Final vs Eglantine's end dump (output is slot 1, `210b21a000`; the swapchain map moves per capture, here
+  `210a31a000` + 3 x 0xF00000): **19.9 dB, mean abs 14.0, brightness 0.93x; world 18.7 dB** (`mkw21/compare.png`:
+  ours over Eglantine). Per-pass HDR: median ratio 0.99-1.00 at every point.
+- The big difference is **foliage only in ours** (the ninth pass's bush, here a row of trees at the left edge with
+  their shadows on the road): ours covers +4.6% of the screen at **entry 6784** where Eglantine adds 0.2%. 6784 is
+  the 5-word tail of a `CALL_MME_MACRO(40)` that entry 6783 started with one parameter (`0x4`): `(1089, 34, 0, 0,
+  55)` = 1089 indices x 34 instances from base instance 55. The host MME collects the parameters across the GPFIFO
+  entries and draws. Eglantine has dedicated handling for exactly these 5-word subroutine entries
+  (`DmaPusher::Step`, `FrontTakeIndirectRecord`, "title 4 ends a main entry after a macro's first word"), and its
+  3D macro trace logs the call with one parameter and no emitted methods (an HLE'd draw also logs none, so this is
+  not proof). Before 6784 Eglantine covers ~0.6% more (6350-6750: the pipe railing, grass tufts). **Which side is
+  right is open**: next, the draw's vertex shader instance data (base instance 55) in ours vs Eglantine's.
+- Disk: **mkw19's dumps deleted** (it has no open per-draw question left that needs them: the windows are explained
+  above); mkw19 keeps metadata, `replay/` (no arena: rebuild needs the dumps, so it is reference only now),
+  snapshots and images. **mkw21 is the one full capture** (52 GB + 10 GB arena): it has per-pass snapshots.
+
+**5. Clipmaps / VT pages: not done** (Phase 2 does not need it; the readback design is under item 2).
+
 ## Phase 2, step 1: channels and submission (2026-11-17)
 **Result:** the RM channel runs inside Eglantine. Fork branch `uscl-passthrough-ship` (`5e536b6a4`, on
 `uscl-gpurw-ship`), USCL `patches/0014`. The same commit sits on top of the probe as `uscl-passthrough`
@@ -740,6 +825,58 @@ local and starts in the post chain, not in lighting. Images in `~/.local/share/u
   space (probe `NoteMap`/`NoteUnmap`/`NoteGuestKind` events, guest memory as an RM OS descriptor over Eglantine's
   host mapping), then submit the guest's own words with the host-class rewrites (syncpoints dropped,
   `SET_SRGB_WRITE` 0), asynchronously.
+
+## Phase 2, step 2: the guest VA space (gate 4) (2026-11-17)
+**Result: gate 4 passes on hardware.** The guest's GPU VA space is mirrored in the RM VA space inside Eglantine and
+the host GPU reads the guest's own bytes at the guest's own addresses: **128556 pushbuffer entries read back by the
+host copy engine at their guest VA, 0 differ from the guest memory** (6 differ from Eglantine's parse because the
+guest rewrote them afterwards). Fork `uscl-passthrough-ship` **65397093a** = USCL `patches/0015`; `git am` of
+0001-0015 onto 30181ba05 gives the branch's tree (0 lines of diff); also on the probe branch `uscl-passthrough`.
+
+Open question answered first, with `nvrm_probe guestvm [GiB] [granule MiB]` (new step): a guest VA range as one RM
+sparse virtual allocation (`NV50_MEMORY_VIRTUAL`, `VIRTUAL | SPARSE | FIXED_ADDRESS_ALLOCATE`, 4 KiB pages), a memfd
+`MAP_SHARED` arena (as Eglantine's HostMemory) imported as `NV01_MEMORY_SYSTEM_OS_DESCRIPTOR`s, mapped inside the
+range with `PAGE_KIND_OVERRIDE`:
+- **No OS-descriptor limit found**: 4 GiB as one descriptor or as 64 x 64 MiB, 12 GiB as 192 x 64 MiB, all fine.
+  Import = pinning (`pin_user_pages` `FOLL_LONGTERM` on the whole range): **~210 ms per GiB** (4 GiB 0.84 s, 12 GiB
+  2.55 s), the pages count as RssShmem, VmPin stays 0. So: import 64 MiB granules lazily on first GPU map (MKW:
+  7.4 GiB pinned over a session, 1.5 s in total), not the whole arena at boot.
+- **Kinds**: every kind MKW uses maps on OS-descriptor memory (0x06, 0x08, 0x09, 0x0b, 0x01, 0x0c, 0x03, 0x0d, 0x04);
+  0xfe (generic 16Bx2) is refused ("PTE kind override of 254 is not supported"; MKW does not use it).
+- **Sparse works**: a copy from an unmapped address inside the range read 4096/4096 zero bytes, no fault.
+- A GPU semaphore release through the imported mapping is seen by the CPU in the memfd.
+
+The backend (`nx2_passthrough.cpp`; hooks in `MemoryManager::Map/MapSparse/Unmap` and nx2:gpu 211/212/213/216):
+- Guest VA range **[1 << 36, 1 << 40)** = one sparse range, reserved before the channel's own memory is mapped (RM
+  then places that below it). MKW's guest VAs: 0x114b41b000-0x86a91c6000, one memory manager (`mkw19/maps.txt`).
+- `MemoryManager::Map` walks the device pages and hands runs contiguous in host memory to the backend; offsets are
+  relative to HostMemory's backing (`BackingSize()` added). The backend keeps its RM mappings in an interval map
+  (partial unmaps re-map the remainder), and the guest's kinds in another (compressible -> incompressible fallback;
+  a kind change remaps what is mapped there). Default kind where the guest set none: pitch.
+- Guest memory is mapped **GPU-uncached** (`NVOS46_FLAGS_GPU_CACHEABLE_NO`; it made no difference to the stale reads
+  below, kept because nothing invalidates the L2 on guest CPU writes). A map that fails with `NV_ERR_NO_MEMORY`
+  (once per session in RM's page-table walk) is retried once (then pitch).
+- **Hole punching**: Eglantine's `HostMemory::ClearBackingRegion` punches holes in the memfd for cleared granules.
+  A punched page stays pinned for the GPU and the file gets a new one, so the GPU read stale bytes (measured: **4.4%
+  of checked entries**, all of them pitch-kind, CPU memory = parsed words; `EDEN_PUNCH_HOLE=0` -> 0). Fix: with
+  `EDEN_NX2_PASSTHROUGH=1` HostMemory clears with memset (a punched pinned page returns no RAM anyway);
+  `EDEN_PUNCH_HOLE` still overrides. Emulator-wide.
+- `EDEN_NX2_PASSTHROUGH_CHECK=<n>`: every n-th entry the copy engine reads the entry's words at their guest VA into
+  the channel buffer; compared with the parsed words and with the mirrored memory, logged every 50000 entries with
+  the map counters (`LogStats`). `EDEN_NX2_PASSTHROUGH_KINDS=0` maps everything as pitch (bisecting).
+- MKW race (`runs.py pt2fixed:EDEN_NX2_PASSTHROUGH=1,EDEN_NX2_PASSTHROUGH_CHECK=50`): 26898 maps, 3301 unmaps,
+  16142 live RM mappings (32889 made, 16747 undone), 18422 kind changes, 7552 MiB pinned in 1.5 s; no Xid, RM client
+  freed at shutdown, VRAM back to 751 MiB, health check OK. Racing 53-60 fps in these short runs (the step-1
+  serialized marker submission is still there; 13-21 fps in step 1's measurement on the probe build did not
+  reproduce on the ship build: 54-60 fps in `pt2stop`, not investigated).
+
+Next (step 2b, then the plan's steps 3-5): submit the guest's own words. Copy each entry's words into the host
+pushbuffer with the host-class rewrites (drop syncpoint methods 0x70/0x74; `SET_SRGB_WRITE` -> 0), submitted
+asynchronously (a ring of pushbuffer space reclaimed by GPGet, no per-entry wait; wait only where the guest waits).
+Before that is safe on this desktop GPU: pixel programs need the `PT_HELPER_LOADS` trampoline when uploaded (the
+helper-lane light loop is the Xid 109 case), the other guest channels (2, 3) must be followed too or their semaphore
+acquires stall channel 1, and fine-grained preemption (`bind_preemption` in nvrm.h) belongs in the channel setup.
+ASTC sampling still needs step 6.
 
 ## Phase 1 exit check (2026-11-17)
 | Capture | Frame | PSNR vs Eglantine | Mean abs (0-255) | Brightness | Notes |
