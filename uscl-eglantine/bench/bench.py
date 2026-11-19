@@ -70,7 +70,12 @@ def main():
     start = time.time()
     for _ in range(RACE_FRAMES // 300):
         s0, c0 = status(), proc_cpu_seconds(pid)
-        seq((["A"], 300))
+        shots = int(os.environ.get("BENCH_SHOTS", "1"))  # >1: that many screenshots spread over the chunk
+        for i in range(shots):
+            seq((["A"], 300 // shots))
+            if shots > 1:
+                subprocess.run([sys.executable, "-I", DBG, "--call", json.dumps({"method": "screenshot", "params": {}}),
+                                "--out", shot.replace(".png", f"-c{len(samples)}s{i}.png")], capture_output=True, timeout=120)
         s1, c1 = status(), proc_cpu_seconds(pid)
         if os.environ.get("BENCH_CHUNK_SHOTS"):  # a frame per chunk: the countdown is in one of the first
             subprocess.run([sys.executable, "-I", DBG, "--call", json.dumps({"method": "screenshot", "params": {}}),
