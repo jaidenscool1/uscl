@@ -1,0 +1,71 @@
+From 619279f3c5867dcdaec7124154e3c3c3a88eca9f Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 21:00:00 -0700
+Subject: [PATCH 34/35] nx2: passthrough backend: early resumes skip the queued
+ lists' re-read (late acquires stay experimental)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/dma_pusher.cpp      | 4 +++-
+ src/video_core/dma_pusher.h        | 3 +++
+ src/video_core/engines/puller.cpp  | 1 +
+ src/video_core/nx2_passthrough.cpp | 2 +-
+ 4 files changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/src/video_core/dma_pusher.cpp b/src/video_core/dma_pusher.cpp
+index 91e6886b3..7507b3ac7 100644
+--- a/src/video_core/dma_pusher.cpp
++++ b/src/video_core/dma_pusher.cpp
+@@ -104,7 +104,9 @@ bool DmaPusher::Step() {
+     // as this frame's commands (methods on unbound subchannels, garbage QMDs, then a channel
+     // waiting forever on a release it never got). The acquire is released now, so the commands
+     // are written and the memory not yet reused: copy them here. EDEN_NX2_RESNAPSHOT=0: off.
+-    if (ResnapshotEnabled() && suspensions.load(std::memory_order_relaxed) != suspensions_before) {
++    const bool resumed_early_now = std::exchange(resumed_early, false);
++    if (ResnapshotEnabled() && suspensions.load(std::memory_order_relaxed) != suspensions_before &&
++        !resumed_early_now) {
+         const u64 now = suspensions.load(std::memory_order_acquire);
+         for (CommandList& list : dma_pushbuffer) {
+             if (!list.submitted_offsets.empty() && !list.snapshot_final) {
+diff --git a/src/video_core/dma_pusher.h b/src/video_core/dma_pusher.h
+index ad956ba47..1d4cc0f39 100644
+--- a/src/video_core/dma_pusher.h
++++ b/src/video_core/dma_pusher.h
+@@ -255,6 +255,9 @@ public:
+     bool resumed_by_gpu = false;
+     /// The word of the entry the method being called came from (the passthrough's acquires submit up to it).
+     size_t method_word = 0;
++    /// The passthrough left the acquire this channel waited at to the host GPU before memory met it: the next resume
++    /// is no sign the commands queued meanwhile were written (a later acquire the CPU releases guards those).
++    bool resumed_early = false;
+     /// Copies the list's words again after a resume, or keeps them (see SnapshotRefresh); final.
+     void ResumeSnapshot(CommandList& list, u64 now);
+ 
+diff --git a/src/video_core/engines/puller.cpp b/src/video_core/engines/puller.cpp
+index 2ae7ea1d2..a836dba06 100644
+--- a/src/video_core/engines/puller.cpp
++++ b/src/video_core/engines/puller.cpp
+@@ -252,6 +252,7 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
+                                       pending_acquire->operation ==
+                                           static_cast<u32>(GpuSemaphoreOperation::AcquireCircularGequal),
+                                       [acquire = *pending_acquire](u32 word) { return acquire.Matches(word); })) {
++        dma_pusher.resumed_early = true; // no re-read of the queued lists: br4/rg2 read the CPU's ones too early
+         return true;
+     }
+     if (met) {
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index 05c07166c..f4c3cb0a5 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -3596,7 +3596,7 @@ bool HwAcquire(s32 channel, size_t word, GPUVAddr address, u32 value, const std:
+ }
+ 
+ bool HwAcquireLate(s32 channel, GPUVAddr address, u32 value, bool circular, const std::function<bool(u32)>& meets) {
+-    static const bool late = [] { // EDEN_NX2_PASSTHROUGH_HWACQ_LATE=1 (experimental: br4 faulted with it)
++    static const bool late = [] { // EDEN_NX2_PASSTHROUGH_HWACQ_LATE=1 (experimental, unsafe: Xid 31 in br4/rg2, a washed-out race frame in lt2)
+         const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_HWACQ_LATE");
+         return v != nullptr && v[0] == '1';
+     }();
+-- 
+2.56.0
+
