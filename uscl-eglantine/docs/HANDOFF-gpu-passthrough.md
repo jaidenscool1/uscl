@@ -1553,6 +1553,22 @@ GPU is ~60-75% busy (~45 ms of channel 1 and ~23 ms of channel 2 a frame with th
 pass dominates). The present on the back costs ~10 ms (CPU de-tile of the 2560x1440 frame from guest memory) plus its
 host wait.
 
+### Fifteenth pass, continued: stability, Switch Sports, experiments that did not pay
+- **Stability (5 consecutive full runs, defaults, probe e1a56b805 = ship + a measuring knob):** st1-st5 all boot,
+  menus, 1800 race frames, SIGTERM: no deadlock, no crash, no Xid (kernel count unchanged), the backend never turned
+  off, `nvrm_probe clear` OK, video memory back to 936 MiB after (no leak). Racing chunk 5: 22.4, 22.3, 21.4, 21.1,
+  19.7 fps; peak VRAM ~5.1 GB.
+- **Switch Sports (`nsr.py 300 25 --press-after 40`, same binary):** Vulkan path unchanged, **59.8 fps** throughout
+  (as before); sole passthrough: not stuck, reaches the same Tennis screen at 24-58 fps, no Xid; its blurred background
+  is flat grey (a one-time capture before its textures exist, as MKW's menu) and the player portrait is black
+  (`bench/nsr15pt-12.png` vs `nsr15vk-12.png`).
+- **Ruled out:** helper-lane trampolines (`EDEN_NX2_PASSTHROUGH_HELPER_LOADS=0`, measuring knob: hl0 19.8 / 22.9, same);
+  a larger budget for GPU-only regions (`VRAM_MB=5120`, vm5: every GPU-only mapping already fits in 2.6 GiB, same).
+  The remaining PCIe reads (2-3 GB/s) are ordinary guest memory the CPU also writes (textures, vertex/index data,
+  constants): that needs video-memory shadows with CPU-write tracking (Eglantine's memory tracker), a design of its own.
+- **One TSG with async compute subcontexts** (ts1/ts2, reverted): RM refuses the compute class on an async
+  subcontext (`NV_ERR_INVALID_OBJECT`); one shared subcontext would make the channels share one register context.
+
 ### Next (after the fifteenth pass)
 1. **Front CPU** (~35 ms a frame; 60 fps needs <16): Eglantine's 3D front macros and `FrontWrite` (the front still
    runs every 3D macro for its own bookkeeping; in sole mode only program binds, colour targets, sync points and
