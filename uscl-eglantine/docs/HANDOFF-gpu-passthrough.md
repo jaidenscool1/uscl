@@ -4,7 +4,7 @@ Goal and plan: `PROMPT-gpu-passthrough-continue.md`. Hand the game's own NVIDIA 
 shaders to the host RTX 4060 (AD107) through the RM ioctls, instead of translating every draw to Vulkan.
 Host: driver 615.78.08 (open kernel module), Arch Linux.
 
-## Status (2026-11-18, fifteenth pass)
+## Status (2026-11-19, sixteenth pass)
 
 | Gate / phase | Result |
 |---|---|
@@ -14,7 +14,7 @@ Host: driver 615.78.08 (open kernel module), Arch Linux.
 | Gate 3 (shader compatibility) | **Pass (decode level)**; guest compute SASS has started to **execute** on the RTX 4060 (Phase 1), no per-instruction failure seen yet |
 | Phase 1 (capture + replay one frame) | **Road and seams localized, new capture** (eleventh pass): mkw19's near road / mid band / pylon / beam are MKW's virtual-texture pages the capture lacks (8192x8192x68 ASTC arrays: Eglantine keeps written layers only in host-only SparseLayers images; not a passthrough bug); the dashed seams come from `PT_HELPER_LOADS` zeroing per-instance UV loads in helper lanes (fix designed: quad-neighbour value); new capture `mkw21` (race-start countdown, pack in view) with per-pass HDR snapshots 300-7900: 19.9 dB, 0.93x, trees only in ours from entry 6784 (a macro-40 draw split across GPFIFO entries; which side is right is open). Before: **Shadow mask fixed, open course checked** (tenth pass): the race-start slabs were the cached Z16 atlas read in the depth GOB arrangement (guest depth PTE kinds; the capture holds Eglantine's colour-arrangement download): depth twins in `ptcap.py build` take `mkw19`'s shadow mask from 17.8 to **28.0 dB** vs Eglantine; `SET_SRGB_WRITE` forced to 0; the 3D macro trace is paired by call order (21 pixel programs the helper-lane patch had missed). `mkw19` 17.6 dB, 1.015x; open-course `mkw20` **22.9 dB world, 0.986x**, dirt 30.6 dB. Left, localized to entries: mkw19 near road / pylon / top beam / Mario's shadow; mkw20 post-chain wedges and seams (entry 2926). Before: **Exit check done, helper-lane fix** (ninth pass, 2026-11-17): the `PT_HELPER_LOADS` trampoline zeroed global loads in *covered* pixels (PIXLD.COVMASK's predicate is no helper test); with `SR_THREAD_KILL` the race-start frames replay lit: `mkw17` 9.6 -> **13.9 dB** (brightness 0.38 -> 0.89x), `mkw19` **17.6 dB** (1.03x), no Xid. Left: the shadow mask (cached shadow atlas tiles), gantry darker, foliage. Earlier in the pass: the replay matches Eglantine wherever the capture holds the frame's inputs (`mkw16`: 22.6 dB, HDR main view 1.00-1.05x of Eglantine's per-pass snapshots); the remaining mismatches are inputs Eglantine keeps only in host images it never writes back to guest memory (superseded: the zero virtual-texture samples were the trampoline bug, see "Ninth pass, continued"). Phase 2 plan written (see "Phase 2 plan"). Before: **Close to Eglantine** (eighth pass, 2026-11-17): capture `mkw16` replays to Eglantine's own render within **PSNR 22.6 dB, mean abs 9.1, brightness ratio 1.04**, HUD identical; left: Toad heads dark, terrain dirt paler, foliage differs (see "mkw16" below). Before: **Textured racing frame, exact reference**: capture `mkw15` replays with every sampled ASTC texture decoded (`PT_ASTC=decode`) to the right image: arch, signs, track, karts, HUD all match Eglantine's own render of the same frame (taken from the capture's end dump), aligned to the pixel; lit surfaces are 0.33-0.65x as bright as the reference (sky 1.00x): a missing light contribution, the next Phase 1 item. Before: **Lit racing frame** (seventh pass, 2026-11-17): capture `mkw14` (probe 0003 now flushes GPU-written images) replays to the lit scene; only ASTC (white stand-in) is left between it and the reference. Before: **Whole racing frame replays** (sixth pass, 2026-11-17): all 7757 entries of capture `mkw13` (racing, 3 channels) run on the RTX 4060 with no Xid, **~36 ms of GPU wait in total** (slowest entry 0.7 ms) with guest memory in VRAM. The fix was emulator-wide: Ada does not perform global loads in pixel-shader helper lanes, so `PT_HELPER_LOADS=1` routes every LDG of every pixel program through a trampoline that zeroes the destination in helper lanes. Output not yet right: the HUD layer matches the reference, the G-buffer shows the right scene (karts, track), but the lit scene composited under the HUD is black (next: find the lighting/composite passes). Earlier: the intro-flyover frame `mkw10` replays to a recognisable course image (third pass) |
 | New: texture formats | **ASTC done for replay** (eighth pass; Phase 2: transcode on upload to BC7/BC3, see "Phase 2 plan"): the frame's 1455 sampled ASTC textures are decoded with Eglantine's own decoder to A8B8G8R8 in a host arena and their headers repointed. 28% of MKW's texture headers are ASTC (8x8, 6x6, 4x4, 5x5); the RTX 4060 has no ASTC sampling. Phase 2 needs the same on upload, and a smaller target (BC1/BC3) for VRAM |
-| Phase 2 | **Hardware acquires, racing ~22 fps vs Vulkan ~33** (fifteenth pass, `patches/0031`-`0035`, on by default in sole mode): the channel hand-offs run on the host (the front leaves an acquire to the host channel when the host work already submitted meets it), GPU-culled macro parameters fetched by reference, guest memory GPU-cacheable as on the console, 8192-entry GPFIFO rings, the split ring carries only the sync point; **not** frames right: washed-out/overexposed race frames in 3-10% of shots in every sole configuration (Vulkan 0 of 102; see "Fifteenth pass, continued: washed-out race frames"), plus the known kart shadow square and helper-lane seams; VRAM 5.1 GiB peak (ASTC twins off); no Xid with the defaults (two Xid 31 with the experimental late acquires, off). Next: the front's own CPU (~37 ms a frame), the remaining NVN fence hand-offs (~200 ms/s of front waits), the host GPU's per-pass cost. Before: **Textures ready at the race start** (fourteenth pass, `patches/0027`-`0028`): sole mode decodes ASTC on the otherwise idle Vulkan device (37k textures by the menus, median error 1.97 vs the CPU decoder) and sweeps virtual textures by raw chunk hashes (~1 s a pass): every racer, Lakitu, the HUD and the ground are textured at the race start (`bench/pt-sole-gpuastc-start.png`). Racing itself is **~12-13 fps vs Vulkan ~36** (earlier 29-34 fps figures were mostly the course intro); profiled: no busy stage (front 58%, host GPU 51-60%), a serial chain; measured: ~40 cross-channel handshakes a frame, each a host round trip through Eglantine (`patches/0029`-`0030`); next: hardware acquires for them. Before: **Sole executor works, async** (thirteenth pass, continued; textures in video memory and fresher copies: `patches/0024`-`0025`; GPU thread woken on host progress: `patches/0026`, race 29-34 fps; textures at a course's start arrive late): `EDEN_NX2_PASSTHROUGH_SOLE=1` (`patches/0021`-`0022`): Eglantine parses, the host GPU alone executes (draws, copies, queries, releases; syncpoints after the host's fences; acquires split the submission); MKW boots, menus and races in async mode with complete frames, no deadlock, no Xid. **Phase 3 started** (`patches/0023`): GPU-only regions in video memory: race **26.3-26.8 fps vs Vulkan 54.6-54.8** (interleaved pairs; 14.2 with everything in system memory). Next: textures in video memory (ASTC arena 4.3 GiB and VT copies 2.3 GiB are system memory the GPU samples over PCIe), helper-lane seams, one-time captures before their textures are transcoded. Before: **Virtual textures on the host GPU** (thirteenth pass): MKW's 8192^2 x 84 ASTC arrays (and its 8192^2 images) transcoded per 64x64-block cell into sparse BC3 copies (`patches/0020`); the race frame's track, canyon and buildings are textured (`bench/pt-live-vs-vulkan-race-vt.png`), menu vs Vulkan 26.1 dB, 0.998x; ~2.3 GiB of BC3 mapped in a race; no Xid in 8 runs. Open: dual-executor deadlocks on zeroed NVN semaphores (2 of 8 runs), SYNC racing drops to ~3 fps after ~45 s. Next: sole executor (plan below), then VRAM residency. Before: **The guest's own words run** (twelfth pass): `EDEN_NX2_PASSTHROUGH_WORDS=1` (fork e5091605d = `patches/0017`); MKW boots to the menu and race on the RTX 4060; menu vs Vulkan **20.7 dB, 1.01x** with sampled ASTC transcoded to BC1/BC3 (`patches/0018`); race frame matches except the virtual-texture track/buildings (black, `patches/0019`); `SYNC=1` correct (~7 fps), async stable for ~10M entries without Xid but races Eglantine's memory writes: next: virtual-texture (sparse ASTC) transcoding, host-as-sole-executor, VRAM residency. Before: **Steps 2b-3 done** (eleventh pass, continued): every guest channel on its own host channel with async submission (-1% racing fps next to Vulkan with doorbell batching), pixel programs patched for helper lanes on bind (C++ port byte-identical to ptcap on 210 programs; 237/237 patched programs read back right at their guest VAs). Fork 043f82389 = `patches/0016`. Next: the guest's own words (QMD dependence, inline-QMD macros, texture header pool, host-class rewrites). Before: **Step 2 done** (eleventh pass): guest VA space mirrored inside Eglantine (sparse RM range, guest memory as OS descriptors at the guest's VAs and kinds), checked live: 128556 entries read back at their guest VA by the host copy engine, 0 differ; hole punching off under passthrough (pinned pages went stale). Fork 65397093a = `patches/0015`. Next: submit the guest's own words (async), then steps 3-5. Before: **Step 1 done** (tenth pass): an RM channel follows guest channel 1 inside Eglantine (`EDEN_NX2_PASSTHROUGH=1`, fork `uscl-passthrough-ship` / `patches/0014`), 15.45M serialized submissions in an MKW race, no Xid; the per-entry wait costs 37-43 -> 13-21 fps, so later steps submit asynchronously. Next: step 2 (guest VA space) |
+| Phase 2 | **Race frames right: 0 washed in 924 shots** (sixteenth pass, `patches/0036`-`0037`): the washed-out frames were **stale texture headers** (MKW rewrites 80-200 a frame through its 4 MiB pool; the shadow pools were refreshed every 100 ms), now found by a pool scanner thread every 2 ms; upload store v2 on by default (fixes boot hangs on late barrier QMDs); video memory keyed by guest memory (~1.6 GiB less). 5 of 5 full runs clean, no Xid. Racing **~15-18 fps** (store + scanner cost ~3-4 fps vs ~21-22: next, the front CPU). Before: **Hardware acquires, racing ~22 fps vs Vulkan ~33** (fifteenth pass, `patches/0031`-`0035`, on by default in sole mode): the channel hand-offs run on the host (the front leaves an acquire to the host channel when the host work already submitted meets it), GPU-culled macro parameters fetched by reference, guest memory GPU-cacheable as on the console, 8192-entry GPFIFO rings, the split ring carries only the sync point; **not** frames right: washed-out/overexposed race frames in 3-10% of shots in every sole configuration (Vulkan 0 of 102; see "Fifteenth pass, continued: washed-out race frames"), plus the known kart shadow square and helper-lane seams; VRAM 5.1 GiB peak (ASTC twins off); no Xid with the defaults (two Xid 31 with the experimental late acquires, off). Next: the front's own CPU (~37 ms a frame), the remaining NVN fence hand-offs (~200 ms/s of front waits), the host GPU's per-pass cost. Before: **Textures ready at the race start** (fourteenth pass, `patches/0027`-`0028`): sole mode decodes ASTC on the otherwise idle Vulkan device (37k textures by the menus, median error 1.97 vs the CPU decoder) and sweeps virtual textures by raw chunk hashes (~1 s a pass): every racer, Lakitu, the HUD and the ground are textured at the race start (`bench/pt-sole-gpuastc-start.png`). Racing itself is **~12-13 fps vs Vulkan ~36** (earlier 29-34 fps figures were mostly the course intro); profiled: no busy stage (front 58%, host GPU 51-60%), a serial chain; measured: ~40 cross-channel handshakes a frame, each a host round trip through Eglantine (`patches/0029`-`0030`); next: hardware acquires for them. Before: **Sole executor works, async** (thirteenth pass, continued; textures in video memory and fresher copies: `patches/0024`-`0025`; GPU thread woken on host progress: `patches/0026`, race 29-34 fps; textures at a course's start arrive late): `EDEN_NX2_PASSTHROUGH_SOLE=1` (`patches/0021`-`0022`): Eglantine parses, the host GPU alone executes (draws, copies, queries, releases; syncpoints after the host's fences; acquires split the submission); MKW boots, menus and races in async mode with complete frames, no deadlock, no Xid. **Phase 3 started** (`patches/0023`): GPU-only regions in video memory: race **26.3-26.8 fps vs Vulkan 54.6-54.8** (interleaved pairs; 14.2 with everything in system memory). Next: textures in video memory (ASTC arena 4.3 GiB and VT copies 2.3 GiB are system memory the GPU samples over PCIe), helper-lane seams, one-time captures before their textures are transcoded. Before: **Virtual textures on the host GPU** (thirteenth pass): MKW's 8192^2 x 84 ASTC arrays (and its 8192^2 images) transcoded per 64x64-block cell into sparse BC3 copies (`patches/0020`); the race frame's track, canyon and buildings are textured (`bench/pt-live-vs-vulkan-race-vt.png`), menu vs Vulkan 26.1 dB, 0.998x; ~2.3 GiB of BC3 mapped in a race; no Xid in 8 runs. Open: dual-executor deadlocks on zeroed NVN semaphores (2 of 8 runs), SYNC racing drops to ~3 fps after ~45 s. Next: sole executor (plan below), then VRAM residency. Before: **The guest's own words run** (twelfth pass): `EDEN_NX2_PASSTHROUGH_WORDS=1` (fork e5091605d = `patches/0017`); MKW boots to the menu and race on the RTX 4060; menu vs Vulkan **20.7 dB, 1.01x** with sampled ASTC transcoded to BC1/BC3 (`patches/0018`); race frame matches except the virtual-texture track/buildings (black, `patches/0019`); `SYNC=1` correct (~7 fps), async stable for ~10M entries without Xid but races Eglantine's memory writes: next: virtual-texture (sparse ASTC) transcoding, host-as-sole-executor, VRAM residency. Before: **Steps 2b-3 done** (eleventh pass, continued): every guest channel on its own host channel with async submission (-1% racing fps next to Vulkan with doorbell batching), pixel programs patched for helper lanes on bind (C++ port byte-identical to ptcap on 210 programs; 237/237 patched programs read back right at their guest VAs). Fork 043f82389 = `patches/0016`. Next: the guest's own words (QMD dependence, inline-QMD macros, texture header pool, host-class rewrites). Before: **Step 2 done** (eleventh pass): guest VA space mirrored inside Eglantine (sparse RM range, guest memory as OS descriptors at the guest's VAs and kinds), checked live: 128556 entries read back at their guest VA by the host copy engine, 0 differ; hole punching off under passthrough (pinned pages went stale). Fork 65397093a = `patches/0015`. Next: submit the guest's own words (async), then steps 3-5. Before: **Step 1 done** (tenth pass): an RM channel follows guest channel 1 inside Eglantine (`EDEN_NX2_PASSTHROUGH=1`, fork `uscl-passthrough-ship` / `patches/0014`), 15.45M serialized submissions in an MKW race, no Xid; the per-entry wait costs 37-43 -> 13-21 fps, so later steps submit asynchronously. Next: step 2 (guest VA space) |
 | Gate 4 (memory) | **Pass** (eleventh pass): sparse range + OS descriptors, no size limit up to 12 GiB, ~210 ms/GiB to pin, every MKW kind maps, live readback check 0 differences |
 | Gates 5-6 | not started |
 
@@ -1640,3 +1640,138 @@ the config (`gpu_accuracy=0`, `engine:sdl`). When boots change suddenly, diff th
 5. Correctness (unchanged): the kart shadow square (in every passthrough run, never in Vulkan's), helper-lane seams,
    one-time captures before their textures exist, the black-and-white sprite.
 6. Stability pass (5 full runs) and the Switch Sports check (`bench/nsr.py`).
+
+## Sixteenth pass (2026-11-19): the upload store made safe
+
+**Benches run on a test profile now** (the user's choice, AGENTS.md): `~/.local/share/uscl/eglantine-test` is a copy
+of `~/.config/uscl/uscl/switch` (config, keys, NAND with the MKW save, shader cache; the config's absolute paths
+rewritten). `bench/launch.py`, `runs.py`, `nsr.py`, `idle.py`, `mkw.sh`, `rf.sh` use it by default
+(`USCL_SWITCH_PROFILE=<dir>` overrides); logs are in `<profile>/data/eglantine/log`. A good copy of the test config is
+`<profile>/qt-config.ini.good`. The real config is no longer touched by benches. Run wrapper: `run.sh` in the job tmp
+(`ulimit -c 0`, 20 GB check, Xid count before/after, `nvrm_probe clear`, VRAM, washed count per label, test config
+check/restore, real config checksum).
+
+**Why the opt-in store (fifteenth pass) was not safe** (read from the code and uw2's log):
+- The store never forgot: an address once uploaded was patched with that word forever, after the guest CPU or the
+  host GPU had rewritten it (NVN reuses QMD and fence memory).
+- The front's readers (MME DMA reads, after `split.Drain`) saw it filled by the back, but nothing tied its words to
+  the host's timeline.
+- Program binds (`BindProgram`) read code from guest memory after `Drain()`: a *plain* fence (passes before the
+  work's writes land) and **no L2 flush**, while guest memory is GPU-cacheable in sole mode; and `MirroredHost`
+  returns guest memory for shadow pages, where the host's writes land only in the shadow. Once Eglantine stopped
+  writing uploads itself, a bind could patch stale bytes into a shadow page: uw2's Xid 13 SPH (channel 1, ADA_A,
+  48 s in, "drain before reading a program failed" right after).
+- Inline QMDs: the host launches them from its own slot and never wrote the guest's QMD address; only Eglantine's
+  back did, off the host's timeline, so barrier launches (`GpuCopyQmd`, a copy-engine read of guest memory on the
+  host timeline) copied whatever the back had written by then.
+
+**Redesign (probe, `EDEN_NX2_PASSTHROUGH_BACK_UPLOADS=0`):**
+- One store, the translator's `s.i2m` (stream order, the words the host itself writes: one-line pitch uploads up
+  to 4 KiB and inline QMDs), each word stamped with its host channel and the fence of the submission that carries
+  it. It **lands** (leaves the store) once a WFI fence at or after it passed and an L2 flush ran after that (cached
+  memory; `Channel::flushed`, from `L2Flush` records the flush submissions leave: syncpoint flushes, the front-read
+  flush, program-read drains); uncached: the WFI fence alone. A landed word in a shadow page is written to guest
+  memory then (the host wrote only the shadow). A host release to an address drops its store word (newer writer).
+- Readers lay the store over what they read: `SolePatch` (compute QMD reads, MME DMA reads) and the host's own
+  guest reads (`ReadGuest`, `GuestEquals`, new shadow pages: program patcher, header pools) through `Host::overlay`.
+- The back writes neither those uploads nor inline QMDs (`sole_sink` returns true for exactly the translator's
+  criteria); **the host writes each inline QMD at its guest address** right after its 64 words (an inline-to-memory
+  upload of the guest's own words, its I2M registers restored after).
+- Program reads drain with WFI fences and an L2 flush on every channel (`DrainFlushed`).
+
+| run | configuration (all sole defaults + `BACK_UPLOADS=0`) | washed / 84 | racing chunks 4-11 | notes |
+|---|---|---|---|---|
+| su1 | store v2: translator store, host writes inline QMDs, back drops tracked uploads | 8 | 17.4-20.9 | no Xid; the back read 5878 all-zero QMDs (its QMD reads came before the translator saw their entry) |
+| su2 | + back map (the back's reads get the back's own uploads) | 10 | 16.2-22.0 | no Xid, 0 zero QMDs |
+| sq1, sq2 | su2 with `QMD_HOSTWRITE=0` (the back writes inline QMDs, as the old store) | 2, 5 | 18.3-22.8 | no Xid |
+
+- No upload ever landed in a shadow page (0 write-backs) and the store never overflowed.
+- Ruled out (sq2 counters, 0 of 677k inline QMDs and 0 of 90k barrier launches): inline QMDs with a dependence count
+  of their own (the translator's launch-at-once shortcut) and barriers counted down from another host channel.
+- What the old store (0 / 168) did that v2 did not: it kept **every** aligned linear compute upload out of guest
+  memory; v2 diverted only the translator-tracked ones (one line, <= 4 KiB), so the back still wrote the larger and
+  multi-line ones ahead of the host. Next run (sa1/sa2): the back's sink takes them all again.
+| sa1, sa2 | v2 + the back's sink takes every aligned linear compute upload (as the old store) | 5, 9 | 16.6-22.2 | no Xid |
+| ou1, ou2 | **the old store rebuilt** (probe 67efee9bd, uw1's configuration) | **3, 5** | 18.4-25.0 | uw1/ow1's 0 / 168 was luck |
+| vz1 | sole defaults, `VRAM_MB=0` (GPU-only regions stay in system memory), store off | **0** | 11.2-12.4 | slower; next: is it the speed or video memory? |
+
+**Correction: the upload store does not fix the washed frames** (no variant does, and the old one reproduces them).
+Every configuration so far washes 2-12% of shots except slow ones (SYNC 1/168, VRAM off 0/84).
+New lead: GPU-only regions get **video memory per mapping, zeroed** (`VramFor` / `ClearVram`). On the console the
+guest memory behind a mapping keeps its contents across remaps and aliases; MKW's render-target pools (dynamic
+resolution) may map the same memory at two VAs or remap it, which per-mapping video memory breaks. vr1 counts video
+memory given to guest memory that had video memory before (`vram_reuse`, logged with the first 12).
+| vr1 | sole defaults + the reuse counter | 2 | 18.8-22.0 | **6956 of 7925 video-memory allocations were guest memory that had video memory before**: e.g. 89 MiB at guest 0x33a6a4000 mapped at a new VA every ~15 ms at boot, each time fresh zeroed video memory |
+
+**Fix (probe): video memory is keyed by the guest memory it stands for** (`vram_blocks`: guest offset -> memory,
+size). A mapping inside a block shares it (aliases and remaps see the same contents, as the console's physical
+memory); a block outlives its mappings and is freed only when the 3 GiB budget needs room (unmapped blocks first,
+counted); a mapping that overlaps a block only partly stays in system memory (counted, logged). Runs vb1/vb2.
+| vb1, vb2 | sole defaults, video memory keyed by guest memory | 8, 13 | 18.7-23.1 | 7014 mappings shared 1051 blocks, 0 partial overlaps; VRAM peak 3.4 GB (was 5.1); washed not fixed |
+
+Kept (probe): the keyed video memory is the console's semantics (and saves ~1.6 GiB), but it is not the washed fix.
+Across all runs the washed rate follows **speed**, not a component: ~7-12 fps configurations 0-2% (SYNC, fourteenth
+pass, vz1), ~20 fps 2-15%, Vulkan (54 fps) 0. MKW sizes its dynamic resolution from GPU timestamps and Eglantine
+gives MKW the legacy guest clock (`UsesLegacyAmpereTimestamps`, ticks / clock divisor); on the host every timestamp
+the GPU writes is the RTX's nanoseconds. `STAMPS=1` replaced only four-word reports; it now also covers **QMD
+releases with the four-word structure** (inline and barrier launches) and **host semaphores with
+`RELEASE_TIMESTAMP`** (counted: `QmdStamps`, `SemStamps`). Runs st1/st2.
+| st1, st2 | sole defaults + `STAMPS=1` (reports, QMD and semaphore timestamps) | 2, 0 | 16.1-22.3 | MKW uses no QMD or semaphore timestamps (both counters 0): same as the old `STAMPS=1` (ts1/ts2 9 / 168) |
+
+Next test: `STAMPS=2` stamps the guest clock as of the last present (every GPU duration within a frame reads 0): if
+the dynamic resolution's changes cause the washed frames, they should vanish (sf1/sf2).
+| sf1, sf2 | `STAMPS=2` (guest clock frozen per frame: every in-frame GPU duration 0) | 0, 3 | 15.7-23.3 | not the dynamic resolution |
+| wl1 | sole defaults + `_WASHED=1` (new: the present measures each frame's crop, logs the 32 frames before a washed one) | 11 | 18.3-22.3 | see below |
+
+**What a washed frame is (wl1, 8 episodes logged):** a single-frame jump (luminance 119 -> 253) with **the same
+colour targets** as the frames around it (1040 binds a frame, same size hash and largest area: no resolution
+change), no guest maps/unmaps/kind changes, no new video memory, no shadow pages, no quiesces, and the host done
+with every fence at the present in 7 of 8. So the GPU rendered the frame from stale data with nothing structural
+going on. Candidate: **texture header pools are shadow pages refreshed from guest memory at most every 100 ms**
+(`RefreshPools(epoch)`); a header the game rewrites reaches the host up to 100 ms (several frames) late. Test pm1:
+`EDEN_NX2_PASSTHROUGH_POOL_MS=0` (refresh at every submission).
+| pm1 | `POOL_MS=0` (every pool page compared at every submission) | - | - | far too slow: never left the menus (input sequence timed out at 900 s); no Xid |
+| wl2 | + header change counts per frame | 6 | 18.1-23.7 | **MKW rewrites 80-200 texture headers per 100 ms refresh, continuously**: the host saw each of them up to 100 ms (several frames) late |
+
+**Fix (probe): hot header pages.** The full refresh (100 ms) records the pool pages the guest rewrote; those pages
+are compared with guest memory in place every `EDEN_NX2_PASSTHROUGH_POOL_HOT_US` (250 us) at submission time and a
+changed page is translated into its shadow before the entry that samples it is submitted (pages quiet for ~5 s drop
+out). CPU writes to the shadow are ordered by the guest's own fences (a slot is reused after its fence, which passes
+after the host GPU). Runs hp1/hp2.
+| hp1, hp2 | hot header pages (above) | 7, 5 | 17.5-22.5 | hot rewrites caught 18k of ~300k changes: MKW's rewrites move through the pool (a ring); removed |
+| **pt10** | `POOL_MS=10` (full header refresh every 10 ms instead of 100) | **0** | 16.3-21.3 | **stale texture headers are the washed frames** |
+
+Then: the refresh compares existing pools page by page **in place** (only changed pages are read, translated and
+written to the shadow; it copied the whole pool from guest memory each time) and logs its time; the hot pages are
+gone. pc4 / pc10: `POOL_MS` 4 and 10, to pick the default from cost and result.
+| pc4, pc10 | in-place compare, `POOL_MS` 4 / 10 | **0, 0** | 17.1-21.6 | 0.8-0.9 ms a refresh (61 s / 29 s of the entry thread a run) |
+| pd2 | `POOL_MS=2`, only each pool's rewritten range between 100 ms scans | **0** | 15.4-18.3 | the rewritten range is the whole 4105 KiB pool (a 128k-header ring): no saving, 112 s refreshing |
+
+**0 washed in 336 shots** with headers refreshed every <= 10 ms (pt10, pc4, pc10, pd2) vs ~7% at 100 ms.
+
+**Fix (probe): a pool scanner thread** (`ScanPools`, `EDEN_NX2_PASSTHROUGH_POOL_SCAN_US`, default 2000, 0 off): every
+2 ms it compares the pools with its own copy (host pointers resolved under the state lock, the compare unlocked)
+and queues the changed pages; at each submission the entry thread translates just those pages into the shadow
+(`RefreshScanned`); the 100 ms full refresh stays (ASTC readiness, safety net). Runs sc1/sc2.
+| sc1, sc2 | pool scanner on by default | **0, 0** | 16.2-20.3 | entry thread ~6 s a run in refreshes (was 30-110 s); 22-24k pages rewritten from the scanner |
+| v1-v5 | sole defaults (scanner; the scanner's page pointers cached per mapping generation) | -, **0**, -, **0**, **0** | 15.9-22.2 | **v1 and v3 hung at boot** (below); no Xid, VRAM back to 873 MiB |
+
+**0 washed in 504 shots since the fix** (sc1, sc2, v2, v4, v5; plus 336 with the faster timer).
+
+**Boot hangs in default mode (v1, v3):** 17 entries in, channel 2 waits for 0x2105837010 >= 1 (v3: 0x2104e37010),
+which a barrier QMD releases; the translator launched it (`1 barrier QMDs launched at 0`) but found no release to
+promise: the QMD's words were not in memory when the host copied it. In default mode inline QMDs and their I2M
+patches reach guest memory only through Eglantine's back thread, whenever it gets there; at boot it can be behind
+the host. The fifteenth pass's boot hangs (nu1, us3) were this race. The upload store v2 closes it (the host writes
+inline QMDs in stream order, the translator tracks uploads up to 4 KiB): 0 boot hangs in the 6 store runs, 2 in ~20
+default runs this pass. **The store is now on by default in sole mode** (`EDEN_NX2_PASSTHROUGH_BACK_UPLOADS=1`:
+off). Validation w1-w5 with it.
+| w1-w5 | **store on by default + scanner (final)** | **0, 0, 0, 0, 0** | 14.0-18.0 | 5 of 5 full runs boot, race, SIGTERM; no Xid; VRAM back to 876 MiB |
+
+**Goal 2 met: 0 washed in 5 x 84 shots** (w1-w5; 924 clean shots since the header fix). Fork probe 9ae7479ef; ship
+`uscl-passthrough-ship` f17e3217b = `patches/0036` (the fifteenth pass's measuring switches and opt-in store, never
+shipped before) + `0037` (this pass); `git am` 0001-0037 onto 30181ba05 gives the ship tree (af0701db); every changed
+file syntax-checked from the ship tree with and without `NX2_PASSTHROUGH`.
+
+Cost: racing (chunks 4-11) went from ~18-23 (vb, before the scanner) to ~16-20 (sc, scanner) to ~14-18 (w, + store):
+the next item (front CPU) starts with a profile of this.

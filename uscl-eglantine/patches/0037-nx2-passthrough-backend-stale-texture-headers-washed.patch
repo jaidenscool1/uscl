@@ -1,0 +1,1187 @@
+From f17e3217b21cc85b205c254ef06cd272862180ee Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 15:23:47 -0700
+Subject: [PATCH 37/37] nx2: passthrough backend: stale texture headers
+ (washed-out race frames), upload store on, keyed video memory
+
+Washed-out race frames (sole mode, 2-15% of shots in every configuration; Vulkan
+none): MKW rewrites 80-200 texture headers a frame all through its 4 MiB header
+pool, and the pool's shadow pages were refreshed from guest memory at most every
+100 ms, so the host sampled stale headers for several frames. A pool scanner
+thread (EDEN_NX2_PASSTHROUGH_POOL_SCAN_US, 2000; 0 off) compares the pools with
+its own copy and queues changed pages; the entry thread translates just those
+before the next submission. Full refreshes compare in place. 0 washed in 924
+shots since (was ~7%).
+
+Upload store v2, on by default in sole mode (EDEN_NX2_PASSTHROUGH_BACK_UPLOADS=1:
+off): Eglantine's back no longer writes compute inline uploads or inline QMDs to
+guest memory; the host writes them in stream order (inline QMDs at their guest
+address, the guest's words, I2M registers restored). The translator's store words
+are stamped with their submission and land once a WFI fence and an L2 flush
+passed (shadow-page words written back then); the back's own reads use a back
+map. Program reads drain with WFI fences and an L2 flush (DrainFlushed). Fixes
+boot hangs where a barrier QMD the back wrote late was copied empty by the host.
+
+Video memory for GPU-only regions is keyed by the guest memory it stands for:
+aliases and remaps share it (6956 of 7925 MKW mappings were remaps of guest
+memory that had video memory), ~1.6 GiB less VRAM.
+
+Measuring: EDEN_NX2_PASSTHROUGH_WASHED (per-frame crop luminance, events before
+a washed frame), _POOL_MS, _QMD_HOSTWRITE, STAMPS=2 and QMD/semaphore stamps,
+dependence counters.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/engines/engine_upload.cpp      |   5 +-
+ src/video_core/engines/engine_upload.h        |   6 +-
+ src/video_core/engines/kepler_compute.cpp     |   5 +-
+ src/video_core/nx2_passthrough.cpp            | 641 ++++++++++++++++--
+ src/video_core/nx2_passthrough.h              |  12 +-
+ .../renderer_vulkan/present/layer.cpp         |   3 +
+ 6 files changed, 612 insertions(+), 60 deletions(-)
+
+diff --git a/src/video_core/engines/engine_upload.cpp b/src/video_core/engines/engine_upload.cpp
+index e8e140600..a9aac7255 100644
+--- a/src/video_core/engines/engine_upload.cpp
++++ b/src/video_core/engines/engine_upload.cpp
+@@ -69,8 +69,9 @@ void State::ProcessData(const u32* data, size_t num_data) {
+ }
+ 
+ void State::Write(GPUVAddr address, std::span<const u8> data) {
+-    if (sole_sink && ((address | data.size()) & 3) == 0) {
+-        sole_sink(address, data);
++    // Any size: the host GPU runs every inline upload in stream order (a larger one written here early raced
++    // with it as the small ones did: washed-out race frames).
++    if (sole_sink && ((address | data.size()) & 3) == 0 && sole_sink(address, data)) {
+         return;
+     }
+     rasterizer->AccelerateInlineToMemory(address, data.size(), data);
+diff --git a/src/video_core/engines/engine_upload.h b/src/video_core/engines/engine_upload.h
+index 0593455a4..b85eaeefa 100644
+--- a/src/video_core/engines/engine_upload.h
++++ b/src/video_core/engines/engine_upload.h
+@@ -68,9 +68,9 @@ public:
+ 
+     void SetNativePartialTransfers(bool enabled) { native_partial = enabled; }
+ 
+-    /// Sole passthrough mode: aligned linear uploads go here instead of guest memory (the host GPU writes them
+-    /// in stream order; written by this thread too, they land early or late against the host's timeline).
+-    std::function<void(GPUVAddr, std::span<const u8>)> sole_sink;
++    /// Sole passthrough mode: small aligned linear uploads go here first; true: not written to guest memory (the
++    /// host GPU writes them in stream order; written by this thread too, they land early or late against it).
++    std::function<bool(GPUVAddr, std::span<const u8>)> sole_sink;
+     void ProcessExec(bool is_linear_);
+     void ProcessData(u32 data, bool is_last_call);
+     void ProcessData(const u32* data, size_t num_data);
+diff --git a/src/video_core/engines/kepler_compute.cpp b/src/video_core/engines/kepler_compute.cpp
+index d2df98164..ac457955e 100644
+--- a/src/video_core/engines/kepler_compute.cpp
++++ b/src/video_core/engines/kepler_compute.cpp
+@@ -338,8 +338,9 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
+             return true;
+         }
+         const std::span<const u8> inline_qmd{reinterpret_cast<const u8*>(native_registers.data() + 0xc8), 256};
+-        rasterizer->AccelerateInlineToMemory(address, 256, inline_qmd);
+-        if (upload_state.sole_sink) Nx2Passthrough::SoleUpload(address, inline_qmd); // newer than earlier uploads
++        if (!upload_state.sole_sink || !Nx2Passthrough::SoleInlineQmd(address, inline_qmd)) { // else the host writes it
++            rasterizer->AccelerateInlineToMemory(address, 256, inline_qmd);
++        }
+ 
+         if ((control & (1U << 24)) || !(native_registers[0xcc] & (1U << 12))) {
+             const u32 previous = native_registers[0xad];
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index d99381f97..5e94baeee 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -30,6 +30,7 @@
+ 
+ #include <fmt/format.h>
+ 
++#include "common/scope_exit.h"
+ #include "common/alignment.h"
+ #include "common/cityhash.h"
+ #include "common/div_ceil.h"
+@@ -269,7 +270,41 @@ public:
+         NvU32 gt_done = 0;
+         s32 gt_guest = 0;
+         NvU64 gt_sig = 0;
++        // Upload store (sole mode): a plain fence passes before the work's writes land, a WFI fence after them,
++        // and they reach memory the CPU reads once an L2 flush ran after that (UpdateFlushed).
++        std::deque<NvU32> wfi_fences; // submitted WFI fences not seen passed
++        NvU32 wfi_done = 0;           // the last WFI fence seen passed
++        NvU32 flushed = 0;            // the work up to this fence wrote memory (WFI, then an L2 flush)
+     };
++    /// L2 flushes in flight: the flushing channel's fence, and every channel's last passed WFI fence before it.
++    struct L2Flush {
++        Channel* c;
++        NvU32 fence;
++        std::vector<std::pair<Channel*, NvU32>> before;
++    };
++    std::deque<L2Flush> l2_flushes;
++
++    static void NoteWfiDone(Channel& c) {
++        while (!c.wfi_fences.empty() && static_cast<s32>(Passed(c) - c.wfi_fences.front()) >= 0) {
++            c.wfi_done = c.wfi_fences.front();
++            c.wfi_fences.pop_front();
++        }
++    }
++
++    /// Moves each channel's `flushed` past the L2 flushes the GPU ran. True when one moved.
++    bool UpdateFlushed() {
++        bool moved = false;
++        while (!l2_flushes.empty() && static_cast<s32>(Passed(*l2_flushes.front().c) - l2_flushes.front().fence) >= 0) {
++            for (const auto [ch, f] : l2_flushes.front().before) {
++                if (static_cast<s32>(f - ch->flushed) > 0) {
++                    ch->flushed = f;
++                    moved = true;
++                }
++            }
++            l2_flushes.pop_front();
++        }
++        return moved;
++    }
+     static constexpr NvU64 GT_SLOTS = 16384;
+     static constexpr NvU64 PB_WORDS = (CHECK - PB) / 4;
+     static constexpr NvU64 COPY_SEM = SEM + 0x10;
+@@ -409,6 +444,20 @@ public:
+             const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_BATCH");
+             return v != nullptr ? std::max<u64>(1, std::strtoull(v, nullptr, 0)) : 64;
+         }();
++        if (tail && (wfi || flush_l2)) {
++            if (c.wfi_fences.size() >= 4096) c.wfi_fences.pop_front(); // nobody looked: an older one is enough
++            c.wfi_fences.push_back(fence);
++        }
++        if (tail && flush_l2) {
++            L2Flush f{&c, fence, {{&c, fence}}};
++            for (auto& [g, ch] : channels) {
++                if (&ch == &c) continue;
++                NoteWfiDone(ch);
++                f.before.emplace_back(&ch, ch.wfi_done);
++            }
++            if (l2_flushes.size() >= 1024) l2_flushes.pop_front();
++            l2_flushes.push_back(std::move(f));
++        }
+         if (c.unflushed++ == 0) c.oldest = std::chrono::steady_clock::now();
+         if (wait || flush || c.unflushed >= batch) Ring(c);
+         while (wait && static_cast<s32>(*reinterpret_cast<volatile NvU32*>(c.cpu + SEM) - fence) < 0) {
+@@ -428,6 +477,9 @@ public:
+         ++quiesces;
+     }
+     bool live = false;
++    /// Sole mode, upload store on (State): lays the uploaded words the stream has and memory may not over
++    /// guest bytes read at va (the host wrote them only into a shadow page, or not yet, or into its L2).
++    std::function<void(NvU64, std::span<u8>)> overlay;
+     NvU64 quiesces = 0;
+     std::array<NvU64, 3> quiesce_sites{}; // new shadow page, shadow write, (unused)
+     std::vector<u8> shadow_copy = std::vector<u8>(SHADOW_POOL); // what the shadow pool holds (CPU side)
+@@ -446,6 +498,18 @@ public:
+         return true;
+     }
+ 
++    /// Drain for reads of memory the host GPU may have written (program code): every channel's work done (a WFI
++    /// fence: a plain one passes before the writes land) and out of the L2 (guest memory is GPU-cacheable in
++    /// sole mode). Every submission ends at a method boundary (held parts are not submitted), so a fence fits.
++    bool DrainFlushed() {
++        for (auto& [guest, c] : channels) {
++            if (!Submit(c, std::span<const NvU32>{}, false, true, true, true, 0, 0, true)) return false;
++        }
++        const bool ok = Drain();
++        UpdateFlushed();
++        return ok;
++    }
++
+     void Ring(Channel& c) {
+         if (c.unflushed == 0) return;
+         __sync_synchronize();
+@@ -640,6 +704,50 @@ public:
+         }
+     }
+ 
++    u64 PoolBytes() const {
++        u64 n = 0;
++        for (const auto& [va, pool] : pools) n += u64{pool.count} * 32;
++        return n;
++    }
++    /// Pool scanner (State's thread): every pool page wholly in guest memory, as VA, host pointer, size.
++    void PoolPages(std::vector<std::tuple<NvU64, const u8*, size_t>>& out) const {
++        for (const auto& [va, pool] : pools) {
++            const size_t bytes = size_t{pool.count} * 32;
++            for (size_t o = 0; o < bytes; o += PAGE) {
++                const size_t n = std::min<size_t>(PAGE, bytes - o);
++                const u8* src = MirroredHost(va + o);
++                if (src != nullptr && MirroredHost(va + o + n - 1) == src + n - 1) out.emplace_back(va + o, src, n);
++            }
++        }
++    }
++    std::vector<NvU64> scanned; // pool pages the scanner saw change (VA), for the next RefreshPools
++
++    /// Pages the scanner found changed: read, compared with the copy, translated into their shadow pages.
++    void RefreshScanned() {
++        std::sort(scanned.begin(), scanned.end());
++        scanned.erase(std::unique(scanned.begin(), scanned.end()), scanned.end());
++        for (const NvU64 at : scanned) {
++            auto it = pools.upper_bound(at);
++            if (it == pools.begin()) continue;
++            --it;
++            auto& [va, pool] = *it;
++            const size_t bytes = size_t{pool.count} * 32, o = at - va;
++            if (pool.full || pool.copy.size() != bytes || o >= bytes) continue; // the next full refresh does it
++            const size_t n = std::min<size_t>(PAGE, bytes - o);
++            std::vector<u8> page(n);
++            if (ReadGuest(at, page) != n || std::memcmp(page.data(), pool.copy.data() + o, n) == 0) continue;
++            for (size_t h = 0; h + 32 <= n; h += 32) {
++                pool_changes += std::memcmp(page.data() + h, pool.copy.data() + o + h, 32) != 0;
++            }
++            std::memcpy(pool.copy.data() + o, page.data(), n);
++            for (size_t h = 0; h + 32 <= n; h += 32) TranslateHeader(page.data() + h, at + h);
++            WriteShadow(at, page, true, false);
++            ++scanned_rewrites;
++        }
++        scanned.clear();
++    }
++    NvU64 scanned_rewrites = 0;
++
+     void SetHeaderPool(NvU64 va, u32 count) {
+         if (va < GUEST_VA_LO || count == 0 || count > (1u << 20)) return;
+         Pool& pool = pools[va];
+@@ -651,8 +759,18 @@ public:
+ 
+     /// Entry thread: decoded copies become visible, changed guest headers are translated into the shadow pages.
+     void RefreshPools(u64 epoch) {
+-        if (pools.empty() || epoch == pools_epoch || astc_cpu == nullptr) return;
++        if (pools.empty() || astc_cpu == nullptr) return;
++        if (epoch == pools_epoch) { // between full refreshes: what the scanner saw change
++            if (!scanned.empty()) RefreshScanned();
++            return;
++        }
++        scanned.clear(); // the full refresh compares every page
+         pools_epoch = epoch;
++        ++pool_refreshes;
++        const auto refresh_start = std::chrono::steady_clock::now();
++        SCOPE_EXIT {
++            pool_ns += static_cast<NvU64>((std::chrono::steady_clock::now() - refresh_start).count());
++        };
+         GrowAstc();
+         ReadAstc();
+         // Only the pages of headers whose copy got ready (or that wait for their texture's data) are translated
+@@ -716,8 +834,33 @@ public:
+             --it;
+             if (a < it->first + u64{it->second.count} * 32) it->second.dirty.insert((a - it->first) & ~(PAGE - 1));
+         }
++        const auto scan_start = std::chrono::steady_clock::now();
++        SCOPE_EXIT {
++            pool_scan_ns += static_cast<NvU64>((std::chrono::steady_clock::now() - scan_start).count());
++        };
+         for (auto& [va, pool] : pools) {
+             const size_t bytes = size_t{pool.count} * 32;
++            if (!pool.full && pool.copy.size() == bytes) { // pages compared in place, changed ones read and translated
++                for (size_t o = 0; o < bytes; o += PAGE) {
++                    const size_t n = std::min<size_t>(PAGE, bytes - o);
++                    const u8* src = MirroredHost(va + o);
++                    const bool whole = src != nullptr && MirroredHost(va + o + n - 1) == src + n - 1;
++                    if (whole && !overlay && !pool.dirty.contains(o) && std::memcmp(src, pool.copy.data() + o, n) == 0) {
++                        continue;
++                    }
++                    std::vector<u8> page(n);
++                    if (ReadGuest(va + o, page) != n) continue;
++                    if (!pool.dirty.contains(o) && std::memcmp(page.data(), pool.copy.data() + o, n) == 0) continue;
++                    for (size_t h = 0; h + 32 <= n; h += 32) {
++                        pool_changes += std::memcmp(page.data() + h, pool.copy.data() + o + h, 32) != 0;
++                    }
++                    std::memcpy(pool.copy.data() + o, page.data(), n);
++                    for (size_t h = 0; h + 32 <= n; h += 32) TranslateHeader(page.data() + h, va + o + h);
++                    WriteShadow(va + o, page, true, false); // shortcut: no wait for a header slot the GPU may read
++                }
++                pool.dirty.clear();
++                continue;
++            }
+             std::vector<u8> cur(bytes);
+             cur.resize(ReadGuest(va, cur));
+             const bool full = pool.full || pool.copy.size() != cur.size();
+@@ -1852,7 +1995,7 @@ public:
+         // Sole mode: the host GPU may be what uploads the program (a copy still queued): read it once the channels
+         // ran what they were given (they never wait for Eglantine there). Read too early, a patch of the old bytes
+         // raised Xid 13 Shader Program Header in an async run.
+-        if (Sole() && live && !Drain()) throw Error("drain before reading a program", 0);
++        if (Sole() && live && !DrainFlushed()) throw Error("drain before reading a program", 0);
+         std::vector<u8> image(MAX_PROGRAM);
+         image.resize(ReadGuest(va, image));
+         if (image.size() < 0x100) return false;
+@@ -1939,6 +2082,14 @@ public:
+         return guest_base + it->second.off + (va - it->first);
+     }
+ 
++    /// Whether va lies in a shadow page (the GPU sees the shadow, MirroredHost still the guest memory).
++    bool IsShadow(NvU64 va) const {
++        auto it = pieces.upper_bound(va);
++        if (it == pieces.begin()) return false;
++        --it;
++        return va < it->first + it->second.size && it->second.shadow != ~0u;
++    }
++
+     /// Whether the mirror maps va (guest memory or video memory standing for it).
+     bool IsMapped(NvU64 va) const {
+         auto it = pieces.upper_bound(va);
+@@ -1961,7 +2112,9 @@ public:
+         if (it == pieces.begin() || va >= std::prev(it)->first + std::prev(it)->second.size) return {"unmapped", only};
+         return {std::prev(it)->second.vmem != 0 ? "video memory" : "system memory", only};
+     }
+-    NvU64 vram_used = 0, vram_maps = 0;
++    NvU64 vram_used = 0, vram_maps = 0, vram_shared = 0, vram_partial = 0, vram_evicted = 0;
++    NvU64 pool_changes = 0, pool_refreshes = 0, pool_ns = 0; // guest headers found changed, refreshes, their time
++    NvU64 pool_scan_ns = 0; // of it, comparing and translating headers
+ 
+     // Counters for the log.
+     NvU64 doorbells = 0, map_retries = 0;
+@@ -1992,8 +2145,12 @@ private:
+         std::vector<u8> unpatched;
+     };
+ 
+-    /// Whether guest memory at va still holds `bytes` (compared in place).
++    /// Whether guest memory at va still holds `bytes` (compared in place; with the upload store over it).
+     bool GuestEquals(NvU64 va, std::span<const u8> bytes) const {
++        if (overlay) {
++            std::vector<u8> cur(bytes.size());
++            return ReadGuest(va, cur) == bytes.size() && std::memcmp(cur.data(), bytes.data(), bytes.size()) == 0;
++        }
+         for (size_t done = 0; done < bytes.size();) {
+             const u8* src = MirroredHost(va + done);
+             const size_t n = std::min<size_t>(bytes.size() - done, PAGE - ((va + done) & (PAGE - 1)));
+@@ -2013,6 +2170,7 @@ private:
+             std::memcpy(out.data() + done, src, n);
+             done += n;
+         }
++        if (overlay && done != 0) overlay(va, out.first(done));
+         return done;
+     }
+ 
+@@ -2066,8 +2224,9 @@ private:
+         const u32 index = free_shadow.empty() ? shadow_next++ : free_shadow.back();
+         if (!free_shadow.empty() && index == free_shadow.back()) free_shadow.pop_back();
+         const NvU64 off = static_cast<NvU64>(src - guest_base);
+-        for (NvU64 i = 0; i < PAGE; ++i) shadow_cpu[index * PAGE + i] = src[i];
+         std::memcpy(shadow_copy.data() + index * PAGE, src, PAGE);
++        if (overlay) overlay(page, std::span<u8>(shadow_copy.data() + index * PAGE, PAGE));
++        for (NvU64 i = 0; i < PAGE; ++i) shadow_cpu[index * PAGE + i] = shadow_copy[index * PAGE + i];
+         fresh_shadow.insert(index); // not mapped before this bind: nothing runs it yet
+         Unmap(page, PAGE, true);
+         NVOS46_PARAMETERS p{};
+@@ -2104,10 +2263,10 @@ private:
+ 
+     /// Maps, split where a granule or the guest's kind changes.
+     void MapOff(NvU64 va, NvU64 off, NvU64 size) {
+-        if (const NvHandle vmem = VramFor(va, size)) {
+-            MapRuns(va, off, size, vmem, 0);
+-            ReleaseVram(vmem); // the pieces hold it now
+-            ClearVram(va, size);
++        if (const Vram v = VramFor(va, off, size); v.mem != 0) {
++            MapRuns(va, off, size, v.mem, v.voff);
++            ReleaseVram(v.mem); // the pieces hold it now
++            if (v.fresh) ClearVram(va, size);
+             return;
+         }
+         while (size != 0) {
+@@ -2133,27 +2292,67 @@ private:
+         }
+     }
+ 
+-    /// Video memory for a mapping of [va, va + size) when it lies in a GPU-only region and fits the budget (one
+-    /// reference, for the caller to release), else 0.
+-    NvHandle VramFor(NvU64 va, NvU64 size) {
++    struct Vram {
++        NvHandle mem = 0;
++        NvU64 voff = 0;   // where the mapping starts in it
++        bool fresh = false; // new: zero it (the guest's memory read zero until written)
++    };
++
++    /// Video memory for a mapping of [va, va + size) of guest memory at `off` when it lies in a GPU-only region
++    /// and fits the budget (one reference, for the caller to release), else none. Video memory stands for guest
++    /// memory, not for a mapping: aliases and remaps of the same guest memory share it and see its contents, as
++    /// on the console (MKW maps the same render-target memory at a new VA again and again: 6956 of 7925 mappings
++    /// in vr1; fresh memory per mapping gave washed-out and banded race frames). A block outlives its mappings
++    /// (the guest may map the memory again); unmapped blocks are freed only when the budget needs the room.
++    Vram VramFor(NvU64 va, NvU64 off, NvU64 size) {
+         static const NvU64 budget = [] {
+             const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_VRAM_MB");
+             return (v != nullptr ? std::strtoull(v, nullptr, 0) : (Sole() ? 3072ull : 0ull)) << 20;
+         }();
+-        if (budget == 0 || vram_used + size > budget || (size & (PAGE - 1)) != 0) return 0;
+-        auto it = gpu_only.upper_bound(va);
+-        if (it == gpu_only.begin() || va + size > std::prev(it)->first + std::prev(it)->second) return 0;
++        if (budget == 0 || (size & (PAGE - 1)) != 0) return {};
++        auto g = gpu_only.upper_bound(va);
++        if (g == gpu_only.begin() || va + size > std::prev(g)->first + std::prev(g)->second) return {};
++        auto it = vram_blocks.upper_bound(off);
++        if (it != vram_blocks.begin()) {
++            const auto prev = std::prev(it);
++            if (off + size <= prev->first + prev->second.second) { // inside a block: shared
++                ++vram_refs[prev->second.first].first;
++                ++vram_shared;
++                return {prev->second.first, off - prev->first, false};
++            }
++            if (prev->first + prev->second.second > off) it = prev;
++        }
++        if (it != vram_blocks.end() && it->first < off + size) { // overlaps a block partly: system memory
++            if (++vram_partial <= 8) {
++                LOG_WARNING(HW_GPU, "Nx2 passthrough: guest memory {:#x} +{:#x} at {:#x} overlaps video memory {:#x} +{:#x} "
++                            "partly: left in system memory", off, size, va, it->first, it->second.second);
++            }
++            return {};
++        }
++        // Room: unmapped blocks (only the block's own reference left) go first.
++        for (auto b = vram_blocks.begin(); vram_used + size > budget && b != vram_blocks.end();) {
++            const NvHandle mem = b->second.first;
++            if (vram_refs[mem].first != 1) {
++                ++b;
++                continue;
++            }
++            ++vram_evicted;
++            b = vram_blocks.erase(b);
++            ReleaseVram(mem);
++        }
++        if (vram_used + size > budget) return {};
+         NvHandle mem = 0;
+         try {
+             mem = AllocVidmem(size, false);
+         } catch (const Error& e) { // out of video memory: system memory as before
+             if (++vram_failures <= 4) LOG_WARNING(HW_GPU, "Nx2 passthrough: no video memory for {:#x} +{:#x} (status {:#x})", va, size, e.status);
+-            return 0;
++            return {};
+         }
+-        vram_refs[mem] = {1, size};
++        vram_blocks[off] = {mem, size};
++        vram_refs[mem] = {2, size}; // the block's and the caller's
+         vram_used += size;
+         ++vram_maps;
+-        return mem;
++        return {mem, 0, true};
+     }
+ 
+     /// Zeroes fresh video memory mapped at [va, va + size) with the copy engine, on a channel of the backend's own,
+@@ -2337,6 +2536,7 @@ private:
+     std::map<NvU64, NvU64> gpu_only;                           // GPU-only regions: start -> size
+     std::map<NvHandle, std::pair<u32, NvU64>> vram_refs;         // video memory: pieces using it, size
+     NvU64 vram_failures = 0;
++    std::map<NvU64, std::pair<NvHandle, NvU64>> vram_blocks; // guest memory with video memory: off -> memory, size
+     std::map<NvU64, Run> kinds;    // the guest's kinds (host kind) by guest VA
+     NvHandle shadow_mem = 0;
+     volatile u8* shadow_cpu = nullptr;
+@@ -2517,7 +2717,9 @@ enum Count : size_t {
+     WordsIn, WordsOut, DropSyncpoint, DropHostMethod, DropNever, DropUnbound, DropSemaphoreUnmapped, DropReportTrap,
+     DropMemOp, DropDependence, QmdFromMemory, QmdFromSlot, QmdUnmapped, BarrierLaunches, DependenceUnderflow, InlineQmds, SrgbWrite, LocalMemory, LocalMemoryTooSmall,
+     MacroReplaced, MacroHostMme, MacroDropped, MacroUnpaired, Invalidates, MidRun, BadHeader, Releases, ReleasesDropped, ByReference, FreshDiffers, AcquiresDropped, VtCopies,
+-    L2Invalidates, ComputeParamDrains, FrontReadWaits, CatchUpDrains, HwAcquires, HwLate, HwUnknown, HwUnmet, KeepMismatch, AheadEntries, AheadDiffer, AheadUnread, I2mSemaphoreWrites, MetPendingWaits, Stamps, TimestampReports, CountEnd
++    L2Invalidates, ComputeParamDrains, FrontReadWaits, CatchUpDrains, HwAcquires, HwLate, HwUnknown, HwUnmet, KeepMismatch, AheadEntries, AheadDiffer, AheadUnread, I2mSemaphoreWrites, MetPendingWaits, Stamps, TimestampReports,
++    StoreRetired, StoreShadowWrites, StoreOverlaid, StoreOverflow, InlineQmdWrites, InlineQmdCounted, BarrierCrossChannel,
++    QmdStamps, SemStamps, CountEnd
+ };
+ constexpr const char* COUNT_NAMES[CountEnd] = {
+     "words in", "words out", "syncpoint methods dropped", "host methods dropped", "firmware/sw/zcull/ISA methods dropped",
+@@ -2536,7 +2738,13 @@ constexpr const char* COUNT_NAMES[CountEnd] = {
+     "kept acquires out of order", "entries parsed ahead of an acquire (HWACQ=2)", "of them changed by the time it passed",
+     "of them unreadable", "inline uploads to semaphores (promised)",
+     "acquires met in memory before the host wrote it (waited for the host)",
+-    "report timestamps replaced by the guest clock", "of them TIMESTAMP reports"
++    "report timestamps replaced by the guest clock", "of them TIMESTAMP reports",
++    "upload store words landed", "of them written to guest memory (shadow pages)",
++    "upload store words laid over host reads", "upload store overflows (words dropped)",
++    "inline QMDs written to their guest address by the host",
++    "inline QMDs with a dependence count of their own (launched at once)",
++    "barrier launches counted down from another host channel",
++    "QMD timestamp releases given the guest clock", "host semaphore timestamp releases given the guest clock"
+ };
+ 
+ /// Per guest channel: the decode state (a method run continues into the next entry, as on the GPU), the guest
+@@ -2552,6 +2760,10 @@ struct Xlate {
+         u32 payload, how;
+     };
+     NvU64 i2m_out = 0, i2m_at = 0;               // inline-to-memory destination, next word (0: not tracked)
++    u32 i2m_launch = 1;                          // the guest's last tracked LAUNCH_DMA (pitch)
++    std::vector<NvU64> i2m_new;                  // s.i2m words put since the last submission (stamped after it)
++    NvU64 qmd_write = 0;                         // upload store: an inline QMD to write at its guest address
++    bool qmd_stamp = false;                      // STAMPS: the inline QMD just put may release timestamps
+     std::vector<Write> writes;                   // semaphore writes in the entry (Words::Promise), until submitted
+     std::deque<std::pair<NvU64, u32>> keep;      // acquires the front left to the host (HwAcquire), in order
+     std::deque<std::array<NvU64, 4>> kept_log;
+@@ -2614,6 +2826,7 @@ struct State {
+     bool tried = false;
+     const void* memory_manager = nullptr;   // the guest VA space mirrored (step 2: the first that maps)
+     u64 entries = 0, words = 0, maps = 0, unmaps = 0, outside = 0, other_managers = 0;
++    u64 frame_rt_binds = 0, frame_rt_hash = 0, frame_rt_max = 0; // colour targets set since the last present (washed log)
+     u64 checked = 0, check_mismatch = 0, check_wrong = 0;
+     // Program binds (measuring the shadow-program design): per stage, from macros, on another thread than
+     // OnEntry, distinct pixel programs.
+@@ -2635,7 +2848,8 @@ struct State {
+     std::vector<std::pair<NvU64, NvU64>> copied_qmds; // (guest QMD, slot) launched in the entry (watch only)
+     struct QmdDep {
+         s32 dependencies = 0, deferred = 0;
+-        bool loaded = false, scheduled = false, completed = false;
++        bool loaded = false, scheduled = false, completed = false, cross = false;
++        const void* from = nullptr; // the host channel of its last count change (measuring)
+     };
+     std::unordered_map<NvU64, QmdDep> qmd_deps; // NVN's QMD dependence, every channel (Words::Dependence)
+     s32 entry_channel = 0;
+@@ -2660,6 +2874,7 @@ struct State {
+     };
+     std::deque<Armed> armed;
+     std::thread poller;
++    std::thread pool_scanner; // ScanPools
+     std::atomic<bool> poller_stop{false};
+     u64 after_run = 0, after_now = 0;
+     // EDEN_NX2_PASSTHROUGH_HWACQ: per semaphore VA, the value the host work submitted so far leaves there (the
+@@ -2671,7 +2886,14 @@ struct State {
+     NvU64 gt_pixel = 0; // GPUTIME: the pixel program bound last
+     std::map<std::pair<s32, NvU64>, std::pair<u64, u64>> gt_sum; // (channel, signature) -> GPU ns, submissions
+     std::chrono::steady_clock::time_point gt_since = std::chrono::steady_clock::now();
+-    std::unordered_map<NvU64, u32> i2m; // words small inline-to-memory uploads wrote, in stream order (Launch)
++    // Words small inline-to-memory uploads (and, upload store on, inline QMDs) wrote, in stream order: the host
++    // channel that writes them and the fence of the submission that carries them (0: not submitted yet).
++    struct Upload {
++        u32 value;
++        Host::Channel* c;
++        NvU32 fence = 0;
++    };
++    std::unordered_map<NvU64, Upload> i2m;
+     // The submission that carries each promised VA's last write: once the host passed it, memory's value is the
+     // promise (MKW's NVN fence slots are reset to 0 every frame by a write the translator does not see).
+     std::unordered_map<NvU64, std::pair<Host::Channel*, NvU32>> last_write;
+@@ -2691,6 +2913,130 @@ State& Get() {
+ 
+ void Poll(State& s);
+ 
++/// Sole mode: compares the texture header pools with a copy of its own every EDEN_NX2_PASSTHROUGH_POOL_SCAN_US
++/// (2000; 0: off) on its own thread and hands the pages that changed to the entry thread (RefreshScanned). MKW
++/// rewrites 80-200 headers a frame all through its 4 MiB pool; translated only every 100 ms they reached the host
++/// late and it sampled stale ones: washed-out race frames (a refresh every <= 10 ms: 0 in 336 shots). A full
++/// compare there costs ~0.7 ms, too much for the entry thread at that rate. Guest memory stays allocated while the
++/// emulator runs; a page the guest remaps between two scans only gives a false change (filtered there).
++void ScanPools(State& s, std::chrono::microseconds period) {
++    std::unordered_map<NvU64, std::vector<u8>> seen;
++    std::vector<std::tuple<NvU64, const u8*, size_t>> pages;
++    std::vector<NvU64> changed;
++    NvU64 pages_gen = ~NvU64{0};
++    while (!s.poller_stop.load(std::memory_order_relaxed)) {
++        std::this_thread::sleep_for(period);
++        {
++            std::scoped_lock lk{s.mutex};
++            if (!s.host) return;
++            // The pages' host pointers change only with the mappings or the pools.
++            const NvU64 gen = s.host->rm_maps + s.host->rm_unmaps + s.host->kind_changes + s.host->PoolBytes();
++            if (gen != pages_gen) {
++                pages_gen = gen;
++                pages.clear();
++                s.host->PoolPages(pages);
++            }
++        }
++        changed.clear();
++        for (const auto& [va, src, n] : pages) {
++            auto& copy = seen[va];
++            if (copy.size() != n) {
++                copy.assign(src, src + n);
++                continue;
++            }
++            if (std::memcmp(copy.data(), src, n) == 0) continue;
++            std::memcpy(copy.data(), src, n);
++            changed.push_back(va);
++        }
++        if (changed.empty()) continue;
++        std::scoped_lock lk{s.mutex};
++        if (!s.host) return;
++        s.host->scanned.insert(s.host->scanned.end(), changed.begin(), changed.end());
++    }
++}
++
++// Upload store, Eglantine's side: the words its engines' uploads (and inline QMDs) would have written, in the
++// back's stream order; the back's own reads lay them over guest memory (SolePatch: the translator works at entry
++// ends, the back reads a QMD while its entry is still being parsed). A word leaves once the host's copy of it
++// landed with the same value (Retire).
++std::mutex back_words_mutex;
++std::unordered_map<NvU64, u32> back_words;
++
++/// EDEN_NX2_PASSTHROUGH_QMD_HOSTWRITE=0 (bisecting, upload store on): Eglantine's back writes inline QMDs to guest
++/// memory as before instead of the host.
++bool QmdHostWrite() {
++    static const bool on = [] {
++        const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_QMD_HOSTWRITE");
++        return v == nullptr || v[0] != '0';
++    }();
++    return on;
++}
++
++/// Guest system memory is GPU-cacheable (sole mode default; EDEN_NX2_PASSTHROUGH_SYSMEM_CACHED=0: off).
++bool SysmemCached() {
++    static const bool on = [] {
++        const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_SYSMEM_CACHED");
++        return v != nullptr ? v[0] == '1' : Sole();
++    }();
++    return on;
++}
++
++// Upload store (sole mode, EDEN_NX2_PASSTHROUGH_BACK_UPLOADS=0): the words of small inline-to-memory uploads and
++// of inline QMDs as the translator put them in the host's stream (s.i2m). Eglantine's back does not write them
++// (its writes landed early or late against the host's timeline: washed-out race frames); Eglantine's readers lay
++// them over guest memory until memory holds them: their submission's WFI fence passed and an L2 flush ran after
++// it (cached guest memory). In a shadow page the host wrote only the shadow: guest memory gets the word then (the
++// program patcher and the header pools read guest memory). s.mutex held for all of these.
++
++bool Landed(const State::Upload& u) {
++    if (u.fence == 0) return false;
++    if (SysmemCached()) return static_cast<s32>(u.c->flushed - u.fence) >= 0;
++    Host::NoteWfiDone(*u.c);
++    return static_cast<s32>(u.c->wfi_done - u.fence) >= 0;
++}
++
++/// A landed word leaves the store: memory has it, except in a shadow page (written there now). Returns whether
++/// readers should take `value` rather than what they read from guest memory.
++bool Retire(State& s, NvU64 va, u32 value) {
++    ++s.counts[StoreRetired];
++    {
++        std::scoped_lock lk{back_words_mutex};
++        if (const auto it = back_words.find(va); it != back_words.end() && it->second == value) back_words.erase(it);
++    }
++    if (!s.host->IsShadow(va)) return false;
++    if (const u8* p = s.host->MirroredHost(va)) {
++        std::memcpy(const_cast<u8*>(p), &value, 4);
++        ++s.counts[StoreShadowWrites];
++    }
++    return true;
++}
++
++void SweepStore(State& s) {
++    if (s.i2m.empty() || !s.host) return;
++    std::erase_if(s.i2m, [&](const auto& kv) { return Landed(kv.second) && (Retire(s, kv.first, kv.second.value), true); });
++}
++
++/// Lays the store over `bytes`, read from guest memory at va (4-byte words inside it only).
++void StoreOverlay(State& s, NvU64 va, std::span<u8> bytes) {
++    if (s.i2m.empty() || !s.host) return;
++    s.host->UpdateFlushed();
++    const auto lay = [&](NvU64 at, const State::Upload& u) { // true: the word leaves the store
++        const bool landed = Landed(u);
++        if (!landed || Retire(s, at, u.value)) {
++            std::memcpy(bytes.data() + (at - va), &u.value, 4);
++            ++s.counts[StoreOverlaid];
++        }
++        return landed;
++    };
++    if (s.i2m.size() * 4 < bytes.size()) {
++        std::erase_if(s.i2m, [&](const auto& kv) { return kv.first >= va && kv.first + 4 <= va + bytes.size() && lay(kv.first, kv.second); });
++        return;
++    }
++    for (NvU64 at = (va + 3) & ~NvU64{3}; at + 4 <= va + bytes.size(); at += 4) {
++        if (const auto it = s.i2m.find(at); it != s.i2m.end() && lay(at, it->second)) s.i2m.erase(it);
++    }
++}
++
+ /// Opens the host side on first use (any hook); false while the backend is off. Called with the mutex held.
+ bool Ready(State& s) {
+     if (!Requested()) return false; // the nvhost hooks (kinds, unmaps) call in unconditionally
+@@ -2715,8 +3061,14 @@ bool Ready(State& s) {
+             if (!host->KindMapSelfTest()) throw Error("kind map self-test", 0);
+             if (!Xlate::EncoderSelfTest()) throw Error("encoder self-test", 0);
+             host->live = s.submit_words;
++            if (SoleUploads()) host->overlay = [&s](NvU64 va, std::span<u8> bytes) { StoreOverlay(s, va, bytes); };
+             s.host = std::move(host);
+             if (Sole()) s.poller = std::thread([&s] { Poll(s); });
++            static const auto scan = std::chrono::microseconds([] {
++                const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_POOL_SCAN_US");
++                return v != nullptr ? std::strtoll(v, nullptr, 0) : 2000ll;
++            }());
++            if (Sole() && scan.count() > 0) s.pool_scanner = std::thread([&s] { ScanPools(s, scan); });
+             LOG_INFO(HW_GPU, "Nx2 passthrough: host channel up, guest VA [{:#x}, {:#x}) sparse, check every {} entries, "
+                      "guest words {}", GUEST_VA_LO, GUEST_VA_HI, s.check_every, s.submit_words ? "submitted" : "not submitted");
+         } catch (const Error& e) {
+@@ -2775,8 +3127,12 @@ void LogStats(State& s) {
+                  h.AstcArenaUsed() >> 20, h.astc_in_vram >> 20, h.astc_failed, h.astc_too_large, h.astc_headers);
+         if (Sole()) {
+             LOG_INFO(HW_GPU, "Nx2 passthrough sole: {} syncpoint callbacks after the host GPU, {} at once, {} armed; "
+-                     "{} MiB of GPU-only memory in video memory ({} allocations)", s.after_run, s.after_now,
+-                     s.armed.size(), h.vram_used >> 20, h.vram_maps);
++                     "{} MiB of GPU-only memory in video memory ({} blocks, {} mappings shared one, {} left in system "
++                     "memory (partly over one), {} unmapped blocks freed for room); header pools: {} guest headers "
++                     "changed, {} full refreshes, {} ms in them ({} ms comparing), {} KiB of pools, {} pages "
++                     "rewritten from the scanner", s.after_run, s.after_now, s.armed.size(), h.vram_used >> 20,
++                     h.vram_maps, h.vram_shared, h.vram_partial, h.vram_evicted, h.pool_changes, h.pool_refreshes,
++                     h.pool_ns / 1000000, h.pool_scan_ns / 1000000, h.PoolBytes() >> 10, h.scanned_rewrites);
+         }
+         if (!h.vts.empty()) {
+             LOG_INFO(HW_GPU, "Nx2 passthrough VT: {} textures, {} level jobs ({} swept, {} with changes, {} ms), {} cells "
+@@ -2846,6 +3202,17 @@ bool ReportStamps() {
+     return on;
+ }
+ 
++/// EDEN_NX2_PASSTHROUGH_STAMPS=2 (measuring): the guest clock as of the last present, so every GPU duration within
++/// a frame reads 0 (MKW's dynamic resolution then never sees a slow GPU).
++bool FrameStamps() {
++    static const bool on = [] {
++        const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_STAMPS");
++        return v != nullptr && v[0] == '2';
++    }();
++    return on;
++}
++std::atomic<u64> frame_clock{0};
++
+ struct Words {
+     State& s;
+     Host& h;
+@@ -2866,7 +3233,45 @@ struct Words {
+ 
+     /// A semaphore write the host will make (`how`: 0 sets `payload`, 1 adds it, 2 anything else), counted in
+     /// the promised values once the entry is submitted (HwAcquire).
+-    void Promise(NvU64 va, u32 payload, u32 how) { x.writes.push_back({va, payload, how}); }
++    void Promise(NvU64 va, u32 payload, u32 how, bool i2m = false) {
++        x.writes.push_back({va, payload, how});
++        if (!i2m && SoleUploads()) s.i2m.erase(va); // the host writes it after the upload: memory, not the store
++    }
++
++    /// An uploaded word the host writes in stream order (the upload store's, stamped once submitted).
++    void NoteUpload(NvU64 va, u32 v) {
++        if (s.i2m.size() >= (1u << 16)) {
++            SweepStore(s);
++            if (s.i2m.size() >= (1u << 16)) {
++                if (SoleUploads()) s.counts[StoreOverflow] += s.i2m.size();
++                s.i2m.clear();
++            }
++        }
++        s.i2m.insert_or_assign(va, State::Upload{v, &c});
++        if (SoleUploads()) x.i2m_new.push_back(va);
++    }
++
++    /// Upload store: the guest's inline QMD at its own address, written by the host in stream order as the guest
++    /// GPU does (the host launched it from our slot; barrier launches copy QMDs from guest memory later). The
++    /// guest's words unchanged (the slot copy has the fixups), then the guest's inline-to-memory registers back.
++    void WriteInlineQmd(u32 sc) {
++        using namespace Mthd;
++        const NvU64 at = std::exchange(x.qmd_write, 0);
++        Put(sc, LINE_LENGTH_IN, 256);
++        Put(sc, LINE_COUNT, 1);
++        Put(sc, OFFSET_OUT_UPPER, static_cast<u32>(at >> 32));
++        Put(sc, OFFSET_OUT, static_cast<u32>(at));
++        Put(sc, LAUNCH_DMA, x.i2m_launch);
++        for (u32 i = 0; i < 64; ++i) {
++            Put(sc, LOAD_INLINE_DATA, x.qmd[i]);
++            NoteUpload(at + i * 4, x.qmd[i]);
++        }
++        Put(sc, LINE_LENGTH_IN, x.i2m_len);
++        Put(sc, LINE_COUNT, x.i2m_count);
++        Put(sc, OFFSET_OUT_UPPER, static_cast<u32>(x.i2m_out >> 32));
++        Put(sc, OFFSET_OUT, static_cast<u32>(x.i2m_out));
++        ++s.counts[InlineQmdWrites];
++    }
+ 
+     /// A QMD's releases (RELEASE0/1/2: address, control, payload), made when its grid is done.
+     void PromiseQmd(const u32* q) {
+@@ -2962,6 +3367,15 @@ struct Words {
+             return (e.first >= Mthd::SEND_PCAS_A && e.first <= Mthd::SEND_SIGNALING_PCAS2_B) ||
+                    (e.first >= Mthd::INLINE_QMD_ADDRESS_A && e.first < Mthd::INLINE_QMD_DATA + 64);
+         });
++        // shortcut: upload store on, such a call's inline uploads are not in the store (readers see them once the
++        // host wrote them, or never if dropped); none in MKW. Warned about: trace them like replaced calls if seen.
++        if (SoleUploads() && std::any_of(emits.begin(), emits.end(), [](const auto& e) { return e.first == Mthd::LOAD_INLINE_DATA; })) {
++            static bool warned = false;
++            if (!std::exchange(warned, true)) {
++                LOG_WARNING(HW_GPU, "Nx2 passthrough: a compute macro call with inline uploads {} (upload store on)",
++                            qmd ? "dropped" : "left to the host MME");
++            }
++        }
+         if (qmd) {
+             ++s.counts[MacroDropped];
+             return;
+@@ -3033,15 +3447,15 @@ struct Words {
+             case OFFSET_OUT: x.i2m_out = (x.i2m_out & ~NvU64{0xFFFFFFFF}) | v; break;
+             case LAUNCH_DMA: // pitch, one line: NVN writes and patches QMDs this way (ReadQmd reads them back)
+                 x.i2m_at = (v & 1) && x.i2m_count <= 1 && x.i2m_len <= (SoleUploads() ? 4096u : 256u) ? x.i2m_out : 0;
++                if (x.i2m_at != 0) x.i2m_launch = v;
+                 break;
+             case LOAD_INLINE_DATA:
+                 if (x.i2m_at != 0) {
+-                    if (s.i2m.size() >= (1u << 16)) s.i2m.clear();
+-                    s.i2m[x.i2m_at] = v;
++                    NoteUpload(x.i2m_at, v);
+                     // A known semaphore (NVN resets its per-frame fence slots this way): a write the host makes.
+                     if (s.last_write.contains(x.i2m_at) || s.promised.contains(x.i2m_at)) {
+                         ++s.counts[I2mSemaphoreWrites];
+-                        Promise(x.i2m_at, v, 0);
++                        Promise(x.i2m_at, v, 0, true);
+                     }
+                     x.i2m_at += 4;
+                 }
+@@ -3096,6 +3510,11 @@ struct Words {
+             }
+         }
+         Put(sc, m, v);
++        if (x.qmd_write != 0) WriteInlineQmd(sc); // after the QMD's last word: its 64 words are one buffer
++        if (x.qmd_stamp) {
++            x.qmd_stamp = false;
++            StampQmd(x.qmd.data());
++        }
+         if (stamp_va != 0) Stamp();
+     }
+ 
+@@ -3103,8 +3522,30 @@ struct Words {
+     /// carry it (MKW sizes its dynamic resolution from them: the host's clock across the front's frame read as a
+     /// full GPU budget, the resolution changed every few frames, washed-out and banded race frames). The release
+     /// waits for idle, so it lands after the report.
++    /// The guest clock over the timestamp the host GPU writes at va + 8 (16-byte structures: QMD releases with
++    /// four words, host semaphores with RELEASE_TIMESTAMP), after the work: MKW keeps GPU ticks of the guest
++    /// clock (UsesLegacyAmpereTimestamps) and read the host's nanoseconds as a GPU far too slow.
++    void StampAt(NvU64 va) {
++        stamp_va = va;
++        stamp_value = false;
++        Stamp();
++        --s.counts[Stamps];
++    }
++
++    /// QMD releases (RELEASE0/1/2) with a timestamp: the guest clock over it once the grid is done.
++    void StampQmd(const u32* q) {
++        if (!ReportStamps() || !guest_clock || !HostReleases()) return;
++        for (const u32 r : {24u, 28u, 52u}) {
++            const u32 ctl = q[r + 1];
++            if (!(ctl & (1u << 23)) || (ctl >> 30) != 0) continue; // enabled, STRUCTURE_SIZE four words
++            StampAt((NvU64{ctl & 0xFF} << 32) | q[r]);
++            ++s.counts[QmdStamps];
++        }
++    }
++
+     void Stamp() {
+-        const u64 t = guest_clock();
++        const u64 t = FrameStamps() && frame_clock.load(std::memory_order_relaxed) != 0 ? frame_clock.load(std::memory_order_relaxed)
++                                                                                       : guest_clock();
+         const auto release = [&](NvU64 at) {
+             Put(0, Mthd::SEM_ADDR_LO, static_cast<u32>(at));
+             Put(0, Mthd::SEM_ADDR_HI, static_cast<u32>(at >> 32));
+@@ -3153,6 +3594,8 @@ struct Words {
+             std::erase_if(table, [](const auto& e) { return e.second.completed && e.second.deferred == 0; });
+         }
+         auto& d = table[qmd];
++        if (d.from != nullptr && d.from != &c) d.cross = true;
++        d.from = &c;
+         if (action == 2 || action == 3) {
+             if (action == 3 || !d.loaded) {
+                 u32 w[5]{};
+@@ -3175,6 +3618,8 @@ struct Words {
+         if (d.dependencies < 0) ++s.counts[DependenceUnderflow];
+         d.completed = true;
+         ++s.counts[BarrierLaunches];
++        s.counts[BarrierCrossChannel] += d.cross;
++        d.cross = false;
+         Launch(qmd);
+         // Its own dependent QMD, read now (Eglantine reads it at execution).
+         if (u32 w[17]{}; ReadQmd(qmd, w) && ++depth_ < 64) {
+@@ -3202,7 +3647,7 @@ struct Words {
+         bool any = src != nullptr;
+         for (u32 i = 0; i < N; ++i) {
+             if (const auto it = s.i2m.find(qmd + i * 4); it != s.i2m.end()) {
+-                w[i] = it->second;
++                w[i] = it->second.value;
+                 any = true;
+             }
+         }
+@@ -3241,6 +3686,7 @@ struct Words {
+         Put(sc, Mthd::SEND_PCAS_A, static_cast<u32>(slot >> 8));
+         Put(sc, Mthd::SEND_SIGNALING_PCAS2_B, 3); // INVALIDATE_COPY_SCHEDULE
+         x.release = true;
++        if (u32 q[64]{}; ReportStamps() && ReadQmd(qmd, q)) StampQmd(q);
+     }
+     int depth_ = 0;
+ 
+@@ -3353,11 +3799,14 @@ struct Words {
+             if ((w == 25 || w == 29 || w == 53) && !HostReleases()) v &= ~(1u << 23); // RELEASE0/1/2_ENABLE
+             if (w == 63) {
+                 WatchQmd(x.qmd.data(), "inline");
++                s.counts[InlineQmdCounted] += ((x.qmd[4] >> 14) & 0xFFFF) != 0;
++                x.qmd_stamp = true;
+                 // Its dependent QMD (the hardware's part is cleared above): as Eglantine runs it at launch.
+                 // shortcut: an inline QMD with a dependence count of its own launches at once.
+                 if (x.qmd[16] & 1) Dependent(x.qmd[15], x.qmd[16]);
+                 const NvU64 guest = ((NvU64{x.qmd_guest_a} << 32) | x.qmd_guest_b) << 8;
+                 h.inline_qmds[guest] = {x.qmd_slot, h.qmd_next};
++                if (SoleUploads() && QmdHostWrite() && guest != 0 && Mapped(guest) && Mapped(guest + 252)) x.qmd_write = guest;
+                 ++s.counts[InlineQmds];
+                 if (HostReleases()) PromiseQmd(x.qmd.data());
+                 x.gt_program = (NvU64{x.qmd[49] & 0x1FFFF} << 32) | x.qmd[48];
+@@ -3460,6 +3909,11 @@ struct Words {
+         default: ++s.counts[DropHostMethod]; return;
+         }
+         Put(sc, m, v);
++        // A host semaphore release with a timestamp (RELEASE_TIMESTAMP): the guest clock over it (STAMPS).
++        if (m == Mthd::SEM_EXECUTE && (v & 7) == 1 && ((v >> 25) & 1) && ReportStamps() && guest_clock) {
++            StampAt((NvU64{x.sem_hi & 0xFF} << 32) | (x.sem_lo & ~3u));
++            ++s.counts[SemStamps];
++        }
+     }
+ };
+ 
+@@ -3817,9 +4271,8 @@ bool CatchUp(State& s, s32 channel, std::unique_lock<std::mutex>& lk) {
+     }();
+     if (cached) {
+         Guarded(s, "L2 flush before a front read", [&](Host& h) {
+-            if (!h.Submit(h.ChannelFor(-1), std::array<NvU32, 7>{Hdr(0, NVC56F_WFI, 1), 0, Hdr(0, NVC56F_MEM_OP_A, 4), 0, 0, 0,
+-                                                                 0x10u << 27},
+-                          true)) { // L2_FLUSH_DIRTY
++            // WFI + L2_FLUSH_DIRTY before the fence (recorded: the upload store's words land with it)
++            if (!h.Submit(h.ChannelFor(-1), std::span<const NvU32>{}, true, true, false, false, 0, 0, true)) {
+                 throw Error("L2 flush before a front read", 0);
+             }
+         });
+@@ -4012,6 +4465,7 @@ void OnPresent(GPUVAddr address, u32 width, u32 height, u32 block_height_log2, u
+     State& s = Get();
+     std::scoped_lock lk{s.mutex};
+     s.present = {address, width, height, block_height_log2, size};
++    if (FrameStamps() && guest_clock) frame_clock.store(guest_clock(), std::memory_order_relaxed);
+ }
+ 
+ void OnColorTarget(GPUVAddr address, u32 width, u32 height, u32 format) {
+@@ -4028,12 +4482,76 @@ void OnColorTarget(GPUVAddr address, u32 width, u32 height, u32 format) {
+         }
+     }
+     const u64 area = u64{width} * height;
++    ++s.frame_rt_binds;
++    s.frame_rt_hash += (u64{width} * 2654435761u) ^ (u64{height} * 40503u) ^ format;
++    s.frame_rt_max = std::max(s.frame_rt_max, area);
+     if (format == 0xD6 && address != 0 && area >= s.output_area) {
+         s.output_area = area;
+         s.output_target = address;
+     }
+ }
+ 
++/// EDEN_NX2_PASSTHROUGH_WASHED=1 (measuring): each presented frame's mean luminance over the bench's crop (the
++/// screenshot's (300,150)-(980,560) of 1280x720, scaled), with the frame's events; a washed frame (> 225) after a
++/// clean stretch logs the 32 frames before it (first 8 episodes).
++void OnFrameImage(std::span<const u8> pixels, u32 width, u32 height, u32 bytes_per_pixel) {
++    static const bool on = std::getenv("EDEN_NX2_PASSTHROUGH_WASHED") != nullptr;
++    if (!on || bytes_per_pixel != 4 || width < 64 || height < 64 || pixels.size() < u64{width} * height * 4) return;
++    u64 sum = 0, n = 0;
++    for (u32 y = height * 150 / 720; y < height * 560 / 720; y += 4) {
++        for (u32 x = width * 300 / 1280; x < width * 980 / 1280; x += 4) {
++            const u8* p = pixels.data() + (u64{y} * width + x) * 4;
++            sum += (299u * p[0] + 587u * p[1] + 114u * p[2]) / 1000u;
++            ++n;
++        }
++    }
++    const u32 lum = static_cast<u32>(sum / std::max<u64>(n, 1));
++    struct Frame {
++        u64 frame, entries, maps, unmaps, kinds, vram, evicted, shadow, quiesces, hwacq, rt_binds, rt_hash, rt_max, pool, refresh;
++        s64 drain_us;
++        u32 lum, lag;
++    };
++    static std::deque<Frame> ring;
++    static Frame last{};
++    static u64 frame = 0, clean = 0;
++    static int episodes = 0;
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    if (!s.host) return;
++    Host& h = *s.host;
++    u32 lag = 0;
++    for (auto& [g, c] : h.Channels()) lag += static_cast<u32>(c.fence - Host::Passed(c));
++    const s64 drain_us = std::chrono::duration_cast<std::chrono::microseconds>(s.drain_time).count();
++    const Frame now{++frame, s.entries, s.maps, s.unmaps, h.kind_changes, h.vram_maps, h.vram_evicted, h.shadow_pages,
++                    h.quiesces, s.counts[HwAcquires], s.frame_rt_binds, s.frame_rt_hash, s.frame_rt_max, h.pool_changes,
++                    h.pool_refreshes, drain_us, lum, lag};
++    s.frame_rt_binds = s.frame_rt_hash = s.frame_rt_max = 0;
++    Frame d = now; // deltas against the previous frame
++    d.entries -= last.entries, d.maps -= last.maps, d.unmaps -= last.unmaps, d.kinds -= last.kinds, d.vram -= last.vram;
++    d.evicted -= last.evicted, d.shadow -= last.shadow, d.quiesces -= last.quiesces, d.hwacq -= last.hwacq;
++    d.drain_us -= last.drain_us;
++    d.pool -= last.pool, d.refresh -= last.refresh;
++    last = now;
++    ring.push_back(d);
++    if (ring.size() > 32) ring.pop_front();
++    if (lum <= 225) {
++        ++clean;
++        return;
++    }
++    if (clean >= 30 && episodes < 8) {
++        ++episodes;
++        LOG_WARNING(HW_GPU, "Nx2 passthrough washed: frame {} luminance {} (episode {}); the frames before it:", frame, lum,
++                    episodes);
++        for (const Frame& f : ring) {
++            LOG_WARNING(HW_GPU, "  frame {} lum {} entries {} maps {} unmaps {} kinds {} vram {} evicted {} shadow {} "
++                        "quiesces {} drain {} us hwacq {} lag {} rt binds {} hash {:016x} max {} headers changed {} refreshes {}",
++                        f.frame, f.lum, f.entries, f.maps, f.unmaps, f.kinds, f.vram, f.evicted, f.shadow, f.quiesces,
++                        f.drain_us, f.hwacq, f.lag, f.rt_binds, f.rt_hash, f.rt_max, f.pool, f.refresh);
++        }
++    }
++    clean = 0;
++}
++
+ void OnComputeMacro() {
+     State& s = Get();
+     std::scoped_lock lk{s.mutex};
+@@ -4177,8 +4695,16 @@ void SubmitEntry(s32 channel, size_t to, bool final) {
+         }
+         Guarded(s, "texture header pools", [&](Host& h) {
+             h.MarkUsed(used);
+-            h.RefreshPools(static_cast<u64>(std::chrono::steady_clock::now().time_since_epoch() /
+-                                            std::chrono::milliseconds(100)));
++            // EDEN_NX2_PASSTHROUGH_POOL_MS (measuring, default 100): how often guest header changes reach the
++            // shadow pools; 0: at every submission.
++            static const u64 pool_ms = [] {
++                const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_POOL_MS");
++                return v != nullptr ? std::strtoull(v, nullptr, 0) : 100ull;
++            }();
++            static u64 pool_seq = 0;
++            h.RefreshPools(pool_ms == 0 ? ++pool_seq
++                                        : static_cast<u64>(std::chrono::steady_clock::now().time_since_epoch() /
++                                                           std::chrono::milliseconds(pool_ms)));
+         });
+         if (!s.host) return;
+         if (!x->held) { // else the words of entries that ended inside a method run are still here
+@@ -4341,6 +4867,12 @@ void SubmitEntry(s32 channel, size_t to, bool final) {
+         h.VtFlush();
+     });
+     if (x != nullptr && s.host && done && !hold) {
++        for (const NvU64 va : x->i2m_new) { // the upload store's words of this submission: its fence
++            const auto it = s.i2m.find(va);
++            if (it != s.i2m.end() && it->second.fence == 0 && it->second.c == c) it->second.fence = c->fence;
++        }
++        x->i2m_new.clear();
++        if (SoleUploads() && s.host->UpdateFlushed()) SweepStore(s);
+         for (const auto& w : x->writes) {
+             if (w.how == 2 || s.unpredictable.contains(w.va)) {
+                 s.unpredictable.insert(w.va);
+@@ -4609,11 +5141,6 @@ void HandBack() {
+     for (auto& f : run) VideoCommon::GpuSplit::Get().DeferFunction(std::move(f));
+ }
+ 
+-namespace {
+-std::mutex uploads_mutex;
+-std::unordered_map<GPUVAddr, u32> uploads; // the words Eglantine's inline uploads wrote (SoleUpload)
+-} // namespace
+-
+ void LogStuck(GPUVAddr address) {
+     State& s = Get();
+     std::scoped_lock lk{s.mutex};
+@@ -4636,28 +5163,35 @@ void LogStuck(GPUVAddr address) {
+ 
+ bool SoleUploads() {
+     static const bool on = [] {
+-        // shortcut: opt-in (EDEN_NX2_PASSTHROUGH_BACK_UPLOADS=0): the host then launched zeroed QMDs (Xid 13), some
+-        // QMDs reach guest memory only through this thread's writes; find that writer before turning it on.
++        // On by default in sole mode (EDEN_NX2_PASSTHROUGH_BACK_UPLOADS=1: Eglantine's back writes them as before;
++        // a barrier QMD it wrote late was copied empty by the host and boots waited forever on its release).
+         const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_BACK_UPLOADS");
+-        return Sole() && v != nullptr && v[0] == '0';
++        return Sole() && (v == nullptr || v[0] != '1');
+     }();
+     return on;
+ }
+ 
+-void SoleUpload(GPUVAddr address, std::span<const u8> data) {
+-    std::scoped_lock lk{uploads_mutex};
++bool SoleUpload(GPUVAddr address, std::span<const u8> data) {
++    if (!SoleUploads()) return false;
++    std::scoped_lock lk{back_words_mutex};
++    if (back_words.size() >= (1u << 18)) back_words.clear(); // shortcut: a host that never lands; readers see memory
+     for (size_t i = 0; i + 4 <= data.size(); i += 4) {
+         u32 word;
+         std::memcpy(&word, data.data() + i, 4);
+-        uploads[address + i] = word;
++        back_words[address + i] = word;
+     }
++    return true; // the host writes it in stream order
++}
++
++bool SoleInlineQmd(GPUVAddr address, std::span<const u8> qmd) {
++    return QmdHostWrite() && SoleUpload(address, qmd);
+ }
+ 
+ void SolePatch(GPUVAddr address, u32* words, size_t count) {
+-    std::scoped_lock lk{uploads_mutex};
+-    if (uploads.empty()) return;
++    std::scoped_lock lk{back_words_mutex};
++    if (back_words.empty()) return;
+     for (size_t i = 0; i < count; ++i) {
+-        if (const auto it = uploads.find(address + i * 4); it != uploads.end()) words[i] = it->second;
++        if (const auto it = back_words.find(address + i * 4); it != back_words.end()) words[i] = it->second;
+     }
+ }
+ 
+@@ -4692,6 +5226,7 @@ void Shutdown() {
+     State& s = Get();
+     s.poller_stop = true;
+     if (s.poller.joinable()) s.poller.join();
++    if (s.pool_scanner.joinable()) s.pool_scanner.join();
+     std::scoped_lock lk{s.mutex};
+     for (auto& a : s.armed) {
+         for (auto& f : a.done) f();
+@@ -4733,6 +5268,7 @@ void OnStep(s32) {}
+ void OnPresent(GPUVAddr, u32, u32, u32, u64) {}
+ void OnDescriptorRead(GPUVAddr) {}
+ void OnColorTarget(GPUVAddr, u32, u32, u32) {}
++void OnFrameImage(std::span<const u8>, u32, u32, u32) {}
+ void OnComputeMacro() {}
+ void OnComputeMacroEmit(u32, u32) {}
+ void Shutdown() {}
+@@ -4761,7 +5297,12 @@ bool SoleUploads() {
+     return false;
+ }
+ void LogStuck(GPUVAddr) {}
+-void SoleUpload(GPUVAddr, std::span<const u8>) {}
++bool SoleUpload(GPUVAddr, std::span<const u8>) {
++    return false;
++}
++bool SoleInlineQmd(GPUVAddr, std::span<const u8>) {
++    return false;
++}
+ void SolePatch(GPUVAddr, u32*, size_t) {}
+ void DeferToBack(std::function<void()> f) {
+     f();
+diff --git a/src/video_core/nx2_passthrough.h b/src/video_core/nx2_passthrough.h
+index c5323ab9a..6247381dd 100644
+--- a/src/video_core/nx2_passthrough.h
++++ b/src/video_core/nx2_passthrough.h
+@@ -69,6 +69,8 @@ void OnComputeMacroEmit(u32 method, u32 value);
+ /// The guest set colour target format `format` at `address` (width x height), from the 3D front (macros
+ /// included): the largest sRGB A8B8G8R8 one is the output EDEN_NX2_PASSTHROUGH_SNAP address 0 reads.
+ void OnColorTarget(GPUVAddr address, u32 width, u32 height, u32 format);
++/// The presented frame as the present de-tiled it (EDEN_NX2_PASSTHROUGH_WASHED=1: washed-out frames logged).
++void OnFrameImage(std::span<const u8> pixels, u32 width, u32 height, u32 bytes_per_pixel);
+ 
+ /// Eglantine's texture cache read a new or changed descriptor at `address` (any thread): the textures the
+ /// game samples, which the passthrough's ASTC transcoding decodes first.
+@@ -134,12 +136,16 @@ struct GpuAstc {
+ void SetGpuAstc(GpuAstc gpu_astc);
+ /// Sole mode: the guest GPU clock Eglantine's own reports carry (GPU::GetTicks), for the host's report timestamps.
+ void SetGuestClock(std::function<u64()> clock);
+-/// Sole mode, EDEN_NX2_PASSTHROUGH_BACK_UPLOADS=0 (experimental): Eglantine's inline uploads are kept here instead of in guest
+-/// memory, which the host GPU writes in stream order; Eglantine's own reads of them patch their words from here.
++/// Sole mode, EDEN_NX2_PASSTHROUGH_BACK_UPLOADS=0 (upload store): Eglantine does not write small inline uploads and
++/// inline QMDs into guest memory (the host GPU writes them in stream order); its readers of guest memory lay the
++/// stream's words over what they read (SolePatch) until memory holds them.
+ bool SoleUploads();
+ /// Sole mode: logs the host channels' progress and the host's view of `address` (a wait that lasts).
+ void LogStuck(GPUVAddr address);
+-void SoleUpload(GPUVAddr address, std::span<const u8> data);
++/// An inline upload Eglantine's engine would write: true when the host writes it instead (upload store on).
++bool SoleUpload(GPUVAddr address, std::span<const u8> data);
++/// The same for an inline QMD at its guest address.
++bool SoleInlineQmd(GPUVAddr address, std::span<const u8> qmd);
+ void SolePatch(GPUVAddr address, u32* words, size_t count);
+ /// Sole mode: held around the GpuAstc batches and the presenter's use of the Vulkan scheduler (a present can
+ /// run on the GPU front: a guest syncpoint action, while the batches run on the back).
+diff --git a/src/video_core/renderer_vulkan/present/layer.cpp b/src/video_core/renderer_vulkan/present/layer.cpp
+index ccf3bed97..d5f02aee5 100644
+--- a/src/video_core/renderer_vulkan/present/layer.cpp
++++ b/src/video_core/renderer_vulkan/present/layer.cpp
+@@ -8,6 +8,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <variant>
++#include "video_core/nx2_passthrough.h"
+ #include "video_core/present.h"
+ #include "video_core/renderer_vulkan/present/anti_alias_pass.h"
+ /* X11 defines */
+@@ -362,6 +363,8 @@ void Layer::UpdateRawImage(const Tegra::FramebufferConfig& framebuffer, size_t i
+         Tegra::Texture::UnswizzleTexture(
+             mapped_span.subspan(image_offset, linear_size), std::span(host_ptr, tiled_size),
+             bytes_per_pixel, framebuffer.width, framebuffer.height, 1, block_height_log2, 0, 1, framebuffer.native_tiling);
++        Tegra::Nx2Passthrough::OnFrameImage(mapped_span.subspan(image_offset, linear_size), framebuffer.width,
++                                            framebuffer.height, bytes_per_pixel);
+         buffer.Flush();  // Ensure host writes are visible before the GPU copy.
+     }
+ 
+-- 
+2.56.0
+

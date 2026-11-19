@@ -6,7 +6,7 @@ import os, shutil, signal, subprocess, sys, time
 
 T = os.path.dirname(os.path.abspath(__file__))
 BIN = os.environ.get("RUN_BIN", "/home/main/src/eglantine/.claude/worktrees/perf/build/bin/eglantine")
-LOG = "/home/main/.config/uscl/uscl/switch/data/eglantine/log/eden_log.txt"
+LOG = os.environ.get("USCL_SWITCH_PROFILE", "/home/main/.local/share/uscl/eglantine-test") + "/data/eglantine/log/eden_log.txt"
 
 def stuck_note(pid):
     """The watchdog's verdict for this emulator (launch.py), or ''."""

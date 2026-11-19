@@ -2,7 +2,7 @@
 # mkw.sh <label> <eglantine binary>: boot MKW (launch.py, watchdog on), run the race bench, stop it,
 # keep the log as run-<label>.log and count garbage-command errors in it.
 T=$(dirname "$(readlink -f "$0")")
-L=/home/main/.config/uscl/uscl/switch/data/eglantine/log/eden_log.txt
+L=${USCL_SWITCH_PROFILE:-/home/main/.local/share/uscl/eglantine-test}/data/eglantine/log/eden_log.txt
 python3 -I "$T/launch.py" "$2" >/dev/null 2>&1 &
 pid=$!
 sleep 20

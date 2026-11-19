@@ -3,7 +3,8 @@
 usage: launch.py [eglantine binary]"""
 import ctypes, os, sys
 
-P = "/home/main/.config/uscl/uscl/switch"
+# Bench profile: a copy of the user's config, keys and saves, so runs never touch the real setup (AGENTS.md).
+P = os.environ.get("USCL_SWITCH_PROFILE", "/home/main/.local/share/uscl/eglantine-test")
 GAME = os.environ["USCL_GAME"]  # the game executable (exefs/main) to boot
 binary = sys.argv[1] if len(sys.argv) > 1 else "/home/main/src/eglantine/build-uscl/bin/eglantine"
 env = dict(os.environ, XDG_CONFIG_HOME=P + "/config", XDG_DATA_HOME=P + "/data", XDG_CACHE_HOME=P + "/cache",
