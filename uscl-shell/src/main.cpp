@@ -375,7 +375,7 @@ namespace
 				      Online::bridgeSession("uscl-bridge: looking for a friend's USCL session").isEmpty(), "bridge joins, legacy output and waiting messages");
 				const QString target = root.filePath("linked-library");
 				QDir().mkpath(target);
-				QFile::copy(kart, target + "/Kart.NSP");
+				QFile::copy(kart, target + "/Linked Kart [0100000000006000].NSP");
 #ifdef _WIN32
 				QProcess junction;
 				junction.start("cmd.exe", {"/c", "mklink", "/J", QDir::toNativeSeparators(root.filePath("games/library-link")), QDir::toNativeSeparators(target)});
@@ -385,7 +385,8 @@ namespace
 				check(QFile::link(root.filePath("games"), target + "/cycle"), "linked library cycle fixture");
 #endif
 				const auto linked = GameModel::findGames(QUrl::fromLocalFile(root.filePath("games/library-link")).toString());
-				check(!linked.isEmpty(), "game scan follows library links and accepts local file URLs");
+				check(linked.contains("0100000000006000"), "game scan accepts local file URLs");
+				check(GameModel::findGames(root.filePath("games")).contains("0100000000006000"), "parent scan discovers games inside child junctions without following cycles forever");
 				QDir().rmdir(root.filePath("games/library-link"));
 				QFile::remove(root.filePath("games/library-link"));
 				const auto oldAppData = qgetenv("APPDATA");
