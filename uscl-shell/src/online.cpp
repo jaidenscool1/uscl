@@ -447,6 +447,13 @@ bool Online::setup(const QString& name)
 
 // ---- sessions ----
 
+QStringList Online::bridgeSession(const QString& line)
+{
+	static const QRegularExpression re(R"(^uscl-bridge: session (\d+)(?: code [A-Za-z0-9]+)? \((hosting|joined)\))");
+	const auto match = re.match(line);
+	return match.hasMatch() ? QStringList{match.captured(1), match.captured(2)} : QStringList();
+}
+
 void Online::setState(const QString& state, const QString& message)
 {
 	m_state = state;
@@ -487,11 +494,10 @@ bool Online::start(service s, const QString& tool, const QStringList& args, cons
 					emit notice(tr("%1 tried to save impossible stats. They were refused.").arg(m.captured(1)));
 				if (s != bridge)
 					continue;
-				static const QRegularExpression re(R"(session (\d+) \((hosting|joined)\))");
-				if (const auto m = re.match(line); m.hasMatch())
+				if (const auto session = bridgeSession(line); !session.isEmpty())
 				{
-					m_session = m.captured(1);
-					m_state = m.captured(2);
+					m_session = session[0];
+					m_state = session[1];
 					m_message.clear();
 					emit stateChanged();
 				}

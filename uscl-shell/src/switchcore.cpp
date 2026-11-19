@@ -10,6 +10,8 @@
 #include <QJsonObject>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QSet>
+#include <QUrl>
 #include <QStandardPaths>
 #include <QSettings>
 #include <QProcess>
@@ -167,6 +169,54 @@ namespace
 		return best;
 	}
 
+	bool usableProdKeys(const QString& path)
+	{
+		QFile file(path);
+		if (!file.open(QIODevice::ReadOnly) || file.size() > 1024 * 1024) return false;
+		static const QRegularExpression re(R"((?m)^\s*(?:master_key_[0-9a-fA-F]{2}|header_key|key_area_key_[a-z]+_[0-9a-fA-F]{2}|titlekek_[0-9a-fA-F]{2})\s*=\s*([0-9a-fA-F]{32}|[0-9a-fA-F]{64})\s*$)");
+		for (auto it = re.globalMatch(QString::fromLatin1(file.readAll())); it.hasNext();)
+		{
+			const auto value = it.next().captured(1);
+			if (value.count('0') != value.size()) return true;
+		}
+		return false;
+	}
+
+	bool mergeTitleKeys(const QStringList& sources, const QString& destination, bool& changed)
+	{
+		QMap<QString, QString> entries;
+		static const QRegularExpression re(R"((?m)^\s*([0-9a-fA-F]{32})\s*=\s*([0-9a-fA-F]{32})\s*$)");
+		QFile existing(destination);
+		if (existing.exists() && !existing.open(QIODevice::ReadOnly)) return false;
+		const QByteArray original = existing.isOpen() ? existing.readAll() : QByteArray();
+		existing.close();
+		auto collect = [&](const QByteArray& text) {
+			for (auto it = re.globalMatch(QString::fromLatin1(text)); it.hasNext();)
+			{
+				const auto match = it.next();
+				if (match.captured(2).count('0') != 32)
+					if (!entries.contains(match.captured(1).toLower()))
+						entries[match.captured(1).toLower()] = match.captured(2).toLower();
+			}
+		};
+		collect(original);
+		const auto before = entries;
+		for (const QString& source : sources)
+		{
+			QFile file(source);
+			if (file.open(QIODevice::ReadOnly) && file.size() <= 16 * 1024 * 1024) collect(file.readAll());
+		}
+		if (before == entries) return true;
+		QByteArray text;
+		for (auto it = entries.cbegin(); it != entries.cend(); ++it)
+			text += it.key().toLatin1() + " = " + it.value().toLatin1() + '\n';
+		QSaveFile output(destination);
+		if (!QDir().mkpath(QFileInfo(destination).absolutePath()) || !output.open(QIODevice::WriteOnly) ||
+		    output.write(text) != text.size() || !output.commit()) return false;
+		changed = true;
+		return true;
+	}
+
 	QVersionNumber versionInName(const QString& name)
 	{
 		static const QRegularExpression re("(\\d{1,2})\\.(\\d{1,2})\\.(\\d{1,2})");
@@ -175,10 +225,14 @@ namespace
 	}
 
 	// prod.keys / title.keys and system software (a folder of .nca files, or a firmware .zip) under dir
-	void collectConsoleFiles(const QString& dir, int depth, QStringList& keys, QStringList& titles, QStringList& firmware, const QString& skip)
+	void collectConsoleFiles(const QString& dir, int depth, QStringList& keys, QStringList& titles, QStringList& firmware, const QString& skip, QSet<QString>& visited)
 	{
-		if (QDir(dir).absolutePath().startsWith(QDir(skip).absolutePath()))
+		const QString canonical = QFileInfo(dir).canonicalFilePath();
+		const QString excluded = QFileInfo(skip).canonicalFilePath();
+		if (canonical.isEmpty() || visited.contains(canonical) ||
+		    (!excluded.isEmpty() && (canonical == excluded || canonical.startsWith(excluded + '/'))))
 			return;
+		visited.insert(canonical);
 		const QDir d(dir);
 		if (QFileInfo(d.filePath("prod.keys")).isFile() && !keys.contains(d.filePath("prod.keys")))
 			keys << d.filePath("prod.keys");
@@ -190,8 +244,8 @@ namespace
 			if (!firmware.contains(zip.absoluteFilePath()))
 				firmware << zip.absoluteFilePath();
 		if (depth > 0)
-			for (const QFileInfo& sub : d.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks))
-				collectConsoleFiles(sub.absoluteFilePath(), depth - 1, keys, titles, firmware, skip);
+			for (const QFileInfo& sub : d.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot))
+				collectConsoleFiles(sub.absoluteFilePath(), depth - 1, keys, titles, firmware, skip, visited);
 	}
 
 	// Unpacks a firmware .zip with the system's own tools (Windows 10+ ships tar, which reads zip)
@@ -557,22 +611,30 @@ QVariantMap SwitchCore::findConsoleFiles(const QStringList& folders)
 {
 	QStringList keys, titles, firmware;
 	const QString home = QDir::homePath(), skip = profileDir();
-	for (const QString& dir : folders)
-		collectConsoleFiles(dir, 8, keys, titles, firmware, skip);
-	if (folders.isEmpty())
-		for (const auto& [dir, depth] : {std::pair{home + "/Downloads", 6}, {home + "/Desktop", 4}, {home + "/Documents", 4}, {home, 1},
-		                                 {home + "/.var/app", 5}})
-			collectConsoleFiles(dir, depth, keys, titles, firmware, skip);
-	// other Switch emulators keep keys in <data>/<name>/keys and system software in <data>/<name>/nand/system/Contents/registered
+	QSet<QString> visited;
+	for (const QString& folder : folders)
+	{
+		const QUrl url(folder);
+		collectConsoleFiles(url.isLocalFile() ? url.toLocalFile() : folder, 8, keys, titles, firmware, skip, visited);
+	}
+	// Selected games folders supplement the normal search; keys often live on another drive.
+	for (const auto location : {QStandardPaths::DownloadLocation, QStandardPaths::DesktopLocation, QStandardPaths::DocumentsLocation})
+		for (const QString& dir : QStandardPaths::standardLocations(location))
+			collectConsoleFiles(dir, 6, keys, titles, firmware, skip, visited);
+	for (const auto& [dir, depth] : {std::pair{home + "/Downloads", 6}, {home + "/Desktop", 4}, {home + "/Documents", 4},
+	                                 {home + "/.var/app", 5}})
+		collectConsoleFiles(dir, depth, keys, titles, firmware, skip, visited);
+	// Other emulators' profiles can be outside the home directory on Windows.
 	for (const QString& base : {home + "/.local/share", home + "/.config", qEnvironmentVariable("APPDATA"), qEnvironmentVariable("LOCALAPPDATA")})
 		for (const char* name : {"eden", "yuzu", "suyu", "sudachi", "citron", "torzu", "Ryujinx", "eglantine"})
-			if (!base.isEmpty() && folders.isEmpty())
-				collectConsoleFiles(base + '/' + name, 4, keys, titles, firmware, skip);
+			if (!base.isEmpty())
+				collectConsoleFiles(base + '/' + name, 4, keys, titles, firmware, skip, visited);
+	collectConsoleFiles(home, 1, keys, titles, firmware, skip, visited);
 
 	QString bestKeys;
 	int master = -1;
 	for (const QString& k : keys)
-		if (const int m = highestMasterKey(k); m > master)
+		if (const int m = highestMasterKey(k); usableProdKeys(k) && (bestKeys.isEmpty() || m > master))
 			master = m, bestKeys = k;
 	QString titleKeys = titles.contains(QFileInfo(bestKeys).absolutePath() + "/title.keys") ? QFileInfo(bestKeys).absolutePath() + "/title.keys"
 	                                                                                        : titles.value(0);
@@ -595,7 +657,7 @@ QVariantMap SwitchCore::findConsoleFiles(const QStringList& folders)
 		if (better)
 			bestFirmware = f, best = v;
 	}
-	return {{"keys", bestKeys}, {"master", master}, {"titleKeys", titleKeys},
+	return {{"keys", bestKeys}, {"master", master}, {"titleKeys", titleKeys}, {"titleKeyFiles", titles},
 	        {"firmware", bestFirmware}, {"version", best.isNull() ? QString() : best.toString()}, {"skipped", skipped}};
 }
 
@@ -619,15 +681,18 @@ QString SwitchCore::installConsoleFiles(const QVariantMap& found, QString* error
 	for (const QString& core : {dataDir(), profileDir() + "data/eglantine/"})
 	{
 		const QVariantMap have = coreFiles(core);
-		const bool newKeys = found.value("master").toInt() >= 0 && found.value("master").toInt() > have.value("master").toInt();
+		const bool newKeys = usableProdKeys(found.value("keys").toString()) &&
+		    (!usableProdKeys(core + "keys/prod.keys") || found.value("master").toInt() > have.value("master").toInt());
 		if (newKeys)
 		{
 			if (!copyFile(found.value("keys").toString(), core + "keys/prod.keys"))
 				return fail(QCoreApplication::translate("SwitchCore", "Couldn't save the console keys."));
 			keys = true;
 		}
-		if (const QString t = found.value("titleKeys").toString(); !t.isEmpty() && (newKeys || !have.value("titleKeys").toBool()) && copyFile(t, core + "keys/title.keys"))
-			titles = true;
+		QStringList titleSources = found.value("titleKeyFiles").toStringList();
+		if (titleSources.isEmpty() && !found.value("titleKeys").toString().isEmpty()) titleSources << found.value("titleKeys").toString();
+		if (!mergeTitleKeys(titleSources, core + "keys/title.keys", titles))
+			return fail(QCoreApplication::translate("SwitchCore", "Couldn't save the title keys."));
 		// installed system software of unknown version (put there by hand or by the emulator) is kept: it may be newer
 		const QVersionNumber installed = QVersionNumber::fromString(have.value("version").toString());
 		if (firmware.isEmpty() || (have.value("firmware").toBool() && (installed.isNull() || version.isNull() || version <= installed)))

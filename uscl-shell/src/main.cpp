@@ -368,6 +368,45 @@ namespace
 				qunsetenv("USCL_SWITCH2_CORE");
 				QDir(root.filePath("games/ns2")).removeRecursively(); // the scans below count the Switch 1 fixtures only
 			}
+			{
+				check(Online::bridgeSession("uscl-bridge: session 12345 code ABC234 (hosting); give friends this number or code") == QStringList{"12345", "hosting"}, "current bridge hosting starts the waiting game");
+				check(Online::bridgeSession("uscl-bridge: session 12345 code ABC234 (joined);") == QStringList{"12345", "joined"} &&
+				      Online::bridgeSession("uscl-bridge: session 12345 (hosting)") == QStringList{"12345", "hosting"} &&
+				      Online::bridgeSession("uscl-bridge: looking for a friend's USCL session").isEmpty(), "bridge joins, legacy output and waiting messages");
+				const QString target = root.filePath("linked-library");
+				QDir().mkpath(target);
+				QFile::copy(kart, target + "/Kart.NSP");
+#ifdef _WIN32
+				QProcess junction;
+				junction.start("cmd.exe", {"/c", "mklink", "/J", QDir::toNativeSeparators(root.filePath("games/library-link")), QDir::toNativeSeparators(target)});
+				check(junction.waitForFinished() && junction.exitCode() == 0, "Windows library junction fixture");
+#else
+				check(QFile::link(target, root.filePath("games/library-link")), "linked library fixture");
+				check(QFile::link(root.filePath("games"), target + "/cycle"), "linked library cycle fixture");
+#endif
+				const auto linked = GameModel::findGames(QUrl::fromLocalFile(root.filePath("games/library-link")).toString());
+				check(!linked.isEmpty(), "game scan follows library links and accepts local file URLs");
+				QDir().rmdir(root.filePath("games/library-link"));
+				QFile::remove(root.filePath("games/library-link"));
+				const auto oldAppData = qgetenv("APPDATA");
+				const bool hadAppData = qEnvironmentVariableIsSet("APPDATA");
+				qputenv("APPDATA", root.filePath("games/key-discovery").toUtf8());
+				const QString prod = write("key-discovery/eden/keys/prod.keys", "header_key = " + QByteArray(64, '1') + "\r\n");
+				const QString title = write("key-discovery/eden/keys/title.keys", QByteArray(32, '1') + " = " + QByteArray(32, '2') + "\r\n");
+				const auto discovered = SwitchCore::findConsoleFiles({root.filePath("games/empty-game-drive")});
+				check(discovered.value("titleKeyFiles").toStringList().contains(title), "selected games folder also searches emulator profiles");
+				QString error;
+				SwitchCore::installConsoleFiles({{"keys", prod}, {"master", -1}, {"titleKeys", title}}, &error);
+				check(error.isEmpty() && QFileInfo::exists(SwitchCore::dataDir() + "keys/prod.keys"), "automatic install accepts header keys without master keys");
+				write("key-discovery/eden/keys/title.keys", QByteArray(32, '3') + " = " + QByteArray(32, '4') + "\n");
+				SwitchCore::installConsoleFiles({{"keys", prod}, {"master", -1}, {"titleKeys", title}}, &error);
+				QFile installed(SwitchCore::dataDir() + "keys/title.keys");
+				check(error.isEmpty() && installed.open(QIODevice::ReadOnly) && installed.readAll().count('=') == 2, "same-generation title keys refresh without losing previous games");
+				installed.close();
+				for (const QString& core : {SwitchCore::dataDir(), SwitchCore::profileDir() + "data/eglantine/"}) QDir(core + "keys").removeRecursively();
+				if (hadAppData) qputenv("APPDATA", oldAppData); else qunsetenv("APPDATA");
+				QDir(root.filePath("games/key-discovery")).removeRecursively();
+			}
 			const auto args = SwitchCore::arguments(kart, true, "A@:B");
 			check(args.contains("--game") && args.last() == kart && args.contains("A__B@127.0.0.1:24872") &&
 			      !SwitchCore::arguments(kart, false, "Player").contains("--multiplayer"), "Switch launch and room arguments");
@@ -491,8 +530,25 @@ namespace
 					loop.quit();
 				});
 				QTimer::singleShot(3000, &loop, &QEventLoop::quit);
-				check(launcher.startGame(homebrew, "Homebrew", true, "Switch", "TestPlayer"), "Switch core process starts");
+				const auto oldTools = qgetenv("USCL_TOOLS"), oldRoom = qgetenv("USCL_SWITCH_ROOM");
+				const bool hadTools = qEnvironmentVariableIsSet("USCL_TOOLS"), hadRoom = qEnvironmentVariableIsSet("USCL_SWITCH_ROOM");
+				const QString bridge = write("uscl-bridge", "#!/bin/sh\nprintf 'uscl-bridge: session 12345 code ' \nsleep 0.05\nprintf 'ABC234 (hosting); give friends this number or code\\n'\nread line\n");
+				const QString room = write("fake-room", "#!/bin/sh\nread line\n");
+				for (const QString& executable : {bridge, room}) QFile::setPermissions(executable, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+				qputenv("USCL_TOOLS", QFileInfo(bridge).absolutePath().toUtf8());
+				qputenv("USCL_SWITCH_ROOM", room.toUtf8());
+				Online session;
+				bool sessionLaunched = false;
+				QObject::connect(&session, &Online::stateChanged, &loop, [&] {
+					if (session.state() == "hosting" && !sessionLaunched)
+						sessionLaunched = launcher.startGame(homebrew, "Homebrew", true, "Switch", "TestPlayer");
+				});
+				session.host("0100152000022000", "Mario Kart fixture", homebrew, "Switch");
 				loop.exec();
+				check(sessionLaunched && session.state() == "hosting", "current bridge output transitions to hosting and launches the emulator");
+				session.stop();
+				if (hadTools) qputenv("USCL_TOOLS", oldTools); else qunsetenv("USCL_TOOLS");
+				if (hadRoom) qputenv("USCL_SWITCH_ROOM", oldRoom); else qunsetenv("USCL_SWITCH_ROOM");
 				check(completed && !launcher.running() && !launcher.starting(), "Switch core receives profile, room arguments and loading palette; process state resets");
 				// Other native launch routes use the same child-only theme contract without real emulators.
 				for (const auto& route : {qMakePair(QString("Wii"), QByteArray("USCL_DOLPHIN")),

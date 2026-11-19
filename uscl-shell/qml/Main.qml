@@ -1120,7 +1120,8 @@ Window {
                 onlineGame = null
                 if (online.state === "off") ownSession = false
                 if (online.state === "off" && g.console === "Switch") {
-                    dialog.show(qsTr("Online Session"), online.message || qsTr("Couldn't start the Switch session. Try hosting again."))
+                    dialog.show(qsTr("Online Session"), online.message || qsTr("Couldn't start the Switch session. Try hosting again."),
+                                { buttons: [{ title: qsTr("Start Offline"), action: function() { launchGame(g) } }, { title: qsTr("Cancel") }] })
                     return
                 }
                 launchGame(g)

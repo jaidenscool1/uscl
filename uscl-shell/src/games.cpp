@@ -16,6 +16,7 @@
 #include <QStandardPaths>
 #include <QStorageInfo>
 #include <QSaveFile>
+#include <QSet>
 #include <QThread>
 #include <QUrl>
 #include <QtEndian>
@@ -423,8 +424,12 @@ QVariantMap GameModel::get(int row) const
 
 namespace
 {
-	void walk(const QString& dir, int depth, QMap<QString, QString>& out, int& encrypted, int& archives)
+	void walk(const QString& dir, int depth, QMap<QString, QString>& out, int& encrypted, int& archives, QSet<QString>& visited)
 	{
+		const QString canonical = QFileInfo(dir).canonicalFilePath();
+		if (canonical.isEmpty() || visited.contains(canonical))
+			return;
+		visited.insert(canonical);
 		const auto serialOf = [](const QString& sfo) {
 			QFile f(sfo);
 			return f.open(QIODevice::ReadOnly) ? GameModel::readSfo(f.readAll()).value("TITLE_ID") : QString();
@@ -479,8 +484,8 @@ namespace
 		}
 		if (depth > 0)
 		{
-			for (const QFileInfo& sub : d.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks))
-				walk(sub.absoluteFilePath(), depth - 1, out, encrypted, archives);
+			for (const QFileInfo& sub : d.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot))
+				walk(sub.absoluteFilePath(), depth - 1, out, encrypted, archives, visited);
 		}
 	}
 }
@@ -627,7 +632,9 @@ QMap<QString, QString> GameModel::findGames(const QString& path, int* encrypted,
 {
 	QMap<QString, QString> out;
 	int scrambled = 0, packed = 0;
-	walk(QDir::cleanPath(path), 8, out, scrambled, packed);
+	QSet<QString> visited;
+	const QUrl url(path);
+	walk(QDir::cleanPath(url.isLocalFile() ? url.toLocalFile() : path), 8, out, scrambled, packed, visited);
 	if (encrypted)
 		*encrypted = scrambled;
 	if (archives)
@@ -760,6 +767,10 @@ void GameModel::scanFolder(const QString& path)
 QVariantList GameModel::roots()
 {
 	QVariantList out{QVariantMap{{"name", tr("Home")}, {"path", QDir::homePath()}}};
+	for (const auto location : {QStandardPaths::DownloadLocation, QStandardPaths::DesktopLocation, QStandardPaths::DocumentsLocation})
+		for (const QString& path : QStandardPaths::standardLocations(location))
+			if (QFileInfo(path).isDir())
+				out << QVariantMap{{"name", QStandardPaths::displayName(location)}, {"path", path}};
 	for (const QStorageInfo& v : QStorageInfo::mountedVolumes())
 	{
 		const QString root = v.rootPath();
