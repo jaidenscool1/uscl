@@ -1,5 +1,14 @@
 # USCL Changelog
 
+## 0.5.4-alpha — 2026-11-18
+
+- Fix session readiness parsing after the bridge added short session codes; Switch games such as Mario Kart 8 Deluxe can launch after hosting connects.
+- Offer Start Offline when a Switch session fails.
+- Search Windows Known Folders, including redirected Downloads/Desktop/Documents, and keep searching other emulator profiles after Add Games.
+- Follow linked game folders and Windows junctions with cycle detection; expose Known Folders in Add Games.
+- Discover valid derived console-key dumps and merge newly found title keys without discarding existing game keys.
+- Keep the v0.5.3 native core baseline and standalone Eden room server. No new two-PC gameplay result is claimed.
+
 ## 0.5.3-alpha — 2026-11-18
 
 Console menus, original theme audio and safer firmware installation. The Linux

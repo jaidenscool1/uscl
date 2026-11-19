@@ -55,8 +55,8 @@ under the emulator’s control. Standalone launches retain the upstream appearan
 
 ## USCL release integration
 
-The v0.5.3-alpha release line integrates the reviewed installer/library work and
-console themes. Use the [release page](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.3-alpha)
+The v0.5.4-alpha release line integrates the reviewed installer/library work and
+console themes. Use the [release page](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.4-alpha)
 for published assets and the [fork matrix](../README.md#fork-maintenance) for build pins.
 This does not update the upstream base or establish new gameplay/online support
 for this fork. Patch changes require rebuilding the corresponding core; updating
@@ -65,10 +65,14 @@ the shell alone does not update a separately installed emulator.
 Switch 2 CPU/GPU translation, game evidence and pending work are tracked in
 [SWITCH2-PROGRESS.md](../docs/SWITCH2-PROGRESS.md).
 
-For v0.5.3-alpha, Linux retains the signed v0.5.1-alpha native core and therefore
+For v0.5.4-alpha, Linux retains the signed v0.5.1-alpha native core and therefore
 uses the shell launch theme without the new native loading colors. Windows builds
-the loading-color patch from the release manifest. See [packaging provenance](../packaging/README.md#v053-alpha-linux-provenance).
+the loading-color patch from the release manifest. See [packaging provenance](../packaging/README.md#v054-alpha-linux-provenance).
 
-The v0.5.3-alpha AppImage adds a newly built `eden-room` from the pinned Eden
+The v0.5.4-alpha AppImage adds a newly built `eden-room` from the pinned Eden
 source to the retained frontend baseline. PR #21 enables the standalone target and
 invalidates the Windows Eden cache so both installers include the room server.
+
+The 0.5.4 shell fixes session-code readiness parsing, redirected Windows folder discovery,
+linked game libraries and automatic title-key refresh. For Mario Kart 8 Deluxe multiplayer,
+use Wireless Play with matching game updates and DLC after the USCL session connects.

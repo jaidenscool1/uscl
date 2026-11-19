@@ -116,8 +116,8 @@ Alternatives: MSYS2 MinGW (`release-mingw-x86_64`). Linux and macOS: melonDS's `
 
 ## USCL release integration
 
-The v0.5.3-alpha release line integrates the reviewed installer/library work and
-console themes. Use the [release page](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.3-alpha)
+The v0.5.4-alpha release line integrates the reviewed installer/library work and
+console themes. Use the [release page](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.4-alpha)
 for published assets and the [fork matrix](../README.md#fork-maintenance) for build pins.
 This does not update the upstream base or establish new gameplay/online support
 for this fork. Patch changes require rebuilding the corresponding core; updating

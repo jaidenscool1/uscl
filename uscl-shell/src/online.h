@@ -66,6 +66,8 @@ public:
 	Q_INVOKABLE void ban(const QString& id, const QString& name);
 	Q_INVOKABLE void unban(const QString& id);
 
+	static QStringList bridgeSession(const QString& line);
+
 	// Exposed for the self-test
 	static QString sanitizeName(const QString& persona);
 	static QString personaFromVdf(const QByteArray& vdf);
