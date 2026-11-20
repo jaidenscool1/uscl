@@ -1,0 +1,69 @@
+From 0ffc5efdda64ad409cb478497096ca3a2c84502f Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 17:50:31 -0700
+Subject: [PATCH] nx2: passthrough backend: upload store: Eglantine keeps
+ writing uploads into GPU-only regions
+
+There the host GPU writes video memory Eglantine cannot read; with the store on,
+nothing wrote those uploads to guest memory any more and Eglantine's own readers
+(the 3D front's MME DMA reads) were left with stale words once they landed. The
+back's sink declines them (ranges from OnGpuOnlyRegion, under a shared lock): the
+back writes guest memory as before, the host video memory in stream order.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/nx2_passthrough.cpp | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index c53e7733e..54708f1bd 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -24,6 +24,7 @@
+ #include <cstdlib>
+ #include <memory>
+ #include <mutex>
++#include <shared_mutex>
+ #include <stdexcept>
+ #include <string>
+ #include <vector>
+@@ -2979,6 +2980,18 @@ void ScanPools(State& s, std::chrono::microseconds period) {
+ std::mutex back_words_mutex;
+ std::unordered_map<NvU64, u32> back_words;
+ 
++// GPU-only regions (OnGpuOnlyRegion), for the back's upload sink: there the host writes video memory Eglantine
++// cannot read, so Eglantine keeps writing those uploads to guest memory itself (its readers, such as the 3D
++// front's MME DMA reads, find them there; Switch Sports stopped presenting once only the host wrote them).
++std::shared_mutex gpu_only_mutex;
++std::map<NvU64, NvU64> gpu_only_ranges;
++
++bool InGpuOnly(NvU64 va) {
++    std::shared_lock lk{gpu_only_mutex};
++    const auto it = gpu_only_ranges.upper_bound(va);
++    return it != gpu_only_ranges.begin() && va < std::prev(it)->first + std::prev(it)->second;
++}
++
+ /// EDEN_NX2_PASSTHROUGH_QMD_HOSTWRITE=0 (bisecting, upload store on): Eglantine's back writes inline QMDs to guest
+ /// memory as before instead of the host.
+ bool QmdHostWrite() {
+@@ -4590,6 +4603,8 @@ void OnGpuOnlyRegion(GPUVAddr gpu_addr, u64 size) {
+     std::scoped_lock lk{s.mutex};
+     if (!Ready(s) || !Sole()) return;
+     s.host->SetGpuOnly(gpu_addr, size);
++    std::unique_lock glk{gpu_only_mutex};
++    gpu_only_ranges[gpu_addr] = size;
+ }
+ 
+ void OnGuestKind(GPUVAddr gpu_addr, u64 size, u32 kind, u32 fallback_kind) {
+@@ -5191,7 +5206,7 @@ bool SoleUploads() {
+ }
+ 
+ bool SoleUpload(GPUVAddr address, std::span<const u8> data) {
+-    if (!SoleUploads()) return false;
++    if (!SoleUploads() || InGpuOnly(address)) return false;
+     std::scoped_lock lk{back_words_mutex};
+     if (back_words.size() >= (1u << 18)) back_words.clear(); // shortcut: a host that never lands; readers see memory
+     for (size_t i = 0; i + 4 <= data.size(); i += 4) {
+-- 
+2.56.0
+
