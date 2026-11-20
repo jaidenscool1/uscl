@@ -1,0 +1,125 @@
+From d6a73e86a24cb074641a4a22488a4dc8ace4e0ed Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 13:55:19 -0700
+Subject: [PATCH] nx2: passthrough backend: sole mode wakes the GPU thread on
+ host progress
+
+Sampled with eu-stack in an MKW race (sole, async): the GPU thread was busy 38-55% of the time and spent
+most of the rest in PendingWakeSleep, the 1 ms sleep while a channel waits on an acquire, which only pushes
+and Eglantine's own releases cut short. The host GPU's releases now do: the backend's poller wakes it
+whenever any host channel passed more of its work. Doorbells for batches older than 250 us ring in sole
+mode (2 ms before: nothing else uses the GPU, and a channel resumed after an acquire is what the others wait
+for next). Transcoding workers run at nice 10, six ASTC workers in sole mode (three ASTC workers were busy
+85% each in a race, next to the game's threads).
+
+MKW race, sole async: 29.0 / 31.9 fps, 34.1 / 28.4 with six workers (27.5-28.6 before).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/nx2_passthrough.cpp | 32 +++++++++++++++++++++++++++---
+ 1 file changed, 29 insertions(+), 3 deletions(-)
+
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index b868937f6..52d909e2c 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -35,6 +35,7 @@
+ #include "common/logging.h"
+ #include "video_core/host1x/syncpoint_manager.h"
+ #include "video_core/memory_manager.h"
++#include "video_core/nx2.h"
+ #include "video_core/nx2_helper_loads.h"
+ #include "video_core/nx2_passthrough.h"
+ #include "video_core/surface.h"
+@@ -50,6 +51,7 @@
+ #include <fcntl.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
++#include <sys/resource.h>
+ #include <unistd.h>
+ 
+ #include "nvtypes.h"
+@@ -377,10 +379,20 @@ public:
+     void FlushStale() {
+         const auto now = std::chrono::steady_clock::now();
+         for (auto& [guest, c] : channels) {
+-            if (c.unflushed != 0 && now - c.oldest > std::chrono::milliseconds(2)) Ring(c);
++            // Sole mode: 250 us (the GPU is ours alone, and a channel resumed after an acquire is what the others
++            // wait for next).
++            const auto stale = Sole() ? std::chrono::microseconds(250) : std::chrono::microseconds(2000);
++            if (c.unflushed != 0 && now - c.oldest > stale) Ring(c);
+         }
+     }
+ 
++    /// Sum of every channel's passed fence: it moves whenever any channel finished more work.
++    NvU64 PassedSum() const {
++        NvU64 sum = 0;
++        for (const auto& [guest, c] : channels) sum += Passed(c);
++        return sum;
++    }
++
+     /// The last fence the channel's GPU work passed.
+     static NvU32 Passed(const Channel& c) { return *reinterpret_cast<const volatile NvU32*>(c.cpu + SEM); }
+     static bool PassedFence(const Channel& c, NvU32 fence) { return static_cast<s32>(Passed(c) - fence) >= 0; }
+@@ -1158,9 +1170,10 @@ private:
+         maps.emplace_back(p, astc_size);
+         astc_cpu = static_cast<u8*>(p);
+         GrowAstc();
+-        // EDEN_NX2_PASSTHROUGH_ASTC_THREADS (3): sole mode transcodes every header of a pool (MKW ~35k).
++        // EDEN_NX2_PASSTHROUGH_ASTC_THREADS (3; 6 in sole mode, which transcodes every header of a pool: MKW ~35k,
++        // and a course's textures waited seconds behind the backlog). The workers run at nice 10.
+         const char* t = std::getenv("EDEN_NX2_PASSTHROUGH_ASTC_THREADS");
+-        const u32 n = std::clamp<u32>(t != nullptr ? static_cast<u32>(std::strtoul(t, nullptr, 0)) : 3u, 1u, 16u);
++        const u32 n = std::clamp<u32>(t != nullptr ? static_cast<u32>(std::strtoul(t, nullptr, 0)) : (Sole() ? 6u : 3u), 1u, 16u);
+         for (u32 i = 0; i < n; ++i) astc_threads.emplace_back([this] { AstcWorker(); });
+         LOG_INFO(HW_GPU, "Nx2 passthrough: ASTC arena up to {} MiB, {} MiB chunks", astc_size >> 20, ASTC_CHUNK >> 20);
+     }
+@@ -1225,6 +1238,7 @@ private:
+     }
+ 
+     void AstcWorker() {
++        setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), 10); // background: yield to the game's threads
+         for (;;) {
+             AstcJob job;
+             {
+@@ -1362,6 +1376,7 @@ private:
+     }
+ 
+     void VtWorker() {
++        setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), 10); // background: yield to the game's threads
+         const bool native = memory_manager != nullptr && memory_manager->UsesNativeTiling();
+         std::vector<u8> lin, rgba, bc, gather;
+         for (;;) {
+@@ -2991,11 +3006,18 @@ namespace {
+ /// Sole mode: rings stale doorbells (the entry thread may be blocked on a guest wait) and runs the armed
+ /// callbacks whose fence the host GPU passed; all of them once the backend is off.
+ void Poll(State& s) {
++    NvU64 passed = 0;
+     while (!s.poller_stop.load()) {
+         std::vector<std::function<void()>> run;
++        bool progress = false;
+         {
+             std::scoped_lock lk{s.mutex};
+             if (s.host) s.host->FlushStale();
++            if (s.host) {
++                const NvU64 now = s.host->PassedSum();
++                progress = now != passed;
++                passed = now;
++            }
+             const auto due = [&](const State::Armed& a) {
+                 return !s.host || std::all_of(a.fences.begin(), a.fences.end(),
+                                               [](const auto& f) { return Host::PassedFence(*f.first, f.second); });
+@@ -3016,6 +3038,10 @@ void Poll(State& s) {
+             s.after_run += run.size();
+         }
+         for (auto& f : run) f();
++        // The GPU thread sleeps up to 1 ms while a channel waits on an acquire, woken by Eglantine's own releases;
++        // the host GPU's releases wake it here (it then polls the semaphores again; measured: most of the entry
++        // thread's waiting was that sleep).
++        if (progress) Nx2PendingWake::Wake(Nx2PendingWake::push_seq, Nx2PendingWake::ByPush);
+         if (run.empty()) std::this_thread::sleep_for(std::chrono::microseconds(200));
+     }
+ }
+-- 
+2.56.0
+

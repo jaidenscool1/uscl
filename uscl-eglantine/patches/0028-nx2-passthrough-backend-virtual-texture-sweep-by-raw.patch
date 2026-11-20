@@ -1,0 +1,150 @@
+From 091f9f488c9a6f78baa0bf90774f5b5e57b9b579 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 15:26:36 -0700
+Subject: [PATCH 28/28] nx2: passthrough backend: virtual-texture sweep by raw
+ chunk hashes
+
+The background sweep (patches/0025) looked at one level per 5 ms and unswizzled and hashed every cell of
+it: ~10 s per pass over MKW's ~2 GiB of virtual-texture arrays, so tiles the game rewrites in place stayed
+stale (dark, blocky ground) for seconds at a course's start. A swept level's raw guest bytes are now hashed
+per 64 KiB first; only the cells over changed chunks (the inverse of VtRectRanges: whole GOB columns of
+whole GOB-block rows) are unswizzled and compared. The sweep is paced by bytes hashed,
+EDEN_NX2_PASSTHROUGH_VT_SWEEP_MBS (2048: the whole set about once a second).
+
+MKW race, sole async: 69.7k level sweeps, 2.1k with changed chunks; VT workers 154 s busy in the run
+(238 s before); the race start frame's ground is textured and current.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/nx2_passthrough.cpp | 67 +++++++++++++++++++++++++++---
+ 1 file changed, 62 insertions(+), 5 deletions(-)
+
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index 8b4e104e2..6076afc0f 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -837,6 +837,7 @@ public:
+         std::vector<std::vector<const u8*>> pages;
+         std::vector<u32> page_head;
+         std::vector<u64> hash;                      // per cell: the guest bytes last transcoded (0: none)
++        std::vector<std::vector<u64>> chunk_hash;   // per layer * levels + level: its raw bytes per VT_CHUNK, last sweep
+         std::vector<u8> mapped;                     // per output page
+         std::vector<u8> queued;                     // per layer * levels + level (entry thread)
+         std::mutex mutex;                           // hash, mapped
+@@ -845,6 +846,22 @@ public:
+     };
+     static constexpr NvU64 VT_PAGE = 64ull << 10, VT_VA_LO = 1ull << 41;
+     static constexpr u32 VT_CELL = 64;
++    static constexpr NvU64 VT_CHUNK = 64ull << 10;
++
++    /// The cells (of 64x64 elements) of level `lv` whose elements lie in its layout bytes [a, b): the inverse of
++    /// VtRectRanges (whole GOB columns of whole GOB-block rows).
++    static void VtChunkCells(const VtLevel& lv, NvU64 a, NvU64 b, std::vector<u32>& cells) {
++        const u32 rows = 8u << lv.bh, gobs_x = Common::DivCeil(lv.stride_w * 16, 64u);
++        const NvU64 block = NvU64{512} << lv.bh;
++        const u32 cw = Common::DivCeil(lv.w, VT_CELL), ch = Common::DivCeil(lv.h, VT_CELL);
++        for (NvU64 k = a / block; k <= (b - 1) / block; ++k) {
++            const u32 by = static_cast<u32>(k / gobs_x), x = static_cast<u32>(k % gobs_x) * 4; // 4 elements per GOB row
++            if (x >= lv.w) continue;
++            for (u32 cy = by * rows / VT_CELL; cy <= ((by + 1) * rows - 1) / VT_CELL && cy < ch; ++cy) {
++                cells.push_back(cy * cw + x / VT_CELL);
++            }
++        }
++    }
+     std::map<NvU64, std::unique_ptr<Vt>> vts;
+ 
+     /// The per-level layout (Eglantine's swizzle parameters) of a 2D block-linear image; "" if handled, else why not.
+@@ -1021,6 +1038,7 @@ public:
+             }
+         }
+         v.hash.assign(cells, 0);
++        v.chunk_hash.resize(v.first_cell.size());
+         v.out_size = Common::AlignUp(NvU64{v.layers} * v.out_stride, VT_PAGE);
+         v.mapped.assign(v.out_size / VT_PAGE, 0);
+         v.queued.assign(v.src.size(), 0);
+@@ -1462,13 +1480,14 @@ private:
+         u32 index; // layer * levels + level
+         std::chrono::steady_clock::time_point not_before;
+         std::vector<u32> cells; // empty: every cell of the level
++        bool swept = false;     // from the sweep: only the cells over bytes changed since its last visit
+     };
+     std::map<std::pair<Vt*, u32>, std::set<u32>> vt_mapped_cells; // entry thread: cells guest maps covered
+     std::vector<std::pair<Vt*, u32>> vt_sweep;                     // every level, swept in turn (vt_mutex)
+     size_t vt_sweep_at = 0;
+     std::chrono::steady_clock::time_point vt_next_sweep{};
+ public:
+-    std::atomic<u64> vt_swept{0};
++    std::atomic<u64> vt_swept{0}, vt_sweep_hits{0};
+ private:
+     std::vector<std::pair<Vt*, u32>> vt_dirty; // entry thread: levels copies wrote in this entry
+     std::deque<VtJob> vt_jobs;
+@@ -1526,8 +1545,15 @@ private:
+                     // per 5 ms): the game rewrites tiles in memory it keeps mapped, which no map or copy announces.
+                     if (!vt_sweep.empty() && now >= vt_next_sweep) {
+                         const auto [sv, si] = vt_sweep[vt_sweep_at++ % vt_sweep.size()];
+-                        vt_next_sweep = now + std::chrono::milliseconds(5);
+-                        job = {sv, si, now, {}};
++                        // Paced by bytes hashed (EDEN_NX2_PASSTHROUGH_VT_SWEEP_MBS, 2048: MKW's ~2 GiB of arrays
++                        // about once a second; it was one level per 5 ms, ~10 s a pass, with every cell unswizzled).
++                        static const double rate = [] {
++                            const char* e = std::getenv("EDEN_NX2_PASSTHROUGH_VT_SWEEP_MBS");
++                            return std::max(1.0, e != nullptr ? std::strtod(e, nullptr) : 2048.0) * double(1 << 20);
++                        }();
++                        vt_next_sweep = now + std::chrono::nanoseconds(static_cast<s64>(
++                                                  double(sv->in[si % sv->levels].bytes) * 1e9 / rate));
++                        job = {sv, si, now, {}, true};
+                         ++vt_swept;
+                         break;
+                     }
+@@ -1557,6 +1583,36 @@ private:
+             const auto start = std::chrono::steady_clock::now();
+             const u32 layer = job.index / v.levels, l = job.index % v.levels;
+             const VtLevel& li = v.in[l];
++            if (job.swept) { // the raw bytes by chunk first: only cells over changed chunks are unswizzled
++                std::vector<u64> now((li.bytes + VT_CHUNK - 1) / VT_CHUNK);
++                for (size_t i = 0; i < now.size(); ++i) {
++                    now[i] = Common::CityHash64(reinterpret_cast<const char*>(src) + i * VT_CHUNK,
++                                                std::min<NvU64>(VT_CHUNK, li.bytes - i * VT_CHUNK));
++                }
++                bool all = false;
++                job.cells.clear();
++                {
++                    std::scoped_lock lk{v.mutex};
++                    std::vector<u64>& was = v.chunk_hash[job.index];
++                    all = was.size() != now.size();
++                    for (size_t i = 0; !all && i < now.size(); ++i) {
++                        if (now[i] != was[i]) {
++                            VtChunkCells(li, i * VT_CHUNK, std::min<NvU64>((i + 1) * VT_CHUNK, li.bytes), job.cells);
++                        }
++                    }
++                    was = std::move(now);
++                }
++                if (!all) {
++                    if (job.cells.empty()) {
++                        ++vt_jobs_done;
++                        vt_busy += (std::chrono::steady_clock::now() - start).count();
++                        continue;
++                    }
++                    std::sort(job.cells.begin(), job.cells.end());
++                    job.cells.erase(std::unique(job.cells.begin(), job.cells.end()), job.cells.end());
++                    ++vt_sweep_hits;
++                }
++            }
+             const VtLevel& lo = v.out[l];
+             const u32 cw = Common::DivCeil(li.w, VT_CELL), ch = Common::DivCeil(li.h, VT_CELL);
+             u8* const dst = v.cpu + layer * v.out_stride + lo.off;
+@@ -2581,8 +2637,9 @@ void LogStats(State& s) {
+                      s.armed.size(), h.vram_used >> 20, h.vram_maps);
+         }
+         if (!h.vts.empty()) {
+-            LOG_INFO(HW_GPU, "Nx2 passthrough VT: {} textures, {} level jobs ({} swept, {} ms), {} cells transcoded, {} unchanged, "
+-                     "{} empty, {} MiB of output mapped", h.vts.size(), h.vt_jobs_done.load(), h.vt_swept.load(),
++            LOG_INFO(HW_GPU, "Nx2 passthrough VT: {} textures, {} level jobs ({} swept, {} with changes, {} ms), {} cells "
++                     "transcoded, {} unchanged, {} empty, {} MiB of output mapped", h.vts.size(), h.vt_jobs_done.load(),
++                     h.vt_swept.load(), h.vt_sweep_hits.load(),
+                      h.vt_busy.load() / 1000000, h.vt_cells.load(), h.vt_same.load(), h.vt_zero.load(),
+                      (h.vt_mapped.load() * Host::VT_PAGE) >> 20);
+         }
+-- 
+2.56.0
+

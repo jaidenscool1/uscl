@@ -1,0 +1,736 @@
+From a81442a16044ce4e10e76c442f87b5f28a7a6f83 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 09:12:57 -0700
+Subject: [PATCH] nx2: passthrough backend: the host GPU as the only executor
+ (EDEN_NX2_PASSTHROUGH_SOLE=1)
+
+With EDEN_NX2_PASSTHROUGH_SOLE=1 (and _WORDS=1) Eglantine still parses every entry (macros, QMD
+bookkeeping, program binds) but executes nothing: the Vulkan rasterizer's draws, clears, dispatches and
+queries, the DMA engine's launches, 2D blits, compute release reductions and 3D query stamps return at
+once, and the host GPU does them all, with its own semaphore releases on. So guest memory has one writer.
+
+- Syncpoints: the puller's fence increment (and the 3D sync method, through the rasterizer) moves the
+  guest value at once and the host value when the host GPU has run the entry (armed with the fence of
+  the submission that carries it; the 3D method, which may run on the back's thread, waits for every
+  channel's submitted work). A poller thread runs them and rings stale doorbells.
+- Acquires: Ampere SEM_EXECUTE acquires suspend the channel as the other acquires do (they were checked
+  once and passed); the host's copies of acquires are dropped, since the rest of the entry reaches the
+  host only after Eglantine saw them met. An entry that waits at an acquire is submitted up to there
+  first (OnEntrySuspended), so work before it (other channels' releases) is not held back.
+- Present: the frame is read from guest memory (Layer::UpdateRawImage) once the host GPU ran what was
+  submitted (WaitHost, at most 250 ms).
+- ASTC: every header of a pool is transcoded (Eglantine's texture cache, which told which are sampled,
+  no longer binds textures): MKW ~35k textures, 4.3 GiB.
+
+MKW, SYNC mode: boot, menus and a race on the host GPU alone, no deadlock, no Xid; menu and race frames
+complete (thumbnails, HUD, track); VRAM 1.8 GiB (Vulkan idle) against 6.3 GiB next to Vulkan.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/dma_pusher.cpp                 |   2 +
+ src/video_core/engines/fermi_2d.cpp           |   4 +
+ src/video_core/engines/kepler_compute.cpp     |   4 +
+ src/video_core/engines/maxwell_3d.cpp         |   3 +
+ src/video_core/engines/maxwell_dma.cpp        |   4 +
+ src/video_core/engines/puller.cpp             |  29 +++
+ src/video_core/engines/puller.h               |   3 +
+ src/video_core/nx2_passthrough.cpp            | 217 ++++++++++++++++--
+ src/video_core/nx2_passthrough.h              |  26 +++
+ .../renderer_vulkan/vk_rasterizer.cpp         |  28 +++
+ 10 files changed, 307 insertions(+), 13 deletions(-)
+
+diff --git a/src/video_core/dma_pusher.cpp b/src/video_core/dma_pusher.cpp
+index 1866590a1..3d9a7b2c8 100644
+--- a/src/video_core/dma_pusher.cpp
++++ b/src/video_core/dma_pusher.cpp
+@@ -132,6 +132,7 @@ bool DmaPusher::Step() {
+         command_resume_offset +=
+             ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
+         if (puller.HasPendingAcquire()) {
++            Nx2Passthrough::OnEntrySuspended(channel_state.bind_id, command_resume_offset);
+             return false;
+         }
+         command_resume_offset = 0;
+@@ -367,6 +368,7 @@ bool DmaPusher::Step() {
+                 ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
+         }
+         if (puller.HasPendingAcquire()) {
++            Nx2Passthrough::OnEntrySuspended(channel_state.bind_id, command_resume_offset);
+             return false;
+         }
+         command_resume_offset = 0;
+diff --git a/src/video_core/engines/fermi_2d.cpp b/src/video_core/engines/fermi_2d.cpp
+index 15b123da9..c3956ef4c 100644
+--- a/src/video_core/engines/fermi_2d.cpp
++++ b/src/video_core/engines/fermi_2d.cpp
+@@ -13,6 +13,7 @@
+ #include "common/assert.h"
+ #include "common/logging.h"
+ #include "video_core/engines/fermi_2d.h"
++#include "video_core/nx2_passthrough.h"
+ #include "video_core/engines/sw_blitter/blitter.h"
+ #include "video_core/memory_manager.h"
+ #include "video_core/rasterizer_interface.h"
+@@ -65,6 +66,9 @@ void Fermi2D::ConsumeSinkImpl(Core::System& system) {
+ }
+ 
+ void Fermi2D::Blit() {
++    if (Tegra::Nx2Passthrough::Sole()) [[unlikely]] {
++        return; // the host GPU executes it (sole mode)
++    }
+     if (static const u64 trace_destination = [] {
+             const char* value = std::getenv("EDEN_NX2_TRACE_DST");
+             return value != nullptr ? std::strtoull(value, nullptr, 16) : 0ULL;
+diff --git a/src/video_core/engines/kepler_compute.cpp b/src/video_core/engines/kepler_compute.cpp
+index f5f005569..97d9d26f1 100644
+--- a/src/video_core/engines/kepler_compute.cpp
++++ b/src/video_core/engines/kepler_compute.cpp
+@@ -135,6 +135,9 @@ void KeplerCompute::ProcessNativeReportSemaphore(u32 argument) {
+     if (address == 0) {
+         return;
+     }
++    if (Nx2Passthrough::Sole()) [[unlikely]] {
++        return; // the host GPU releases it (sole mode)
++    }
+     if ((argument >> 3) & 1) {
+         const u32 reduction = (argument >> 9) & 7;
+         rasterizer->SignalFence([this, address, payload, reduction] {
+@@ -400,6 +403,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
+             [&](u64 address, u32 payload, u32 flags) {
+                 const bool four_words = (flags >> 30) == 0;
+                 if (!memory_manager.IsFullyMappedRange(address, four_words ? 16 : sizeof(payload))) return false;
++                if (Nx2Passthrough::Sole()) [[unlikely]] return true; // the host GPU releases it (sole mode)
+                 if (flags & (1U << 26)) {
+                     rasterizer->SignalFence([this, address, payload, flags] {
+                         const u32 value = ReduceSemaphore((flags >> 20) & 7, (flags >> 24) & 1,
+diff --git a/src/video_core/engines/maxwell_3d.cpp b/src/video_core/engines/maxwell_3d.cpp
+index a4907e154..46d31ad0e 100644
+--- a/src/video_core/engines/maxwell_3d.cpp
++++ b/src/video_core/engines/maxwell_3d.cpp
+@@ -869,6 +869,9 @@ void Maxwell3D::ProcessFirmwareCall4() {
+ }
+ 
+ void Maxwell3D::StampQueryResult(Core::System& system, u64 payload, bool long_query) {
++    if (Tegra::Nx2Passthrough::Sole()) [[unlikely]] {
++        return; // the host GPU executes it (sole mode)
++    }
+     const GPUVAddr sequence_address{regs.report_semaphore.Address()};
+     if (long_query) {
+         memory_manager.Write<u64>(sequence_address + sizeof(u64), system.GPU().GetTicks());
+diff --git a/src/video_core/engines/maxwell_dma.cpp b/src/video_core/engines/maxwell_dma.cpp
+index e8c3b76f6..6d3aa5e42 100644
+--- a/src/video_core/engines/maxwell_dma.cpp
++++ b/src/video_core/engines/maxwell_dma.cpp
+@@ -16,6 +16,7 @@
+ #include "core/core.h"
+ #include "video_core/engines/maxwell_3d.h"
+ #include "video_core/engines/maxwell_dma.h"
++#include "video_core/nx2_passthrough.h"
+ #include "video_core/guest_memory.h"
+ #include "video_core/memory_manager.h"
+ #include "video_core/renderer_base.h"
+@@ -66,6 +67,9 @@ void MaxwellDMA::CallMultiMethod(Core::System& system, u32 method, const u32* ba
+ }
+ 
+ void MaxwellDMA::Launch() {
++    if (Tegra::Nx2Passthrough::Sole()) [[unlikely]] {
++        return; // the host GPU executes it (sole mode)
++    }
+     LOG_TRACE(Render_OpenGL, "DMA copy {:#x} -> {:#x}", static_cast<GPUVAddr>(regs.offset_in), GPUVAddr(regs.offset_out));
+     // EDEN_NX2_TRACE_DST=<hex>: also log copies writing within 32 MiB above that GPU address.
+     static const u64 trace_destination = [] {
+diff --git a/src/video_core/engines/puller.cpp b/src/video_core/engines/puller.cpp
+index 0112ede94..5d0339aed 100644
+--- a/src/video_core/engines/puller.cpp
++++ b/src/video_core/engines/puller.cpp
+@@ -31,6 +31,8 @@
+ #include "video_core/memory_manager.h"
+ #include "video_core/nx2.h"
+ #include "video_core/rasterizer_interface.h"
++#include "video_core/host1x/host1x.h"
++#include "video_core/nx2_passthrough.h"
+ 
+ namespace Tegra::Engines {
+ 
+@@ -225,6 +227,10 @@ bool Puller::PendingAcquire::Matches(u32 current) const {
+         return current >= value;
+     case GpuSemaphoreOperation::AcquireMask:
+         return (current & value) != 0;
++    case GpuSemaphoreOperation::AcquireCircularGequal:
++        return static_cast<s32>(current - value) >= 0;
++    case GpuSemaphoreOperation::AcquireNor:
++        return (current & value) == 0;
+     default:
+         return true;
+     }
+@@ -395,6 +401,12 @@ void Puller::ProcessFenceActionMethod(DmaPusher& dma_pusher) {
+         VideoCommon::GpuSplit::Get().NoteSync();
+         break;
+     case Puller::FenceOperation::Increment:
++        if (Nx2Passthrough::Sole()) [[unlikely]] {
++            Nx2Passthrough::SoleSyncpoint(dma_pusher.system.Host1x().GetSyncpointManager(),
++                                          static_cast<u32>(regs.fence_action.syncpoint_id.Value()),
++                                          dma_pusher.channel_state.bind_id);
++            break;
++        }
+         OnBack(
+             [rasterizer = dma_pusher.rasterizer,
+              id = static_cast<u32>(regs.fence_action.syncpoint_id.Value())] {
+@@ -615,6 +627,23 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
+         });
+         return;
+     }
++    if (Nx2Passthrough::Sole() && operation != 6) [[unlikely]] {
++        // Sole mode: the host GPU releases these, so wait for them as for the other acquires (suspend the
++        // channel until the word meets it): the host then gets the entry only once its acquire can pass.
++        constexpr std::array ops{GpuSemaphoreOperation::AcquireEqual, GpuSemaphoreOperation::AcquireEqual,
++                                 GpuSemaphoreOperation::AcquireGequal, GpuSemaphoreOperation::AcquireCircularGequal,
++                                 GpuSemaphoreOperation::AcquireMask, GpuSemaphoreOperation::AcquireNor};
++        if (operation >= ops.size()) {
++            return;
++        }
++        const auto now = std::chrono::steady_clock::now();
++        const PendingAcquire acquire{address, payload, static_cast<u32>(ops[operation]), now, now, false};
++        if (!acquire.Matches(ReadSemaphoreWord(dma_pusher, address))) {
++            pending_acquire = acquire;
++            dma_pusher.suspensions.fetch_add(1, std::memory_order_release);
++        }
++        return;
++    }
+     // Acquires: check once after flushing pending fences; never block the GPU thread on them.
+     // The check only feeds the warning below: drain for it during the first checks only.
+     static std::atomic<u32> reported{};
+diff --git a/src/video_core/engines/puller.h b/src/video_core/engines/puller.h
+index 11fc4f923..12d3e35f4 100644
+--- a/src/video_core/engines/puller.h
++++ b/src/video_core/engines/puller.h
+@@ -164,6 +164,9 @@ private:
+         WriteLong = 0x2,
+         AcquireGequal = 0x4,
+         AcquireMask = 0x8,
++        // Ampere SEM_EXECUTE acquires with no legacy code (sole passthrough mode only).
++        AcquireCircularGequal = 0x10,
++        AcquireNor = 0x20,
+     };
+ 
+ #define ASSERT_REG_POSITION(field_name, position)                                                  \
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index 0427620e4..5252bd5ed 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -33,6 +33,7 @@
+ #include "common/cityhash.h"
+ #include "common/div_ceil.h"
+ #include "common/logging.h"
++#include "video_core/host1x/syncpoint_manager.h"
+ #include "video_core/memory_manager.h"
+ #include "video_core/nx2_helper_loads.h"
+ #include "video_core/nx2_passthrough.h"
+@@ -380,6 +381,20 @@ public:
+         }
+     }
+ 
++    /// The last fence the channel's GPU work passed.
++    static NvU32 Passed(const Channel& c) { return *reinterpret_cast<const volatile NvU32*>(c.cpu + SEM); }
++    static bool PassedFence(const Channel& c, NvU32 fence) { return static_cast<s32>(Passed(c) - fence) >= 0; }
++
++    /// Sole mode, before presenting: rings every channel and returns the fences their submissions end with.
++    std::vector<std::pair<Channel*, NvU32>> RingAll() {
++        std::vector<std::pair<Channel*, NvU32>> out;
++        for (auto& [guest, c] : channels) {
++            if (c.unflushed != 0) Ring(c);
++            if (!c.pending.empty()) out.emplace_back(&c, c.fence);
++        }
++        return out;
++    }
++
+     /// Shader local memory, one buffer for every channel as the guest has it (MKW: one address on all its
+     /// channels); allocated on first use.
+     NvU64 LocalMemory(Channel&) {
+@@ -614,7 +629,9 @@ public:
+             ++astc_headers;
+             return;
+         }
+-        if (astc_queued.contains(h) || !used_headers.contains(header_va)) return; // decoded once the game samples it
++        // Decoded once the game samples it (Eglantine's texture cache read it); in sole mode Eglantine binds no
++        // textures, so every header of a pool counts.
++        if (astc_queued.contains(h) || (!Sole() && !used_headers.contains(header_va))) return;
+         Tegra::Texture::TICEntry tic{};
+         std::memcpy(&tic, h.data(), 32);
+         const VideoCommon::ImageInfo info(tic);
+@@ -2020,6 +2037,7 @@ struct State {
+         bool valid = false;
+         GPUVAddr address = 0;
+         std::vector<CommandHeader> words;
++        size_t sent = 0; // words already submitted (sole mode: up to each acquire the entry waited at)
+     };
+     std::map<s32, Recorded> recorded; // per guest channel: the entry being processed // wrong: differs from the mirrored memory too
+     u32 check_every = 0;
+@@ -2045,6 +2063,17 @@ struct State {
+     NvU64 output_target = 0; // the largest sRGB A8B8G8R8 colour target set (OnColorTarget)
+     u64 output_area = 0;
+     std::chrono::nanoseconds drain_time{};
++    // Sole mode: callbacks for the entry being processed per channel, and those armed with the fence of the
++    // submission that carries their entry; run by the poller once the host GPU passes it.
++    std::map<s32, std::vector<std::function<void()>>> after;
++    struct Armed {
++        std::vector<std::pair<Host::Channel*, NvU32>> fences; // empty: due now
++        std::vector<std::function<void()>> done;
++    };
++    std::deque<Armed> armed;
++    std::thread poller;
++    std::atomic<bool> poller_stop{false};
++    u64 after_run = 0, after_now = 0;
+ };
+ 
+ State& Get() {
+@@ -2052,6 +2081,8 @@ State& Get() {
+     return state;
+ }
+ 
++void Poll(State& s);
++
+ /// Opens the host side on first use (any hook); false while the backend is off. Called with the mutex held.
+ bool Ready(State& s) {
+     if (!Requested()) return false; // the nvhost hooks (kinds, unmaps) call in unconditionally
+@@ -2077,6 +2108,7 @@ bool Ready(State& s) {
+             if (!Xlate::EncoderSelfTest()) throw Error("encoder self-test", 0);
+             host->live = s.submit_words;
+             s.host = std::move(host);
++            if (Sole()) s.poller = std::thread([&s] { Poll(s); });
+             LOG_INFO(HW_GPU, "Nx2 passthrough: host channel up, guest VA [{:#x}, {:#x}) sparse, check every {} entries, "
+                      "guest words {}", GUEST_VA_LO, GUEST_VA_HI, s.check_every, s.submit_words ? "submitted" : "not submitted");
+         } catch (const Error& e) {
+@@ -2123,6 +2155,10 @@ void LogStats(State& s) {
+         LOG_INFO(HW_GPU, "Nx2 passthrough ASTC: {} textures decoded ({} MiB), {} failed, {} left raw (too large), {} "
+                  "headers repointed", h.astc_decoded, h.AstcArenaUsed() >> 20, h.astc_failed, h.astc_too_large,
+                  h.astc_headers);
++        if (Sole()) {
++            LOG_INFO(HW_GPU, "Nx2 passthrough sole: {} syncpoint callbacks after the host GPU, {} at once, {} armed",
++                     s.after_run, s.after_now, s.armed.size());
++        }
+         if (!h.vts.empty()) {
+             LOG_INFO(HW_GPU, "Nx2 passthrough VT: {} textures, {} level jobs ({} ms), {} cells transcoded, {} unchanged, "
+                      "{} empty, {} MiB of output mapped", h.vts.size(), h.vt_jobs_done.load(),
+@@ -2155,7 +2191,7 @@ u32 DropMask() {
+ bool HostReleases() {
+     static const bool on = [] {
+         const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_RELEASES");
+-        return v != nullptr && v[0] == '1';
++        return (v != nullptr && v[0] == '1') || Sole();
+     }();
+     return on;
+ }
+@@ -2597,7 +2633,7 @@ struct Words {
+         case SEM_B: x.sem_b = v; break;
+         case SEM_D: {
+             if (DropMask() & 2) return;
+-            if ((v & 0x12) == 0 && ((DropMask() & 64) || !HostReleases())) {
++            if ((v & 0x12) == 0 && ((DropMask() & 64) || !HostReleases() || Sole())) {
+                 ++s.counts[AcquiresDropped];
+                 return;
+             }
+@@ -2616,7 +2652,8 @@ struct Words {
+         case SEM_ADDR_HI: x.sem_hi = v; break;
+         case SEM_EXECUTE: {
+             if (DropMask() & 2) return;
+-            if ((v & 7) != 1 && (v & 7) != 6 && ((DropMask() & 64) || !HostReleases())) {
++            // Sole mode: Eglantine's puller waits for these (the rest of the entry reaches the host after it).
++            if ((v & 7) != 1 && (v & 7) != 6 && ((DropMask() & 64) || !HostReleases() || Sole())) {
+                 ++s.counts[AcquiresDropped];
+                 return;
+             }
+@@ -2666,6 +2703,103 @@ bool Requested() {
+     return on;
+ }
+ 
++bool Sole() {
++    static const bool on = [] {
++        const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_SOLE");
++        const char* w = std::getenv("EDEN_NX2_PASSTHROUGH_WORDS");
++        return Requested() && v != nullptr && v[0] == '1' && w != nullptr && w[0] == '1';
++    }();
++    return on;
++}
++
++namespace {
++/// Sole mode: rings stale doorbells (the entry thread may be blocked on a guest wait) and runs the armed
++/// callbacks whose fence the host GPU passed; all of them once the backend is off.
++void Poll(State& s) {
++    while (!s.poller_stop.load()) {
++        std::vector<std::function<void()>> run;
++        {
++            std::scoped_lock lk{s.mutex};
++            if (s.host) s.host->FlushStale();
++            const auto due = [&](const State::Armed& a) {
++                return !s.host || std::all_of(a.fences.begin(), a.fences.end(),
++                                              [](const auto& f) { return Host::PassedFence(*f.first, f.second); });
++            };
++            while (!s.armed.empty() && due(s.armed.front())) {
++                for (auto& f : s.armed.front().done) run.push_back(std::move(f));
++                s.armed.pop_front();
++            }
++            // Later channels may pass first: look past the head too.
++            for (auto it = s.armed.begin(); s.host && it != s.armed.end();) {
++                if (!due(*it)) {
++                    ++it;
++                    continue;
++                }
++                for (auto& f : it->done) run.push_back(std::move(f));
++                it = s.armed.erase(it);
++            }
++            s.after_run += run.size();
++        }
++        for (auto& f : run) f();
++        if (run.empty()) std::this_thread::sleep_for(std::chrono::microseconds(200));
++    }
++}
++
++} // Anonymous namespace
++
++void AfterEntry(s32 channel, std::function<void()> done) {
++    State& s = Get();
++    {
++        std::scoped_lock lk{s.mutex};
++        if (s.host && s.submit_words) {
++            s.after[channel].push_back(std::move(done));
++            return;
++        }
++        ++s.after_now;
++    }
++    done();
++}
++
++void SoleSyncpoint(Host1x::SyncpointManager& syncpoints, u32 id, s32 channel) {
++    if (id >= Host1x::SyncpointManager::NUM_MAX_SYNCPOINTS) return; // command words read wrong (fence manager)
++    syncpoints.IncrementGuest(id);
++    std::function<void()> done = [&syncpoints, id] { syncpoints.IncrementHost(id); };
++    if (channel < 0) { // no entry to attach it to (the back's thread): after everything submitted so far
++        State& s = Get();
++        {
++            std::scoped_lock lk{s.mutex};
++            if (s.host && s.submit_words) {
++                s.armed.push_back({s.host->RingAll(), {std::move(done)}});
++                return;
++            }
++        }
++        done();
++        return;
++    }
++    AfterEntry(channel, std::move(done));
++}
++
++void WaitHost() {
++    State& s = Get();
++    std::vector<std::pair<Host::Channel*, NvU32>> wait;
++    {
++        std::scoped_lock lk{s.mutex};
++        if (!s.host) return;
++        wait = s.host->RingAll();
++    }
++    const auto start = std::chrono::steady_clock::now();
++    for (const auto& [c, fence] : wait) {
++        for (;;) {
++            {
++                std::scoped_lock lk{s.mutex};
++                if (!s.host || Host::PassedFence(*c, fence)) break;
++            }
++            if (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(250)) return;
++            std::this_thread::sleep_for(std::chrono::microseconds(100));
++        }
++    }
++}
++
+ void OnMap(const void* memory_manager, GPUVAddr gpu_addr, const u8* host, u64 size, std::span<u8> guest_memory) {
+     State& s = Get();
+     std::scoped_lock lk{s.mutex};
+@@ -2798,21 +2932,25 @@ void OnEntry(s32 channel, GPUVAddr address, std::span<const CommandHeader> comma
+     auto& e = s.recorded[channel];
+     e.valid = true;
+     e.address = address;
++    e.sent = 0;
+     e.words.assign(commands.begin(), commands.end());
+ }
+ 
+-void OnEntryDone(s32 channel) {
+-    if (!Requested()) [[likely]] {
+-        return;
+-    }
++namespace {
++/// Submits the recorded entry's words up to `to` that were not submitted yet; `final`: the entry is done.
++void SubmitEntry(s32 channel, size_t to, bool final) {
+     State& s = Get();
+     std::scoped_lock lk{s.mutex};
+     if (!s.host) return;
+     const auto it = s.recorded.find(channel);
+     if (it == s.recorded.end() || !it->second.valid) return;
+-    it->second.valid = false;
+-    const GPUVAddr address = it->second.address;
+-    const std::span<const CommandHeader> commands{it->second.words};
++    auto& rec = it->second;
++    const size_t end = std::min(to, rec.words.size());
++    if (end < rec.sent || (end == rec.sent && !final)) return;
++    const GPUVAddr address = rec.address == 0 ? 0 : rec.address + rec.sent * sizeof(CommandHeader);
++    const std::span<const CommandHeader> commands = std::span<const CommandHeader>(rec.words).subspan(rec.sent, end - rec.sent);
++    rec.sent = end;
++    rec.valid = !final;
+     // One marker submission per entry, on the guest channel's own host channel, without waiting (the guest's
+     // words follow once its programs are patched). The live check (every n-th entry) waits for its copy.
+     Host::Channel* c = nullptr;
+@@ -2854,10 +2992,26 @@ void OnEntryDone(s32 channel) {
+     std::vector<NvU32> marker;
+     std::vector<NvU32>& out = x != nullptr ? x->out : marker;
+     const u64 bytes = commands.size_bytes();
+-    bool check = s.check_every != 0 && address != 0 && bytes != 0 && bytes <= CHECK_SZ && boundary &&
++    bool check = final && s.check_every != 0 && address != 0 && bytes != 0 && bytes <= CHECK_SZ && boundary &&
+                  address >= GUEST_VA_LO && address + bytes <= GUEST_VA_HI && s.entries % s.check_every == 0;
+     const auto start = std::chrono::steady_clock::now();
+     bool tail = true, flush = false, hold = false;
++    // Sole mode: the entry's AfterEntry callbacks are armed with the fence of the submission that carries it
++    // (a held entry keeps them for its continuation); on any path that does not submit they run now.
++    bool armed = false;
++    struct RunLeft {
++        State& s;
++        s32 channel;
++        const bool& keep;
++        const bool& armed;
++        ~RunLeft() {
++            auto it = s.after.find(channel);
++            if (keep || armed || it == s.after.end() || it->second.empty()) return;
++            s.after_now += it->second.size();
++            s.armed.push_back({{}, std::move(it->second)}); // due now: the poller runs them, unlocked
++            it->second.clear();
++        }
++    } run_left{s, channel, hold, armed};
+     if (x != nullptr) {
+         std::vector<u64> used;
+         {
+@@ -2969,10 +3123,16 @@ void OnEntryDone(s32 channel) {
+     c->cur_guest = address;
+     bool done = false;
+     Guarded(s, "submit", [&](Host& h) {
+-        done = hold || h.Submit(*c, out, check || (sync && tail), tail, flush);
++        // A part up to an acquire (sole mode) rings at once: other channels' waits may need its releases.
++        done = hold || h.Submit(*c, out, check || (sync && tail), tail, flush || !final);
+         h.FlushStale();
+         h.VtFlush();
+     });
++    if (const auto af = s.after.find(channel); s.host && done && !hold && af != s.after.end() && !af->second.empty()) {
++        s.armed.push_back({{{c, c->fence}}, std::move(af->second)}); // this submission ends with fence c->fence
++        af->second.clear();
++        armed = true;
++    }
+     // EDEN_NX2_PASSTHROUGH_SNAP=<seconds>:<va>:<size>:<file>[,...]: once that long after the backend came up (or
+     // when <file>.now appears: seconds < 0),
+     // waits for the host channels and writes guest memory at va (what the host GPU rendered there) to file.
+@@ -3110,9 +3270,31 @@ void OnEntryDone(s32 channel) {
+     }
+ }
+ 
++} // Anonymous namespace
++
++void OnEntryDone(s32 channel) {
++    if (!Requested()) [[likely]] {
++        return;
++    }
++    SubmitEntry(channel, ~size_t{0}, true);
++}
++
++void OnEntrySuspended(s32 channel, size_t words) {
++    if (!Sole()) [[likely]] {
++        return;
++    }
++    SubmitEntry(channel, words, false);
++}
++
+ void Shutdown() {
+     State& s = Get();
++    s.poller_stop = true;
++    if (s.poller.joinable()) s.poller.join();
+     std::scoped_lock lk{s.mutex};
++    for (auto& a : s.armed) {
++        for (auto& f : a.done) f();
++    }
++    s.armed.clear();
+     if (s.host) {
+         LOG_INFO(HW_GPU, "Nx2 passthrough: shutting down after {} entries", s.entries);
+         LogStats(s);
+@@ -3143,6 +3325,7 @@ void OnUnmap(const void*, GPUVAddr, u64) {}
+ void OnGuestKind(GPUVAddr, u64, u32, u32) {}
+ void OnProgramBind(u32, GPUVAddr, bool) {}
+ void OnEntryDone(s32) {}
++void OnEntrySuspended(s32, size_t) {}
+ void OnStep(s32) {}
+ void OnPresent(GPUVAddr, u32, u32, u32, u64) {}
+ void OnDescriptorRead(GPUVAddr) {}
+@@ -3150,6 +3333,14 @@ void OnColorTarget(GPUVAddr, u32, u32, u32) {}
+ void OnComputeMacro() {}
+ void OnComputeMacroEmit(u32, u32) {}
+ void Shutdown() {}
++bool Sole() {
++    return false;
++}
++void AfterEntry(s32, std::function<void()> done) {
++    done();
++}
++void WaitHost() {}
++void SoleSyncpoint(Host1x::SyncpointManager&, u32, s32) {}
+ 
+ } // namespace Tegra::Nx2Passthrough
+ 
+diff --git a/src/video_core/nx2_passthrough.h b/src/video_core/nx2_passthrough.h
+index e3e37533e..6b93849cd 100644
+--- a/src/video_core/nx2_passthrough.h
++++ b/src/video_core/nx2_passthrough.h
+@@ -3,6 +3,7 @@
+ 
+ #pragma once
+ 
++#include <functional>
+ #include <span>
+ 
+ #include "common/common_types.h"
+@@ -19,6 +20,10 @@
+ // Step 3: bound pixel programs are patched for helper-lane loads in shadow pages.
+ // EDEN_NX2_PASSTHROUGH_WORDS=1: the guest's own methods run on the host channels, copied with the host-class
+ // rewrites (nx2_passthrough.cpp, Words); Vulkan still renders and presents.
++namespace Tegra::Host1x {
++class SyncpointManager;
++}
++
+ namespace Tegra::Nx2Passthrough {
+ 
+ /// EDEN_NX2_PASSTHROUGH=1 (read once).
+@@ -28,6 +33,9 @@ bool Requested();
+ /// OnEntryDone once the entry's methods (and the program binds they make) have been processed.
+ void OnEntry(s32 channel, GPUVAddr address, std::span<const CommandHeader> commands);
+ void OnEntryDone(s32 channel);
++/// Sole mode: the entry waits at an acquire after its first `words` words: those go to the host now (the host
++/// channel waits there too), so work before the acquire (other channels' releases) is not held back.
++void OnEntrySuspended(s32 channel, size_t words);
+ /// The DMA pusher works on `channel` (also when it resumes an entry after an acquire, without OnEntry).
+ void OnStep(s32 channel);
+ 
+@@ -64,6 +72,24 @@ void OnDescriptorRead(GPUVAddr address);
+ /// 1 << block_height_log2, size bytes): what EDEN_NX2_PASSTHROUGH_SNAP address 0 reads.
+ void OnPresent(GPUVAddr address, u32 width, u32 height, u32 block_height_log2, u64 size);
+ 
++/// EDEN_NX2_PASSTHROUGH_SOLE=1 (with EDEN_NX2_PASSTHROUGH=1 and _WORDS=1): the host GPU is the only executor.
++/// Eglantine still parses every entry (macros, QMD bookkeeping, program binds), but its back renders, copies
++/// and writes no results (draws, clears, dispatches, DMA and 2D copies, queries, semaphore releases are left to
++/// the host, with the host's releases on); syncpoints advance when the host GPU has run the entry that
++/// increments them; the presented image is read from guest memory, where the host rendered it.
++bool Sole();
++
++/// Sole mode: runs `done` once the host GPU has run the entry being processed on `channel` (now, when the
++/// backend is off or does not submit).
++void AfterEntry(s32 channel, std::function<void()> done);
++
++/// Sole mode: a guest syncpoint increment on `channel` (-1: the channel whose entry is being processed): the
++/// guest value moves now, the host value once the host GPU has run that entry.
++void SoleSyncpoint(Host1x::SyncpointManager& syncpoints, u32 id, s32 channel = -1);
++
++/// Sole mode: waits (at most 250 ms) until the host GPU has run what was submitted so far (before presenting).
++void WaitHost();
++
+ /// Frees the host channel and RM client (also done at process exit).
+ void Shutdown();
+ 
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 9fd00f4ff..19d10d334 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -60,6 +60,7 @@
+ #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+ #include "video_core/renderer_vulkan/vk_query_cache.h"
+ #include "video_core/renderer_vulkan/vk_rasterizer.h"
++#include "video_core/nx2_passthrough.h"
+ #include "video_core/renderer_vulkan/vk_scheduler.h"
+ #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
+ #include "video_core/renderer_vulkan/vk_state_tracker.h"
+@@ -1259,6 +1260,9 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
+ } // Anonymous namespace
+ 
+ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
++    if (Tegra::Nx2Passthrough::Sole()) [[unlikely]] {
++        return; // the host GPU executes it (sole mode)
++    }
+     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
+     {
+         // A draw's first and count can come from memory a skipped (rejected) compute program
+@@ -1478,6 +1482,9 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
+ }
+ 
+ void RasterizerVulkan::DrawIndirect() {
++    if (Tegra::Nx2Passthrough::Sole()) [[unlikely]] {
++        return; // the host GPU executes it (sole mode)
++    }
+     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
+     const auto& params = maxwell3d->draw_manager.indirect_state;
+     if (VideoCommon::Nx2Diag::Active()) {
+@@ -1591,6 +1598,9 @@ void RasterizerVulkan::DrawIndirect() {
+ }
+ 
+ void RasterizerVulkan::DrawTexture() {
++    if (Tegra::Nx2Passthrough::Sole()) [[unlikely]] {
++        return; // the host GPU executes it (sole mode)
++    }
+ 
+     SCOPE_EXIT {
+         gpu.TickWork();
+@@ -1641,6 +1651,9 @@ void RasterizerVulkan::DrawTexture() {
+ }
+ 
+ void RasterizerVulkan::Clear(u32 layer_count) {
++    if (Tegra::Nx2Passthrough::Sole()) [[unlikely]] {
++        return; // the host GPU executes it (sole mode)
++    }
+     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Clear};
+     if (Tegra::Engines::g_nx2_trace_draws_after_upscale > 0) {
+         const auto& regs = maxwell3d->regs;
+@@ -1853,6 +1866,9 @@ bool SyncFixEnabled() {
+ } // namespace
+ 
+ void RasterizerVulkan::DispatchCompute() {
++    if (Tegra::Nx2Passthrough::Sole()) [[unlikely]] {
++        return; // the host GPU executes it (sole mode)
++    }
+     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Compute};
+     FlushWork();
+     gpu_memory->FlushCaching();
+@@ -2030,6 +2046,9 @@ void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
+ 
+ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
+                              VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) {
++    if (Tegra::Nx2Passthrough::Sole()) [[unlikely]] {
++        return; // the host GPU executes it (sole mode)
++    }
+     query_cache.CounterReport(gpu_addr, type, flags, payload, subreport);
+ }
+ 
+@@ -2465,6 +2484,10 @@ void RasterizerVulkan::SyncOperation(std::function<void()>&& func) {
+ }
+ 
+ void RasterizerVulkan::SignalSyncPoint(u32 value) {
++    if (Tegra::Nx2Passthrough::Sole()) [[unlikely]] { // the 3D engine's sync method: after all submitted work
++        Tegra::Nx2Passthrough::SoleSyncpoint(gpu.Host1x().GetSyncpointManager(), value);
++        return;
++    }
+     fence_manager.SignalSyncPoint(value);
+ }
+ 
+@@ -3021,6 +3044,11 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
+     if (!framebuffer_addr) {
+         return {};
+     }
++    if (Tegra::Nx2Passthrough::Sole()) [[unlikely]] {
++        // The host GPU rendered the frame into guest memory: present it from there (Layer::UpdateRawImage).
++        Tegra::Nx2Passthrough::WaitHost();
++        return {};
++    }
+     std::scoped_lock lock{texture_cache.mutex};
+     const auto [image_view, scaled] =
+         texture_cache.TryFindFramebufferImageView(config, framebuffer_addr);
+-- 
+2.56.0
+

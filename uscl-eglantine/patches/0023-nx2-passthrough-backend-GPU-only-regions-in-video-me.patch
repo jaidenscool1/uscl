@@ -1,0 +1,301 @@
+From e651c0ac90e01a4dd5921e635a421b2503d5445b Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 09:57:06 -0700
+Subject: [PATCH 23/23] nx2: passthrough backend: GPU-only regions in video
+ memory (sole mode)
+
+nx2:gpu 214 regions without the sparse flag are GPU-only: the guest CPU never maps them (MKW: render targets,
+145 regions, 10 GiB). With the host GPU the only executor nothing else reads or writes them, so in sole mode
+their mappings get video memory (allocated per mapping, freed with its last piece, kinds and partial unmaps
+carried over) instead of pinned, uncached system memory, up to EDEN_NX2_PASSTHROUGH_VRAM_MB (3072). Fresh
+video memory is zeroed with the copy engine before use: those regions read zero until written, and without
+the clear MKW's track came out blocky. The mirror's "mapped" test for semaphores no longer needs guest memory
+behind the VA.
+
+MKW, async sole mode: 2.6 GiB of GPU-only memory in video memory; race 26.3 fps mean (24.6-36.3 in the first
+75 s) against 14.2 in system memory; frames as before; no Xid.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/core/hle/service/nx2_gsv.h     |   1 +
+ src/video_core/nx2_passthrough.cpp | 142 ++++++++++++++++++++++++++---
+ src/video_core/nx2_passthrough.h   |   4 +
+ 3 files changed, 136 insertions(+), 11 deletions(-)
+
+diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
+index e36f8dacd..efb243187 100644
+--- a/src/core/hle/service/nx2_gsv.h
++++ b/src/core/hle/service/nx2_gsv.h
+@@ -652,6 +652,7 @@ private:
+             FreeReleasedRegions();
+             if ((w[7] & SparseRegionFlag) == 0) {
+                 m_gpu_only_ranges[start] = size; // kept out of 216, however it is backed
++                Tegra::Nx2Passthrough::OnGpuOnlyRegion(start, size); // before it is mapped (video memory)
+             }
+             if ((w[7] & SparseRegionFlag) != 0 && LazySparseRegions()) {
+                 // Title 1's terrain texture arrays and layer pools (170 MB-5.8 GB, mostly empty):
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index 276f65250..ccbf2d617 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -1378,8 +1378,9 @@ public:
+                 for (auto& [pva_, pool] : pools) pool.full = true; // a pool page may have been one
+                 continue;
+             }
+-            if (pva < va) MapPiece(pva, va - pva, p.off, p.kind);
+-            if (pva + p.size > hi) MapPiece(hi, pva + p.size - hi, p.off + (hi - pva), p.kind);
++            if (pva < va) MapPiece(pva, va - pva, p.off, p.kind, p.vmem, p.voff);
++            if (pva + p.size > hi) MapPiece(hi, pva + p.size - hi, p.off + (hi - pva), p.kind, p.vmem, p.voff + (hi - pva));
++            ReleaseVram(p.vmem);
+         }
+     }
+ 
+@@ -1394,6 +1395,11 @@ public:
+                 continue;
+             }
+             RmUnmap(pva, p.mem);
++            if (p.vmem != 0) {
++                MapRuns(pva, p.off, p.size, p.vmem, p.voff);
++                ReleaseVram(p.vmem);
++                continue;
++            }
+             MapOff(pva, p.off, p.size);
+         }
+     }
+@@ -1498,10 +1504,25 @@ public:
+         auto it = pieces.upper_bound(va);
+         if (it == pieces.begin()) return nullptr;
+         --it;
+-        if (va >= it->first + it->second.size) return nullptr;
++        if (va >= it->first + it->second.size || it->second.vmem != 0) return nullptr; // VRAM: not in guest memory
+         return guest_base + it->second.off + (va - it->first);
+     }
+ 
++    /// Whether the mirror maps va (guest memory or video memory standing for it).
++    bool IsMapped(NvU64 va) const {
++        auto it = pieces.upper_bound(va);
++        return it != pieces.begin() && va < std::prev(it)->first + std::prev(it)->second.size;
++    }
++
++    // --- Phase 3, first step: GPU-only regions in video memory (sole mode) ---
++    // nx2:gpu 214 regions without the sparse flag are GPU-only: the guest CPU never maps them (MKW: render targets,
++    // 145 regions, 10 GiB, lazily backed). With the host GPU the only executor nothing else reads or writes them,
++    // so their mappings get video memory (allocated per mapping, freed with its last piece) instead of pinned,
++    // uncached system memory, up to EDEN_NX2_PASSTHROUGH_VRAM_MB (3072 in sole mode). shortcut: first come,
++    // first served; regions past the budget stay in system memory.
++    void SetGpuOnly(NvU64 start, NvU64 size) { gpu_only[start] = size; }
++    NvU64 vram_used = 0, vram_maps = 0;
++
+     // Counters for the log.
+     NvU64 doorbells = 0, map_retries = 0;
+     NvU64 ring_waits = 0, pinned = 0, rm_maps = 0, rm_unmaps = 0, kind_changes = 0, kind_fallbacks = 0;
+@@ -1514,6 +1535,8 @@ private:
+         NvU32 kind;
+         NvHandle mem;
+         u32 shadow = ~0u; // a shadow page (index in the pool): off is still the guest memory it stands for
++        NvHandle vmem = 0; // video memory standing for the guest memory (sole mode, GPU-only regions)
++        NvU64 voff = 0;    // where in it
+     };
+     struct Run {
+         NvU64 end;
+@@ -1641,6 +1664,12 @@ private:
+ 
+     /// Maps, split where a granule or the guest's kind changes.
+     void MapOff(NvU64 va, NvU64 off, NvU64 size) {
++        if (const NvHandle vmem = VramFor(va, size)) {
++            MapRuns(va, off, size, vmem, 0);
++            ReleaseVram(vmem); // the pieces hold it now
++            ClearVram(va, size);
++            return;
++        }
+         while (size != 0) {
+             const auto [kind, run_end] = KindAt(va);
+             const NvU64 n = std::min({size, (off / GRANULE + 1) * GRANULE - off, run_end - va});
+@@ -1651,24 +1680,102 @@ private:
+         }
+     }
+ 
+-    void MapPiece(NvU64 va, NvU64 size, NvU64 off, NvU32 kind) {
++    /// Maps video memory vmem from voff over [va, va + size), split where the guest's kind changes.
++    void MapRuns(NvU64 va, NvU64 off, NvU64 size, NvHandle vmem, NvU64 voff) {
++        while (size != 0) {
++            const auto [kind, run_end] = KindAt(va);
++            const NvU64 n = std::min(size, run_end - va);
++            MapPiece(va, n, off, kind, vmem, voff);
++            va += n;
++            off += n;
++            voff += n;
++            size -= n;
++        }
++    }
++
++    /// Video memory for a mapping of [va, va + size) when it lies in a GPU-only region and fits the budget (one
++    /// reference, for the caller to release), else 0.
++    NvHandle VramFor(NvU64 va, NvU64 size) {
++        static const NvU64 budget = [] {
++            const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_VRAM_MB");
++            return (v != nullptr ? std::strtoull(v, nullptr, 0) : (Sole() ? 3072ull : 0ull)) << 20;
++        }();
++        if (budget == 0 || vram_used + size > budget || (size & (PAGE - 1)) != 0) return 0;
++        auto it = gpu_only.upper_bound(va);
++        if (it == gpu_only.begin() || va + size > std::prev(it)->first + std::prev(it)->second) return 0;
++        NvHandle mem = 0;
++        try {
++            mem = AllocVidmem(size, false);
++        } catch (const Error& e) { // out of video memory: system memory as before
++            if (++vram_failures <= 4) LOG_WARNING(HW_GPU, "Nx2 passthrough: no video memory for {:#x} +{:#x} (status {:#x})", va, size, e.status);
++            return 0;
++        }
++        vram_refs[mem] = {1, size};
++        vram_used += size;
++        ++vram_maps;
++        return mem;
++    }
++
++    /// Zeroes fresh video memory mapped at [va, va + size) with the copy engine, on a channel of the backend's own,
++    /// and waits: the guest's GPU-only regions read zero until written (system memory did; video memory need not).
++    void ClearVram(NvU64 va, NvU64 size) {
++        Channel& c = ChannelFor(-1);
++        const NvU64 line = size % (1ull << 20) == 0 ? 1ull << 20 : PAGE;
++        std::vector<NvU32> w;
++        if (!c.copy_bound) {
++            w.insert(w.end(), {Hdr(4, 0, 1), AMPERE_DMA_COPY_B});
++            c.copy_bound = true;
++        }
++        w.insert(w.end(), {Hdr(4, NVC7B5_SET_REMAP_CONST_A, 1), 0, Hdr(4, NVC7B5_SET_REMAP_COMPONENTS, 1),
++                           DRF_DEF(C7B5, _SET_REMAP_COMPONENTS, _DST_X, _CONST_A) |
++                               DRF_DEF(C7B5, _SET_REMAP_COMPONENTS, _COMPONENT_SIZE, _FOUR) |
++                               DRF_DEF(C7B5, _SET_REMAP_COMPONENTS, _NUM_DST_COMPONENTS, _ONE),
++                           Hdr(4, NVC7B5_OFFSET_IN_UPPER, 4), static_cast<NvU32>(va >> 32), static_cast<NvU32>(va),
++                           static_cast<NvU32>(va >> 32), static_cast<NvU32>(va), Hdr(4, NVC7B5_PITCH_IN, 2),
++                           static_cast<NvU32>(line), static_cast<NvU32>(line), Hdr(4, NVC7B5_LINE_LENGTH_IN, 2),
++                           static_cast<NvU32>(line / 4), static_cast<NvU32>(size / line), Hdr(4, NVC7B5_LAUNCH_DMA, 1),
++                           DRF_DEF(C7B5, _LAUNCH_DMA, _DATA_TRANSFER_TYPE, _NON_PIPELINED) |
++                               DRF_DEF(C7B5, _LAUNCH_DMA, _FLUSH_ENABLE, _TRUE) |
++                               DRF_DEF(C7B5, _LAUNCH_DMA, _SRC_MEMORY_LAYOUT, _PITCH) |
++                               DRF_DEF(C7B5, _LAUNCH_DMA, _DST_MEMORY_LAYOUT, _PITCH) |
++                               DRF_DEF(C7B5, _LAUNCH_DMA, _MULTI_LINE_ENABLE, _TRUE) |
++                               DRF_DEF(C7B5, _LAUNCH_DMA, _REMAP_ENABLE, _TRUE)});
++        if (!Submit(c, w, true)) throw Error("clear video memory", 0);
++    }
++
++    void ReleaseVram(NvHandle mem) {
++        if (mem == 0) return;
++        auto it = vram_refs.find(mem);
++        if (it == vram_refs.end() || --it->second.first != 0) return;
++        vram_used -= it->second.second;
++        vram_refs.erase(it);
++        NVOS00_PARAMETERS p{};
++        p.hRoot = root;
++        p.hObjectParent = device;
++        p.hObjectOld = mem;
++        Ioctl(ctl, NV_ESC_RM_FREE, &p, "free video memory");
++    }
++
++    void MapPiece(NvU64 va, NvU64 size, NvU64 off, NvU32 kind, NvHandle vmem = 0, NvU64 voff = 0) {
+         static const bool pitch_only = [] {
+             const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_KINDS"); // 0: map everything as pitch (bisecting)
+             return v != nullptr && v[0] == '0';
+         }();
+         if (pitch_only) kind = 0;
+-        const NvHandle mem = Granule(off / GRANULE);
++        const NvHandle mem = vmem != 0 ? vmem : Granule(off / GRANULE);
+         NVOS46_PARAMETERS p{};
+         p.hClient = root;
+         p.hDevice = device;
+         p.hDma = guest_va;
+         p.hMemory = mem;
+-        p.offset = off % GRANULE;
++        p.offset = vmem != 0 ? voff : off % GRANULE;
+         p.length = size;
+         // Not cached in the GPU's L2: the guest CPU rewrites this memory all the time (rings reused every frame)
+         // and nothing invalidates the L2 on a CPU write (measured: cached, 6% of re-read pushbuffer entries stale).
+         p.flags = DRF_DEF(OS46, _FLAGS, _DMA_OFFSET_FIXED, _TRUE) | DRF_DEF(OS46, _FLAGS, _PAGE_SIZE, _4KB) |
+-                  DRF_DEF(OS46, _FLAGS, _PAGE_KIND_OVERRIDE, _YES) | DRF_DEF(OS46, _FLAGS, _GPU_CACHEABLE, _NO);
++                  DRF_DEF(OS46, _FLAGS, _PAGE_KIND_OVERRIDE, _YES) |
++                  (vmem != 0 ? DRF_DEF(OS46, _FLAGS, _GPU_CACHEABLE, _YES) // only the GPU touches it
++                             : DRF_DEF(OS46, _FLAGS, _GPU_CACHEABLE, _NO));
+         p.kindOverride = kind;
+         p.dmaOffset = va;
+         Ioctl(ctl, NV_ESC_RM_MAP_MEMORY_DMA, &p, "map guest memory");
+@@ -1690,7 +1797,8 @@ private:
+             Ioctl(ctl, NV_ESC_RM_MAP_MEMORY_DMA, &p, "map guest memory");
+         }
+         if (p.status != NV_OK) throw Error("map guest memory", p.status);
+-        pieces[va] = Piece{size, off, kind, mem};
++        pieces[va] = Piece{size, off, kind, mem, ~0u, vmem, voff};
++        if (vmem != 0) ++vram_refs[vmem].first;
+         ++rm_maps;
+     }
+ 
+@@ -1780,6 +1888,9 @@ private:
+     NvU64 guest_size = 0;
+     std::vector<NvHandle> granules;
+     std::map<NvU64, Piece> pieces; // RM mappings by guest VA
++    std::map<NvU64, NvU64> gpu_only;                           // GPU-only regions: start -> size
++    std::map<NvHandle, std::pair<u32, NvU64>> vram_refs;         // video memory: pieces using it, size
++    NvU64 vram_failures = 0;
+     std::map<NvU64, Run> kinds;    // the guest's kinds (host kind) by guest VA
+     NvHandle shadow_mem = 0;
+     volatile u8* shadow_cpu = nullptr;
+@@ -2164,8 +2275,9 @@ void LogStats(State& s) {
+                  "headers repointed", h.astc_decoded, h.AstcArenaUsed() >> 20, h.astc_failed, h.astc_too_large,
+                  h.astc_headers);
+         if (Sole()) {
+-            LOG_INFO(HW_GPU, "Nx2 passthrough sole: {} syncpoint callbacks after the host GPU, {} at once, {} armed",
+-                     s.after_run, s.after_now, s.armed.size());
++            LOG_INFO(HW_GPU, "Nx2 passthrough sole: {} syncpoint callbacks after the host GPU, {} at once, {} armed; "
++                     "{} MiB of GPU-only memory in video memory ({} allocations)", s.after_run, s.after_now,
++                     s.armed.size(), h.vram_used >> 20, h.vram_maps);
+         }
+         if (!h.vts.empty()) {
+             LOG_INFO(HW_GPU, "Nx2 passthrough VT: {} textures, {} level jobs ({} ms), {} cells transcoded, {} unchanged, "
+@@ -2220,7 +2332,7 @@ struct Words {
+     }
+ 
+     bool Mapped(NvU64 va) const {
+-        return va >= GUEST_VA_LO && va < GUEST_VA_HI && h.MirroredHost(va) != nullptr;
++        return va >= GUEST_VA_LO && va < GUEST_VA_HI && h.IsMapped(va);
+     }
+ 
+     void Run(std::span<const u32> words) {
+@@ -2916,6 +3028,13 @@ void OnComputeMacroEmit(u32 method, u32 value) {
+     if (!traced.empty()) traced.back().emplace_back(method, value);
+ }
+ 
++void OnGpuOnlyRegion(GPUVAddr gpu_addr, u64 size) {
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    if (!Ready(s) || !Sole()) return;
++    s.host->SetGpuOnly(gpu_addr, size);
++}
++
+ void OnGuestKind(GPUVAddr gpu_addr, u64 size, u32 kind, u32 fallback_kind) {
+     State& s = Get();
+     std::scoped_lock lk{s.mutex};
+@@ -3332,6 +3451,7 @@ bool Requested() {
+ void OnMap(const void*, GPUVAddr, const u8*, u64, std::span<u8>) {}
+ void OnUnmap(const void*, GPUVAddr, u64) {}
+ void OnGuestKind(GPUVAddr, u64, u32, u32) {}
++void OnGpuOnlyRegion(GPUVAddr, u64) {}
+ void OnProgramBind(u32, GPUVAddr, bool) {}
+ void OnEntryDone(s32) {}
+ void OnEntrySuspended(s32, size_t) {}
+diff --git a/src/video_core/nx2_passthrough.h b/src/video_core/nx2_passthrough.h
+index 6b93849cd..8291cd288 100644
+--- a/src/video_core/nx2_passthrough.h
++++ b/src/video_core/nx2_passthrough.h
+@@ -47,6 +47,10 @@ void OnMap(const void* memory_manager, GPUVAddr gpu_addr, const u8* host, u64 si
+ /// Unmaps [gpu_addr, gpu_addr + size) (also a sparse reservation: unmapped addresses read 0).
+ void OnUnmap(const void* memory_manager, GPUVAddr gpu_addr, u64 size);
+ 
++/// nx2:gpu 214 made a GPU-only region [gpu_addr, gpu_addr + size) (no sparse flag: the guest CPU never maps it).
++/// Sole mode maps it with video memory (EDEN_NX2_PASSTHROUGH_VRAM_MB).
++void OnGpuOnlyRegion(GPUVAddr gpu_addr, u64 size);
++
+ /// The PTE kind the guest asks for over a range (nx2:gpu 212, 216); 0xff forgets it (pitch).
+ void OnGuestKind(GPUVAddr gpu_addr, u64 size, u32 kind, u32 fallback_kind);
+ 
+-- 
+2.56.0
+

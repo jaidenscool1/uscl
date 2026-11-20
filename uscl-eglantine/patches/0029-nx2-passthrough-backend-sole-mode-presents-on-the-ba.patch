@@ -1,0 +1,277 @@
+From 13f3c59f7af60bb94b6bd21a8be4687c09ddaa9b Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 16:32:15 -0700
+Subject: [PATCH] nx2: passthrough backend: sole mode presents on the back,
+ front time measured
+
+Timed on the GPU front in an MKW race (EDEN_NX2_PASSTHROUGH_TIMES=1, new: idle, acquire waits, presents and
+the present's host wait, logged every 5 s): ~380 ms/s waiting on acquires, ~80 ms/s presenting, 0 idle; the
+rest is work (~43 ms of front CPU per frame at ~12.5 fps). In sole mode the guest syncpoint moves on the
+front as it parses (SoleSyncpoint), so the present's syncpoint action ran Composite there: ~6.5 ms a frame
+(a CPU de-tile of the frame) in which nothing was parsed or submitted. The action now queues the present
+(Nx2Passthrough::DeferToBack) and the front hands it to the split's back, otherwise idle in sole mode, when
+the entry is done or suspended (the action runs under the syncpoint manager's lock, which the back takes:
+deferring there could deadlock on a full ring).
+
+MKW race (racing chunks): 12.0 / 14.0 fps (12.3 / 13.3 before); presents 0 ms/s on the front; frames right.
+The front is the critical path: work plus acquire waits fill the frame.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/gpu.cpp                        | 10 ++++
+ src/video_core/gpu_split.h                    |  4 ++
+ src/video_core/gpu_thread.cpp                 | 14 +++++
+ src/video_core/nx2_passthrough.cpp            | 59 +++++++++++++++++++
+ src/video_core/nx2_passthrough.h              | 11 ++++
+ .../renderer_vulkan/renderer_vulkan.cpp       | 10 ++++
+ .../renderer_vulkan/vk_rasterizer.cpp         |  5 ++
+ 7 files changed, 113 insertions(+)
+
+diff --git a/src/video_core/gpu.cpp b/src/video_core/gpu.cpp
+index ce2c22e46..f5639830d 100644
+--- a/src/video_core/gpu.cpp
++++ b/src/video_core/gpu.cpp
+@@ -38,6 +38,7 @@
+ #include "video_core/engines/maxwell_3d.h"
+ #include "video_core/engines/maxwell_dma.h"
+ #include "video_core/gpu.h"
++#include "video_core/gpu_split.h"
+ #include "video_core/nx2_passthrough.h"
+ #include "video_core/gpu_thread.h"
+ #include "video_core/gpu_timestamp.h"
+@@ -362,6 +363,15 @@ struct GPU::Impl {
+                         }
+                         free_swap_counters.push_back(current_request_counter);
+                     }
++                    // Passthrough sole mode: the guest syncpoint moves on the front as it parses (SoleSyncpoint),
++                    // so the present would run there and stop the parsing that feeds the host GPU for its ~6 ms
++                    // (a CPU de-tile of the frame): the back, otherwise idle in sole mode, presents instead.
++                    if (Tegra::Nx2Passthrough::Sole() && VideoCommon::GpuSplit::OnGpuThread() &&
++                        VideoCommon::GpuSplit::Get().Active()) [[unlikely]] {
++                        Tegra::Nx2Passthrough::DeferToBack(
++                            [this, composite_layers] { renderer->Composite(composite_layers); });
++                        return;
++                    }
+                     renderer->Composite(composite_layers);
+                 };
+                 for (size_t i = 0; i < num_fences; i++) {
+diff --git a/src/video_core/gpu_split.h b/src/video_core/gpu_split.h
+index 9d75935b1..c074eb282 100644
+--- a/src/video_core/gpu_split.h
++++ b/src/video_core/gpu_split.h
+@@ -93,6 +93,10 @@ public:
+     [[nodiscard]] static bool OnBackThread() {
+         return on_back_thread;
+     }
++    /// Whether the calling thread is the GPU thread (the front, or the only one without the split).
++    [[nodiscard]] static bool OnGpuThread() {
++        return on_gpu_thread;
++    }
+     /// Marks the calling thread as the GPU thread (the front, or the only one without the split).
+     static void MarkGpuThread() {
+         on_gpu_thread = true;
+diff --git a/src/video_core/gpu_thread.cpp b/src/video_core/gpu_thread.cpp
+index 6fb969e80..d4ea60eda 100644
+--- a/src/video_core/gpu_thread.cpp
++++ b/src/video_core/gpu_thread.cpp
+@@ -28,6 +28,7 @@
+ #include "video_core/gpu.h"
+ #include "video_core/gpu_thread.h"
+ #include "video_core/gpu_split.h"
++#include "video_core/nx2_passthrough.h"
+ #include "video_core/nx2_hazard.h"
+ #include "video_core/nx2_job_stats.h"
+ #include "video_core/nx2_timeline.h"
+@@ -229,6 +230,14 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
+                     // millisecond before sleeping, or every wait also waits out a host sleep
+                     // (title 1 waits ~25 times a second).
+                     Profile::Scope scope{Profile::Zone::PendingSleep};
++                    const auto wait_start = std::chrono::steady_clock::now();
++                    SCOPE_EXIT {
++                        if (Tegra::Nx2Passthrough::Timing()) [[unlikely]] {
++                            Tegra::Nx2Passthrough::NoteTime(
++                                Tegra::Nx2Passthrough::Time::FrontAcquire,
++                                (std::chrono::steady_clock::now() - wait_start).count());
++                        }
++                    };
+                     if (std::chrono::steady_clock::now() - last_progress <
+                         std::chrono::microseconds{100}) {
+ #if defined(ARCHITECTURE_x86_64)
+@@ -246,7 +255,12 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
+                 }
+             } else {
+                 Profile::Scope scope{Profile::Zone::Idle};
++                const auto idle_start = std::chrono::steady_clock::now();
+                 state.queue.PopWait(next, stop_token);
++                if (Tegra::Nx2Passthrough::Timing()) [[unlikely]] {
++                    Tegra::Nx2Passthrough::NoteTime(Tegra::Nx2Passthrough::Time::FrontIdle,
++                                                    (std::chrono::steady_clock::now() - idle_start).count());
++                }
+             }
+             if (stop_token.stop_requested()) {
+                 break;
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index 6076afc0f..9f8aad3d6 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -3829,6 +3829,25 @@ std::mutex& VulkanMutex() {
+     return m;
+ }
+ 
++std::mutex back_mutex;
++std::vector<std::function<void()>> back_queue; // (back_mutex) DeferToBack, handed over by OnEntryDone
++
++void DeferToBack(std::function<void()> f) {
++    std::scoped_lock lk{back_mutex};
++    back_queue.push_back(std::move(f));
++}
++
++/// Entry thread, no locks held: DeferToBack's functions to the back.
++void HandBack() {
++    std::vector<std::function<void()>> run;
++    {
++        std::scoped_lock lk{back_mutex};
++        if (back_queue.empty()) return;
++        run.swap(back_queue);
++    }
++    for (auto& f : run) VideoCommon::GpuSplit::Get().DeferFunction(std::move(f));
++}
++
+ void SetGpuAstc(GpuAstc g) {
+     gpu_astc_on = false;
+     gpu_astc = std::move(g);
+@@ -3841,6 +3860,7 @@ void OnEntryDone(s32 channel) {
+     }
+     SubmitEntry(channel, ~size_t{0}, true);
+     DispatchGpuAstc();
++    HandBack();
+ }
+ 
+ void OnEntrySuspended(s32 channel, size_t words) {
+@@ -3848,6 +3868,7 @@ void OnEntrySuspended(s32 channel, size_t words) {
+         return;
+     }
+     SubmitEntry(channel, words, false);
++    HandBack();
+ }
+ 
+ void Shutdown() {
+@@ -3907,6 +3928,9 @@ void AfterEntry(s32, std::function<void()> done) {
+ void WaitHost() {}
+ void SoleSyncpoint(Host1x::SyncpointManager&, u32, s32) {}
+ void SetGpuAstc(GpuAstc) {}
++void DeferToBack(std::function<void()> f) {
++    f();
++}
+ std::mutex& VulkanMutex() {
+     static std::mutex m;
+     return m;
+@@ -3915,3 +3939,38 @@ std::mutex& VulkanMutex() {
+ } // namespace Tegra::Nx2Passthrough
+ 
+ #endif
++
++namespace Tegra::Nx2Passthrough {
++
++bool Timing() {
++    static const bool on = [] {
++        const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_TIMES");
++        return v != nullptr && v[0] == '1';
++    }();
++    return on;
++}
++
++void NoteTime(Time what, u64 ns) {
++    static std::array<std::atomic<u64>, static_cast<size_t>(Time::Count)> sum{}, count{};
++    static std::atomic<s64> window{0};
++    sum[static_cast<size_t>(what)] += ns;
++    ++count[static_cast<size_t>(what)];
++    const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
++    s64 start = window.load();
++    if (start == 0) {
++        window.compare_exchange_strong(start, now);
++        return;
++    }
++    if (now - start < 5'000'000'000 || !window.compare_exchange_strong(start, now)) return;
++    static constexpr std::array<const char*, static_cast<size_t>(Time::Count)> names{
++        "front idle", "front acquire waits", "present on the front", "present on the back", "present's host wait"};
++    std::string line;
++    const double secs = double(now - start) / 1e9;
++    for (size_t i = 0; i < names.size(); ++i) {
++        line += fmt::format("{}{} {:.0f} ms/s ({:.0f}/s)", i ? ", " : "", names[i], double(sum[i].exchange(0)) / 1e6 / secs,
++                            double(count[i].exchange(0)) / secs);
++    }
++    LOG_INFO(HW_GPU, "Nx2 passthrough times: {}", line);
++}
++
++} // namespace Tegra::Nx2Passthrough
+diff --git a/src/video_core/nx2_passthrough.h b/src/video_core/nx2_passthrough.h
+index a541cac82..241b94643 100644
+--- a/src/video_core/nx2_passthrough.h
++++ b/src/video_core/nx2_passthrough.h
+@@ -112,6 +112,17 @@ void SetGpuAstc(GpuAstc gpu_astc);
+ /// run on the GPU front: a guest syncpoint action, while the batches run on the back).
+ std::mutex& VulkanMutex();
+ 
++/// Sole mode, GPU front: runs `f` on the split's back thread, handed over when the entry being parsed is done
++/// (callers may hold locks the back takes, such as the syncpoint manager's: a full ring would deadlock there).
++void DeferToBack(std::function<void()> f);
++
++/// EDEN_NX2_PASSTHROUGH_TIMES=1 (measuring): where time goes, summed over every thread that notes it and logged
++/// every 5 s: the GPU front idle (no commands from the game), waiting on acquires, presenting (on the front or the
++/// back), and the present's wait for the host GPU.
++enum class Time : u32 { FrontIdle, FrontAcquire, PresentFront, PresentBack, WaitHost, Count };
++bool Timing();
++void NoteTime(Time what, u64 ns);
++
+ /// Frees the host channel and RM client (also done at process exit).
+ void Shutdown();
+ 
+diff --git a/src/video_core/renderer_vulkan/renderer_vulkan.cpp b/src/video_core/renderer_vulkan/renderer_vulkan.cpp
+index 8fee813f8..711d0fe87 100644
+--- a/src/video_core/renderer_vulkan/renderer_vulkan.cpp
++++ b/src/video_core/renderer_vulkan/renderer_vulkan.cpp
+@@ -32,6 +32,7 @@
+ #include "video_core/post_processing/fx_chain.h"
+ #endif
+ #include "video_core/renderer_vulkan/renderer_vulkan.h"
++#include "video_core/gpu_split.h"
+ #include "video_core/nx2_passthrough.h"
+ #include "video_core/renderer_vulkan/vk_blit_screen.h"
+ #include "video_core/renderer_vulkan/vk_rasterizer.h"
+@@ -219,6 +220,15 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
+     if (Tegra::Nx2Passthrough::Sole()) {
+         passthrough_lock.lock();
+     }
++    const auto present_start = std::chrono::steady_clock::now();
++    SCOPE_EXIT {
++        if (Tegra::Nx2Passthrough::Timing()) [[unlikely]] {
++            Tegra::Nx2Passthrough::NoteTime(VideoCommon::GpuSplit::OnBackThread()
++                                                ? Tegra::Nx2Passthrough::Time::PresentBack
++                                                : Tegra::Nx2Passthrough::Time::PresentFront,
++                                            (std::chrono::steady_clock::now() - present_start).count());
++        }
++    };
+     SCOPE_EXIT {
+         render_window.OnFrameDisplayed();
+     };
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index f82297cd3..3a7eb508f 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -3061,7 +3061,12 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
+     }
+     if (Tegra::Nx2Passthrough::Sole()) [[unlikely]] {
+         // The host GPU rendered the frame into guest memory: present it from there (Layer::UpdateRawImage).
++        const auto wait_start = std::chrono::steady_clock::now();
+         Tegra::Nx2Passthrough::WaitHost();
++        if (Tegra::Nx2Passthrough::Timing()) [[unlikely]] {
++            Tegra::Nx2Passthrough::NoteTime(Tegra::Nx2Passthrough::Time::WaitHost,
++                                            (std::chrono::steady_clock::now() - wait_start).count());
++        }
+         return {};
+     }
+     std::scoped_lock lock{texture_cache.mutex};
+-- 
+2.56.0
+

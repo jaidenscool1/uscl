@@ -7,7 +7,7 @@ T = os.path.dirname(os.path.abspath(__file__))
 BIN = os.environ.get("RUN_BIN", "/home/main/src/eglantine/build-uscl/bin/eglantine")
 DBG = "/home/main/src/eglantine/tools/nx2/debug_mcp.py"
 GAME = os.environ["NSR_GAME"]  # Switch Sports Resort exefs/main
-LOG = "/home/main/.config/uscl/uscl/switch/data/eglantine/log/eden_log.txt"
+LOG = os.environ.get("USCL_SWITCH_PROFILE", "/home/main/.local/share/uscl/eglantine-test") + "/data/eglantine/log/eden_log.txt"
 def stuck_note(pid):
     """The watchdog's verdict for this emulator (launch.py), or ''."""
     path = os.path.join(T, f"STUCK-{pid}.txt")

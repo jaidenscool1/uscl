@@ -1,0 +1,468 @@
+From 28355eb3c9a47e27c684370a618e7b2a53128b1e Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 19:41:27 -0700
+Subject: [PATCH 32/35] nx2: passthrough backend: macro parameters by
+ reference, barrier releases promised, late hardware acquires
+
+- EDEN_NX2_PASSTHROUGH_BYREF=1: an entry that is the rest of a 3D macro call (MKW's GPU-culled parameters) is
+  submitted as a GP entry on the guest's own words (SYNC_WAIT), announced by a header, in one submission
+  with the call, instead of a drain of every channel and a CPU copy.
+- Barrier QMDs launched from memory promise their releases: guest memory with the stream's small inline
+  uploads laid over it (Eglantine writes NVN's payload patches on its back thread, later).
+- EDEN_NX2_PASSTHROUGH_HWACQ_LATE=1 (experimental): an acquire the front waits at becomes a host acquire once
+  the submitted work meets it.
+- Stats lines split (the logger cuts long lines); the last kept acquires are logged when the backend stops.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/engines/puller.cpp  |  13 +-
+ src/video_core/nx2_passthrough.cpp | 217 +++++++++++++++++++++++------
+ src/video_core/nx2_passthrough.h   |   5 +
+ 3 files changed, 188 insertions(+), 47 deletions(-)
+
+diff --git a/src/video_core/engines/puller.cpp b/src/video_core/engines/puller.cpp
+index 362f714b7..2ae7ea1d2 100644
+--- a/src/video_core/engines/puller.cpp
++++ b/src/video_core/engines/puller.cpp
+@@ -242,7 +242,18 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
+     }
+     namespace Profile = VideoCommon::Nx2Profile;
+     Profile::Add(Profile::Counter::AcquirePolls, 1);
+-    const bool met = PollAcquire(dma_pusher);
++    bool met = PollAcquire(dma_pusher);
++    // Sole mode: once the host work submitted meets it, the host channel waits instead (HWACQ).
++    if (!met && Nx2Passthrough::Sole() &&
++        (pending_acquire->operation == static_cast<u32>(GpuSemaphoreOperation::AcquireGequal) ||
++         pending_acquire->operation == static_cast<u32>(GpuSemaphoreOperation::AcquireCircularGequal)) &&
++        Nx2Passthrough::HwAcquireLate(dma_pusher.channel_state.bind_id, pending_acquire->address,
++                                      pending_acquire->value,
++                                      pending_acquire->operation ==
++                                          static_cast<u32>(GpuSemaphoreOperation::AcquireCircularGequal),
++                                      [acquire = *pending_acquire](u32 word) { return acquire.Matches(word); })) {
++        return true;
++    }
+     if (met) {
+         Profile::Add(Profile::Counter::AcquirePollsMet, 1);
+         if (Nx2PendingWake::verify_resume) [[unlikely]] {
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index 46411abef..f7d6bc96d 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -308,10 +308,11 @@ public:
+     /// Appends `words` plus a fence release (no WFI) to the channel and rings its doorbell. `wait`: returns once
+     /// the GPU has executed them (WFI). The CPU only waits when the ring is full. False on a 2 s timeout.
+     /// `tail` false: no fence (the words end inside a method run the next submission continues; the next fence
+-    /// covers them). `flush`: ring the doorbell now.
++    /// covers them). `flush`: ring the doorbell now. `ref_n` words of guest memory at `ref_va` go between `words`
++    /// and the fence (fetched by the host when it gets there: SYNC_WAIT), in one go.
+     bool Submit(Channel& c, std::span<const NvU32> words, bool wait, bool tail = true, bool flush = false,
+-                bool wfi = false) {
+-        tail = tail || wait;
++                bool wfi = false, NvU64 ref_va = 0, NvU32 ref_n = 0) {
++        tail = tail || wait || ref_n != 0;
+         wfi = wfi || wait;
+         const NvU64 sem = c.gva + SEM;
+         const NvU32 fence = tail ? ++c.fence : c.fence + 1;
+@@ -326,21 +327,32 @@ public:
+         if (n >= PB_WORDS / 2) return false;
+         const auto start = std::chrono::steady_clock::now();
+         NvU64 at;
+-        while (!Reserve(c, n, at)) {
++        while (!Reserve(c, n, at, ref_n != 0 ? 3 : 1)) {
+             ++ring_waits;
+             if (std::chrono::steady_clock::now() - start > WAIT_LIMIT) return false;
+         }
+         auto* pb = reinterpret_cast<volatile NvU32*>(c.cpu + PB) + at;
+         for (size_t i = 0; i < words.size(); ++i) pb[i] = words[i];
+         for (size_t i = 0; tail && i < 6; ++i) pb[words.size() + i] = tail_words[i];
+-        c.pending.push_back({fence, at, at + n});
+         c.head = at + n;
+-        auto& sent = c.sent[c.gpput % ENTRIES];
+-        sent.entry = c.cur_entry;
+-        sent.guest = c.cur_guest;
+-        sent.words.assign(words.begin(), words.begin() + std::min<size_t>(words.size(), 256));
+-        reinterpret_cast<volatile NvU64*>(c.cpu + RING)[c.gpput % ENTRIES] = (c.gva + PB + at * 4) | (n << 42);
+-        ++c.gpput;
++        const auto entry = [&](NvU64 gp, NvU64 from, NvU64 to, std::span<const NvU32> w) {
++            c.pending.push_back({fence, from, to});
++            auto& sent = c.sent[c.gpput % ENTRIES];
++            sent.entry = c.cur_entry;
++            sent.guest = c.cur_guest;
++            sent.words.assign(w.begin(), w.begin() + std::min<size_t>(w.size(), 256));
++            reinterpret_cast<volatile NvU64*>(c.cpu + RING)[c.gpput % ENTRIES] = gp;
++            ++c.gpput;
++        };
++        if (ref_n == 0) {
++            entry((c.gva + PB + at * 4) | (n << 42), at, at + n, words);
++        } else {
++            const NvU64 w = words.size();
++            if (w != 0) entry((c.gva + PB + at * 4) | (w << 42), at, at + w, words);
++            entry(ref_va | (NvU64{ref_n} << 42) | (NvU64{1} << 63), at + w, at + w, {}); // SYNC_WAIT
++            entry((c.gva + PB + (at + w) * 4) | (NvU64{6} << 42), at + w, at + n, {});
++            ++c.unflushed; // the submission's other entries
++        }
+         // The doorbell rings every 64 submissions (EDEN_NX2_PASSTHROUGH_BATCH): one per entry cost 15% of MKW's
+         // racing fps next to Vulkan (the GPU kept switching to our channels), 64 cost 1%. Words mode also rings
+         // after entries that release a semaphore (another channel may wait for it) and for batches older than
+@@ -494,10 +506,10 @@ public:
+ 
+ 
+     /// Finds room for n words in the channel's pushbuffer ring; frees what the GPU finished (the fence).
+-    bool Reserve(Channel& c, NvU64 n, NvU64& at) {
++    bool Reserve(Channel& c, NvU64 n, NvU64& at, size_t slots = 1) {
+         // Guest entries run ~125k/s: read the fence (video memory over BAR) only when room runs short.
+         auto room = [&]() -> bool {
+-            if (c.pending.size() >= ENTRIES - 1) return false;
++            if (c.pending.size() + slots >= ENTRIES) return false;
+             if (c.pending.empty()) {
+                 at = c.head + n <= PB_WORDS ? c.head : 0;
+                 return true;
+@@ -2393,7 +2405,7 @@ constexpr u32 SET_OBJECT = 0, NOP = 0x08 / 4, SEM_A = 0x10 / 4, SEM_B = 0x14 / 4
+               SEM_ADDR_LO = 0x5C / 4, SEM_ADDR_HI = 0x60 / 4, SEM_PAYLOAD_LO = 0x64 / 4, SEM_PAYLOAD_HI = 0x68 / 4,
+               SEM_EXECUTE = 0x6C / 4, WFI = 0x78 / 4, HOST_END = 0x40;
+ constexpr u32 INSTRUMENTATION_A = 0x150 / 4, INSTRUMENTATION_B = 0x154 / 4, LINE_LENGTH_IN = 0x180 / 4,
+-              LINE_COUNT = 0x184 / 4, LAUNCH_DMA = 0x1B0 / 4, LOAD_INLINE_DATA = 0x1B4 / 4,
++              LINE_COUNT = 0x184 / 4, OFFSET_OUT_UPPER = 0x188 / 4, OFFSET_OUT = 0x18C / 4, LAUNCH_DMA = 0x1B0 / 4, LOAD_INLINE_DATA = 0x1B4 / 4,
+               INVALIDATE_SHADER_CACHES = 0x21C / 4, SEND_PCAS_A = 0x2B4 / 4, SEND_SIGNALING_PCAS_B = 0x2BC / 4,
+               SEND_SIGNALING_PCAS2_B = 0x2C0 / 4, LM_NON_THROTTLED_B = 0x2E8 / 4, SPA_VERSION = 0x310 / 4,
+               INLINE_QMD_ADDRESS_A = 0x318 / 4, INLINE_QMD_ADDRESS_B = 0x31C / 4, INLINE_QMD_DATA = 0x320 / 4,
+@@ -2431,7 +2443,7 @@ enum Count : size_t {
+     WordsIn, WordsOut, DropSyncpoint, DropHostMethod, DropNever, DropUnbound, DropSemaphoreUnmapped, DropReportTrap,
+     DropMemOp, DropDependence, QmdFromMemory, QmdFromSlot, QmdUnmapped, BarrierLaunches, DependenceUnderflow, InlineQmds, SrgbWrite, LocalMemory, LocalMemoryTooSmall,
+     MacroReplaced, MacroHostMme, MacroDropped, MacroUnpaired, Invalidates, MidRun, BadHeader, Releases, ReleasesDropped, ByReference, FreshDiffers, AcquiresDropped, VtCopies,
+-    HwAcquires, HwUnknown, HwUnmet, KeepMismatch, AheadEntries, AheadDiffer, AheadUnread, CountEnd
++    HwAcquires, HwLate, HwUnknown, HwUnmet, KeepMismatch, AheadEntries, AheadDiffer, AheadUnread, CountEnd
+ };
+ constexpr const char* COUNT_NAMES[CountEnd] = {
+     "words in", "words out", "syncpoint methods dropped", "host methods dropped", "firmware/sw/zcull/ISA methods dropped",
+@@ -2444,9 +2456,9 @@ constexpr const char* COUNT_NAMES[CountEnd] = {
+     "compute macro calls left to the host MME", "compute macro calls dropped (QMD output, incomplete trace)",
+     "front macro traces left unpaired", "shader cache invalidates", "entries ending inside a method run",
+     "unknown headers", "doorbells at releases", "semaphore releases left to Eglantine",
+-    "macro parameter entries read again after a drain", "of them differing from Eglantine's words",
++    "macro parameter entries read again after a drain (or by reference)", "of them differing from Eglantine's words",
+     "semaphore acquires left to Eglantine", "copy launches into virtual textures",
+-    "acquires left to the host", "of the rest: no promised value", "promised value does not meet them",
++    "acquires left to the host", "of them after the front waited", "of the rest: no promised value", "promised value does not meet them",
+     "kept acquires out of order", "entries parsed ahead of an acquire (HWACQ=2)", "of them changed by the time it passed",
+     "of them unreadable"
+ };
+@@ -2463,8 +2475,11 @@ struct Xlate {
+         NvU64 va;
+         u32 payload, how;
+     };
++    NvU64 i2m_out = 0, i2m_at = 0;               // inline-to-memory destination, next word (0: not tracked)
+     std::vector<Write> writes;                   // semaphore writes in the entry (Words::Promise), until submitted
+     std::deque<std::pair<NvU64, u32>> keep;      // acquires the front left to the host (HwAcquire), in order
++    std::deque<std::array<NvU64, 4>> kept_log;
++    std::vector<NvU32> prefix;                   // host acquires for the channel's next words (HwAcquireLate)   // the last ones: address, value, memory, promised (postmortem)
+     NvU64 qmd_slot = 0; // the host slot inline QMDs go to
+     std::array<u32, 2> header_pool{};
+     u32 qmd_guest_a = 0, qmd_guest_b = 0; // the guest's inline QMD address (SHIFTED8)
+@@ -2570,6 +2585,7 @@ struct State {
+     // an add wrote are never promised.
+     std::unordered_map<NvU64, u32> promised;
+     std::unordered_set<NvU64> unpredictable;
++    std::unordered_map<NvU64, u32> i2m; // words small inline-to-memory uploads wrote, in stream order (Launch)
+     // The submission that carries each promised VA's last write: once the host passed it, memory's value is the
+     // promise (MKW's NVN fence slots are reset to 0 every frame by a write the translator does not see).
+     std::unordered_map<NvU64, std::pair<Host::Channel*, NvU32>> last_write;
+@@ -2633,6 +2649,12 @@ void Guarded(State& s, const char* what, F&& f) {
+         LOG_ERROR(HW_GPU, "Nx2 passthrough off: {}: {} failed (status {:#x}, errno {})", what, e.what(), e.status,
+                   errno);
+         s.host->Postmortem();
++        for (const auto& [ch, x] : s.xlate) {
++            for (const auto& k : x.kept_log) {
++                LOG_ERROR(HW_GPU, "Nx2 passthrough: channel {} left to the host: {:#x} >= {:#x} (memory {:#x}, promised "
++                          "{:#x})", ch, k[0], k[1], k[2], k[3]);
++            }
++        }
+         s.host.reset();
+     }
+ }
+@@ -2657,6 +2679,10 @@ void LogStats(State& s) {
+         std::string line;
+         for (size_t i = 0; i < CountEnd; ++i) {
+             if (s.counts[i] != 0) line += fmt::format("{}{} {}", line.empty() ? "" : ", ", s.counts[i], COUNT_NAMES[i]);
++            if (line.size() > 600) { // the logger cuts long lines
++                LOG_INFO(HW_GPU, "Nx2 passthrough words: {}", line);
++                line.clear();
++            }
+         }
+         LOG_INFO(HW_GPU, "Nx2 passthrough ASTC: {} textures decoded ({} by the Vulkan device; {} MiB, {} MiB in video "
+                  "memory), {} failed, {} left raw (too large), {} headers repointed", h.astc_decoded, h.astc_gpu_decoded,
+@@ -2727,6 +2753,15 @@ struct Words {
+     /// the promised values once the entry is submitted (HwAcquire).
+     void Promise(NvU64 va, u32 payload, u32 how) { x.writes.push_back({va, payload, how}); }
+ 
++    /// A QMD's releases (RELEASE0/1/2: address, control, payload), made when its grid is done.
++    void PromiseQmd(const u32* q) {
++        for (const u32 r : {24u, 28u, 52u}) {
++            const u32 ctl = q[r + 1];
++            if (!(ctl & (1u << 23))) continue;
++            Promise((NvU64{ctl & 0xFF} << 32) | q[r], q[r + 2], !(ctl & (1u << 26)) ? 0 : ((ctl >> 20) & 7) == 0 ? 1 : 2);
++        }
++    }
++
+     /// Sole mode: whether the front left this acquire to the host (HwAcquire), in the order it met them (the
+     /// others it waited for, or found met).
+     bool Kept(NvU64 va, u32 payload) {
+@@ -2874,6 +2909,18 @@ struct Words {
+             }
+             case LINE_LENGTH_IN: x.i2m_len = v; break;
+             case LINE_COUNT: x.i2m_count = v; break;
++            case OFFSET_OUT_UPPER: x.i2m_out = (NvU64{v & 0xFF} << 32) | (x.i2m_out & 0xFFFFFFFF); break;
++            case OFFSET_OUT: x.i2m_out = (x.i2m_out & ~NvU64{0xFFFFFFFF}) | v; break;
++            case LAUNCH_DMA: // pitch, one short line: NVN's patches of barrier QMDs (Launch reads them back)
++                x.i2m_at = (v & 1) && x.i2m_count <= 1 && x.i2m_len <= 256 ? x.i2m_out : 0;
++                break;
++            case LOAD_INLINE_DATA:
++                if (x.i2m_at != 0) {
++                    if (s.i2m.size() >= (1u << 16)) s.i2m.clear();
++                    s.i2m[x.i2m_at] = v;
++                    x.i2m_at += 4;
++                }
++                break;
+             case TEX_HEADER_POOL_A: x.header_pool[0] = v; break;
+             case TEX_HEADER_POOL_B: x.header_pool[1] = v; break;
+             case TEX_HEADER_POOL_C:
+@@ -3000,6 +3047,16 @@ struct Words {
+             return;
+         }
+         ++s.counts[QmdFromMemory];
++        // Its releases: guest memory with the stream's inline uploads over it (NVN patches the payloads while
++        // the barrier waits; Eglantine writes them to memory later, on its back thread).
++        if (const u8* src = h.MirroredHost(qmd); src != nullptr && HostReleases()) {
++            u32 q[64];
++            std::memcpy(q, src, sizeof(q));
++            for (u32 i = 0; i < 64; ++i) {
++                if (const auto it = s.i2m.find(qmd + i * 4); it != s.i2m.end()) q[i] = it->second;
++            }
++            PromiseQmd(q);
++        }
+         const NvU64 slot = GpuCopyQmd(qmd);
+         if (!s.watch.empty()) s.copied_qmds.emplace_back(qmd, slot);
+         Put(sc, Mthd::SEND_PCAS_A, static_cast<u32>(slot >> 8));
+@@ -3123,12 +3180,7 @@ struct Words {
+                 const NvU64 guest = ((NvU64{x.qmd_guest_a} << 32) | x.qmd_guest_b) << 8;
+                 h.inline_qmds[guest] = {x.qmd_slot, h.qmd_next};
+                 ++s.counts[InlineQmds];
+-                for (const u32 r : {24u, 28u, 52u}) { // RELEASE0/1/2: address, control, payload
+-                    const u32 ctl = x.qmd[r + 1];
+-                    if (!(ctl & (1u << 23)) || !HostReleases()) continue;
+-                    Promise((NvU64{ctl & 0xFF} << 32) | x.qmd[r], x.qmd[r + 2],
+-                            !(ctl & (1u << 26)) ? 0 : ((ctl >> 20) & 7) == 0 ? 1 : 2); // RED_ADD
+-                }
++                if (HostReleases()) PromiseQmd(x.qmd.data());
+                 x.release = true; // its own releases, if any
+             }
+         }
+@@ -3366,25 +3418,18 @@ namespace {
+ void SubmitEntry(s32 channel, size_t to, bool final);
+ }
+ 
+-bool HwAcquire(s32 channel, size_t word, GPUVAddr address, u32 value, const std::function<bool(u32)>& meets) {
+-    if (HwAcqMode() == 0) return false;
+-    // The entry's words before the acquire are translated first: its own releases (MKW: the dispatch just
+-    // before, whose QMD adds 1) count. A part that ends inside a method run is held: its writes are pending below.
+-    SubmitEntry(channel, word, false);
+-    State& s = Get();
+-    std::scoped_lock lk{s.mutex};
+-    if (!s.host || !s.submit_words) return false;
+-    auto& x = s.xlate[channel];
++/// HWACQ: the value the host work submitted so far (and `channel`'s words translated but not submitted yet) leaves
++/// at `address`; nullopt when unknown or met in memory already (`now`: memory's word).
++std::optional<u32> Promised(State& s, Xlate& x, GPUVAddr address, const std::function<bool(u32)>& meets, u32& now) {
+     const bool pending_here = std::any_of(x.writes.begin(), x.writes.end(), [&](const auto& w) { return w.va == address; });
+     const auto it = s.promised.find(address);
+     const u8* p = it != s.promised.end() || pending_here ? s.host->MirroredHost(address) : nullptr;
+     if (p == nullptr || s.unpredictable.contains(address)) {
+         ++s.counts[HwUnknown];
+-        return false;
++        return std::nullopt;
+     }
+-    u32 now;
+     std::memcpy(&now, p, 4);
+-    if (meets(now)) return false; // met already: the front's usual path
++    if (meets(now)) return std::nullopt; // met already: the front's usual path
+     u32 promised = now;
+     const auto last = s.last_write.find(address);
+     if (it != s.promised.end() && static_cast<s32>(now - it->second) <= 0 && last != s.last_write.end() &&
+@@ -3394,24 +3439,69 @@ bool HwAcquire(s32 channel, size_t word, GPUVAddr address, u32 value, const std:
+     if (it != s.promised.end()) it->second = promised;
+     for (const auto& w : x.writes) { // this channel's, not submitted yet: they come before the acquire
+         if (w.va != address) continue;
+-        if (w.how == 2) return false;
++        if (w.how == 2) return std::nullopt;
+         promised = w.how == 0 ? w.payload : promised + w.payload;
+     }
+-    if (!meets(promised)) {
+-        ++s.counts[HwUnmet];
+-        if (HwAcqLog()) {
+-            LOG_INFO(HW_GPU, "Nx2 passthrough HWACQ: ch {} {:#x} >= {:#x} unmet (memory {:#x}, promised {:#x})", channel,
+-                     address, value, now, promised);
+-        }
+-        return false;
+-    }
++    return promised;
++}
++
++void NoteKept(State& s, Xlate& x, s32 channel, GPUVAddr address, u32 value, u32 now, u32 promised,
++              const std::function<bool(u32)>& meets) {
+     ++s.counts[HwAcquires];
+     if (HwAcqLog()) {
+         LOG_INFO(HW_GPU, "Nx2 passthrough HWACQ: ch {} {:#x} >= {:#x} left to the host (memory {:#x}, promised {:#x})",
+                  channel, address, value, now, promised);
+     }
+-    x.keep.emplace_back(address, value);
++    x.kept_log.push_back({address, value, now, promised});
++    if (x.kept_log.size() > 6) x.kept_log.pop_front();
+     if (HwAcqMode() == 2) s.ahead[channel].conditions.emplace_back(address, meets);
++}
++
++namespace {
++void SubmitEntry(s32 channel, size_t to, bool final);
++}
++
++bool HwAcquire(s32 channel, size_t word, GPUVAddr address, u32 value, const std::function<bool(u32)>& meets) {
++    if (HwAcqMode() == 0) return false;
++    // The entry's words before the acquire are translated first: its own releases (MKW: the dispatch just
++    // before, whose QMD adds 1) count. A part that ends inside a method run is held: its writes are pending.
++    SubmitEntry(channel, word, false);
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    if (!s.host || !s.submit_words) return false;
++    auto& x = s.xlate[channel];
++    u32 now = 0;
++    const auto promised = Promised(s, x, address, meets, now);
++    if (!promised) return false;
++    if (!meets(*promised)) {
++        ++s.counts[HwUnmet];
++        return false;
++    }
++    x.keep.emplace_back(address, value);
++    NoteKept(s, x, channel, address, value, now, *promised, meets);
++    return true;
++}
++
++bool HwAcquireLate(s32 channel, GPUVAddr address, u32 value, bool circular, const std::function<bool(u32)>& meets) {
++    static const bool late = [] { // EDEN_NX2_PASSTHROUGH_HWACQ_LATE=1 (experimental: br4 faulted with it)
++        const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_HWACQ_LATE");
++        return v != nullptr && v[0] == '1';
++    }();
++    if (HwAcqMode() == 0 || !late) return false;
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    if (!s.host || !s.submit_words) return false;
++    auto& x = s.xlate[channel];
++    if (x.held || !x.writes.empty()) return false; // inside a method run: no host method can go in between
++    u32 now = 0;
++    const auto promised = Promised(s, x, address, meets, now);
++    if (!promised || !meets(*promised)) return false;
++    x.prefix.insert(x.prefix.end(),
++                    {Hdr(0, NVC56F_SEM_ADDR_LO, 5), static_cast<NvU32>(address), static_cast<NvU32>(address >> 32), value, 0,
++                     static_cast<NvU32>(circular ? DRF_DEF(C56F, _SEM_EXECUTE, _OPERATION, _ACQ_CIRC_GEQ)
++                              : DRF_DEF(C56F, _SEM_EXECUTE, _OPERATION, _ACQ_STRICT_GEQ))});
++    ++s.counts[HwLate];
++    NoteKept(s, x, channel, address, value, now, *promised, meets);
+     return true;
+ }
+ 
+@@ -3617,6 +3707,7 @@ void SubmitEntry(s32 channel, size_t to, bool final) {
+     if (end < rec.sent || (end == rec.sent && !final)) return;
+     const GPUVAddr address = rec.address == 0 ? 0 : rec.address + rec.sent * sizeof(CommandHeader);
+     const std::span<const CommandHeader> commands = std::span<const CommandHeader>(rec.words).subspan(rec.sent, end - rec.sent);
++    const size_t rec_sent_before = rec.sent;
+     rec.sent = end;
+     rec.valid = !final;
+     // One marker submission per entry, on the guest channel's own host channel, without waiting (the guest's
+@@ -3664,6 +3755,9 @@ void SubmitEntry(s32 channel, size_t to, bool final) {
+                  address >= GUEST_VA_LO && address + bytes <= GUEST_VA_HI && s.entries % s.check_every == 0;
+     const auto start = std::chrono::steady_clock::now();
+     bool tail = true, flush = false, hold = false;
++    NvU64 ref_va = 0;
++    NvU32 ref_n = 0;
++    const bool rec_whole = rec_sent_before == 0; // the whole entry in this part
+     // Sole mode: the entry's AfterEntry callbacks are armed with the fence of the submission that carries it
+     // (a held entry keeps them for its continuation); on any path that does not submit they run now.
+     bool armed = false;
+@@ -3697,6 +3791,7 @@ void SubmitEntry(s32 channel, size_t to, bool final) {
+             x->run_n = 0;
+             x->release = false;
+             x->writes.clear();
++            x->out.swap(x->prefix); // acquires left to the host while the front waited (HwAcquireLate)
+         }
+         Guarded(s, "words", [&](Host& h) {
+             Words w{s, h, *c, *x};
+@@ -3731,6 +3826,33 @@ void SubmitEntry(s32 channel, size_t to, bool final) {
+             }();
+             std::span<const u32> words{reinterpret_cast<const u32*>(commands.data()), commands.size()};
+             std::vector<u32> fresh;
++            // EDEN_NX2_PASSTHROUGH_BYREF=1: such an entry, the rest of a 3D macro call, is not read here at all:
++            // a header announces its words and the host fetches them from guest memory when it gets there (as the
++            // console does), after the methods before them (SYNC_WAIT: the acquire that orders the culling first).
++            // No drain. The whole call goes out in one submission (an MME left mid-call faults).
++            static const bool byref_on = [] {
++                const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_BYREF");
++                return Sole() && v != nullptr && v[0] == '1';
++            }();
++            if (byref_on && final && rec_whole && x->left == commands.size() && x->left != 0 && !x->in_call &&
++                x->cls[x->subc] == ADA_A && x->method >= Mthd::MACRO && address >= GUEST_VA_LO &&
++                address + bytes <= GUEST_VA_HI && h.IsMapped(address) && h.IsMapped(address + bytes - 4)) {
++                const u32 n = static_cast<u32>(commands.size());
++                x->out.push_back((x->mode << 29) | (n << 16) | (x->subc << 13) | x->method);
++                x->run_n = 0;
++                if (x->mode == 1) x->method += n;
++                if (x->mode == 5) {
++                    ++x->method;
++                    x->mode = 3;
++                }
++                x->first = false;
++                x->left = 0;
++                s.counts[WordsIn] += n;
++                ref_va = address;
++                ref_n = n;
++                ++s.counts[ByReference];
++                return;
++            }
+             if (reread && x->left >= commands.size() && x->left != 0 && x->cls[x->subc] == ADA_A && x->method >= Mthd::MACRO &&
+                 address >= GUEST_VA_LO && (address & 0xFFF) + bytes <= 0x1000 && h.MirroredHost(address) != nullptr) {
+                 const auto t0 = std::chrono::steady_clock::now();
+@@ -3797,7 +3919,7 @@ void SubmitEntry(s32 channel, size_t to, bool final) {
+         // HWACQ: the fence after promised writes waits for them to land (a QMD's release lands when its grid is
+         // done, long after a plain fence passes), so a passed fence means memory holds them.
+         done = hold || h.Submit(*c, out, check || (sync && tail), tail, flush || !final,
+-                                x != nullptr && !x->writes.empty() && HwAcqMode() != 0);
++                                x != nullptr && !x->writes.empty() && HwAcqMode() != 0, ref_va, ref_n);
+         h.FlushStale();
+         h.VtFlush();
+     });
+@@ -4135,6 +4257,9 @@ void AfterEntry(s32, std::function<void()> done) {
+ }
+ void WaitHost() {}
+ void SoleSyncpoint(Host1x::SyncpointManager&, u32, s32) {}
++bool HwAcquireLate(s32, GPUVAddr, u32, bool, const std::function<bool(u32)>&) {
++    return false;
++}
+ bool HwAcquire(s32, size_t, GPUVAddr, u32, const std::function<bool(u32)>&) {
+     return false;
+ }
+diff --git a/src/video_core/nx2_passthrough.h b/src/video_core/nx2_passthrough.h
+index 870bc027a..293700a38 100644
+--- a/src/video_core/nx2_passthrough.h
++++ b/src/video_core/nx2_passthrough.h
+@@ -95,6 +95,11 @@ void AfterEntry(s32 channel, std::function<void()> done);
+ /// drain can wait on it forever). False: the front waits as before.
+ bool HwAcquire(s32 channel, size_t word, GPUVAddr address, u32 value, const std::function<bool(u32)>& meets);
+ 
++/// The same for an acquire the front already waits at (its words were submitted without it): when the host work
++/// submitted since meets it, a host acquire (`circular`: circular >=, else >=) goes before the channel's next
++/// words and the front resumes.
++bool HwAcquireLate(s32 channel, GPUVAddr address, u32 value, bool circular, const std::function<bool(u32)>& meets);
++
+ /// Sole mode: a guest syncpoint increment on `channel` (-1: the channel whose entry is being processed): the
+ /// guest value moves now, the host value once the host GPU has run that entry.
+ void SoleSyncpoint(Host1x::SyncpointManager& syncpoints, u32 id, s32 channel = -1);
+-- 
+2.56.0
+

@@ -1,0 +1,168 @@
+From 677119a92dfe91a799129d509db00e558a105d96 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 21:07:03 -0700
+Subject: [PATCH 35/35] nx2: passthrough backend: sole-mode split ring filter,
+ the fifteenth pass's switches on by default
+
+- The 3D front sends the back only the sync point in sole mode (EDEN_NX2_PASSTHROUGH_RING_FILTER=0: everything,
+  as before): the back's draws, clears and queries are gated off and the host makes the constant-buffer and
+  inline uploads itself. MKW racing ~19.5 -> ~22 fps.
+- Sole mode defaults: hardware acquires (HWACQ=1), macro parameters by reference (BYREF), cached guest memory
+  (SYSMEM_CACHED), the ring filter; ASTC video-memory twins off (ASTC_VRAM_MB=0: no gain measured, 2 GiB back).
+  Each switch =0 turns it off.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/engines/maxwell_3d.cpp | 30 +++++++++++++++++++++++----
+ src/video_core/nx2_passthrough.cpp    | 26 +++++++++++------------
+ 2 files changed, 39 insertions(+), 17 deletions(-)
+
+diff --git a/src/video_core/engines/maxwell_3d.cpp b/src/video_core/engines/maxwell_3d.cpp
+index 46d31ad0e..44055357d 100644
+--- a/src/video_core/engines/maxwell_3d.cpp
++++ b/src/video_core/engines/maxwell_3d.cpp
+@@ -1526,6 +1526,19 @@ void Maxwell3D::ReleaseFront() {
+     LOG_INFO(HW_GPU, "GPU thread split stopped: 3D macros back on the engine");
+ }
+ 
++// Sole passthrough mode (EDEN_NX2_PASSTHROUGH_RING_FILTER=0: off): the back's 3D engine only needs the sync point (it
++// signals the syncpoint after the host's work); its draws, clears and queries are gated off and the host makes the
++// constant-buffer and inline uploads itself, so nothing else is sent through the split ring (the front's own
++// state, which its macros read, is kept as before).
++static bool SoleRingSkip(u32 method, u32 amount = 1) {
++    static const bool filter = [] {
++        const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_RING_FILTER"); // on by default in sole mode
++        return Nx2Passthrough::Sole() && (v == nullptr || v[0] != '0');
++    }();
++    constexpr u32 sync = MAXWELL3D_REG_INDEX(sync_info);
++    return filter && !(method <= sync && sync < method + (std::max)(amount, 1U));
++}
++
+ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 method,
+                            u32 argument, bool is_last_call, bool from_macro) {
+     namespace Profile = VideoCommon::Nx2Profile;
+@@ -1630,6 +1643,9 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
+         if (IsDrawProgramRegister(method)) {
+             fs.draw_key_valid = false;
+         }
++        if (SoleRingSkip(method)) [[unlikely]] {
++            return;
++        }
+         if (from_macro) {
+             split.MacroWrite(this, method, argument, effect);
+         } else {
+@@ -1691,7 +1707,9 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
+         }
+         break;
+     }
+-    if (fs.draw_begin_coalesce && method == MAXWELL3D_REG_INDEX(draw.begin) &&
++    if (SoleRingSkip(method)) [[unlikely]] {
++        // nothing for the back (above)
++    } else if (fs.draw_begin_coalesce && method == MAXWELL3D_REG_INDEX(draw.begin) &&
+         ((value >> 26) & 3) == 1) [[unlikely]] {
+         // Nx2Perf draw_begin_coalesce: an instance loop's begin right after the same one only
+         // counts one more instance on the back (DrawManager::AddInstances). With Verify it is
+@@ -1880,7 +1898,9 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
+             }
+         }
+     }
+-    split.MultiMethod(this, method, base_start, amount, methods_pending, nullptr, effect);
++    if (!SoleRingSkip(method, amount)) {
++        split.MultiMethod(this, method, base_start, amount, methods_pending, nullptr, effect);
++    }
+     if ((fs.class_table ? (cls & ClassDraw) != 0 : IsDrawMethod(method)) &&
+         FrontIsWriterDraw(fs.regs)) {
+         split.NoteWriter();
+@@ -2219,8 +2239,10 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
+         fs.draw_pending = false;
+         fs.draw_window_writer = false;
+         fs.draw_window_epoch = 0;
+-        split.Defer([this, system_ptr = &system] { FinishFrontMacro(*system_ptr); },
+-                    finish_effect);
++        if (!SoleRingSkip(0)) {
++            split.Defer([this, system_ptr = &system] { FinishFrontMacro(*system_ptr); },
++                        finish_effect);
++        }
+         if (FrontIsWriterDraw(fs.regs)) {
+             split.NoteWriter();
+         }
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index f4c3cb0a5..7da8f5163 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -1290,11 +1290,11 @@ private:
+             if (have > cur + 2 || NvU64{have + 1} * ASTC_CHUNK > astc_size) return;
+             const NvU64 gva = MapGpu(ImportHost(astc_cpu + have * ASTC_CHUNK, ASTC_CHUNK, 0x73000000u + static_cast<NvU32>(have)),
+                                      ASTC_CHUNK);
+-            // EDEN_NX2_PASSTHROUGH_ASTC_VRAM_MB (2048 in sole mode): chunks get a video memory twin the decoded
++            // EDEN_NX2_PASSTHROUGH_ASTC_VRAM_MB (0 by default): chunks get a video memory twin the decoded
+             // textures are copied into (the GPU samples them every frame; over PCIe from host memory otherwise).
+             static const NvU64 vram_budget = [] {
+                 const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_ASTC_VRAM_MB");
+-                return (v != nullptr ? std::strtoull(v, nullptr, 0) : (Sole() ? 2048ull : 0ull)) << 20;
++                return (v != nullptr ? std::strtoull(v, nullptr, 0) : 0ull) << 20; // sole mode measured no gain (tw0/tw3)
+             }();
+             NvU64 twin = 0;
+             if (NvU64{have + 1} * ASTC_CHUNK <= vram_budget) {
+@@ -1732,8 +1732,8 @@ private:
+             // guest's own L2_SYSMEM_INVALIDATEs, several a frame, drop rewritten cells; a cell rewritten mid-frame
+             // races with its sampling either way).
+             static const bool cached = [] {
+-                const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_SYSMEM_CACHED");
+-                return v != nullptr && v[0] == '1';
++                const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_SYSMEM_CACHED"); // default: sole mode
++                return v != nullptr ? v[0] == '1' : Sole();
+             }();
+             p.flags = DRF_DEF(OS46, _FLAGS, _DMA_OFFSET_FIXED, _TRUE) | DRF_DEF(OS46, _FLAGS, _PAGE_SIZE, _4KB) |
+                       (cached ? DRF_DEF(OS46, _FLAGS, _GPU_CACHEABLE, _YES) : DRF_DEF(OS46, _FLAGS, _GPU_CACHEABLE, _NO));
+@@ -2201,11 +2201,11 @@ private:
+         p.length = size;
+         // Not cached in the GPU's L2: the guest CPU rewrites this memory all the time (rings reused every frame)
+         // and nothing invalidates the L2 on a CPU write (measured: cached, 6% of re-read pushbuffer entries stale).
+-        // EDEN_NX2_PASSTHROUGH_SYSMEM_CACHED=1: cached like on the console, where all memory is system memory behind
++        // Sole mode (EDEN_NX2_PASSTHROUGH_SYSMEM_CACHED=0: off): cached like on the console, where all memory is system memory behind
+         // the GPU's L2 and the guest's own L2_SYSMEM_INVALIDATE / L2_FLUSH_DIRTY keep it coherent (MKW: ~8 a frame).
+         static const bool sysmem_cached = [] {
+-            const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_SYSMEM_CACHED");
+-            return v != nullptr && v[0] == '1';
++            const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_SYSMEM_CACHED"); // default: sole mode
++            return v != nullptr ? v[0] == '1' : Sole();
+         }();
+         p.flags = DRF_DEF(OS46, _FLAGS, _DMA_OFFSET_FIXED, _TRUE) | DRF_DEF(OS46, _FLAGS, _PAGE_SIZE, _4KB) |
+                   DRF_DEF(OS46, _FLAGS, _PAGE_KIND_OVERRIDE, _YES) |
+@@ -3371,12 +3371,12 @@ bool Sole() {
+ }
+ 
+ namespace {
+-/// EDEN_NX2_PASSTHROUGH_HWACQ: 0 off, 1 the front leaves acquires the submitted host work meets to the host,
++/// EDEN_NX2_PASSTHROUGH_HWACQ (sole mode): 0 off, 1 (default) the front leaves acquires the submitted host work meets to the host,
+ /// 2 also compares the entries it parsed ahead of them with memory once they are met (measuring).
+ u32 HwAcqMode() {
+     static const u32 mode = [] {
+-        const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_HWACQ");
+-        return Sole() && v != nullptr ? static_cast<u32>(std::strtoul(v, nullptr, 0)) : 0u;
++        const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_HWACQ"); // on by default in sole mode
++        return !Sole() ? 0u : v != nullptr ? static_cast<u32>(std::strtoul(v, nullptr, 0)) : 1u;
+     }();
+     return mode;
+ }
+@@ -3951,13 +3951,13 @@ void SubmitEntry(s32 channel, size_t to, bool final) {
+             }();
+             std::span<const u32> words{reinterpret_cast<const u32*>(commands.data()), commands.size()};
+             std::vector<u32> fresh;
+-            // EDEN_NX2_PASSTHROUGH_BYREF=1: such an entry, the rest of a 3D macro call, is not read here at all:
++            // Sole mode (EDEN_NX2_PASSTHROUGH_BYREF=0: off): such an entry, the rest of a 3D macro call, is not read here at all:
+             // a header announces its words and the host fetches them from guest memory when it gets there (as the
+             // console does), after the methods before them (SYNC_WAIT: the acquire that orders the culling first).
+             // No drain. The whole call goes out in one submission (an MME left mid-call faults).
+             static const bool byref_on = [] {
+-                const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_BYREF");
+-                return Sole() && v != nullptr && v[0] == '1';
++                const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_BYREF"); // on by default in sole mode
++                return Sole() && (v == nullptr || v[0] != '0');
+             }();
+             if (byref_on && final && rec_whole && x->left == commands.size() && x->left != 0 && !x->in_call &&
+                 x->cls[x->subc] == ADA_A && x->method >= Mthd::MACRO && address >= GUEST_VA_LO &&
+-- 
+2.56.0
+

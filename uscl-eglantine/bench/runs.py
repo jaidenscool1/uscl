@@ -6,7 +6,7 @@ import os, shutil, signal, subprocess, sys, time
 
 T = os.path.dirname(os.path.abspath(__file__))
 BIN = os.environ.get("RUN_BIN", "/home/main/src/eglantine/.claude/worktrees/perf/build/bin/eglantine")
-LOG = "/home/main/.config/uscl/uscl/switch/data/eglantine/log/eden_log.txt"
+LOG = os.environ.get("USCL_SWITCH_PROFILE", "/home/main/.local/share/uscl/eglantine-test") + "/data/eglantine/log/eden_log.txt"
 
 def stuck_note(pid):
     """The watchdog's verdict for this emulator (launch.py), or ''."""
@@ -37,11 +37,12 @@ for spec in sys.argv[1:]:
         game.kill()
         game.wait()
     # The emulator can outlive launch.py: stop any left (only ones this job launched use this binary).
-    for _ in range(25):
+    # SIGTERM only, never SIGKILL (shutdown, with the passthrough backend freeing RM objects, takes up to minutes).
+    for _ in range(90):
         pids = subprocess.run(["pgrep", "-f", "-x", f"{BIN} .*"], capture_output=True, text=True).stdout.split()
         if not pids:
             break
         for pid in pids:
-            os.kill(int(pid), signal.SIGTERM if _ < 22 else signal.SIGKILL)
+            os.kill(int(pid), signal.SIGTERM)
         time.sleep(2)
     time.sleep(3)

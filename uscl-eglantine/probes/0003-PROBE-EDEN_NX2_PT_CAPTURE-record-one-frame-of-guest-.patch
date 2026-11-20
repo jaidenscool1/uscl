@@ -1,0 +1,1225 @@
+From eeffa63be7bfe769b7e902b44da3a4eab9f711a9 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 14:42:31 -0700
+Subject: [PATCH] PROBE: EDEN_NX2_PT_CAPTURE, record one frame of guest GPU
+ work for the passthrough replay
+
+Command list entries in execution order, each channel's engine state (3D registers, native compute
+registers, MME code/start addresses/data RAM, 3D constant buffer bindings), the GPU VA map, device
+memory at the start (after flushing GPU-dirty mappings) and at the end, and the inline QMDs the compute
+engine writes. Touch <dir>/capture.now in game: records from the next present for two presents.
+
+Also records the PTE kinds the guest asks for (nx2:gpu 212 modify, 216 sparse map; 211 maps and 213
+unmaps forget them) as kinds.txt: Eglantine maps everything as pitch, but the host GPU samples depth
+texture headers only from pages of the matching depth kind. Each channel's compute MME code and start
+addresses are the image its macros run (the compute one once the channel uploaded through the compute
+class, else the 3D one), not always the 3D image.
+
+Also traces 3D macros on the split front (lower-case c/e lines in mme.txt; complete with
+EDEN_NX2_PERF_OFF=macro_batch,dma_forward and EDEN_NX2_INDIRECT_RECORDS=0), and records the guest bytes the
+back reads per entry from native uniform banks whose pages changed (deltas.bin; every bind with
+EDEN_NX2_BANK_REUPLOAD=3). While recording, each entry drains the split first, so what the back notes
+belongs to the entry it executes.
+
+Also records the guest bytes the back reads at every other read site while recording: buffer uploads (site 1),
+every uniform bind not over GPU-modified memory (site 2) and texture uploads (site 3, GPU VA split over the
+VA map); the site is the record entry's top 4 bits and a record equal to the last one at its address is
+dropped. While a dump flushes, logs every texture-cache image over dumped memory once (address,
+format, flags, GPU-modified, downloadable): images it cannot download are missing from the capture.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/core/hle/service/nx2_gsv.h                |  10 +
+ src/video_core/CMakeLists.txt                 |   2 +
+ src/video_core/buffer_cache/buffer_cache.h    |  24 +
+ src/video_core/dma_pusher.cpp                 |   8 +
+ src/video_core/dma_pusher.h                   |   2 +
+ src/video_core/engines/kepler_compute.cpp     |  52 +-
+ src/video_core/engines/kepler_compute.h       |   8 +
+ src/video_core/engines/maxwell_3d.cpp         |  11 +
+ src/video_core/engines/puller.h               |   2 +
+ src/video_core/memory_manager.cpp             |   4 +
+ src/video_core/memory_manager.h               |   2 +
+ src/video_core/nx2_pt_capture.cpp             | 528 ++++++++++++++++++
+ src/video_core/nx2_pt_capture.h               |  45 ++
+ .../renderer_vulkan/vk_rasterizer.cpp         |   3 +-
+ .../texture_cache/descriptor_table.h          |   4 +
+ src/video_core/texture_cache/texture_cache.h  |  42 +-
+ .../texture_cache/texture_cache_base.h        |   4 +
+ 17 files changed, 745 insertions(+), 6 deletions(-)
+ create mode 100644 src/video_core/nx2_pt_capture.cpp
+ create mode 100644 src/video_core/nx2_pt_capture.h
+
+diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
+index 8f7384405..96a570692 100644
+--- a/src/core/hle/service/nx2_gsv.h
++++ b/src/core/hle/service/nx2_gsv.h
+@@ -36,6 +36,7 @@
+ #include "common/nx2_sampler.h"
+ #include "common/settings.h"
+ #include "common/thread.h"
++#include "video_core/nx2_pt_capture.h"
+ #include "core/core.h"
+ #include "core/device_memory.h"
+ #include "video_core/nx2_diag.h"
+@@ -544,6 +545,7 @@ private:
+             // made there.
+             const u64 cpu = it->second.address + c;
+             Nvidia::Devices::Nx2GpuMemoryRegistry::Get().MapAt(a, cpu, b - a + 1);
++            Tegra::PtCapture::NoteGuestKind(a, b - a + 1, 0xff, 0xff);
+         } else {
+             LOG_WARNING(Service, "nx2:gpu 211 map of unknown handle {}", handle);
+         }
+@@ -563,6 +565,9 @@ private:
+         const u32 kind = w[7] & 0xff;
+         LOG_DEBUG(Service, "nx2:gpu 212 modify [{:#x}, {:#x}] kind={:#x} fallback={:#x} slot={}",
+                   first, last, kind, w[8] & 0xff, w[10]);
++        if (last > first) {
++            Tegra::PtCapture::NoteGuestKind(first, last - first + 1, kind, w[8] & 0xff);
++        }
+         EventFor(w[10])->Signal(system.Kernel());
+         TipcReplyWords(ctx, {kind});
+     }
+@@ -576,6 +581,7 @@ private:
+         LOG_DEBUG(Service, "nx2:gpu 213 unmap [{:#x}, {:#x}] slot={}", first, last, w[8]);
+         if (last > first) {
+             Nvidia::Devices::Nx2GpuMemoryRegistry::Get().Unmap(first, last - first + 1);
++            Tegra::PtCapture::NoteGuestKind(first, last - first + 1, 0xff, 0xff);
+         }
+         SignalAfterGpu(w[8]);
+         IPC::ResponseBuilder rb{ctx, 2};
+@@ -762,6 +768,9 @@ private:
+                 SparseMapRequest request;
+                 std::memcpy(&request, data.data() + i * sizeof(SparseMapRequest), sizeof(request));
+                 kinds[i] = request.kind;
++                Tegra::PtCapture::NoteGuestKind(request.gpu_address, request.size,
++                                                request.memory_handle ? request.kind : 0xff,
++                                                request.fallback_kind);
+                 ApplySparseMapRequest(request);
+             }
+             // The first request, then at most every 30 s.
+@@ -1813,6 +1822,7 @@ private:
+         ++m_presents;
+         VideoCommon::Nx2GpuLatency::NotePresent();
+         Core::g_nx2_present_count.fetch_add(1, std::memory_order_relaxed);
++        Tegra::PtCapture::NotePresent();
+         if (m_presents <= 4 || (m_presents % 600) == 0) {
+             LOG_INFO(Service, "nx2:vi2 229 present #{} token={:#x} slot={} image={}", m_presents,
+                      u64{w[2]} | (u64{w[3]} << 32), w[4], w[5]);
+diff --git a/src/video_core/CMakeLists.txt b/src/video_core/CMakeLists.txt
+index 1668ae51b..da76171f4 100644
+--- a/src/video_core/CMakeLists.txt
++++ b/src/video_core/CMakeLists.txt
+@@ -41,6 +41,8 @@ add_library(video_core STATIC
+     dirty_flags.cpp
+     dirty_flags.h
+     dma_pusher.cpp
++    nx2_pt_capture.cpp
++    nx2_pt_capture.h
+     dma_pusher.h
+     engines/sw_blitter/blitter.cpp
+     engines/sw_blitter/blitter.h
+diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_cache/buffer_cache.h
+index bddc7b7f5..77ec58e0b 100644
+--- a/src/video_core/buffer_cache/buffer_cache.h
++++ b/src/video_core/buffer_cache/buffer_cache.h
+@@ -24,6 +24,7 @@
+ #include "video_core/buffer_cache/buffer_cache_base.h"
+ #include "video_core/buffer_cache/storage_buffer_size.h"
+ #include "video_core/buffer_cache/uniform_stream_reuse.h"
++#include "video_core/nx2_pt_capture.h"
+ #include "video_core/gpu_split.h"
+ #include "video_core/guest_memory.h"
+ #include "video_core/host1x/gpu_device_memory_manager.h"
+@@ -1611,6 +1612,13 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32
+     const Binding& binding = channel_state->uniform_buffers[stage][index];
+     const DAddr device_addr = binding.device_addr;
+     const u32 size = (std::min)(binding.size, (*channel_state->uniform_buffer_sizes)[stage][index]);
++    if (Tegra::PtCapture::Recording() && size != 0 && device_addr != 0 &&
++        !memory_tracker.IsRegionGpuModified(device_addr, size)) [[unlikely]] {
++        static thread_local std::vector<u8> pt_bytes;
++        pt_bytes.resize(size);
++        device_memory.ReadBlockUnsafe(device_addr, pt_bytes.data(), size);
++        Tegra::PtCapture::NoteCpuData(device_addr, pt_bytes.data(), size, 2);
++    }
+     // EDEN_NX2_BIND_STATS: bind cost by size class, and whether the bytes equal this slot's
+     // previous bind (what extending the stream reuse to larger buffers could exploit).
+     bool uniform_same = false;
+@@ -1779,6 +1787,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32
+                             }
+                         }
+                         std::memcpy(shadow_dst, ptr, chunk_size);
++                        Tegra::PtCapture::NoteCpuData(cur_addr, ptr, chunk_size);
+                         shadow->initialized_mask |= page_bit;
+                         if (!already_cpu_modified) {
+                             memory_tracker.MarkRegionAsCpuModified(cur_addr, chunk_size);
+@@ -2094,6 +2103,14 @@ void BufferCache<P>::BindHostComputeUniformBuffers() {
+         Buffer& buffer = slot_buffers[binding.buffer_id];
+         const u32 size =
+             (std::min)(binding.size, (*channel_state->compute_uniform_buffer_sizes)[index]);
++        if (const DAddr device_addr = binding.device_addr;
++            Tegra::PtCapture::Recording() && size != 0 && device_addr != 0 &&
++            !memory_tracker.IsRegionGpuModified(device_addr, size)) [[unlikely]] {
++            static thread_local std::vector<u8> pt_bytes;
++            pt_bytes.resize(size);
++            device_memory.ReadBlockUnsafe(device_addr, pt_bytes.data(), size);
++            Tegra::PtCapture::NoteCpuData(device_addr, pt_bytes.data(), size, 2);
++        }
+         const bool has_host_buffer = binding.buffer_id != NULL_BUFFER_ID;
+         const u32 offset = has_host_buffer ? buffer.Offset(binding.device_addr) : 0;
+         const bool needs_alignment_stream = [&]() {
+@@ -3373,6 +3390,10 @@ void BufferCache<P>::ImmediateUploadMemory([[maybe_unused]] Buffer& buffer,
+             }
+             VideoCommon::Nx2Hazard::CheckRead(VideoCommon::Nx2Hazard::Site::ImmediateUpload,
+                                               device_addr, copy.size);
++            if (Tegra::PtCapture::Recording() && !upload_span.empty()) [[unlikely]] {
++                Tegra::PtCapture::NoteCpuData(device_addr, upload_span.data(),
++                                              static_cast<u32>(copy.size), 1);
++            }
+             buffer.ImmediateUpload(copy.dst_offset, upload_span);
+         }
+     }
+@@ -3391,6 +3412,9 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
+             VideoCommon::Nx2Hazard::CheckRead(VideoCommon::Nx2Hazard::Site::MappedUpload,
+                                               device_addr, copy.size);
+             device_memory.ReadBlockUnsafe(device_addr, src_pointer, copy.size);
++            if (Tegra::PtCapture::Recording()) [[unlikely]] {
++                Tegra::PtCapture::NoteCpuData(device_addr, src_pointer, static_cast<u32>(copy.size), 1);
++            }
+             // Large uploads are mostly geometry the host GPU now has its own copy of: TickFrame
+             // marks their guest memory cold (see TextureCache::RefreshContents).
+             if (copy.size >= 256_KiB) {
+diff --git a/src/video_core/dma_pusher.cpp b/src/video_core/dma_pusher.cpp
+index 8f7571116..c4f1fdad2 100644
+--- a/src/video_core/dma_pusher.cpp
++++ b/src/video_core/dma_pusher.cpp
+@@ -29,6 +29,7 @@
+ #include "video_core/memory_manager.h"
+ #include "video_core/nx2.h"
+ #include "video_core/nx2_perf.h"
++#include "video_core/nx2_pt_capture.h"
+ #include "video_core/rasterizer_interface.h"
+ 
+ namespace Tegra {
+@@ -124,6 +125,9 @@ bool DmaPusher::Step() {
+ 
+     if (prefetch_size > 0) {
+         const std::span<const CommandHeader> commands{command_list.prefetch_command_list};
++        if (PtCapture::Enabled() && command_resume_offset == 0) {
++            PtCaptureEntry(CommandListHeader{}, commands); // address 0: inline (prefetched) list
++        }
+         command_resume_offset +=
+             ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
+         if (puller.HasPendingAcquire()) {
+@@ -979,6 +983,10 @@ void DmaPusher::CheckSubmitHash(const CommandListHeader& header, u64 submit_hash
+ 
+ void DmaPusher::RecordParsedEntry(const CommandListHeader& header,
+                                   std::span<const CommandHeader> commands) {
++    // Resuming after an acquire re-parses the same entry: record it once.
++    if (PtCapture::Enabled() && command_resume_offset == 0) {
++        PtCaptureEntry(header, commands);
++    }
+     if (!g_record_parsed_entries) {
+         return;
+     }
+diff --git a/src/video_core/dma_pusher.h b/src/video_core/dma_pusher.h
+index ec53d4625..6d7f294b5 100644
+--- a/src/video_core/dma_pusher.h
++++ b/src/video_core/dma_pusher.h
+@@ -228,6 +228,8 @@ public:
+     void DumpCurrentEntry(const char* reason);
+     void CheckSubmitHash(const CommandListHeader& header, u64 submit_hash);
+     void RecordParsedEntry(const CommandListHeader& header, std::span<const CommandHeader> commands);
++    /// PROBE: EDEN_NX2_PT_CAPTURE (nx2_pt_capture.cpp).
++    void PtCaptureEntry(const CommandListHeader& header, std::span<const CommandHeader> commands);
+     /// Whether the entry lies on device pages the GPU has written (NX2).
+     bool IsGpuWrittenCommands(GPUVAddr address, size_t size);
+     /// Copies the list's words from memory again, as of suspension count `now`.
+diff --git a/src/video_core/engines/kepler_compute.cpp b/src/video_core/engines/kepler_compute.cpp
+index 53e7e324d..afd5e529e 100644
+--- a/src/video_core/engines/kepler_compute.cpp
++++ b/src/video_core/engines/kepler_compute.cpp
+@@ -33,6 +33,7 @@
+ #include "video_core/engines/fermi_2d.h"
+ #include "video_core/texture_cache/texture_cache_base.h"
+ #include "video_core/engines/kepler_compute.h"
++#include "video_core/nx2_pt_capture.h"
+ #include "video_core/engines/native_upscale.h"
+ #include "video_core/engines/maxwell_3d.h"
+ #include "video_core/game_dlss_status.h"
+@@ -199,7 +200,14 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
+         if (native_data_ram) native_macro->native_interpreter.active_dram = native_data_ram;
+         const u32 dram0_before = (*native_macro->native_interpreter.active_dram)[0x27];
+         const u32 start = native_macro_positions[entry];
++        const bool pt_trace = Tegra::PtCapture::Recording();
++        if (pt_trace) {
++            Tegra::PtCapture::NoteMme('C', start, static_cast<u32>(native_parameters.size()));
++        }
+         const auto emit = [&](u32 address, u32 value) {
++            if (pt_trace) {
++                Tegra::PtCapture::NoteMme('E', address, value);
++            }
+             static u32 diagnostic_writes{};
+             static const bool log_emits = std::getenv("EDEN_NX2_SEM_WATCH_EMITS") != nullptr;
+             if (watched && log_emits) LOG_INFO(HW_GPU, "Semaphore watch: compute macro emit {:#x} = {:#x}", address, value);
+@@ -224,7 +232,13 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
+             const auto result = native_macro->native_jit->Execute(
+                 start, native_parameters,
+                 std::span<u32>{*native_macro->native_interpreter.active_dram},
+-                [&](u32 address) { return address < native_registers.size() ? native_registers[address] : 0U; },
++                [&](u32 address) {
++                    const u32 value = address < native_registers.size() ? native_registers[address] : 0U;
++                    if (pt_trace) {
++                        Tegra::PtCapture::NoteMme('R', address, value);
++                    }
++                    return value;
++                },
+                 emit);
+             if (!result.success) {
+                 native_macro->native_execution_failed = true;
+@@ -331,6 +345,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
+             LOG_ERROR(HW_GPU, "Unmapped native inline QMD destination");
+             return true;
+         }
++        Tegra::PtCapture::NoteInlineQmd(address, native_registers.data() + 0xc8);
+         rasterizer->AccelerateInlineToMemory(address, 256,
+             std::span<const u8>{reinterpret_cast<const u8*>(native_registers.data() + 0xc8), 256});
+         if ((control & (1U << 24)) || !(native_registers[0xcc] & (1U << 12))) {
+@@ -2028,6 +2043,26 @@ void KeplerCompute::FrontApply(FrontState& fs, u32 method, u32 argument) {
+     }
+ }
+ 
++// PROBE (EDEN_NX2_PT_CAPTURE): as FrontMacroEngine / FrontMacroPositions choose.
++std::span<const u32> KeplerCompute::PtNativeMacroPositions() const {
++    const bool uploaded = front ? front->compute_uploaded : native_compute_uploaded;
++    if (native_context) {
++        return uploaded ? std::span<const u32>{native_context->compute_positions}
++                        : std::span<const u32>{native_context->positions};
++    }
++    return native_macro_positions;
++}
++
++std::span<const u32> KeplerCompute::PtNativeMacroCode() const {
++    const bool uploaded = front ? front->compute_uploaded : native_compute_uploaded;
++    if (native_context) {
++        return uploaded ? std::span<const u32>{native_context->compute_engine.native_code}
++                        : std::span<const u32>{native_context->engine.native_code};
++    }
++    const MacroEngine* macro = front ? front->macro : native_macro;
++    return macro ? std::span<const u32>{macro->native_code} : std::span<const u32>{};
++}
++
+ MacroEngine& KeplerCompute::FrontMacroEngine(FrontState& fs) {
+     if (native_context) {
+         return fs.compute_uploaded ? native_context->compute_engine : native_context->engine;
+@@ -2145,10 +2180,21 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
+         macro.native_interpreter.active_dram = native_data_ram;
+     }
+     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Macro};
+-    const auto read = [&fs](u32 address) {
+-        return address < fs.registers.size() ? fs.registers[address] : 0U;
++    const bool pt_trace = Tegra::PtCapture::Recording();
++    if (pt_trace) {
++        Tegra::PtCapture::NoteMme('C', start, static_cast<u32>(fs.parameters.size()));
++    }
++    const auto read = [&fs, pt_trace](u32 address) {
++        const u32 value = address < fs.registers.size() ? fs.registers[address] : 0U;
++        if (pt_trace) {
++            Tegra::PtCapture::NoteMme('R', address, value);
++        }
++        return value;
+     };
+     const auto emit = [&](u32 address, u32 value) {
++        if (pt_trace) {
++            Tegra::PtCapture::NoteMme('E', address, value);
++        }
+         if (address >= 0xe00) {
+             return false;
+         }
+diff --git a/src/video_core/engines/kepler_compute.h b/src/video_core/engines/kepler_compute.h
+index 5e438a477..6508f3357 100644
+--- a/src/video_core/engines/kepler_compute.h
++++ b/src/video_core/engines/kepler_compute.h
+@@ -404,6 +404,14 @@ private:
+     bool native_mode{};
+ 
+ public:
++    /// PROBE (EDEN_NX2_PT_CAPTURE): the compute macros' start addresses, as the macros run them (the
++    /// split front's choice when it is active: the compute image once this channel uploaded through the
++    /// compute class, else the 3D one).
++    std::span<const u32> PtNativeMacroPositions() const;
++    /// PROBE (EDEN_NX2_PT_CAPTURE): the native (Ampere compute class) method registers.
++    const std::array<u32, 0x1000>& PtNativeRegisters() const { return native_registers; }
++    /// PROBE (EDEN_NX2_PT_CAPTURE): the MME code the compute macros run (their own once uploaded).
++    std::span<const u32> PtNativeMacroCode() const;
+     /// Whether this method may write guest memory: dispatches, uploads and reports. Plain native
+     /// state does not.
+     [[nodiscard]] bool MayWriteMemory(u32 method) const {
+diff --git a/src/video_core/engines/maxwell_3d.cpp b/src/video_core/engines/maxwell_3d.cpp
+index 4d5f92089..b1657ba31 100644
+--- a/src/video_core/engines/maxwell_3d.cpp
++++ b/src/video_core/engines/maxwell_3d.cpp
+@@ -30,6 +30,7 @@
+ #include "video_core/nx2.h"
+ #include "video_core/nx2_perf.h"
+ #include "video_core/nx2_profile.h"
++#include "video_core/nx2_pt_capture.h"
+ #include "video_core/rasterizer_interface.h"
+ #include "video_core/textures/texture.h"
+ #include "video_core/macro_dma_forward.h"
+@@ -1898,6 +1899,13 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
+         return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 0)) : ~0U;
+     }();
+     static u32 traced_calls{};
++    // PROBE (EDEN_NX2_PT_CAPTURE): 3D macro trace in mme.txt, lower case ('c' call, 'e' emitted write).
++    // Complete only with EDEN_NX2_PERF_OFF=macro_batch,dma_forward and EDEN_NX2_INDIRECT_RECORDS=0.
++    const bool pt_trace = Tegra::PtCapture::Recording();
++    if (pt_trace) [[unlikely]] {
++        Tegra::PtCapture::NoteMme('c', start,
++                                  static_cast<u32>(borrowed.empty() ? fs.parameters.size() : borrowed.size()));
++    }
+     const bool trace = trace_macro != ~0U && ((method - MacroRegistersStart) >> 1) == trace_macro &&
+                        traced_calls < 32;
+     std::string trace_line;
+@@ -2078,6 +2086,9 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
+             return fs.regs[address];
+         };
+         const auto front_emit = [&](u32 address, u32 value) {
++            if (pt_trace) [[unlikely]] {
++                Tegra::PtCapture::NoteMme('e', address, value);
++            }
+             if (trace) [[unlikely]] {
+                 trace_line += fmt::format(" {:#x}={:#x}", address, value);
+             }
+diff --git a/src/video_core/engines/puller.h b/src/video_core/engines/puller.h
+index 11fc4f923..84942606e 100644
+--- a/src/video_core/engines/puller.h
++++ b/src/video_core/engines/puller.h
+@@ -49,6 +49,8 @@ namespace Tegra::Engines {
+ 
+ class Puller final {
+ public:
++    /// PROBE (EDEN_NX2_PT_CAPTURE): the engine bound on each subchannel.
++    const std::array<EngineID, 8>& BoundEngines() const { return bound_engines; }
+     struct MethodCall {
+         u32 method{};
+         u32 argument{};
+diff --git a/src/video_core/memory_manager.cpp b/src/video_core/memory_manager.cpp
+index 85199b5be..f9c08d176 100644
+--- a/src/video_core/memory_manager.cpp
++++ b/src/video_core/memory_manager.cpp
+@@ -22,6 +22,7 @@
+ #include "video_core/guest_memory.h"
+ #include "video_core/nx2.h"
+ #include "video_core/nx2_perf.h"
++#include "video_core/nx2_pt_capture.h"
+ #include "video_core/host1x/host1x.h"
+ #include "video_core/invalidation_accumulator.h"
+ #include "video_core/memory_manager.h"
+@@ -261,6 +262,7 @@ GPUVAddr MemoryManager::Map(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size,
+         rasterizer->FlushRegion(dev_addr, size, VideoCommon::CacheType::All);
+         rasterizer->InvalidateRegion(dev_addr, size, VideoCommon::CacheType::TextureCache);
+     }
++    PtCapture::NoteMap(this, gpu_addr, dev_addr, size, static_cast<u32>(kind), false);
+     if (is_big_pages)
+         return BigPageTableOp(gpu_addr, dev_addr, size, kind, EntryType::Mapped);
+     return PageTableOp(gpu_addr, dev_addr, size, kind, EntryType::Mapped);
+@@ -268,6 +270,7 @@ GPUVAddr MemoryManager::Map(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size,
+ 
+ GPUVAddr MemoryManager::MapSparse(GPUVAddr gpu_addr, std::size_t size, bool is_big_pages) {
+     PreserveMapping(gpu_addr, size);
++    PtCapture::NoteMap(this, gpu_addr, 0, size, static_cast<u32>(PTEKind::INVALID), true);
+     if (is_big_pages)
+         return BigPageTableOp(gpu_addr, 0, size, PTEKind::INVALID, EntryType::Reserved);
+     return PageTableOp(gpu_addr, 0, size, PTEKind::INVALID, EntryType::Reserved);
+@@ -277,6 +280,7 @@ void MemoryManager::Unmap(GPUVAddr gpu_addr, std::size_t size) {
+     if (size == 0) {
+         return;
+     }
++    PtCapture::NoteUnmap(this, gpu_addr, size);
+     PreserveMapping(gpu_addr, size);
+     GetSubmappedRangeImpl<false>(gpu_addr, size, page_stash);
+ 
+diff --git a/src/video_core/memory_manager.h b/src/video_core/memory_manager.h
+index 9e208af29..9559603af 100644
+--- a/src/video_core/memory_manager.h
++++ b/src/video_core/memory_manager.h
+@@ -39,6 +39,8 @@ namespace Tegra {
+ 
+ class MemoryManager final {
+ public:
++    /// PROBE (EDEN_NX2_PT_CAPTURE): reads device memory, uncached.
++    void PtReadDeviceUnsafe(DAddr address, void* dest, std::size_t size) { memory.ReadBlockUnsafe(address, dest, size); }
+     explicit MemoryManager(Core::System& system_, u64 address_space_bits_ = 40,
+                            GPUVAddr split_address = 1ULL << 34, u64 big_page_bits_ = 16,
+                            u64 page_bits_ = 12);
+diff --git a/src/video_core/nx2_pt_capture.cpp b/src/video_core/nx2_pt_capture.cpp
+new file mode 100644
+index 000000000..e9d46b2aa
+--- /dev/null
++++ b/src/video_core/nx2_pt_capture.cpp
+@@ -0,0 +1,528 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++// PROBE: see nx2_pt_capture.h. Files in <dir>:
++//   maps.txt        "mm gpu dev size kind sparse" (hex) for every GPU mapping when recording starts
++//   kinds.txt       "gpu size kind fallback_kind" (hex): the PTE kinds the guest asked for (NoteGuestKind)
++//   dev-<addr>.bin  device memory, one file per coalesced device range of those mappings
++//   state-<ch>.bin  per channel, when its first entry is recorded (layout in WriteState)
++//   stream.bin      entries in execution order: u32 'PTE1', s32 channel, u64 gpu address,
++//                   u32 words, u32 dma state (method | subchannel << 16), u32 method count, words
++//   end-maps.txt, end-dev-<addr>.bin   the same when recording stops (after the frame)
++//   qmds.bin        inline QMDs the compute engine wrote: u32 entry, u64 gpu address, u32 words[64]
++//   mme.txt         compute macro trace: "<entry> C <start> <parameter count>", "R <reg> <value>",
++//                   "E <method> <value>" (hex)
++//   deltas.bin      guest bytes the back read per entry (NoteCpuData): u32 entry (top 4 bits: site),
++//                   u64 device address, u32 size, bytes
++//   descriptors.txt GPU addresses of the texture headers and samplers read while recording (hex)
++//   snap-<entry>-<gpu>.bin  EDEN_NX2_PT_CAPTURE_SNAP=<entry>[-<last>[/<step>]]:<gpu>:<size>[,...] (hex gpu/size):
++//                   those GPU ranges flushed and read right after that entry ran (per-pass references for the replay)
++//   done.txt        written when recording stops (first/last present, entry count)
++
++#include <algorithm>
++#include <atomic>
++#include <cstdio>
++#include <cstdlib>
++#include <filesystem>
++#include <map>
++#include <mutex>
++#include <set>
++#include <string>
++#include <unordered_map>
++#include <vector>
++
++#include <fmt/format.h>
++
++#include "common/cityhash.h"
++#include "common/logging.h"
++#include "core/core.h"
++#include "video_core/control/channel_state.h"
++#include "video_core/dma_pusher.h"
++#include "video_core/engines/kepler_compute.h"
++#include "video_core/engines/maxwell_3d.h"
++#include "video_core/gpu_split.h"
++#include "video_core/memory_manager.h"
++#include "video_core/nx2_pt_capture.h"
++
++namespace Tegra::PtCapture {
++namespace {
++
++std::atomic<bool> dumping{false};
++
++struct Range {
++    u64 size;
++    u64 dev;
++    u32 kind;
++    bool sparse;
++};
++
++enum class Phase { Idle, Armed, Recording, Stopping, Done };
++
++struct State {
++    std::mutex mutex;
++    std::filesystem::path dir;
++    std::map<const void*, std::map<u64, Range>> maps;
++    std::map<u64, Range> guest_kinds; // dev = the fallback kind
++    std::atomic<Phase> phase{Phase::Idle};
++    u64 presents = 0, first_present = 0;
++    std::FILE* stream = nullptr;
++    std::FILE* qmds = nullptr;
++    std::FILE* mme = nullptr;
++    std::FILE* deltas = nullptr;
++    std::set<s32> channels_seen;
++    std::set<u64> descriptors;
++    std::unordered_map<u64, u64> noted; // device address -> hash of the last delta written there
++    u64 entries = 0;
++};
++
++State& Get() {
++    static State state;
++    return state;
++}
++
++const char* Dir() {
++    static const char* const dir = std::getenv("EDEN_NX2_PT_CAPTURE");
++    return dir != nullptr && *dir != '\0' ? dir : nullptr;
++}
++
++void EraseRange(std::map<u64, Range>& map, u64 gpu, u64 size) {
++    const u64 end = gpu + size;
++    auto it = map.lower_bound(gpu);
++    if (it != map.begin()) {
++        --it;
++    }
++    while (it != map.end() && it->first < end) {
++        const u64 b = it->first, e = b + it->second.size;
++        if (e <= gpu) {
++            ++it;
++            continue;
++        }
++        const Range r = it->second;
++        it = map.erase(it);
++        if (b < gpu) {
++            map.emplace(b, Range{gpu - b, r.dev, r.kind, r.sparse});
++        }
++        if (e > end) {
++            map.emplace(end, Range{e - end, r.sparse ? 0 : r.dev + (end - b), r.kind, r.sparse});
++        }
++    }
++}
++
++void DumpMemory(State& s, MemoryManager& memory_manager, const char* prefix) {
++    // What the GPU wrote in earlier frames (inline QMDs, uploads, render targets) is in the host caches,
++    // not guest memory, until flushed: flush every dirty mapped range first. The caches belong to the
++    // split's back, so the flush runs there (as DmaPusher::FlushGpuWrittenCommands does).
++    auto& split = VideoCommon::GpuSplit::Get();
++    split.Drain(VideoCommon::DrainSite::ListFlush);
++    dumping = true;
++    u64 flushed = 0;
++    for (const auto& [mm, map] : s.maps) {
++        if (mm != &memory_manager) {
++            continue;
++        }
++        for (const auto& [gpu, r] : map) {
++            if (r.sparse || !memory_manager.IsMemoryDirty(gpu, r.size, VideoCommon::CacheType::All)) {
++                continue;
++            }
++            const auto flush = [memory = &memory_manager, gpu, size = r.size] {
++                memory->FlushRegion(gpu, size, VideoCommon::CacheType::All);
++            };
++            if (split.Active()) {
++                split.Run(flush, VideoCommon::DrainSite::ListFlush);
++            } else {
++                flush();
++            }
++            flushed += r.size;
++        }
++    }
++    dumping = false;
++    LOG_WARNING(HW_GPU, "pt capture: flushed {} MiB of dirty mappings", flushed >> 20);
++    std::FILE* maps_file = std::fopen((s.dir / fmt::format("{}maps.txt", prefix)).string().c_str(), "w");
++    std::vector<std::pair<u64, u64>> dev;
++    for (const auto& [mm, map] : s.maps) {
++        for (const auto& [gpu, r] : map) {
++            if (maps_file) {
++                fmt::print(maps_file, "{:x} {:x} {:x} {:x} {:x} {}\n", reinterpret_cast<uintptr_t>(mm),
++                           gpu, r.dev, r.size, r.kind, r.sparse ? 1 : 0);
++            }
++            if (!r.sparse) {
++                dev.emplace_back(r.dev, r.dev + r.size);
++            }
++        }
++    }
++    if (maps_file) {
++        std::fclose(maps_file);
++    }
++    if (std::FILE* f = std::fopen((s.dir / fmt::format("{}kinds.txt", prefix)).string().c_str(), "w")) {
++        for (const auto& [gpu, r] : s.guest_kinds) {
++            fmt::print(f, "{:x} {:x} {:x} {:x}\n", gpu, r.size, r.kind, r.dev);
++        }
++        std::fclose(f);
++    }
++    std::sort(dev.begin(), dev.end());
++    std::vector<std::pair<u64, u64>> merged;
++    for (const auto& d : dev) {
++        if (!merged.empty() && d.first <= merged.back().second) {
++            merged.back().second = std::max(merged.back().second, d.second);
++        } else {
++            merged.push_back(d);
++        }
++    }
++    std::vector<u8> chunk(16 << 20);
++    u64 total = 0;
++    for (const auto& [b, e] : merged) {
++        std::FILE* f = std::fopen((s.dir / fmt::format("{}dev-{:x}.bin", prefix, b)).string().c_str(), "wb");
++        if (!f) {
++            continue;
++        }
++        for (u64 a = b; a < e; a += chunk.size()) {
++            const u64 n = std::min<u64>(chunk.size(), e - a);
++            memory_manager.PtReadDeviceUnsafe(a, chunk.data(), n);
++            std::fwrite(chunk.data(), 1, n, f);
++        }
++        std::fclose(f);
++        total += e - b;
++    }
++    LOG_WARNING(HW_GPU, "pt capture: {} device ranges, {} MiB", merged.size(), total >> 20);
++}
++
++void Snapshots(State& s, MemoryManager& memory_manager, u64 entry) {
++    struct Snap {
++        u64 first, last, step, gpu, size;
++    };
++    static const std::vector<Snap> snaps = [] {
++        std::vector<Snap> out;
++        const char* text = std::getenv("EDEN_NX2_PT_CAPTURE_SNAP");
++        for (const char* p = text; p && *p;) {
++            Snap snap{};
++            char* end = nullptr;
++            snap.first = snap.last = std::strtoull(p, &end, 10);
++            snap.step = 1;
++            if (*end == '-') snap.last = std::strtoull(end + 1, &end, 10);
++            if (*end == '/') snap.step = std::max<u64>(std::strtoull(end + 1, &end, 10), 1);
++            if (*end++ != ':') break;
++            snap.gpu = std::strtoull(end, &end, 16);
++            if (*end++ != ':') break;
++            snap.size = std::strtoull(end, &end, 16);
++            out.push_back(snap);
++            p = *end == ',' ? end + 1 : end;
++        }
++        return out;
++    }();
++    auto& split = VideoCommon::GpuSplit::Get();
++    for (const Snap& snap : snaps) {
++        if (entry < snap.first || entry > snap.last || (entry - snap.first) % snap.step != 0) {
++            continue;
++        }
++        dumping = true;
++        const auto flush = [memory = &memory_manager, snap] {
++            memory->FlushRegion(snap.gpu, snap.size, VideoCommon::CacheType::All);
++        };
++        if (split.Active()) {
++            split.Run(flush, VideoCommon::DrainSite::ListFlush);
++        } else {
++            flush();
++        }
++        dumping = false;
++        std::vector<u8> data(snap.size);
++        memory_manager.ReadBlockUnsafe(snap.gpu, data.data(), data.size());
++        if (std::FILE* f = std::fopen((s.dir / fmt::format("snap-{}-{:x}.bin", entry, snap.gpu)).string().c_str(), "wb")) {
++            std::fwrite(data.data(), 1, data.size(), f);
++            std::fclose(f);
++        }
++    }
++}
++
++template <typename T>
++void Put(std::FILE* f, const T& v) {
++    std::fwrite(&v, sizeof(T), 1, f);
++}
++
++} // Anonymous namespace
++
++bool Enabled() {
++    return Dir() != nullptr;
++}
++
++void NoteMap(const void* memory_manager, u64 gpu_addr, u64 dev_addr, u64 size, u32 kind, bool sparse) {
++    if (!Enabled() || size == 0) {
++        return;
++    }
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    auto& map = s.maps[memory_manager];
++    EraseRange(map, gpu_addr, size);
++    map.emplace(gpu_addr, Range{size, dev_addr, kind, sparse});
++}
++
++void NoteUnmap(const void* memory_manager, u64 gpu_addr, u64 size) {
++    if (!Enabled() || size == 0) {
++        return;
++    }
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    EraseRange(s.maps[memory_manager], gpu_addr, size);
++}
++
++void NoteGuestKind(u64 gpu_addr, u64 size, u32 kind, u32 fallback_kind) {
++    if (!Enabled() || size == 0) {
++        return;
++    }
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    EraseRange(s.guest_kinds, gpu_addr, size);
++    if (kind != 0xff) {
++        s.guest_kinds.emplace(gpu_addr, Range{size, fallback_kind, kind, false});
++    }
++}
++
++void NotePresent() {
++    if (!Enabled()) {
++        return;
++    }
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    ++s.presents;
++    const Phase phase = s.phase.load();
++    if (phase == Phase::Idle) {
++        s.dir = Dir();
++        std::error_code ec;
++        if (std::filesystem::remove(s.dir / "capture.now", ec)) {
++            s.first_present = s.presents;
++            s.phase = Phase::Armed;
++            LOG_WARNING(HW_GPU, "pt capture: armed at present {}", s.presents);
++        }
++    } else if (phase == Phase::Recording && s.presents >= s.first_present + 2) {
++        s.phase = Phase::Stopping;
++    }
++}
++
++bool Dumping() {
++    return dumping.load(std::memory_order_relaxed);
++}
++
++bool Recording() {
++    return Enabled() && Get().phase.load(std::memory_order_relaxed) == Phase::Recording;
++}
++
++void NoteMme(char kind, u32 a, u32 v) {
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    if (s.phase != Phase::Recording) {
++        return;
++    }
++    if (!s.mme) {
++        s.mme = std::fopen((s.dir / "mme.txt").string().c_str(), "w");
++    }
++    if (s.mme) {
++        fmt::print(s.mme, "{} {} {:x} {:x}\n", s.entries - 1, kind, a, v);
++    }
++}
++
++void PutDelta(State& s, u64 device_addr, const u8* data, u32 size, u32 site) {
++    if (!s.deltas || size == 0) {
++        return;
++    }
++    const u64 hash = Common::CityHash64(reinterpret_cast<const char*>(data), size) ^ size;
++    const auto [it, fresh] = s.noted.try_emplace(device_addr, hash);
++    if (!fresh && it->second == hash) {
++        return;
++    }
++    it->second = hash;
++    Put(s.deltas, static_cast<u32>(s.entries - 1) | (site << 28));
++    Put(s.deltas, device_addr);
++    Put(s.deltas, size);
++    std::fwrite(data, 1, size, s.deltas);
++}
++
++void NoteCpuData(u64 device_addr, const u8* data, u32 size, u32 site) {
++    State& s = Get();
++    if (s.phase.load(std::memory_order_relaxed) != Phase::Recording) {
++        return;
++    }
++    std::scoped_lock lk{s.mutex};
++    PutDelta(s, device_addr, data, size, site);
++}
++
++void NoteGpuData(const void* memory_manager, u64 gpu_addr, const u8* data, u64 size, u32 site) {
++    State& s = Get();
++    if (s.phase.load(std::memory_order_relaxed) != Phase::Recording) {
++        return;
++    }
++    std::scoped_lock lk{s.mutex};
++    const auto mm = s.maps.find(memory_manager);
++    if (mm == s.maps.end()) {
++        return;
++    }
++    const u64 end = gpu_addr + size;
++    auto it = mm->second.upper_bound(gpu_addr);
++    if (it != mm->second.begin()) {
++        --it;
++    }
++    for (; it != mm->second.end() && it->first < end; ++it) {
++        const u64 lo = (std::max)(gpu_addr, it->first), hi = (std::min)(end, it->first + it->second.size);
++        if (lo >= hi || it->second.sparse) {
++            continue; // sparse/unmapped pieces read zero in the replay too
++        }
++        for (u64 at = lo; at < hi; at += 0x40000000) { // u32 record sizes
++            PutDelta(s, it->second.dev + (at - it->first), data + (at - gpu_addr),
++                     static_cast<u32>((std::min<u64>)(hi - at, 0x40000000)), site);
++        }
++    }
++}
++
++void NoteDescriptor(u64 gpu_addr) {
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    if (s.phase == Phase::Recording) {
++        s.descriptors.insert(gpu_addr);
++    }
++}
++
++void NoteInlineQmd(u64 gpu_addr, const u32* words) {
++    State& s = Get();
++    if (s.phase.load(std::memory_order_relaxed) != Phase::Recording) {
++        return;
++    }
++    std::scoped_lock lk{s.mutex};
++    if (s.qmds) {
++        Put(s.qmds, static_cast<u32>(s.entries - 1)); // the entry being executed
++        Put(s.qmds, gpu_addr);
++        std::fwrite(words, sizeof(u32), 64, s.qmds);
++    }
++}
++
++} // namespace Tegra::PtCapture
++
++namespace Tegra {
++
++// Layout of state-<ch>.bin: u32 'PTS1', s32 channel, u64 memory manager, u32 bound engine per
++// subchannel [8], dma state (method, subchannel, method count, non-incrementing) [4],
++// u32 native_turing, Maxwell3D regs [0xE00], compute native (Ampere layout) registers [0x1000], MME instruction RAM
++// [0x8000], 3D start addresses [0x80], compute start addresses [0x80], MME data RAM [0xC00], 3D constant buffer bindings
++// [5 stages][18 slots] of {u32 enabled, u32 size, u64 address}, compute MME instruction RAM [0x8000].
++void DmaPusher::PtCaptureEntry(const CommandListHeader& header,
++                               std::span<const CommandHeader> commands) {
++    using namespace PtCapture;
++    State& s = Get();
++    const Phase phase = s.phase.load(std::memory_order_relaxed);
++    if (phase != Phase::Armed && phase != Phase::Recording && phase != Phase::Stopping) {
++        return;
++    }
++    if (phase == Phase::Recording) {
++        // The back finishes the previous entries first: what it notes (NoteCpuData, inline QMDs)
++        // belongs to the entry it executes, which is then s.entries - 1.
++        VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::ListFlush);
++        if (s.entries > 0) {
++            Snapshots(s, memory_manager, s.entries - 1); // entry s.entries - 1 has run
++        }
++    }
++    std::scoped_lock lk{s.mutex};
++    if (s.phase == Phase::Stopping) {
++        // Memory again at the end: what the guest CPU wrote during the frame (QMD and uniform rings).
++        DumpMemory(s, memory_manager, "end-");
++        if (s.stream) {
++            std::fclose(s.stream);
++            s.stream = nullptr;
++        }
++        if (s.qmds) {
++            std::fclose(s.qmds);
++            s.qmds = nullptr;
++        }
++        if (s.deltas) {
++            std::fclose(s.deltas);
++            s.deltas = nullptr;
++        }
++        if (s.mme) {
++            std::fclose(s.mme);
++            s.mme = nullptr;
++        }
++        if (std::FILE* f = std::fopen((s.dir / "descriptors.txt").string().c_str(), "w")) {
++            for (const u64 addr : s.descriptors) {
++                fmt::print(f, "{:x}\n", addr);
++            }
++            std::fclose(f);
++        }
++        if (std::FILE* f = std::fopen((s.dir / "done.txt").string().c_str(), "w")) {
++            fmt::print(f, "first_present {}\nlast_present {}\nentries {}\nchannels {}\n",
++                       s.first_present, s.presents, s.entries, s.channels_seen.size());
++            std::fclose(f);
++        }
++        LOG_WARNING(HW_GPU, "pt capture: done, {} entries", s.entries);
++        s.phase = Phase::Done;
++        return;
++    }
++    if (s.phase == Phase::Armed) {
++        // Start at an entry boundary with no method split across entries.
++        if (dma_state.method_count != 0) {
++            return;
++        }
++        std::filesystem::create_directories(s.dir);
++        DumpMemory(s, memory_manager, "");
++        s.stream = std::fopen((s.dir / "stream.bin").string().c_str(), "wb");
++        if (!s.stream) {
++            s.phase = Phase::Done;
++            return;
++        }
++        std::setvbuf(s.stream, nullptr, _IOFBF, 4 << 20);
++        s.qmds = std::fopen((s.dir / "qmds.bin").string().c_str(), "wb");
++        s.deltas = std::fopen((s.dir / "deltas.bin").string().c_str(), "wb");
++        s.noted.clear();
++        if (s.deltas) {
++            std::setvbuf(s.deltas, nullptr, _IOFBF, 4 << 20);
++        }
++        s.phase = Phase::Recording;
++    }
++    const s32 channel = channel_state.bind_id;
++    if (s.channels_seen.insert(channel).second) {
++        auto& payload = *channel_state.payload;
++        auto& m3d = payload.maxwell_3d;
++        if (std::FILE* f = std::fopen((s.dir / fmt::format("state-{}.bin", channel)).string().c_str(), "wb")) {
++            Put(f, u32{0x31535450});
++            Put(f, channel);
++            Put(f, static_cast<u64>(reinterpret_cast<uintptr_t>(&memory_manager)));
++            for (const auto engine : puller.BoundEngines()) {
++                Put(f, static_cast<u32>(engine));
++            }
++            Put(f, dma_state.method);
++            Put(f, dma_state.subchannel);
++            Put(f, dma_state.method_count);
++            Put(f, u32{dma_state.non_incrementing});
++            auto& macro = m3d.GetNativeMacroEngine();
++            Put(f, u32{macro.native_turing});
++            Put(f, m3d.regs.reg_array);
++            Put(f, payload.kepler_compute.PtNativeRegisters());
++            Put(f, macro.native_code);
++            const auto put_positions = [f](std::span<const u32> p) {
++                std::array<u32, 0x80> a{};
++                std::copy_n(p.begin(), std::min<size_t>(p.size(), a.size()), a.begin());
++                Put(f, a);
++            };
++            put_positions(m3d.GetNativeMacroPositions());
++            put_positions(payload.kepler_compute.PtNativeMacroPositions());
++            Put(f, m3d.GetNativeDataRam());
++            for (const auto& stage : m3d.state.shader_stages) {
++                for (const auto& cb : stage.const_buffers) {
++                    Put(f, u32{cb.enabled});
++                    Put(f, cb.size);
++                    Put(f, static_cast<u64>(cb.address));
++                }
++            }
++            std::array<u32, 0x8000> compute_code{};
++            const auto code = payload.kepler_compute.PtNativeMacroCode();
++            std::copy_n(code.begin(), std::min(code.size(), compute_code.size()), compute_code.begin());
++            Put(f, compute_code);
++            std::fclose(f);
++        }
++    }
++    Put(s.stream, u32{0x31455450});
++    Put(s.stream, channel);
++    Put(s.stream, static_cast<u64>(header.addr));
++    Put(s.stream, static_cast<u32>(commands.size()));
++    Put(s.stream, dma_state.method | (dma_state.subchannel << 16));
++    Put(s.stream, dma_state.method_count);
++    std::fwrite(commands.data(), sizeof(CommandHeader), commands.size(), s.stream);
++    ++s.entries;
++}
++
++} // namespace Tegra
+diff --git a/src/video_core/nx2_pt_capture.h b/src/video_core/nx2_pt_capture.h
+new file mode 100644
+index 000000000..3659047b1
+--- /dev/null
++++ b/src/video_core/nx2_pt_capture.h
+@@ -0,0 +1,45 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++// PROBE: EDEN_NX2_PT_CAPTURE=<dir> records one frame's guest GPU work for the passthrough replay
++// (USCL uscl-eglantine/passthrough): every command list entry as executed, each channel's engine
++// state and macro RAM when it is first seen, the GPU VA map and the device memory behind it.
++// Touch <dir>/capture.now while playing: recording starts at the next present and stops two
++// presents later. Nothing happens without the variable.
++#pragma once
++
++#include "common/common_types.h"
++
++namespace Tegra::PtCapture {
++
++bool Enabled();
++void NoteMap(const void* memory_manager, u64 gpu_addr, u64 dev_addr, u64 size, u32 kind, bool sparse);
++void NoteUnmap(const void* memory_manager, u64 gpu_addr, u64 size);
++/// The PTE kinds the guest asks for (nx2:gpu 212, 216; Eglantine maps everything as pitch), from boot:
++/// written as kinds.txt with the capture. 0xff/0xff forgets the range (a plain map or an unmap).
++void NoteGuestKind(u64 gpu_addr, u64 size, u32 kind, u32 fallback_kind);
++/// Guest CPU side, once per present.
++void NotePresent();
++/// The inline QMD the compute engine writes to memory (LOAD_INLINE_QMD_DATA(63)), while recording.
++void NoteInlineQmd(u64 gpu_addr, const u32* words);
++/// Compute macro trace while recording (mme.txt): 'C' call (start, parameter count), 'R' register read,
++/// 'E' emitted method.
++bool Recording();
++void NoteMme(char kind, u32 a, u32 v);
++/// Guest bytes the GPU back read for the entry being executed, while recording: deltas.bin, so the
++/// replay sees what the guest CPU wrote mid-frame. `site` (top 4 bits of the record's entry) says
++/// where: 0 uniform bank pages whose contents changed, 1 buffer uploads, 2 uniform binds, 3 texture
++/// uploads. A record equal to the last one at the same address is dropped. Recording drains the
++/// split at each entry so the back's entry is the front's.
++void NoteCpuData(u64 device_addr, const u8* data, u32 size, u32 site = 0);
++/// As NoteCpuData for bytes read at a GPU VA (texture uploads), split over the VA map.
++void NoteGpuData(const void* memory_manager, u64 gpu_addr, const u8* data, u64 size, u32 site);
++/// True while a dump flushes the host caches: the rasterizer then reports GPU-written images as dirty
++/// at every accuracy level (normally only GPU accuracy High does), so render targets and other images
++/// the GPU wrote in earlier frames reach the dump instead of stale guest memory.
++bool Dumping();
++/// A texture header or sampler the texture cache read while recording (descriptors.txt): the replay
++/// transcodes only the textures the frame samples (ASTC: the host has no ASTC sampling).
++void NoteDescriptor(u64 gpu_addr);
++
++} // namespace Tegra::PtCapture
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 9fd00f4ff..60457a489 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -76,6 +76,7 @@
+ #include "video_core/nx2_knobs.h"
+ #include "video_core/nx2_perf.h"
+ #include "video_core/nx2_profile.h"
++#include "video_core/nx2_pt_capture.h"
+ 
+ namespace Vulkan {
+ 
+@@ -2199,7 +2200,7 @@ bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheT
+             return true;
+         }
+     }
+-    if (!Settings::IsGPULevelHigh()) {
++    if (!Settings::IsGPULevelHigh() && !Tegra::PtCapture::Dumping()) {
+         return false;
+     }
+     if (True(which & VideoCommon::CacheType::TextureCache)) {
+diff --git a/src/video_core/texture_cache/descriptor_table.h b/src/video_core/texture_cache/descriptor_table.h
+index b3dd1a9fa..c950f833e 100644
+--- a/src/video_core/texture_cache/descriptor_table.h
++++ b/src/video_core/texture_cache/descriptor_table.h
+@@ -18,6 +18,7 @@
+ #include "common/common_types.h"
+ #include "common/div_ceil.h"
+ #include "common/assert.h"
++#include "video_core/nx2_pt_capture.h"
+ #include "core/memory.h"
+ #include "video_core/memory_manager.h"
+ #include "video_core/rasterizer_interface.h"
+@@ -49,6 +50,9 @@ public:
+             invalidated = false;
+         }
+         const GPUVAddr gpu_addr = current_gpu_addr + index * sizeof(T);
++        if (Tegra::PtCapture::Recording()) [[unlikely]] {
++            Tegra::PtCapture::NoteDescriptor(gpu_addr);
++        }
+         const u64 page_offset = gpu_addr & Core::Memory::YUZU_PAGEMASK;
+         std::pair<T, bool> result;
+         // This runs for every texture and sampler of every draw. An entry within one page is
+diff --git a/src/video_core/texture_cache/texture_cache.h b/src/video_core/texture_cache/texture_cache.h
+index 414f7a280..8fa35747d 100644
+--- a/src/video_core/texture_cache/texture_cache.h
++++ b/src/video_core/texture_cache/texture_cache.h
+@@ -16,6 +16,7 @@
+ #include <map>
+ #include <numeric>
+ #include <optional>
++#include <set>
+ #include <tuple>
+ #include <vector>
+ #include <boost/container/small_vector.hpp>
+@@ -37,6 +38,7 @@
+ #include "video_core/texture_cache/image_view_base.h"
+ #include "video_core/texture_cache/memory_budget.h"
+ #include "video_core/texture_cache/samples_helper.h"
++#include "video_core/nx2_pt_capture.h"
+ #include "video_core/texture_cache/texture_cache_base.h"
+ #include "video_core/texture_cache/util.h"
+ #include "video_core/textures/decoders.h"
+@@ -1346,6 +1348,7 @@ template <class P>
+ void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size) {
+     boost::container::small_vector<ImageId, 16> images;
+     ForEachImageInRegion(cpu_addr, size, [this, &images](ImageId image_id, ImageBase& image) {
++        PtLogImage(image);
+         if (!IsDownloadable(image)) {
+             return;
+         }
+@@ -2142,16 +2145,36 @@ bool TextureCache<P>::IsRescaling(const ImageViewBase& image_view) const noexcep
+ template <class P>
+ bool TextureCache<P>::IsRegionGpuModified(DAddr addr, size_t size) {
+     bool is_modified = false;
+-    ForEachImageInRegion(addr, size, [&is_modified](ImageId, ImageBase& image) {
++    const bool pt_dumping = Tegra::PtCapture::Dumping();
++    ForEachImageInRegion(addr, size, [&](ImageId, ImageBase& image) {
++        if (pt_dumping) {
++            PtLogImage(image); // every image over dumped memory, not only the first modified one
++        }
+         if (False(image.flags & ImageFlagBits::GpuModified)) {
+             return false;
+         }
+         is_modified = true;
+-        return true;
++        return !pt_dumping;
+     });
+     return is_modified;
+ }
+ 
++template <class P>
++void TextureCache<P>::PtLogImage(const ImageBase& image) {
++    // PROBE (passthrough capture): what the texture cache holds over dumped memory, once per image. An image
++    // whose data the dump cannot download (Unbacked, TrimmedLevels, ...) is missing from the capture.
++    if (!Tegra::PtCapture::Dumping() || !pt_logged_images.insert(image.gpu_addr ^ (image.cpu_addr << 1)).second) {
++        return;
++    }
++    LOG_WARNING(HW_GPU,
++                "PtCapture dump image: gpu {:#x} dev {:#x} size {:#x} format {} {}x{}x{} layers {} levels {} "
++                "flags {:#x} gpu_modified {} downloadable {}",
++                image.gpu_addr, image.cpu_addr, image.guest_size_bytes, static_cast<u32>(image.info.format),
++                image.info.size.width, image.info.size.height, image.info.size.depth,
++                image.info.resources.layers, image.info.resources.levels, static_cast<u32>(image.flags),
++                True(image.flags & ImageFlagBits::GpuModified), IsDownloadable(image));
++}
++
+ template <class P>
+ std::pair<typename TextureCache<P>::Image*, BufferImageCopy> TextureCache<P>::DmaBufferImageCopy(
+     const Tegra::DMA::ImageCopy& copy_info, const Tegra::DMA::BufferOperand& buffer_operand,
+@@ -2630,6 +2653,9 @@ void TextureCache<P>::UploadLayers(Image& image, std::span<const u32> layers) {
+                                       level_offset,
+                                   staging.mapped_span.data() + i * tail, tail,
+                                   VideoCommon::CacheType::NoTextureCache);
++            if (Tegra::PtCapture::Recording()) [[unlikely]] {
++                Tegra::PtCapture::NoteGpuData(gpu_memory, image.gpu_addr + u64{layers[i]} * image.info.layer_stride + level_offset, staging.mapped_span.data() + i * tail, tail, 3);
++            }
+         }
+         uploads.erase(uploads.begin(), uploads.begin() + image.host_level_offset);
+         for (auto& upload : uploads) {
+@@ -2660,6 +2686,9 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging)
+             gpu_memory->ReadBlock(gpu_addr + layer * image.info.layer_stride + level_offset,
+                                   mapped_span.data() + layer * tail, tail,
+                                   VideoCommon::CacheType::NoTextureCache);
++            if (Tegra::PtCapture::Recording()) [[unlikely]] {
++                Tegra::PtCapture::NoteGpuData(gpu_memory, gpu_addr + layer * image.info.layer_stride + level_offset, mapped_span.data() + layer * tail, tail, 3);
++            }
+         }
+         uploads.erase(uploads.begin(), uploads.begin() + image.host_level_offset);
+         for (auto& upload : uploads) {
+@@ -2673,6 +2702,9 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging)
+                                           mapped_span.size_bytes());
+         gpu_memory->ReadBlock(gpu_addr, mapped_span.data(), mapped_span.size_bytes(),
+                               VideoCommon::CacheType::NoTextureCache);
++        if (Tegra::PtCapture::Recording()) [[unlikely]] {
++            Tegra::PtCapture::NoteGpuData(gpu_memory, gpu_addr, mapped_span.data(), mapped_span.size_bytes(), 3);
++        }
+         const auto uploads = FullUploadSwizzles(image.info);
+         runtime.AccelerateImageUpload(image, staging, uploads, 0, 0);
+         return;
+@@ -2680,6 +2712,9 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging)
+ 
+     Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(
+         *gpu_memory, gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
++    if (Tegra::PtCapture::Recording()) [[unlikely]] {
++        Tegra::PtCapture::NoteGpuData(gpu_memory, gpu_addr, swizzle_data.data(), swizzle_data.size(), 3);
++    }
+     if (True(image.flags & ImageFlagBits::Converted)) {
+         unswizzle_data_buffer.resize_destructive(image.unswizzled_size_bytes);
+         auto copies =
+@@ -3058,6 +3093,9 @@ void TextureCache<P>::TickAsyncUnswizzle() {
+         gpu_memory->ReadBlock(image.gpu_addr + task.current_offset,
+                               task.staging_buffer.mapped_span.data() + task.current_offset,
+                               copy_amount);
++        if (Tegra::PtCapture::Recording()) [[unlikely]] {
++            Tegra::PtCapture::NoteGpuData(gpu_memory, image.gpu_addr + task.current_offset, task.staging_buffer.mapped_span.data() + task.current_offset, copy_amount, 3);
++        }
+         task.current_offset += copy_amount;
+     }
+ 
+diff --git a/src/video_core/texture_cache/texture_cache_base.h b/src/video_core/texture_cache/texture_cache_base.h
+index 0b977f933..5dfab79d9 100644
+--- a/src/video_core/texture_cache/texture_cache_base.h
++++ b/src/video_core/texture_cache/texture_cache_base.h
+@@ -15,6 +15,7 @@
+ #include <map>
+ #include <mutex>
+ #include <optional>
++#include <set>
+ #include <span>
+ #include <type_traits>
+ // TODO: find out which don't require stable iters
+@@ -463,6 +464,9 @@ private:
+ 
+     /// Refresh the contents (pixel data) of an image
+     [[nodiscard]] bool IsDownloadable(const ImageBase& image) const noexcept;
++    /// PROBE (passthrough capture): log an image over dumped memory, once.
++    void PtLogImage(const ImageBase& image);
++    std::set<u64> pt_logged_images;
+ 
+     void RefreshContents(Image& image, ImageId image_id);
+ 
+-- 
+2.56.0
+

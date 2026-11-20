@@ -1,0 +1,140 @@
+From adc4c7c96e18788db2621218bbcb2b4b59801ade Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 13:12:13 -0700
+Subject: [PATCH 25/25] nx2: passthrough backend: virtual textures follow
+ rewritten tiles
+
+MKW rewrites virtual-texture tiles in memory it keeps mapped, which no map or copy announces (the GOB scan
+that called the arrays static only counted written GOBs). Workers with nothing queued now look at every
+level of every virtual texture again in turn (one level per 5 ms; unchanged cells cost an unswizzle and a
+hash), and a guest map queues only the cells it covers instead of whole levels. Before, whole-level
+requeues on every map hid the rewrites at a high cost; with cell-precise requeues alone the track went
+stale (dark, blocky).
+
+MKW race: 18303 cells transcoded (6960 without the sweep), 52979 swept unchanged; frames right; 28.6 fps.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/nx2_passthrough.cpp | 60 ++++++++++++++++++++++++++----
+ 1 file changed, 52 insertions(+), 8 deletions(-)
+
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index b095cb41f..b868937f6 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -1017,6 +1017,10 @@ public:
+                  "{} unmapped", va, v.out_va, v.out_size, cells, v.src.size(), gathered, missing);
+         if (vt_threads.empty()) StartVt();
+         for (u32 i = 0; i < v.src.size(); ++i) VtQueue(v, i, std::chrono::steady_clock::now());
++        {
++            std::scoped_lock lk{vt_mutex};
++            for (u32 i = 0; i < v.src.size(); ++i) vt_sweep.emplace_back(&v, i);
++        }
+         return {v.out_va, 0x26u};
+     }
+ 
+@@ -1053,8 +1057,21 @@ public:
+             if (v.failed || v.src.empty() || va >= base + v.size || va + size <= base) continue;
+             for (u32 i = 0; i < v.src.size(); ++i) {
+                 const NvU64 a = base + (i / v.levels) * v.in_stride + v.in[i % v.levels].off;
+-                if (a < va + size && a + v.in[i % v.levels].bytes > va && VtResolve(v, i) != 2) {
+-                    vt_dirty.push_back({&v, i});
++                const VtLevel& li = v.in[i % v.levels];
++                if (a >= va + size || a + li.bytes <= va || VtResolve(v, i) == 2) continue;
++                // Only the cells the mapping covers (whole levels for every 216 map kept the workers seconds behind:
++                // newly mapped ground stayed black): per GOB block of the range, its element rectangle.
++                auto& cells = vt_mapped_cells[{&v, i}];
++                const NvU64 lo = std::max(a, va) - a, hi = std::min(a + li.bytes, va + size) - a;
++                const u32 rows = 8u << li.bh, gobs_x = Common::DivCeil(li.stride_w * 16, 64u);
++                const u32 cw = Common::DivCeil(li.w, VT_CELL);
++                const NvU64 block = NvU64{512} << li.bh;
++                for (NvU64 b = lo / block; b * block < hi; ++b) {
++                    const u32 x = static_cast<u32>(b % gobs_x) * 4, y = static_cast<u32>(b / gobs_x) * rows;
++                    if (x >= li.w || y >= li.h) continue;
++                    for (u32 cy = y / VT_CELL; cy <= (std::min(y + rows, li.h) - 1) / VT_CELL; ++cy) {
++                        cells.insert(cy * cw + x / VT_CELL);
++                    }
+                 }
+             }
+         }
+@@ -1080,8 +1097,16 @@ public:
+ 
+     /// Entry thread, after an entry ran: queues the levels copies wrote.
+     void VtFlush() {
+-        if (vt_dirty.empty()) return;
++        if (vt_dirty.empty() && vt_mapped_cells.empty()) return;
+         const auto now = std::chrono::steady_clock::now();
++        for (auto& [key, cells] : vt_mapped_cells) {
++            {
++                std::scoped_lock lk{vt_mutex};
++                vt_jobs.push_back({key.first, key.second, now, std::vector<u32>(cells.begin(), cells.end())});
++            }
++            vt_cv.notify_one();
++        }
++        vt_mapped_cells.clear();
+         for (const auto& [v, i] : vt_dirty) {
+             if (v->queued[i]) continue;
+             VtQueue(*v, i, now);
+@@ -1292,7 +1317,15 @@ private:
+         Vt* v;
+         u32 index; // layer * levels + level
+         std::chrono::steady_clock::time_point not_before;
++        std::vector<u32> cells; // empty: every cell of the level
+     };
++    std::map<std::pair<Vt*, u32>, std::set<u32>> vt_mapped_cells; // entry thread: cells guest maps covered
++    std::vector<std::pair<Vt*, u32>> vt_sweep;                     // every level, swept in turn (vt_mutex)
++    size_t vt_sweep_at = 0;
++    std::chrono::steady_clock::time_point vt_next_sweep{};
++public:
++    std::atomic<u64> vt_swept{0};
++private:
+     std::vector<std::pair<Vt*, u32>> vt_dirty; // entry thread: levels copies wrote in this entry
+     std::deque<VtJob> vt_jobs;
+     std::mutex vt_mutex;
+@@ -1344,10 +1377,19 @@ private:
+                         vt_jobs.erase(it);
+                         break;
+                     }
+-                    if (vt_jobs.empty()) {
++                    // Nothing queued: look at the next level of every virtual texture again (round robin, one level
++                    // per 5 ms): the game rewrites tiles in memory it keeps mapped, which no map or copy announces.
++                    if (!vt_sweep.empty() && now >= vt_next_sweep) {
++                        const auto [sv, si] = vt_sweep[vt_sweep_at++ % vt_sweep.size()];
++                        vt_next_sweep = now + std::chrono::milliseconds(5);
++                        job = {sv, si, now, {}};
++                        ++vt_swept;
++                        break;
++                    }
++                    if (vt_jobs.empty() && vt_sweep.empty()) {
+                         vt_cv.wait(lk);
+                     } else {
+-                        vt_cv.wait_for(lk, std::chrono::milliseconds(20));
++                        vt_cv.wait_for(lk, std::chrono::milliseconds(5));
+                     }
+                 }
+             }
+@@ -1374,7 +1416,9 @@ private:
+             const u32 cw = Common::DivCeil(li.w, VT_CELL), ch = Common::DivCeil(li.h, VT_CELL);
+             u8* const dst = v.cpu + layer * v.out_stride + lo.off;
+             try {
+-                for (u32 c = 0; c < cw * ch; ++c) {
++                for (u32 n = 0; n < (job.cells.empty() ? cw * ch : job.cells.size()); ++n) {
++                    const u32 c = job.cells.empty() ? n : job.cells[n];
++                    if (c >= cw * ch) continue;
+                     const u32 cx = c % cw, cy = c / cw;
+                     const u32 ex = std::min(VT_CELL, li.w - cx * VT_CELL), ey = std::min(VT_CELL, li.h - cy * VT_CELL);
+                     lin.resize(size_t{ex} * ey * 16);
+@@ -2391,8 +2435,8 @@ void LogStats(State& s) {
+                      s.armed.size(), h.vram_used >> 20, h.vram_maps);
+         }
+         if (!h.vts.empty()) {
+-            LOG_INFO(HW_GPU, "Nx2 passthrough VT: {} textures, {} level jobs ({} ms), {} cells transcoded, {} unchanged, "
+-                     "{} empty, {} MiB of output mapped", h.vts.size(), h.vt_jobs_done.load(),
++            LOG_INFO(HW_GPU, "Nx2 passthrough VT: {} textures, {} level jobs ({} swept, {} ms), {} cells transcoded, {} unchanged, "
++                     "{} empty, {} MiB of output mapped", h.vts.size(), h.vt_jobs_done.load(), h.vt_swept.load(),
+                      h.vt_busy.load() / 1000000, h.vt_cells.load(), h.vt_same.load(), h.vt_zero.load(),
+                      (h.vt_mapped.load() * Host::VT_PAGE) >> 20);
+         }
+-- 
+2.56.0
+

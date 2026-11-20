@@ -1,0 +1,793 @@
+From 65397093a59b93128febc12bae69d71bf72cada6 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 18:01:18 -0700
+Subject: [PATCH] nx2: passthrough backend step 2, the guest GPU VA space
+ mirrored on the host GPU
+
+EDEN_NX2_PASSTHROUGH=1: the guest's GPU VA range [1 << 36, 1 << 40) is one RM
+sparse range (unmapped addresses read 0 and drop writes instead of faulting).
+GPU memory manager maps hand the backend runs of host memory (Eglantine's
+device memory backing, imported as OS descriptors in 64 MiB granules on first
+use) that it maps at the guest's own VAs; unmaps and sparse reservations unmap.
+The guest's PTE kinds (nx2:gpu 211, 212, 213, 216) are kept per range and
+mapped, compressible kinds as their incompressible fallback; a kind change
+remaps what is mapped there. Guest memory is mapped GPU-uncached.
+
+EDEN_NX2_PASSTHROUGH_CHECK=<n>: every n-th entry the host copy engine reads
+the entry's words at their guest VA and compares them with what Eglantine
+parsed and with the guest memory the mirror maps there.
+
+With the backend on, HostMemory clears guest granules with memset instead of
+punching holes in the memfd: a punched page stays pinned for the host GPU and
+the file gets a new one (measured: the GPU read stale bytes for 4% of the
+checked entries). EDEN_PUNCH_HOLE still overrides.
+
+MKW, one race: 26898 maps, 16142 live RM mappings, 18422 kind changes,
+7.4 GiB pinned in 1.5 s over the session; 128556 entries checked, 0 differ
+from the mirrored memory (6 rewritten by the guest after parsing); no Xid,
+RM client freed at shutdown. The guest's methods are still not submitted.
+---
+ src/common/host_memory.cpp         |   9 +-
+ src/common/host_memory.h           |   4 +
+ src/core/hle/service/nx2_gsv.h     |   9 +
+ src/video_core/memory_manager.cpp  |  27 ++
+ src/video_core/memory_manager.h    |   3 +
+ src/video_core/nx2_passthrough.cpp | 446 +++++++++++++++++++++++++++--
+ src/video_core/nx2_passthrough.h   |  22 +-
+ 7 files changed, 489 insertions(+), 31 deletions(-)
+
+diff --git a/src/common/host_memory.cpp b/src/common/host_memory.cpp
+index 1f8e2c109..619c51759 100644
+--- a/src/common/host_memory.cpp
++++ b/src/common/host_memory.cpp
+@@ -992,7 +992,14 @@ void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 f
+     // Handing a whole granule back to the kernel frees its RAM; a memset would commit it.
+     static const bool punch = [] {
+         const char* value = std::getenv("EDEN_PUNCH_HOLE");
+-        return value == nullptr || value[0] != '0';
++        if (value != nullptr) {
++            return value[0] != '0';
++        }
++        // The GPU passthrough backend pins this memory for the host GPU: a punched page stays pinned
++        // (no RAM comes back) and the file gets a new page, so the GPU would read stale bytes
++        // (measured: 4% of the pushbuffer entries it read back).
++        const char* passthrough = std::getenv("EDEN_NX2_PASSTHROUGH");
++        return passthrough == nullptr || passthrough[0] != '1';
+     }();
+ #endif
+     const size_t end = physical_offset + length;
+diff --git a/src/common/host_memory.h b/src/common/host_memory.h
+index 77e7c21d5..0fe501347 100644
+--- a/src/common/host_memory.h
++++ b/src/common/host_memory.h
+@@ -103,6 +103,10 @@ public:
+         return backing_base;
+     }
+ 
++    [[nodiscard]] size_t BackingSize() const noexcept {
++        return backing_size;
++    }
++
+     [[nodiscard]] u8* VirtualBasePointer() noexcept {
+         return virtual_base;
+     }
+diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
+index 8f7384405..f01f91f89 100644
+--- a/src/core/hle/service/nx2_gsv.h
++++ b/src/core/hle/service/nx2_gsv.h
+@@ -38,6 +38,7 @@
+ #include "common/thread.h"
+ #include "core/core.h"
+ #include "core/device_memory.h"
++#include "video_core/nx2_passthrough.h"
+ #include "video_core/nx2_diag.h"
+ #include "video_core/nx2_spikes.h"
+ #include "video_core/rasterizer_interface.h"
+@@ -544,6 +545,7 @@ private:
+             // made there.
+             const u64 cpu = it->second.address + c;
+             Nvidia::Devices::Nx2GpuMemoryRegistry::Get().MapAt(a, cpu, b - a + 1);
++            Tegra::Nx2Passthrough::OnGuestKind(a, b - a + 1, 0xff, 0xff); // a new map starts as pitch
+         } else {
+             LOG_WARNING(Service, "nx2:gpu 211 map of unknown handle {}", handle);
+         }
+@@ -563,6 +565,9 @@ private:
+         const u32 kind = w[7] & 0xff;
+         LOG_DEBUG(Service, "nx2:gpu 212 modify [{:#x}, {:#x}] kind={:#x} fallback={:#x} slot={}",
+                   first, last, kind, w[8] & 0xff, w[10]);
++        if (last > first) {
++            Tegra::Nx2Passthrough::OnGuestKind(first, last - first + 1, kind, w[8] & 0xff);
++        }
+         EventFor(w[10])->Signal(system.Kernel());
+         TipcReplyWords(ctx, {kind});
+     }
+@@ -576,6 +581,7 @@ private:
+         LOG_DEBUG(Service, "nx2:gpu 213 unmap [{:#x}, {:#x}] slot={}", first, last, w[8]);
+         if (last > first) {
+             Nvidia::Devices::Nx2GpuMemoryRegistry::Get().Unmap(first, last - first + 1);
++            Tegra::Nx2Passthrough::OnGuestKind(first, last - first + 1, 0xff, 0xff);
+         }
+         SignalAfterGpu(w[8]);
+         IPC::ResponseBuilder rb{ctx, 2};
+@@ -762,6 +768,9 @@ private:
+                 SparseMapRequest request;
+                 std::memcpy(&request, data.data() + i * sizeof(SparseMapRequest), sizeof(request));
+                 kinds[i] = request.kind;
++                Tegra::Nx2Passthrough::OnGuestKind(request.gpu_address, request.size,
++                                                   request.memory_handle ? request.kind : 0xff,
++                                                   request.fallback_kind);
+                 ApplySparseMapRequest(request);
+             }
+             // The first request, then at most every 30 s.
+diff --git a/src/video_core/memory_manager.cpp b/src/video_core/memory_manager.cpp
+index 85199b5be..5c63b4dad 100644
+--- a/src/video_core/memory_manager.cpp
++++ b/src/video_core/memory_manager.cpp
+@@ -16,11 +16,13 @@
+ #include "common/assert.h"
+ #include "common/logging.h"
+ #include "core/core.h"
++#include "core/device_memory.h"
+ #include "core/hle/kernel/k_page_table.h"
+ #include "core/hle/kernel/k_process.h"
+ #include "memory_manager.h"
+ #include "video_core/guest_memory.h"
+ #include "video_core/nx2.h"
++#include "video_core/nx2_passthrough.h"
+ #include "video_core/nx2_perf.h"
+ #include "video_core/host1x/host1x.h"
+ #include "video_core/invalidation_accumulator.h"
+@@ -261,13 +263,37 @@ GPUVAddr MemoryManager::Map(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size,
+         rasterizer->FlushRegion(dev_addr, size, VideoCommon::CacheType::All);
+         rasterizer->InvalidateRegion(dev_addr, size, VideoCommon::CacheType::TextureCache);
+     }
++    if (Nx2Passthrough::Requested()) [[unlikely]] {
++        PassthroughMap(gpu_addr, dev_addr, size);
++    }
+     if (is_big_pages)
+         return BigPageTableOp(gpu_addr, dev_addr, size, kind, EntryType::Mapped);
+     return PageTableOp(gpu_addr, dev_addr, size, kind, EntryType::Mapped);
+ }
+ 
++void MemoryManager::PassthroughMap(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size) {
++    // The passthrough backend maps host memory: one call per run of device pages that is contiguous there.
++    auto& backing = system.DeviceMemory().buffer;
++    const std::span<u8> guest{backing.BackingBasePointer(), backing.BackingSize()};
++    constexpr u64 page = 1ULL << 12;
++    const u8* run = nullptr;
++    u64 run_start = 0;
++    for (u64 off = 0; off <= size; off += page) {
++        const u8* const p = off < size ? memory.GetPointer<u8>(dev_addr + off) : nullptr;
++        if (run != nullptr && p != run + (off - run_start)) {
++            Nx2Passthrough::OnMap(this, gpu_addr + run_start, run, off - run_start, guest);
++            run = nullptr;
++        }
++        if (run == nullptr && p != nullptr) {
++            run = p;
++            run_start = off;
++        }
++    }
++}
++
+ GPUVAddr MemoryManager::MapSparse(GPUVAddr gpu_addr, std::size_t size, bool is_big_pages) {
+     PreserveMapping(gpu_addr, size);
++    Nx2Passthrough::OnUnmap(this, gpu_addr, size); // the passthrough range is sparse: unmapped reads 0
+     if (is_big_pages)
+         return BigPageTableOp(gpu_addr, 0, size, PTEKind::INVALID, EntryType::Reserved);
+     return PageTableOp(gpu_addr, 0, size, PTEKind::INVALID, EntryType::Reserved);
+@@ -277,6 +303,7 @@ void MemoryManager::Unmap(GPUVAddr gpu_addr, std::size_t size) {
+     if (size == 0) {
+         return;
+     }
++    Nx2Passthrough::OnUnmap(this, gpu_addr, size);
+     PreserveMapping(gpu_addr, size);
+     GetSubmappedRangeImpl<false>(gpu_addr, size, page_stash);
+ 
+diff --git a/src/video_core/memory_manager.h b/src/video_core/memory_manager.h
+index 9e208af29..d30e1d7b5 100644
+--- a/src/video_core/memory_manager.h
++++ b/src/video_core/memory_manager.h
+@@ -253,6 +253,9 @@ private:
+ 
+     std::atomic<GPUVAddr> native_syncpoint_shim{};
+     Core::System& system;
++    /// EDEN_NX2_PASSTHROUGH: hands the mapping to the passthrough backend as runs of host memory.
++    void PassthroughMap(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size);
++
+     MaxwellDeviceMemoryManager& memory;
+ 
+     const u64 address_space_bits;
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index d69dfe99a..fae6261a5 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -1,7 +1,7 @@
+ // SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ 
+-// Step 1 of the passthrough backend (see nx2_passthrough.h). The RM setup is the one the USCL passthrough tools
++// Steps 1-2 of the passthrough backend (see nx2_passthrough.h). The RM setup is the one the USCL passthrough tools
+ // verified on an RTX 4060 (uscl-eglantine/passthrough: nvrm_probe, pt_replay): root client, device, subdevice,
+ // an RM-owned VA space, a TSG with a context share and an AMPERE_CHANNEL_GPFIFO_A channel holding the guest's
+ // engine classes (ADA_A, ADA_COMPUTE_A, AMPERE_DMA_COPY_B), work submission through the usermode doorbell.
+@@ -9,6 +9,9 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <cstring>
++#include <map>
++#include <optional>
+ #include <chrono>
+ #include <cstdlib>
+ #include <memory>
+@@ -38,7 +41,9 @@
+ #include "class/cl0000.h"
+ #include "class/cl0040.h"
+ #include "class/cl0070.h"
++#include "class/cl0071.h"
+ #include "class/cl0080.h"
++#include "class/cl50a0.h"
+ #include "class/cl2080.h"
+ #include "class/cl2080_notification.h"
+ #include "class/cl9067.h"
+@@ -65,8 +70,16 @@ namespace {
+ #define NV01_MEMORY_SYSTEM 0x3e
+ #endif
+ 
+-// Channel memory (video memory, CPU-mapped write-combined): GPFIFO ring, USERD, semaphore, pushbuffer.
+-constexpr NvU64 CH_SZ = 4 << 20, RING = 0, USERD = 0x2000, SEM = 0x3000, PB = 0x10000;
++// Channel memory (video memory, CPU-mapped write-combined): GPFIFO ring, USERD, semaphore, pushbuffer, and the
++// buffer the live check copies guest words into.
++constexpr NvU64 CH_SZ = 8 << 20, RING = 0, USERD = 0x2000, SEM = 0x3000, PB = 0x10000, CHECK = 4 << 20;
++constexpr NvU64 CHECK_SZ = CH_SZ - CHECK;
++// The guest's GPU VA range (MKW: 0x114b41b000-0x86a91c6000, one memory manager) is one RM sparse range: an
++// address nothing maps reads 0 and drops writes instead of faulting. The channel's own memory lies below it.
++constexpr NvU64 GUEST_VA_LO = 1ull << 36, GUEST_VA_HI = 1ull << 40;
++// Guest memory is imported (pinned) in granules on first use: measured ~210 ms per GiB, no size limit up to
++// 12 GiB (nvrm_probe guestvm), so only memory the guest maps for the GPU is pinned.
++constexpr NvU64 GRANULE = 64ull << 20;
+ constexpr NvU32 ENTRIES = 0x400;
+ constexpr auto WAIT_LIMIT = std::chrono::seconds(2);
+ 
+@@ -115,6 +128,16 @@ public:
+         virtmem = Alloc(device, NV01_MEMORY_VIRTUAL, &mv, "virtual memory");
+         const NvHandle usermode = Alloc(subdevice, AMPERE_USERMODE_A, nullptr, "usermode");
+         mmio = static_cast<volatile NvU32*>(MapCpu(usermode, 0x10000, 0));
++        // Reserved before anything else is mapped, so RM places the channel's memory below it.
++        NV_MEMORY_ALLOCATION_PARAMS gv{};
++        gv.owner = root;
++        gv.type = NVOS32_TYPE_IMAGE;
++        gv.offset = GUEST_VA_LO;
++        gv.size = GUEST_VA_HI - GUEST_VA_LO;
++        gv.hVASpace = vaspace;
++        gv.flags = NVOS32_ALLOC_FLAGS_VIRTUAL | NVOS32_ALLOC_FLAGS_SPARSE | NVOS32_ALLOC_FLAGS_FIXED_ADDRESS_ALLOCATE;
++        gv.attr = DRF_DEF(OS32, _ATTR, _PAGE_SIZE, _4KB);
++        guest_va = Alloc(device, NV50_MEMORY_VIRTUAL, &gv, "sparse guest VA range");
+ 
+         const NvHandle mem = AllocVidmem(CH_SZ);
+         cpu = static_cast<volatile NvU8*>(
+@@ -159,7 +182,7 @@ public:
+                                DRF_DEF(C56F, _SEM_EXECUTE, _OPERATION, _RELEASE) |
+                                    DRF_DEF(C56F, _SEM_EXECUTE, _RELEASE_WFI, _EN) |
+                                    DRF_DEF(C56F, _SEM_EXECUTE, _PAYLOAD_SIZE, _32BIT)};
+-        const NvU64 n = words.size() + 6, cap = (CH_SZ - PB) / 4;
++        const NvU64 n = words.size() + 6, cap = (CHECK - PB) / 4;
+         if (n > cap) return false;
+         if (pbn + n > cap) pbn = 0; // serialized: the previous submission has completed
+         auto* pb = reinterpret_cast<volatile NvU32*>(cpu + PB) + pbn;
+@@ -196,7 +219,246 @@ public:
+         ctl = -1;
+     }
+ 
++
++    // --- Step 2: the guest VA space ---
++
++    /// Maps [va, va + size) to guest memory at `off` (bytes from the guest memory base), replacing what was there.
++    void Map(NvU64 va, NvU64 off, NvU64 size) {
++        Unmap(va, size);
++        MapOff(va, off, size);
++    }
++
++    /// Unmaps [va, va + size); the parts of overlapping mappings outside it stay mapped.
++    void Unmap(NvU64 va, NvU64 size) {
++        const NvU64 hi = va + size;
++        for (auto& [pva, p] : TakePieces(va, hi)) {
++            RmUnmap(pva, p.mem);
++            if (pva < va) MapPiece(pva, va - pva, p.off, p.kind);
++            if (pva + p.size > hi) MapPiece(hi, pva + p.size - hi, p.off + (hi - pva), p.kind);
++        }
++    }
++
++    /// The guest's kind over [va, va + size) changed: remember it, remap what is mapped there.
++    void SetKind(NvU64 va, NvU64 size, std::optional<NvU32> host_kind) {
++        AssignKind(va, va + size, host_kind);
++        ++kind_changes;
++        for (auto& [pva, p] : TakePieces(va, va + size)) {
++            RmUnmap(pva, p.mem);
++            MapOff(pva, p.off, p.size);
++        }
++    }
++
++    void SetGuestMemory(std::span<u8> guest) {
++        guest_base = guest.data();
++        guest_size = guest.size();
++        granules.assign((guest_size + GRANULE - 1) / GRANULE, 0);
++    }
++    const u8* GuestBase() const { return guest_base; }
++    NvU64 GuestSize() const { return guest_size; }
++
++    /// Copies `bytes` at guest VA `va` into the check buffer with the copy engine (part of the next Submit).
++    void QueueCheckCopy(std::vector<NvU32>& words, NvU64 va, NvU64 bytes) {
++        if (!copy_bound) {
++            words.insert(words.end(), {Hdr(4, 0, 1), AMPERE_DMA_COPY_B});
++            copy_bound = true;
++        }
++        const NvU64 dst = gva + CHECK;
++        words.insert(words.end(), {Hdr(4, NVC7B5_OFFSET_IN_UPPER, 4), static_cast<NvU32>(va >> 32),
++                                   static_cast<NvU32>(va), static_cast<NvU32>(dst >> 32), static_cast<NvU32>(dst),
++                                   Hdr(4, NVC7B5_LINE_LENGTH_IN, 2), static_cast<NvU32>(bytes), 1,
++                                   Hdr(4, NVC7B5_LAUNCH_DMA, 1),
++                                   DRF_DEF(C7B5, _LAUNCH_DMA, _DATA_TRANSFER_TYPE, _NON_PIPELINED) |
++                                       DRF_DEF(C7B5, _LAUNCH_DMA, _FLUSH_ENABLE, _TRUE) |
++                                       DRF_DEF(C7B5, _LAUNCH_DMA, _SRC_MEMORY_LAYOUT, _PITCH) |
++                                       DRF_DEF(C7B5, _LAUNCH_DMA, _DST_MEMORY_LAYOUT, _PITCH)});
++    }
++    const volatile NvU8* CheckBuffer() const { return cpu + CHECK; }
++
++    /// The kind the mirror mapped at va (~0u where nothing is mapped).
++    NvU32 MappedKind(NvU64 va) const {
++        auto it = pieces.upper_bound(va);
++        if (it == pieces.begin() || va >= std::prev(it)->first + std::prev(it)->second.size) return ~0u;
++        return std::prev(it)->second.kind;
++    }
++
++    /// The guest memory the mirror maps at va (nullptr where nothing is mapped): what the GPU should read.
++    const u8* MirroredHost(NvU64 va) const {
++        auto it = pieces.upper_bound(va);
++        if (it == pieces.begin()) return nullptr;
++        --it;
++        if (va >= it->first + it->second.size) return nullptr;
++        return guest_base + it->second.off + (va - it->first);
++    }
++
++    // Counters for the log.
++    NvU64 pinned = 0, rm_maps = 0, rm_unmaps = 0, kind_changes = 0, kind_fallbacks = 0;
++    std::chrono::nanoseconds import_time{};
++    size_t Pieces() const { return pieces.size(); }
++
+ private:
++    struct Piece {
++        NvU64 size, off;
++        NvU32 kind;
++        NvHandle mem;
++    };
++    struct Run {
++        NvU64 end;
++        NvU32 kind;
++    };
++
++    /// Removes and returns the mappings that overlap [lo, hi).
++    std::vector<std::pair<NvU64, Piece>> TakePieces(NvU64 lo, NvU64 hi) {
++        std::vector<std::pair<NvU64, Piece>> out;
++        auto it = pieces.upper_bound(lo);
++        if (it != pieces.begin() && std::prev(it)->first + std::prev(it)->second.size > lo) --it;
++        while (it != pieces.end() && it->first < hi) {
++            out.emplace_back(*it);
++            it = pieces.erase(it);
++        }
++        return out;
++    }
++
++    /// Maps, split where a granule or the guest's kind changes.
++    void MapOff(NvU64 va, NvU64 off, NvU64 size) {
++        while (size != 0) {
++            const auto [kind, run_end] = KindAt(va);
++            const NvU64 n = std::min({size, (off / GRANULE + 1) * GRANULE - off, run_end - va});
++            MapPiece(va, n, off, kind);
++            va += n;
++            off += n;
++            size -= n;
++        }
++    }
++
++    void MapPiece(NvU64 va, NvU64 size, NvU64 off, NvU32 kind) {
++        static const bool pitch_only = [] {
++            const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_KINDS"); // 0: map everything as pitch (bisecting)
++            return v != nullptr && v[0] == '0';
++        }();
++        if (pitch_only) kind = 0;
++        const NvHandle mem = Granule(off / GRANULE);
++        NVOS46_PARAMETERS p{};
++        p.hClient = root;
++        p.hDevice = device;
++        p.hDma = guest_va;
++        p.hMemory = mem;
++        p.offset = off % GRANULE;
++        p.length = size;
++        // Not cached in the GPU's L2: the guest CPU rewrites this memory all the time (rings reused every frame)
++        // and nothing invalidates the L2 on a CPU write (measured: cached, 6% of re-read pushbuffer entries stale).
++        p.flags = DRF_DEF(OS46, _FLAGS, _DMA_OFFSET_FIXED, _TRUE) | DRF_DEF(OS46, _FLAGS, _PAGE_SIZE, _4KB) |
++                  DRF_DEF(OS46, _FLAGS, _PAGE_KIND_OVERRIDE, _YES) | DRF_DEF(OS46, _FLAGS, _GPU_CACHEABLE, _NO);
++        p.kindOverride = kind;
++        p.dmaOffset = va;
++        Ioctl(ctl, NV_ESC_RM_MAP_MEMORY_DMA, &p, "map guest memory");
++        if (p.status == NV_ERR_NO_MEMORY) { // seen once per session in RM's page-table walk; a retry succeeds
++            p.dmaOffset = va;
++            Ioctl(ctl, NV_ESC_RM_MAP_MEMORY_DMA, &p, "map guest memory");
++        }
++        if (p.status != NV_OK && kind != 0) { // a kind the host does not take: pitch keeps the bytes reachable
++            if (++kind_fallbacks <= 8) {
++                LOG_WARNING(HW_GPU, "Nx2 passthrough: map [{:#x}, +{:#x}) kind {:#x} failed (status {:#x}), as pitch",
++                            va, size, kind, p.status);
++            }
++            kind = 0;
++            p.kindOverride = 0;
++            p.dmaOffset = va;
++            Ioctl(ctl, NV_ESC_RM_MAP_MEMORY_DMA, &p, "map guest memory");
++        }
++        if (p.status != NV_OK) throw Error("map guest memory", p.status);
++        pieces[va] = Piece{size, off, kind, mem};
++        ++rm_maps;
++    }
++
++    void RmUnmap(NvU64 va, NvHandle mem) {
++        NVOS47_PARAMETERS p{};
++        p.hClient = root;
++        p.hDevice = device;
++        p.hDma = guest_va;
++        p.hMemory = mem;
++        p.dmaOffset = va;
++        Ioctl(ctl, NV_ESC_RM_UNMAP_MEMORY_DMA, &p, "unmap guest memory");
++        if (p.status != NV_OK) throw Error("unmap guest memory", p.status);
++        ++rm_unmaps;
++    }
++
++    /// The OS descriptor over granule g of guest memory, imported (pinned) on first use.
++    NvHandle Granule(NvU64 g) {
++        if (granules.at(g) != 0) return granules[g];
++        const NvU64 size = std::min(GRANULE, guest_size - g * GRANULE);
++        const auto start = std::chrono::steady_clock::now();
++        nv_ioctl_nvos02_parameters_with_fd d{};
++        d.fd = -1;
++        d.params.hRoot = root;
++        d.params.hObjectParent = device;
++        d.params.hObjectNew = 0x72000000u + static_cast<NvU32>(g); // this escape takes the handle from the client
++        d.params.hClass = NV01_MEMORY_SYSTEM_OS_DESCRIPTOR;
++        d.params.flags = DRF_DEF(OS02, _FLAGS, _PHYSICALITY, _NONCONTIGUOUS) |
++                         DRF_DEF(OS02, _FLAGS, _COHERENCY, _CACHED) | DRF_DEF(OS02, _FLAGS, _MAPPING, _NO_MAP);
++        d.params.pMemory = reinterpret_cast<NvP64>(guest_base + g * GRANULE);
++        d.params.limit = size - 1;
++        Ioctl(fds.at(0), NV_ESC_RM_ALLOC_MEMORY, &d, "import guest memory"); // on the device fd
++        if (d.params.status != NV_OK) throw Error("import guest memory", d.params.status);
++        import_time += std::chrono::steady_clock::now() - start;
++        pinned += size;
++        return granules[g] = d.params.hObjectNew;
++    }
++
++    /// The host kind at va and where that run ends (pitch where the guest never set one).
++    std::pair<NvU32, NvU64> KindAt(NvU64 va) const {
++        auto it = kinds.upper_bound(va);
++        if (it != kinds.begin() && std::prev(it)->second.end > va) {
++            return {std::prev(it)->second.kind, std::prev(it)->second.end};
++        }
++        return {0, it == kinds.end() ? ~0ull : it->first};
++    }
++
++    void AssignKind(NvU64 lo, NvU64 hi, std::optional<NvU32> kind) {
++        auto it = kinds.lower_bound(lo);
++        if (it != kinds.begin()) {
++            auto& prev = std::prev(it)->second;
++            if (prev.end > lo) {
++                const Run cut = prev;
++                prev.end = lo;
++                if (cut.end > hi) kinds[hi] = cut;
++            }
++        }
++        it = kinds.lower_bound(lo);
++        while (it != kinds.end() && it->first < hi) {
++            if (it->second.end > hi) {
++                const Run tail = it->second;
++                kinds.erase(it);
++                kinds[hi] = tail;
++                break;
++            }
++            it = kinds.erase(it);
++        }
++        if (kind) kinds[lo] = Run{hi, *kind};
++    }
++
++public:
++    /// Self-check of the kind interval map (runs at open; cheap).
++    bool KindMapSelfTest() {
++        AssignKind(0x1000, 0x5000, 6);
++        AssignKind(0x2000, 0x3000, 0x0b);
++        AssignKind(0x4000, 0x6000, std::nullopt);
++        const bool ok = KindAt(0x1000) == std::pair<NvU32, NvU64>{6, 0x2000} &&
++                        KindAt(0x2800) == std::pair<NvU32, NvU64>{0x0b, 0x3000} &&
++                        KindAt(0x3000) == std::pair<NvU32, NvU64>{6, 0x4000} &&
++                        KindAt(0x4000) == std::pair<NvU32, NvU64>{0, ~0ull} && KindAt(0x800).second == 0x1000;
++        kinds.clear();
++        return ok;
++    }
++
++private:
++    NvHandle guest_va = 0;
++    u8* guest_base = nullptr;
++    NvU64 guest_size = 0;
++    bool copy_bound = false;
++    std::vector<NvHandle> granules;
++    std::map<NvU64, Piece> pieces; // RM mappings by guest VA
++    std::map<NvU64, Run> kinds;    // the guest's kinds (host kind) by guest VA
++
+     template <class T>
+     void Ioctl(int fd, int nr, T* p, const char* what) {
+         if (ioctl(fd, _IOC(_IOC_READ | _IOC_WRITE, NV_IOCTL_MAGIC, nr, sizeof(T)), p) < 0) {
+@@ -309,8 +571,11 @@ struct State {
+     std::mutex mutex;
+     std::unique_ptr<Host> host;
+     bool tried = false;
+-    s32 channel = -1; // the guest channel the host channel follows (step 1: one)
+-    u64 entries = 0, words = 0;
++    s32 channel = -1;                       // the guest channel the host channel follows (step 1: one)
++    const void* memory_manager = nullptr;   // the guest VA space mirrored (step 2: the first that maps)
++    u64 entries = 0, words = 0, maps = 0, unmaps = 0, outside = 0, other_managers = 0;
++    u64 checked = 0, check_mismatch = 0, check_wrong = 0; // wrong: differs from the mirrored memory too
++    u32 check_every = 0;
+     std::chrono::nanoseconds busy{}, worst{};
+ };
+ 
+@@ -319,6 +584,55 @@ State& Get() {
+     return state;
+ }
+ 
++/// Opens the host side on first use (any hook); false while the backend is off. Called with the mutex held.
++bool Ready(State& s) {
++    if (!s.tried) {
++        s.tried = true;
++        std::atexit(Shutdown);
++        if (const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_CHECK")) {
++            s.check_every = static_cast<u32>(std::strtoul(v, nullptr, 0));
++        }
++        auto host = std::make_unique<Host>();
++        try {
++            host->Open();
++            if (!host->KindMapSelfTest()) throw Error("kind map self-test", 0);
++            s.host = std::move(host);
++            LOG_INFO(HW_GPU, "Nx2 passthrough: host channel up, guest VA [{:#x}, {:#x}) sparse, check every {} entries",
++                     GUEST_VA_LO, GUEST_VA_HI, s.check_every);
++        } catch (const Error& e) {
++            LOG_ERROR(HW_GPU, "Nx2 passthrough off: {} failed (status {:#x}, errno {})", e.what(), e.status, errno);
++        }
++    }
++    return s.host != nullptr;
++}
++
++/// Runs `f` on the host; an RM failure logs and turns the backend off (never half-mirrored).
++template <class F>
++void Guarded(State& s, const char* what, F&& f) {
++    try {
++        f(*s.host);
++    } catch (const Error& e) {
++        LOG_ERROR(HW_GPU, "Nx2 passthrough off: {}: {} failed (status {:#x}, errno {})", what, e.what(), e.status,
++                  errno);
++        s.host.reset();
++    }
++}
++
++void LogStats(State& s) {
++    Host& h = *s.host;
++    LOG_INFO(HW_GPU,
++             "Nx2 passthrough: {} entries ({} guest words), mean {:.1f} us, worst {} us; guest VA: {} maps, {} unmaps "
++             "({} outside), {} RM mappings ({} made, {} undone), {} kind changes ({} kept as pitch), {} MiB pinned in "
++             "{} ms; check: {} entries, {} differ from the parsed words, {} from the mirrored memory",
++             s.entries, s.words, std::chrono::duration<double, std::micro>(s.busy).count() / 50000.0,
++             std::chrono::duration_cast<std::chrono::microseconds>(s.worst).count(), s.maps, s.unmaps, s.outside,
++             h.Pieces(), h.rm_maps, h.rm_unmaps, h.kind_changes, h.kind_fallbacks, h.pinned >> 20,
++             std::chrono::duration_cast<std::chrono::milliseconds>(h.import_time).count(), s.checked, s.check_mismatch,
++             s.check_wrong);
++}
++
++} // Anonymous namespace
++
+ bool Requested() {
+     static const bool on = [] {
+         const char* v = std::getenv("EDEN_NX2_PASSTHROUGH");
+@@ -327,7 +641,50 @@ bool Requested() {
+     return on;
+ }
+ 
+-} // Anonymous namespace
++void OnMap(const void* memory_manager, GPUVAddr gpu_addr, const u8* host, u64 size, std::span<u8> guest_memory) {
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    if (!Ready(s)) return;
++    if (s.memory_manager == nullptr) {
++        s.memory_manager = memory_manager;
++        Guarded(s, "guest memory", [&](Host& h) { h.SetGuestMemory(guest_memory); });
++        if (!s.host) return;
++    }
++    if (memory_manager != s.memory_manager) {
++        ++s.other_managers;
++        return;
++    }
++    Host& h = *s.host;
++    if (gpu_addr < GUEST_VA_LO || gpu_addr + size > GUEST_VA_HI || host < h.GuestBase() ||
++        host + size > h.GuestBase() + h.GuestSize()) {
++        ++s.outside;
++        return;
++    }
++    ++s.maps;
++    Guarded(s, "map", [&](Host& hh) { hh.Map(gpu_addr, static_cast<NvU64>(host - hh.GuestBase()), size); });
++}
++
++void OnUnmap(const void* memory_manager, GPUVAddr gpu_addr, u64 size) {
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    if (!Ready(s) || memory_manager != s.memory_manager) return;
++    const u64 lo = std::max<u64>(gpu_addr, GUEST_VA_LO), hi = std::min<u64>(gpu_addr + size, GUEST_VA_HI);
++    if (lo >= hi) return;
++    ++s.unmaps;
++    Guarded(s, "unmap", [&](Host& h) { h.Unmap(lo, hi - lo); });
++}
++
++void OnGuestKind(GPUVAddr gpu_addr, u64 size, u32 kind, u32 fallback_kind) {
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    if (!Ready(s)) return;
++    const u64 lo = std::max<u64>(gpu_addr, GUEST_VA_LO), hi = std::min<u64>(gpu_addr + size, GUEST_VA_HI);
++    if (lo >= hi) return;
++    // A compressible kind becomes its incompressible fallback (no compression tags for system memory).
++    std::optional<NvU32> host_kind;
++    if (kind != 0xff) host_kind = kind != fallback_kind ? fallback_kind : kind;
++    Guarded(s, "kind", [&](Host& h) { h.SetKind(lo, hi - lo, host_kind); });
++}
+ 
+ void OnEntry(s32 channel, GPUVAddr address, std::span<const CommandHeader> commands) {
+     if (!Requested()) [[likely]] {
+@@ -335,26 +692,24 @@ void OnEntry(s32 channel, GPUVAddr address, std::span<const CommandHeader> comma
+     }
+     State& s = Get();
+     std::scoped_lock lk{s.mutex};
+-    if (!s.tried) {
+-        s.tried = true;
+-        std::atexit(Shutdown);
+-        auto host = std::make_unique<Host>();
+-        try {
+-            host->Open();
+-            s.host = std::move(host);
+-            s.channel = channel;
+-            LOG_INFO(HW_GPU, "Nx2 passthrough: host channel up, following guest channel {}", channel);
+-        } catch (const Error& e) {
+-            LOG_ERROR(HW_GPU, "Nx2 passthrough off: {} failed (status {:#x}, errno {})", e.what(), e.status, errno);
+-        }
++    if (!Ready(s)) return;
++    if (s.channel < 0) {
++        s.channel = channel;
++        LOG_INFO(HW_GPU, "Nx2 passthrough: following guest channel {}", channel);
+     }
+-    if (!s.host || channel != s.channel) {
+-        return;
+-    }
+-    // Step 1: the entry's place in the guest's order is kept by one marker submission per entry; the guest's
+-    // own words follow in step 2, once the guest VA space is mirrored.
++    if (channel != s.channel) return;
++    // Step 1 keeps the entry's place in the guest's order with one marker submission per entry. Step 2's live
++    // check: every n-th entry the copy engine reads the entry's words at their guest VA, compared after the wait.
++    std::vector<NvU32> words;
++    const u64 bytes = commands.size_bytes();
++    const bool check = s.check_every != 0 && address != 0 && bytes != 0 && bytes <= CHECK_SZ &&
++                       address >= GUEST_VA_LO && address + bytes <= GUEST_VA_HI && s.entries % s.check_every == 0;
++    if (check) s.host->QueueCheckCopy(words, address, bytes);
+     const auto start = std::chrono::steady_clock::now();
+-    if (!s.host->Submit({})) {
++    bool done = false;
++    Guarded(s, "submit", [&](Host& h) { done = h.Submit(words); });
++    if (!s.host) return;
++    if (!done) {
+         LOG_ERROR(HW_GPU, "Nx2 passthrough off: entry {:#x} not done within 2 s", address);
+         s.host.reset();
+         return;
+@@ -363,10 +718,38 @@ void OnEntry(s32 channel, GPUVAddr address, std::span<const CommandHeader> comma
+     s.busy += took;
+     s.worst = std::max<std::chrono::nanoseconds>(s.worst, took);
+     s.words += commands.size();
++    if (check) {
++        ++s.checked;
++        std::vector<u8> got(bytes);
++        const volatile NvU8* src = s.host->CheckBuffer();
++        for (u64 i = 0; i < bytes; ++i) got[i] = src[i];
++        // A difference is the mirror's fault only where the GPU's bytes also differ from the guest memory the
++        // mirror maps there now (else the guest rewrote the words after Eglantine parsed them).
++        const u8* now = s.host->MirroredHost(address);
++        const bool differs = std::memcmp(got.data(), commands.data(), bytes) != 0;
++        if (differs && (now == nullptr || std::memcmp(got.data(), now, bytes) != 0)) {
++            ++s.check_wrong;
++        }
++        if (differs && s.check_mismatch++ < 8) {
++            u64 i = 0;
++            while (i < commands.size() && std::memcmp(&got[i * 4], &commands[i], 4) == 0) ++i;
++            u32 g{};
++            std::memcpy(&g, &got[i * 4], 4);
++            // Same bytes with 32-byte chunks swapped as a block-linear colour kind arranges a GOB (offset bits 5, 6)?
++            bool gob_swizzled = now != nullptr && (address & 0x1ff) == 0;
++            for (u64 o = 0; gob_swizzled && o + 32 <= (bytes & ~u64{31}); o += 32) {
++                const u64 so = (o & ~u64{0x60}) | ((o & 0x20) << 1) | ((o & 0x40) >> 1);
++                gob_swizzled = so + 32 > bytes || std::memcmp(&got[o], now + so, 32) == 0;
++            }
++            LOG_WARNING(HW_GPU, "Nx2 passthrough check: entry at {:#x} ({} words) differs from word {}: host GPU read "
++                        "{:#010x}, Eglantine parsed {:#010x}; mapped kind {:#x}, memory now {}{}", address,
++                        commands.size(), i, g, commands[i].argument, s.host->MappedKind(address),
++                        now == nullptr ? "unmapped" : std::memcmp(now, commands.data(), bytes) == 0 ? "= parsed" : "differs",
++                        gob_swizzled ? ", GPU read = GOB-swizzled memory" : "");
++        }
++    }
+     if (++s.entries % 50000 == 0) {
+-        LOG_INFO(HW_GPU, "Nx2 passthrough: {} entries ({} guest words) submitted, mean {:.1f} us, worst {} us",
+-                 s.entries, s.words, std::chrono::duration<double, std::micro>(s.busy).count() / 50000.0,
+-                 std::chrono::duration_cast<std::chrono::microseconds>(s.worst).count());
++        LogStats(s);
+         s.busy = {};
+         s.worst = {};
+     }
+@@ -377,6 +760,7 @@ void Shutdown() {
+     std::scoped_lock lk{s.mutex};
+     if (s.host) {
+         LOG_INFO(HW_GPU, "Nx2 passthrough: shutting down after {} entries", s.entries);
++        LogStats(s);
+         s.host.reset();
+     }
+ }
+@@ -395,6 +779,12 @@ void OnEntry(s32, GPUVAddr, std::span<const CommandHeader>) {
+     }
+ }
+ 
++bool Requested() {
++    return false; // the hooks skip their work (OnEntry still warns once when asked for)
++}
++void OnMap(const void*, GPUVAddr, const u8*, u64, std::span<u8>) {}
++void OnUnmap(const void*, GPUVAddr, u64) {}
++void OnGuestKind(GPUVAddr, u64, u32, u32) {}
+ void Shutdown() {}
+ 
+ } // namespace Tegra::Nx2Passthrough
+diff --git a/src/video_core/nx2_passthrough.h b/src/video_core/nx2_passthrough.h
+index 690bd8973..11851d056 100644
+--- a/src/video_core/nx2_passthrough.h
++++ b/src/video_core/nx2_passthrough.h
+@@ -11,13 +11,31 @@
+ // NVIDIA GPU passthrough backend (EDEN_NX2_PASSTHROUGH=1, Linux, NVIDIA open kernel driver, built with
+ // EDEN_NX2_PASSTHROUGH_SDK): the guest's channels run on the host GPU through the driver's RM ioctls.
+ // Step 1 (channels and submission): one host channel follows the first guest channel; each of its GPFIFO
+-// entries becomes one serialized host submission (a semaphore release the CPU waits for). The guest's own
+-// methods are not submitted yet (they need the guest VA space mirrored, step 2); Vulkan still renders.
++// entries becomes one serialized host submission (a semaphore release the CPU waits for).
++// Step 2 (guest VA space): the guest's GPU VA range is one RM sparse range (unmapped addresses read 0); the
++// guest's device memory (Eglantine's host memory) is imported as OS descriptors and mapped inside it at the
++// guest's own VAs with the guest's PTE kinds. EDEN_NX2_PASSTHROUGH_CHECK=<n>: every n-th entry the host copy
++// engine reads the entry's words at their guest VA and compares them with what Eglantine parsed.
++// The guest's own methods are not submitted yet; Vulkan still renders.
+ namespace Tegra::Nx2Passthrough {
+ 
++/// EDEN_NX2_PASSTHROUGH=1 (read once).
++bool Requested();
++
+ /// Called for every guest command list as the DMA pusher parses it (once per entry).
+ void OnEntry(s32 channel, GPUVAddr address, std::span<const CommandHeader> commands);
+ 
++/// The GPU memory manager `memory_manager` maps [gpu_addr, gpu_addr + size) to host memory `host` (one
++/// contiguous run of the guest's device memory `guest_memory`). Only the first memory manager is followed.
++void OnMap(const void* memory_manager, GPUVAddr gpu_addr, const u8* host, u64 size,
++           std::span<u8> guest_memory);
++
++/// Unmaps [gpu_addr, gpu_addr + size) (also a sparse reservation: unmapped addresses read 0).
++void OnUnmap(const void* memory_manager, GPUVAddr gpu_addr, u64 size);
++
++/// The PTE kind the guest asks for over a range (nx2:gpu 212, 216); 0xff forgets it (pitch).
++void OnGuestKind(GPUVAddr gpu_addr, u64 size, u32 kind, u32 fallback_kind);
++
+ /// Frees the host channel and RM client (also done at process exit).
+ void Shutdown();
+ 
+-- 
+2.56.0
+

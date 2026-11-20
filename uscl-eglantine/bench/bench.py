@@ -70,14 +70,30 @@ def main():
     start = time.time()
     for _ in range(RACE_FRAMES // 300):
         s0, c0 = status(), proc_cpu_seconds(pid)
-        seq((["A"], 300))
+        shots = int(os.environ.get("BENCH_SHOTS", "1"))  # >1: that many screenshots spread over the chunk
+        for i in range(shots):
+            seq((["A"], 300 // shots))
+            if shots > 1:
+                subprocess.run([sys.executable, "-I", DBG, "--call", json.dumps({"method": "screenshot", "params": {}}),
+                                "--out", shot.replace(".png", f"-c{len(samples)}s{i}.png")], capture_output=True, timeout=120)
         s1, c1 = status(), proc_cpu_seconds(pid)
+        if os.environ.get("BENCH_CHUNK_SHOTS"):  # a frame per chunk: the countdown is in one of the first
+            subprocess.run([sys.executable, "-I", DBG, "--call", json.dumps({"method": "screenshot", "params": {}}),
+                            "--out", shot.replace(".png", f"-c{len(samples)}.png")], capture_output=True, timeout=120)
         dt = s1["uptime_s"] - s0["uptime_s"]
         util, vram = gpu()
         samples.append({"fps": round((s1["presents"] - s0["presents"]) / dt, 1), "cpu_cores": round((c1 - c0) / dt, 2),
                         "gpu": util, "vram": vram})
     subprocess.run([sys.executable, "-I", DBG, "--call", json.dumps({"method": "screenshot", "params": {}}),
                     "--out", shot.replace(".png", "-end.png")], capture_output=True, timeout=120)
+    # BENCH_TRIGGER=<file>: the passthrough backend's snapshot (EDEN_NX2_PASSTHROUGH_SNAP=-1:...:<file>) of the
+    # frame next to the end screenshot; waits until the backend took it (it removes <file>.now).
+    if trigger := os.environ.get("BENCH_TRIGGER"):
+        open(trigger + ".now", "w").close()
+        for _ in range(60):
+            if not os.path.exists(trigger + ".now"):
+                break
+            time.sleep(1)
     fps = [x["fps"] for x in samples]
     summary = {"label": label, "race_s": round(time.time() - start, 1), "samples": len(samples),
                "fps_mean": round(statistics.mean(fps), 1), "fps_min": min(fps),

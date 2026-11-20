@@ -1,0 +1,678 @@
+From 8e58a33d8295542be806e142f6d040d200949356 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 07:30:24 -0700
+Subject: [PATCH] nx2: passthrough backend: virtual textures transcoded per
+ cell into sparse BC3 copies
+
+ASTC textures too large to transcode whole (MKW's 8192^2 x 84 virtual-texture arrays, 1.75 GiB each,
+and its 8192^2 single-layer images) were left raw and sampled black on the host GPU. Such a header now
+points at a BC3 copy in a sparse host range above the guest's (unbacked pages read 0). Workers
+(EDEN_NX2_PASSTHROUGH_VT_THREADS, 2) transcode the texture in cells of 64x64 ASTC blocks of one level of
+one layer whose guest bytes are non-zero and changed, swizzle them into a CPU reservation laid out as the
+header's block-linear image (Eglantine's subrect swizzles with its upload stride alignment: MKW's
+arrays use tile width spacing 4), and import and map only the 64 KiB pages a cell touched. Cells are
+looked at when the texture is first sampled, when the guest maps memory over it, and after copy-engine
+launches into it. Levels spread over several guest mappings are gathered page by page. A layout
+self-test against whole-level swizzles runs at the first such texture; textures it cannot handle stay
+raw. EDEN_NX2_PASSTHROUGH_VTSCAN=1 logs the written GOBs of each (measuring).
+
+MKW boot to race: 5 textures, 6501 cells, 1378 MiB of BC3 mapped, ~46 s of worker time; the track
+surface, canyon and buildings are textured on the host GPU; no Xid.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/nx2_passthrough.cpp | 540 ++++++++++++++++++++++++++++-
+ 1 file changed, 536 insertions(+), 4 deletions(-)
+
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index 6e495243e..0427620e4 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -29,6 +29,9 @@
+ 
+ #include <fmt/format.h>
+ 
++#include "common/alignment.h"
++#include "common/cityhash.h"
++#include "common/div_ceil.h"
+ #include "common/logging.h"
+ #include "video_core/memory_manager.h"
+ #include "video_core/nx2_helper_loads.h"
+@@ -38,6 +41,7 @@
+ #include "video_core/texture_cache/util.h"
+ #include "video_core/textures/astc.h"
+ #include "video_core/textures/bcn.h"
++#include "video_core/textures/decoders.h"
+ #include "video_core/textures/texture.h"
+ 
+ #if defined(NX2_PASSTHROUGH) && defined(__linux__)
+@@ -125,6 +129,7 @@ class Host {
+ public:
+     ~Host() {
+         StopAstc();
++        StopVt();
+         Close();
+     }
+ 
+@@ -619,8 +624,16 @@ public:
+         const bool block_linear = info.type != VideoCommon::ImageType::Linear;
+         if (!block_linear || !VideoCore::Surface::IsPixelFormatASTC(info.format) || guest_size == 0 ||
+             guest_size > (64ull << 20) || VideoCommon::CalculateGuestSizeInBytes(rgba) > (128ull << 20)) {
+-            decoded[h] = {0, 0}; // left raw (MKW: 8192^2 x 68 virtual-texture arrays)
+-            ++astc_too_large;
++            // MKW: 8192^2 x 68 virtual-texture arrays, transcoded per cell (left raw if that fails)
++            decoded[h] = block_linear && VideoCore::Surface::IsPixelFormatASTC(info.format) && guest_size != 0
++                             ? VtStart(tic.Address(), guest_size, info, header_va)
++                             : std::pair<NvU64, u32>{0, 0};
++            if (decoded[h].first == 0) {
++                ++astc_too_large;
++                return;
++            }
++            std::memcpy(raw, h.data(), 32);
++            TranslateHeader(raw, header_va); // repointed now: the copy fills in as the workers get to it
+             return;
+         }
+         std::array<u8, 4096> head{};
+@@ -655,6 +668,341 @@ public:
+     }
+     NvU64 odd_headers = 0;
+ 
++    // --- Virtual textures: ASTC textures too large to transcode whole ---
++    // MKW's virtual-texture page caches: 8192^2 x 68 ASTC 8x8 arrays, 12 levels (1.45 GiB each, fully mapped),
++    // which the game fills tile by tile. Such a header points at a BC3 copy laid out as the header's
++    // block-linear image in a sparse host range above the guest's (unbacked pages read 0). Workers transcode it
++    // in cells (64x64 ASTC blocks of one level of one layer) whose guest bytes are non-zero and changed, write
++    // the BC3 blocks into a CPU reservation with that layout, and import and map the 64 KiB pages a cell
++    // touched. Cells are looked at when the texture is first sampled, when the guest maps memory over it, and
++    // after a copy-engine launch into it. shortcut: other GPU writes (shaders) into such a texture are not
++    // seen (MKW: none measured; its arrays' contents are static from boot).
++    struct VtLevel {
++        u32 w = 0, h = 0, bh = 0;  // elements, block height (log2 GOBs)
++        u32 stride_w = 0;          // elements per row of the layout (w aligned as Eglantine's UnswizzleImage does)
++        NvU64 off = 0, bytes = 0;  // in the layer
++        u32 tw = 0, th = 0;        // texels
++    };
++    struct Vt {
++        NvU64 va = 0, size = 0; // the guest's ASTC texture
++        u32 layers = 0, levels = 0, bw = 0, bh = 0;
++        NvU64 in_stride = 0, out_stride = 0, out_va = 0, out_size = 0;
++        std::array<VtLevel, 16> in{}, out{};
++        NvHandle obj = 0;
++        u8* cpu = nullptr;
++        std::vector<u32> first_cell;                // per layer * levels + level
++        std::vector<const u8*> src;                 // per layer * levels + level: the level's guest bytes
++        // Per level that is not one piece: the guest's 4 KiB pages over it, from the one holding its first byte
++        // (null: unmapped), and that byte's offset in it.
++        std::vector<std::vector<const u8*>> pages;
++        std::vector<u32> page_head;
++        std::vector<u64> hash;                      // per cell: the guest bytes last transcoded (0: none)
++        std::vector<u8> mapped;                     // per output page
++        std::vector<u8> queued;                     // per layer * levels + level (entry thread)
++        std::mutex mutex;                           // hash, mapped
++        bool failed = false;
++        NvU64 copies = 0, copy_bytes = 0, last_written = 0; // measuring
++    };
++    static constexpr NvU64 VT_PAGE = 64ull << 10, VT_VA_LO = 1ull << 41;
++    static constexpr u32 VT_CELL = 64;
++    std::map<NvU64, std::unique_ptr<Vt>> vts;
++
++    /// The per-level layout (Eglantine's swizzle parameters) of a 2D block-linear image; "" if handled, else why not.
++    static const char* VtLevels(const VideoCommon::ImageInfo& info, std::array<VtLevel, 16>& levels, NvU64& layer_stride) {
++        using namespace VideoCommon;
++        const u32 n = info.resources.levels;
++        if (info.type != ImageType::e2D) return "not 2D";
++        if (info.num_samples != 1) return "multisampled";
++        if (n < 1 || n > 16) return "level count";
++        const auto sw = FullUploadSwizzles(info);
++        if (sw.size() != n) return "swizzle parameters";
++        layer_stride = CalculateLayerStride(info);
++        const NvU64 layer_bytes = CalculateLayerSize(info);
++        for (u32 l = 0; l < n; ++l) {
++            if (sw[l].block.depth != 0 || sw[l].num_tiles.depth != 1) return "block depth";
++            levels[l] = VtLevel{sw[l].num_tiles.width, sw[l].num_tiles.height, sw[l].block.height,
++                                Common::AlignUpLog2(sw[l].num_tiles.width, CalculateLevelStrideAlignment(info, l)),
++                                sw[l].buffer_offset,
++                                (l + 1 < n ? NvU64{sw[l + 1].buffer_offset} : layer_bytes) - sw[l].buffer_offset,
++                                std::max(1u, info.size.width >> l), std::max(1u, info.size.height >> l)};
++        }
++        return "";
++    }
++
++    /// Calls f(lo, hi) for the byte ranges (from the level's start) that hold the 16-byte elements
++    /// [ox, ox + ex) x [oy, oy + ey) of a level: per row of GOB blocks, the GOB columns they lie in.
++    template <class F>
++    static void VtRectRanges(const VtLevel& lv, u32 ox, u32 oy, u32 ex, u32 ey, F&& f) {
++        const u32 rows = 8u << lv.bh, gobs_x = Common::DivCeil(lv.stride_w * 16, 64u);
++        const NvU64 block = NvU64{512} << lv.bh;
++        for (u32 by = oy / rows; by <= (oy + ey - 1) / rows; ++by) {
++            const NvU64 a = (NvU64{by} * gobs_x + ox * 16 / 64) * block;
++            const NvU64 b = (NvU64{by} * gobs_x + ((ox + ex) * 16 - 1) / 64 + 1) * block;
++            f(a, std::min(b, lv.bytes));
++        }
++    }
++
++    /// The cell code against Eglantine's whole-image swizzle, on a small image with `info`'s format and block
++    /// sizes: cells unswizzled from the ASTC layout read the right elements; BC3 cells swizzled one by one give
++    /// the whole-image result, inside the ranges VtRectRanges names. Once, at the first virtual texture.
++    static bool VtLayoutSelfTest(VideoCommon::ImageInfo info, bool native) {
++        using namespace VideoCommon;
++        info.size = {2048, 1048, 1}; // odd height: partial cells and GOB blocks
++        info.resources.layers = 2;
++        info.resources.levels = 10;
++        bool ok = true;
++        for (const bool bc3 : {false, true}) {
++            ImageInfo f = info;
++            if (bc3) f.format = VideoCore::Surface::PixelFormat::BC3_UNORM;
++            std::array<VtLevel, 16> lv{};
++            NvU64 stride = 0;
++            if (*VtLevels(f, lv, stride) != 0) return false;
++            auto copies = FullDownloadCopies(f);
++            size_t total = 0;
++            for (const auto& c : copies) total = std::max<size_t>(total, c.buffer_offset + c.buffer_size);
++            std::vector<u8> linear(total), whole(stride * 2), cells(whole.size()), covered(whole.size() / 16);
++            const auto element = [](u32 l, u32 layer, u32 x, u32 y) {
++                std::array<u32, 4> e{l + 1, layer, x, y};
++                return e;
++            };
++            for (u32 l = 0; l < static_cast<u32>(f.resources.levels); ++l) {
++                for (u32 layer = 0; layer < 2; ++layer) {
++                    for (u32 y = 0; y < lv[l].h; ++y) {
++                        for (u32 x = 0; x < lv[l].w; ++x) {
++                            const auto e = element(l, layer, x, y);
++                            std::memcpy(linear.data() + copies[l].buffer_offset +
++                                            (size_t{layer} * lv[l].h * lv[l].w + size_t{y} * lv[l].w + x) * 16, e.data(), 16);
++                        }
++                    }
++                }
++            }
++            // The reference: each level of each layer swizzled whole, with Eglantine's upload stride alignment.
++            for (u32 l = 0; l < static_cast<u32>(f.resources.levels); ++l) {
++                for (u32 layer = 0; layer < 2; ++layer) {
++                    Tegra::Texture::SwizzleTexture(
++                        std::span<u8>(whole).subspan(layer * stride + lv[l].off, lv[l].bytes),
++                        std::span<const u8>(linear).subspan(copies[l].buffer_offset + size_t{layer} * lv[l].h * lv[l].w * 16),
++                        16, lv[l].w, lv[l].h, 1, lv[l].bh, 0, CalculateLevelStrideAlignment(f, l), native);
++                }
++            }
++            const u32 cell = bc3 ? VT_CELL * 2 : VT_CELL; // a 64x64 cell of 8x8 ASTC blocks is 128x128 BC3 blocks
++            std::vector<u8> rect;
++            for (u32 l = 0; l < static_cast<u32>(f.resources.levels); ++l) {
++                for (u32 layer = 0; layer < 2; ++layer) {
++                    const NvU64 base = layer * stride + lv[l].off;
++                    for (u32 oy = 0; oy < lv[l].h; oy += cell) {
++                        for (u32 ox = 0; ox < lv[l].w; ox += cell) {
++                            const u32 ex = std::min(cell, lv[l].w - ox), ey = std::min(cell, lv[l].h - oy);
++                            rect.resize(size_t{ex} * ey * 16);
++                            if (!bc3) {
++                                Tegra::Texture::UnswizzleSubrect(rect, std::span<const u8>(whole).subspan(base, lv[l].bytes),
++                                                                 16, lv[l].stride_w, lv[l].h, 1, ox, oy, ex, ey, lv[l].bh, 0,
++                                                                 ex * 16, native);
++                                for (u32 y = 0; y < ey && ok; ++y) {
++                                    for (u32 x = 0; x < ex && ok; ++x) {
++                                        ok = std::memcmp(rect.data() + (size_t{y} * ex + x) * 16,
++                                                         element(l, layer, ox + x, oy + y).data(), 16) == 0;
++                                    }
++                                }
++                                continue;
++                            }
++                            for (u32 y = 0; y < ey; ++y) {
++                                for (u32 x = 0; x < ex; ++x) {
++                                    std::memcpy(rect.data() + (size_t{y} * ex + x) * 16,
++                                                element(l, layer, ox + x, oy + y).data(), 16);
++                                }
++                            }
++                            Tegra::Texture::SwizzleSubrect(std::span<u8>(cells).subspan(base, lv[l].bytes), rect, 16,
++                                                           lv[l].stride_w, lv[l].h, 1, ox, oy, ex, ey, lv[l].bh, 0, ex * 16,
++                                                           native);
++                            VtRectRanges(lv[l], ox, oy, ex, ey, [&](NvU64 a, NvU64 b) {
++                                std::fill(covered.begin() + (base + a) / 16, covered.begin() + (base + b) / 16, 1);
++                            });
++                        }
++                    }
++                }
++            }
++            if (bc3) {
++                ok &= cells == whole;
++                for (size_t i = 0; ok && i < covered.size(); ++i) {
++                    ok = covered[i] || std::all_of(whole.begin() + i * 16, whole.begin() + i * 16 + 16, [](u8 b) { return b == 0; });
++                }
++            }
++            if (!ok) LOG_ERROR(HW_GPU, "Nx2 passthrough VT: layout self-test failed ({})", bc3 ? "BC3 cells" : "ASTC cells");
++        }
++        return ok;
++    }
++
++    /// The BC3 copy for a too-large ASTC texture (VA, COMPONENTS), or {0, 0} to leave it raw.
++    std::pair<NvU64, u32> VtStart(NvU64 va, NvU64 size, const VideoCommon::ImageInfo& info, NvU64 header_va) {
++        using namespace VideoCommon;
++        if (const auto it = vts.find(va); it != vts.end()) {
++            return it->second->size == size && !it->second->failed ? std::pair{it->second->out_va, 0x26u}
++                                                                     : std::pair<NvU64, u32>{0, 0};
++        }
++        auto t = std::make_unique<Vt>();
++        t->va = va;
++        t->size = size;
++        ImageInfo out = info;
++        out.format = VideoCore::Surface::PixelFormat::BC3_UNORM;
++        t->layers = info.resources.layers;
++        t->levels = info.resources.levels;
++        t->bw = VideoCore::Surface::DefaultBlockWidth(info.format);
++        t->bh = VideoCore::Surface::DefaultBlockHeight(info.format);
++        const char* why = VtLevels(info, t->in, t->in_stride);
++        if (*why == 0) why = VtLevels(out, t->out, t->out_stride);
++        if (*why == 0 && NvU64{t->layers} * t->in_stride > size + t->in_stride) why = "layers past the texture";
++        static const bool layout_ok = VtLayoutSelfTest(info, memory_manager != nullptr && memory_manager->UsesNativeTiling());
++        if (*why == 0 && !layout_ok) why = "layout self-test failed";
++        const bool ok = *why == 0;
++        LOG_INFO(HW_GPU, "Nx2 passthrough VT: header {:#x} texture {:#x} +{:#x}: format {} {}x{} layers {} levels {} "
++                 "block {}/{}/{} tile width spacing {} layer stride {:#x} (TIC {:#x}) -> BC3 stride {:#x}{}{}", header_va,
++                 va, size, static_cast<u32>(info.format), info.size.width, info.size.height, t->layers, t->levels,
++                 info.block.width, info.block.height, info.block.depth, info.tile_width_spacing, t->in_stride,
++                 info.layer_stride, t->out_stride, ok ? "" : ": left raw: ", why);
++        Vt& v = *t;
++        vts[va] = std::move(t);
++        if (!ok) {
++            v.failed = true;
++            return {0, 0};
++        }
++        // Each level of each layer must be one contiguous piece of guest memory (MKW: levels 0-2 and the tail).
++        v.src.assign(size_t{v.layers} * v.levels, nullptr);
++        u32 cells = 0, missing = 0, gathered = 0;
++        v.pages.resize(v.src.size());
++        v.page_head.resize(v.src.size());
++        for (u32 layer = 0; layer < v.layers; ++layer) {
++            for (u32 l = 0; l < v.levels; ++l) {
++                v.first_cell.push_back(cells);
++                cells += Common::DivCeil(v.in[l].w, VT_CELL) * Common::DivCeil(v.in[l].h, VT_CELL);
++                const int r = VtResolve(v, layer * v.levels + l);
++                gathered += r == 1;
++                missing += r == 2;
++            }
++        }
++        v.hash.assign(cells, 0);
++        v.out_size = Common::AlignUp(NvU64{v.layers} * v.out_stride, VT_PAGE);
++        v.mapped.assign(v.out_size / VT_PAGE, 0);
++        v.queued.assign(v.src.size(), 0);
++        try {
++            void* p = mmap(nullptr, v.out_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++            if (p == MAP_FAILED) throw Error("VT reservation", 0);
++            maps.emplace_back(p, v.out_size);
++            v.cpu = static_cast<u8*>(p);
++            NV_MEMORY_ALLOCATION_PARAMS a{};
++            a.owner = root;
++            a.type = NVOS32_TYPE_IMAGE;
++            a.offset = vt_next;
++            a.size = v.out_size;
++            a.hVASpace = vaspace;
++            a.flags = NVOS32_ALLOC_FLAGS_VIRTUAL | NVOS32_ALLOC_FLAGS_SPARSE | NVOS32_ALLOC_FLAGS_FIXED_ADDRESS_ALLOCATE;
++            a.attr = DRF_DEF(OS32, _ATTR, _PAGE_SIZE, _4KB);
++            v.obj = Alloc(device, NV50_MEMORY_VIRTUAL, &a, "sparse VT range");
++            v.out_va = vt_next;
++            vt_next += Common::AlignUp(v.out_size, 1ull << 30);
++        } catch (const Error& e) {
++            LOG_WARNING(HW_GPU, "Nx2 passthrough VT {:#x}: {} failed (status {:#x}), left raw", va, e.what(), e.status);
++            v.failed = true;
++            return {0, 0};
++        }
++        LOG_INFO(HW_GPU, "Nx2 passthrough VT {:#x}: BC3 at {:#x} +{:#x} (sparse), {} cells; of {} levels {} in pieces, "
++                 "{} unmapped", va, v.out_va, v.out_size, cells, v.src.size(), gathered, missing);
++        if (vt_threads.empty()) StartVt();
++        for (u32 i = 0; i < v.src.size(); ++i) VtQueue(v, i, std::chrono::steady_clock::now());
++        return {v.out_va, 0x26u};
++    }
++
++    /// Where level index (layer * levels + level) of v lies in guest memory: 0 one piece, 1 in pieces (gathered
++    /// page by page by the worker), 2 nothing mapped.
++    int VtResolve(Vt& v, u32 index) {
++        const u32 layer = index / v.levels, l = index % v.levels;
++        const NvU64 lva = v.va + layer * v.in_stride + v.in[l].off;
++        const u8* p = MirroredHost(lva);
++        for (NvU64 o = 0; p != nullptr && o < v.in[l].bytes; o += VT_PAGE) {
++            if (MirroredHost(lva + o) != p + o || MirroredHost(lva + v.in[l].bytes - 1) != p + v.in[l].bytes - 1) {
++                p = nullptr;
++            }
++        }
++        auto& pages = v.pages[index];
++        pages.clear();
++        v.src[index] = p;
++        if (p != nullptr) return 0;
++        bool any = false;
++        v.page_head[index] = static_cast<u32>(lva & (PAGE - 1));
++        for (NvU64 pa = lva & ~(PAGE - 1); pa < lva + v.in[l].bytes; pa += PAGE) {
++            pages.push_back(MirroredHost(pa));
++            any |= pages.back() != nullptr;
++        }
++        if (!any) pages.clear();
++        return any ? 1 : 2;
++    }
++
++    /// The guest mapped [va, va + size): levels of virtual textures there are looked up and looked at again
++    /// (MKW maps some only after they are first sampled).
++    void VtMapped(NvU64 va, NvU64 size) {
++        for (auto& [base, vp] : vts) {
++            Vt& v = *vp;
++            if (v.failed || v.src.empty() || va >= base + v.size || va + size <= base) continue;
++            for (u32 i = 0; i < v.src.size(); ++i) {
++                const NvU64 a = base + (i / v.levels) * v.in_stride + v.in[i % v.levels].off;
++                if (a < va + size && a + v.in[i % v.levels].bytes > va && VtResolve(v, i) != 2) {
++                    vt_dirty.push_back({&v, i});
++                }
++            }
++        }
++    }
++
++    /// A copy-engine launch writes [dst, dst + bytes) (bytes 0: unknown extent): the levels it touches are
++    /// looked at again once the entry ran, and once more later (async mode: the copy may land after that).
++    void VtCopied(NvU64 dst, NvU64 bytes) {
++        auto it = vts.upper_bound(dst);
++        if (it == vts.begin()) return;
++        Vt& v = *std::prev(it)->second;
++        if (dst >= v.va + v.size || v.failed || v.src.empty()) return;
++        ++v.copies;
++        v.copy_bytes += bytes;
++        const NvU64 lo = dst - v.va, hi = std::min(v.size, lo + std::max<NvU64>(bytes, 1));
++        for (NvU64 layer = lo / v.in_stride; layer <= (hi - 1) / v.in_stride && layer < v.layers; ++layer) {
++            for (u32 l = 0; l < v.levels; ++l) {
++                const NvU64 a = layer * v.in_stride + v.in[l].off;
++                if (a < hi && a + v.in[l].bytes > lo) vt_dirty.push_back({&v, static_cast<u32>(layer * v.levels + l)});
++            }
++        }
++    }
++
++    /// Entry thread, after an entry ran: queues the levels copies wrote.
++    void VtFlush() {
++        if (vt_dirty.empty()) return;
++        const auto now = std::chrono::steady_clock::now();
++        for (const auto& [v, i] : vt_dirty) {
++            if (v->queued[i]) continue;
++            VtQueue(*v, i, now);
++            VtQueue(*v, i, now + std::chrono::milliseconds(300));
++        }
++        vt_dirty.clear();
++    }
++
++    /// EDEN_NX2_PASSTHROUGH_VTSCAN=1 (measuring): written 512-byte GOBs (first 16 bytes non-zero) of each one.
++    void ScanVts() {
++        for (auto& [va, v] : vts) {
++            u64 written = 0;
++            for (NvU64 o = 0; o < v->size; o += 512) {
++                const u8* p = MirroredHost(va + o);
++                if (p == nullptr) continue;
++                u64 a, b;
++                std::memcpy(&a, p, 8);
++                std::memcpy(&b, p + 8, 8);
++                written += (a | b) != 0;
++            }
++            LOG_INFO(HW_GPU, "Nx2 passthrough VT {:#x}: {} of {} GOBs written ({} MiB, {:+} since the last scan), {} "
++                     "copy launches into it ({} MiB)", va, written, v->size / 512, (written * 512) >> 20,
++                     static_cast<s64>(written) - static_cast<s64>(v->last_written), v->copies, v->copy_bytes >> 20);
++            v->last_written = written;
++        }
++    }
++    std::atomic<NvU64> vt_cells{0}, vt_zero{0}, vt_same{0}, vt_mapped{0}, vt_jobs_done{0};
++    std::atomic<std::chrono::nanoseconds::rep> vt_busy{0};
++
+     void SetMemoryManager(Tegra::MemoryManager* mm) { memory_manager = mm; }
+     NvU64 astc_decoded = 0, astc_failed = 0, astc_too_large = 0, astc_headers = 0;
+     NvU64 AstcArenaUsed() const { return astc_used.load(); }
+@@ -812,6 +1160,155 @@ private:
+         return {va, rgba_only ? 0x08u : bc1 ? 0x24u : 0x26u}; // A8B8G8R8, DXT1, DXT45
+     }
+ 
++    struct VtJob {
++        Vt* v;
++        u32 index; // layer * levels + level
++        std::chrono::steady_clock::time_point not_before;
++    };
++    std::vector<std::pair<Vt*, u32>> vt_dirty; // entry thread: levels copies wrote in this entry
++    std::deque<VtJob> vt_jobs;
++    std::mutex vt_mutex;
++    std::condition_variable vt_cv;
++    bool vt_stop = false;
++    std::vector<std::thread> vt_threads;
++    NvU64 vt_next = VT_VA_LO;
++    std::atomic<NvU32> vt_handles{0};
++
++    void VtQueue(Vt& v, u32 index, std::chrono::steady_clock::time_point when) {
++        v.queued[index] = 1;
++        {
++            std::scoped_lock lk{vt_mutex};
++            vt_jobs.push_back({&v, index, when});
++        }
++        vt_cv.notify_one();
++    }
++
++    /// EDEN_NX2_PASSTHROUGH_VT_THREADS (2 by default).
++    void StartVt() {
++        const char* e = std::getenv("EDEN_NX2_PASSTHROUGH_VT_THREADS");
++        const u32 n = std::clamp<u32>(e != nullptr ? static_cast<u32>(std::strtoul(e, nullptr, 0)) : 2u, 1u, 16u);
++        for (u32 i = 0; i < n; ++i) vt_threads.emplace_back([this] { VtWorker(); });
++    }
++
++    void StopVt() {
++        {
++            std::scoped_lock lk{vt_mutex};
++            vt_stop = true;
++        }
++        vt_cv.notify_all();
++        for (auto& t : vt_threads) t.join();
++        vt_threads.clear();
++    }
++
++    void VtWorker() {
++        const bool native = memory_manager != nullptr && memory_manager->UsesNativeTiling();
++        std::vector<u8> lin, rgba, bc, gather;
++        for (;;) {
++            VtJob job;
++            {
++                std::unique_lock lk{vt_mutex};
++                for (;;) {
++                    if (vt_stop) return;
++                    const auto now = std::chrono::steady_clock::now();
++                    const auto it = std::find_if(vt_jobs.begin(), vt_jobs.end(), [&](const VtJob& j) { return j.not_before <= now; });
++                    if (it != vt_jobs.end()) {
++                        job = *it;
++                        vt_jobs.erase(it);
++                        break;
++                    }
++                    if (vt_jobs.empty()) {
++                        vt_cv.wait(lk);
++                    } else {
++                        vt_cv.wait_for(lk, std::chrono::milliseconds(20));
++                    }
++                }
++            }
++            Vt& v = *job.v;
++            job.v->queued[job.index] = 0; // a copy after this point queues the level again
++            const u8* src = v.src[job.index];
++            if (!v.failed && src == nullptr && !v.pages[job.index].empty()) {
++                const auto& pages = v.pages[job.index];
++                const size_t head = v.page_head[job.index];
++                gather.assign(v.in[job.index % v.levels].bytes, 0);
++                for (size_t i = 0; i < pages.size(); ++i) { // page i holds level bytes [i * PAGE - head, +PAGE)
++                    const size_t lo = std::max<size_t>(i * PAGE, head), hi = std::min<size_t>(i * PAGE + PAGE, head + gather.size());
++                    if (pages[i] != nullptr && lo < hi) {
++                        std::memcpy(gather.data() + lo - head, pages[i] + (lo - i * PAGE), hi - lo);
++                    }
++                }
++                src = gather.data();
++            }
++            if (v.failed || src == nullptr) continue;
++            const auto start = std::chrono::steady_clock::now();
++            const u32 layer = job.index / v.levels, l = job.index % v.levels;
++            const VtLevel& li = v.in[l];
++            const VtLevel& lo = v.out[l];
++            const u32 cw = Common::DivCeil(li.w, VT_CELL), ch = Common::DivCeil(li.h, VT_CELL);
++            u8* const dst = v.cpu + layer * v.out_stride + lo.off;
++            try {
++                for (u32 c = 0; c < cw * ch; ++c) {
++                    const u32 cx = c % cw, cy = c / cw;
++                    const u32 ex = std::min(VT_CELL, li.w - cx * VT_CELL), ey = std::min(VT_CELL, li.h - cy * VT_CELL);
++                    lin.resize(size_t{ex} * ey * 16);
++                    Tegra::Texture::UnswizzleSubrect(lin, std::span<const u8>(src, li.bytes), 16, li.stride_w, li.h, 1,
++                                                     cx * VT_CELL, cy * VT_CELL, ex, ey, li.bh, 0, ex * 16, native);
++                    const bool zero = std::all_of(lin.begin(), lin.end(), [](u8 b) { return b == 0; });
++                    const u64 h = zero ? 0 : (Common::CityHash64(reinterpret_cast<const char*>(lin.data()), lin.size()) | 1);
++                    u64& have = v.hash[v.first_cell[job.index] + c];
++                    if (h == have) {
++                        ++(zero ? vt_zero : vt_same);
++                        continue;
++                    }
++                    have = h;
++                    const u32 tw = std::min(ex * v.bw, li.tw - cx * VT_CELL * v.bw);
++                    const u32 th = std::min(ey * v.bh, li.th - cy * VT_CELL * v.bh);
++                    const u32 oex = Common::DivCeil(tw, 4u), oey = Common::DivCeil(th, 4u);
++                    bc.assign(size_t{oex} * oey * 16, 0);
++                    if (!zero) { // a cell written back to zero: zero blocks (BC3 transparent black) over it
++                        rgba.resize(size_t{tw} * th * 4);
++                        Tegra::Texture::ASTC::Decompress(lin, tw, th, 1, v.bw, v.bh, rgba);
++                        Tegra::Texture::BCN::CompressBC3(rgba, tw, th, 1, bc);
++                    }
++                    const u32 ox = cx * VT_CELL * v.bw / 4, oy = cy * VT_CELL * v.bh / 4;
++                    Tegra::Texture::SwizzleSubrect(std::span<u8>(dst, lo.bytes), bc, 16, lo.stride_w, lo.h, 1, ox, oy, oex, oey,
++                                                   lo.bh, 0, oex * 16, native);
++                    ++vt_cells;
++                    const NvU64 base = NvU64{layer} * v.out_stride + lo.off;
++                    VtRectRanges(lo, ox, oy, oex, oey, [&](NvU64 a, NvU64 b) { VtMap(v, base + a, base + b); });
++                }
++            } catch (const Error& e) {
++                LOG_ERROR(HW_GPU, "Nx2 passthrough VT {:#x}: {} failed (status {:#x}); the texture stays as it is", v.va,
++                          e.what(), e.status);
++                v.failed = true;
++            }
++            ++vt_jobs_done;
++            vt_busy += (std::chrono::steady_clock::now() - start).count();
++        }
++    }
++
++    /// Backs the output pages of [lo, hi) (bytes in the copy) that have no memory yet with the reservation's.
++    void VtMap(Vt& v, NvU64 lo, NvU64 hi) {
++        std::scoped_lock lk{v.mutex};
++        for (NvU64 page = lo / VT_PAGE; page <= (hi - 1) / VT_PAGE && page < v.mapped.size(); ++page) {
++            if (v.mapped[page]) continue;
++            const NvHandle mem = ImportHost(v.cpu + page * VT_PAGE, VT_PAGE, 0x74000000u + vt_handles++);
++            NVOS46_PARAMETERS p{};
++            p.hClient = root;
++            p.hDevice = device;
++            p.hDma = v.obj;
++            p.hMemory = mem;
++            p.length = VT_PAGE;
++            // Not cached in L2: cells are rewritten by the CPU.
++            p.flags = DRF_DEF(OS46, _FLAGS, _DMA_OFFSET_FIXED, _TRUE) | DRF_DEF(OS46, _FLAGS, _PAGE_SIZE, _4KB) |
++                      DRF_DEF(OS46, _FLAGS, _GPU_CACHEABLE, _NO);
++            p.dmaOffset = v.out_va + page * VT_PAGE;
++            Ioctl(ctl, NV_ESC_RM_MAP_MEMORY_DMA, &p, "map VT page");
++            if (p.status != NV_OK) throw Error("map VT page", p.status);
++            v.mapped[page] = 1;
++            ++vt_mapped;
++        }
++    }
++
+     std::map<NvU64, Pool> pools;
+     u64 pools_epoch = 0;
+     std::map<Header, std::pair<NvU64, u32>> decoded; // entry thread: header -> its copy's VA (0: raw), format
+@@ -839,6 +1336,7 @@ public:
+     void Map(NvU64 va, NvU64 off, NvU64 size) {
+         Unmap(va, size);
+         MapOff(va, off, size);
++        if (!vts.empty()) VtMapped(va, size);
+     }
+ 
+     /// Unmaps [va, va + size); the parts of overlapping mappings outside it stay mapped.
+@@ -1435,7 +1933,7 @@ NvU32 HostClass(u32 guest) {
+ enum Count : size_t {
+     WordsIn, WordsOut, DropSyncpoint, DropHostMethod, DropNever, DropUnbound, DropSemaphoreUnmapped, DropReportTrap,
+     DropMemOp, DropDependence, QmdFromMemory, QmdFromSlot, QmdUnmapped, BarrierLaunches, DependenceUnderflow, InlineQmds, SrgbWrite, LocalMemory, LocalMemoryTooSmall,
+-    MacroReplaced, MacroHostMme, MacroDropped, MacroUnpaired, Invalidates, MidRun, BadHeader, Releases, ReleasesDropped, ByReference, FreshDiffers, AcquiresDropped, CountEnd
++    MacroReplaced, MacroHostMme, MacroDropped, MacroUnpaired, Invalidates, MidRun, BadHeader, Releases, ReleasesDropped, ByReference, FreshDiffers, AcquiresDropped, VtCopies, CountEnd
+ };
+ constexpr const char* COUNT_NAMES[CountEnd] = {
+     "words in", "words out", "syncpoint methods dropped", "host methods dropped", "firmware/sw/zcull/ISA methods dropped",
+@@ -1449,7 +1947,8 @@ constexpr const char* COUNT_NAMES[CountEnd] = {
+     "front macro traces left unpaired", "shader cache invalidates", "entries ending inside a method run",
+     "unknown headers", "doorbells at releases", "semaphore releases left to Eglantine",
+     "macro parameter entries read again after a drain", "of them differing from Eglantine's words",
+-    "semaphore acquires left to Eglantine"};
++    "semaphore acquires left to Eglantine", "copy launches into virtual textures"
++};
+ 
+ /// Per guest channel: the decode state (a method run continues into the next entry, as on the GPU), the guest
+ /// state the rewrites need, and the host words of the entry being copied.
+@@ -1462,6 +1961,7 @@ struct Xlate {
+     std::array<u32, 2> header_pool{};
+     u32 qmd_guest_a = 0, qmd_guest_b = 0; // the guest's inline QMD address (SHIFTED8)
+     std::array<u32, 64> qmd{};
++    std::array<u32, 0x200> copy{}; // copy-engine methods below 0x800 (VT measuring)
+     bool in_call = false, invalidate = false, release = false, first = false, held = false;
+     u32 call_subc = 0;
+     std::vector<std::pair<u32, u32>> call;                // a compute macro call, collected until its run ends
+@@ -1623,6 +2123,12 @@ void LogStats(State& s) {
+         LOG_INFO(HW_GPU, "Nx2 passthrough ASTC: {} textures decoded ({} MiB), {} failed, {} left raw (too large), {} "
+                  "headers repointed", h.astc_decoded, h.AstcArenaUsed() >> 20, h.astc_failed, h.astc_too_large,
+                  h.astc_headers);
++        if (!h.vts.empty()) {
++            LOG_INFO(HW_GPU, "Nx2 passthrough VT: {} textures, {} level jobs ({} ms), {} cells transcoded, {} unchanged, "
++                     "{} empty, {} MiB of output mapped", h.vts.size(), h.vt_jobs_done.load(),
++                     h.vt_busy.load() / 1000000, h.vt_cells.load(), h.vt_same.load(), h.vt_zero.load(),
++                     (h.vt_mapped.load() * Host::VT_PAGE) >> 20);
++        }
+         LOG_INFO(HW_GPU, "Nx2 passthrough words: {}; {} doorbells, {} ms draining, {} waits before mirror changes ({} new shadow pages, {} shadow rewrites, {}; {} ms)",
+                  line, h.doorbells, std::chrono::duration_cast<std::chrono::milliseconds>(s.drain_time).count(),
+                  h.quiesces, h.quiesce_sites[0], h.quiesce_sites[1], h.quiesce_sites[2], std::chrono::duration_cast<std::chrono::milliseconds>(h.quiesce_time).count());
+@@ -1794,6 +2300,8 @@ struct Words {
+                 return;
+             }
+         }
++        if (cls == AMPERE_DMA_COPY_B && m < x.copy.size()) x.copy[m] = v;
++        if (cls == AMPERE_DMA_COPY_B && m == 0x300 / 4 && !h.vts.empty()) NoteCopy(v);
+         if (cls == ADA_A || cls == ADA_COMPUTE_A) {
+             const bool compute = cls == ADA_COMPUTE_A;
+             if (Never(compute, m)) {
+@@ -1855,6 +2363,24 @@ struct Words {
+         Put(sc, m, v);
+     }
+ 
++    /// A copy-engine launch whose destination lies in a virtual texture (VT measuring).
++    void NoteCopy(u32 launch) {
++        const auto& r = x.copy;
++        const NvU64 dst = (NvU64{r[0x408 / 4] & 0x1FFFF} << 32) | r[0x40C / 4];
++        auto it = h.vts.upper_bound(dst);
++        if (it == h.vts.begin() || dst >= std::prev(it)->first + std::prev(it)->second->size) return;
++        const u64 bytes = u64{r[0x418 / 4]} * std::max(1u, r[0x41C / 4]);
++        h.VtCopied(dst, bytes);
++        if (++s.counts[VtCopies] <= 16) {
++            const NvU64 src = (NvU64{r[0x400 / 4] & 0x1FFFF} << 32) | r[0x404 / 4];
++            LOG_INFO(HW_GPU, "Nx2 passthrough VT copy: launch {:#x} src {:#x} dst {:#x} len {} x {} pitch in/out {} {} "
++                     "dst block {:#x} w {} h {} d {} layer {} origin {:#x} src block {:#x} w {} h {} origin {:#x}",
++                     launch, src, dst, r[0x418 / 4], r[0x41C / 4], r[0x410 / 4], r[0x414 / 4], r[0x70C / 4],
++                     r[0x710 / 4], r[0x714 / 4], r[0x718 / 4], r[0x71C / 4], r[0x720 / 4], r[0x728 / 4], r[0x72C / 4],
++                     r[0x730 / 4], r[0x738 / 4]);
++        }
++    }
++
+     /// NVN's QMD dependence (barrier QMDs: scheduled with a count, raised by PCAS2 0xC, lowered by PCAS2 7 and by
+     /// the QMDs that name them as dependent; they run at 0, with release payloads NVN patched while they
+     /// waited). Tracked here in stream order with Eglantine's rules (native_qmd.h, one table for every channel)
+@@ -2445,6 +2971,7 @@ void OnEntryDone(s32 channel) {
+     Guarded(s, "submit", [&](Host& h) {
+         done = hold || h.Submit(*c, out, check || (sync && tail), tail, flush);
+         h.FlushStale();
++        h.VtFlush();
+     });
+     // EDEN_NX2_PASSTHROUGH_SNAP=<seconds>:<va>:<size>:<file>[,...]: once that long after the backend came up (or
+     // when <file>.now appears: seconds < 0),
+@@ -2571,6 +3098,11 @@ void OnEntryDone(s32 channel) {
+                         gob_swizzled ? ", GPU read = GOB-swizzled memory" : "");
+         }
+     }
++    static const bool vt_scan = [] {
++        const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_VTSCAN");
++        return v != nullptr && v[0] == '1';
++    }();
++    if (vt_scan && s.host && (s.entries + 1) % 500000 == 0) s.host->ScanVts();
+     if (++s.entries % 50000 == 0) {
+         LogStats(s);
+         s.busy = {};
+-- 
+2.56.0
+

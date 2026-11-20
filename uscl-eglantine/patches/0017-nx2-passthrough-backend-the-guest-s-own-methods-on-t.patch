@@ -1,0 +1,1491 @@
+From e5091605d7000a19d43b2d67cbbd2c6be4defa47 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 03:20:47 -0700
+Subject: [PATCH] nx2: passthrough backend: the guest's own methods on the host
+ GPU (EDEN_NX2_PASSTHROUGH_WORDS=1)
+
+Each guest entry is decoded and copied into its host channel's pushbuffer with the host-class rewrites:
+guest Ampere B classes bound as the Ada ones (plus inline-to-memory and 2D when RM has them), Tegra
+syncpoint methods, firmware/software/instrumentation/zcull methods, the guest's ISA version and TLB mem
+ops dropped, SET_SRGB_WRITE 0 (Ada sRGB-encodes UNORM targets with it), shader local memory moved to a
+per-channel host buffer sized for the host's 72 TPC slots, report and semaphore operations at unmapped
+VAs dropped (NVN releases to VA 0). Re-encoding keeps runs (encoder self-test at start).
+
+Compute macro calls are replaced by the methods the split front emitted for them (OnComputeMacro/Emit;
+the host MME writes inline QMDs one word late); OnStep keeps the pairing right for entries resumed after
+an acquire. Inline QMDs go to host slots (Eglantine reads the guest's back). NVN's QMD dependence (barrier
+QMDs scheduled with a count, raised/lowered by PCAS2 and by dependent QMDs) is tracked in stream order with
+Eglantine's own rules (native_qmd.h); a barrier that reaches 0 is copied by the copy engine on the GPU
+timeline (NVN patches its release payloads while it waits), its dependence cleared by semaphore AND
+reductions, and launched there.
+
+While Eglantine still executes every entry, it alone writes and waits on the guest's semaphores (two
+writers deadlocked MKW; a host acquire behind Eglantine waited forever): EDEN_NX2_PASSTHROUGH_RELEASES=1
+turns host releases and acquires on. An entry that ends inside a method run is held and submitted with its
+continuation (a host MME left mid-call raised Xid 13 MISSING_MACRO_DATA). Program pages becoming or
+changing as shadow pages wait for the host channels first (an unmap-then-map window gave Xid 13 Shader
+Program Header). Ready() now honours EDEN_NX2_PASSTHROUGH (the nvhost hooks opened an RM client without it).
+
+Bisecting: EDEN_NX2_PASSTHROUGH_SYNC=1 (wait per entry), _DROP=<mask>, _WATCH=<va suffix>, _REREAD=1,
+_SNAP=<s>:<va|0>:<size>:<file> (guest memory as the host GPU rendered it; 0 = the 2560x1440 sRGB output).
+
+MKW: boots to the menu and race on the host GPU; the main menu read back from the output target is the
+game's (ASTC textures black: not transcoded yet). No Xid in the last runs. Async mode still races
+Eglantine's own memory writes (NVN's fence slots reset late): SYNC is the correct mode until the host is
+the only executor.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/dma_pusher.cpp             |    1 +
+ src/video_core/engines/kepler_compute.cpp |    8 +
+ src/video_core/nx2_passthrough.cpp        | 1094 ++++++++++++++++++++-
+ src/video_core/nx2_passthrough.h          |   12 +-
+ 4 files changed, 1084 insertions(+), 31 deletions(-)
+
+diff --git a/src/video_core/dma_pusher.cpp b/src/video_core/dma_pusher.cpp
+index 352af3f4e..1866590a1 100644
+--- a/src/video_core/dma_pusher.cpp
++++ b/src/video_core/dma_pusher.cpp
+@@ -93,6 +93,7 @@ bool DmaPusher::Step() {
+         return false;
+     }
+     const u64 suspensions_before = suspensions.load(std::memory_order_relaxed);
++    Nx2Passthrough::OnStep(channel_state.bind_id);
+     if (!puller.ResumeAcquire(*this)) {
+         return false;
+     }
+diff --git a/src/video_core/engines/kepler_compute.cpp b/src/video_core/engines/kepler_compute.cpp
+index 53e7e324d..f5f005569 100644
+--- a/src/video_core/engines/kepler_compute.cpp
++++ b/src/video_core/engines/kepler_compute.cpp
+@@ -30,6 +30,7 @@
+ #include "video_core/nx2_perf.h"
+ #include "video_core/nx2_profile.h"
+ #include "video_core/nx2.h"
++#include "video_core/nx2_passthrough.h"
+ #include "video_core/engines/fermi_2d.h"
+ #include "video_core/texture_cache/texture_cache_base.h"
+ #include "video_core/engines/kepler_compute.h"
+@@ -2148,7 +2149,14 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
+     const auto read = [&fs](u32 address) {
+         return address < fs.registers.size() ? fs.registers[address] : 0U;
+     };
++    const bool passthrough = Nx2Passthrough::Requested();
++    if (passthrough) {
++        Nx2Passthrough::OnComputeMacro();
++    }
+     const auto emit = [&](u32 address, u32 value) {
++        if (passthrough) {
++            Nx2Passthrough::OnComputeMacroEmit(address, value);
++        }
+         if (address >= 0xe00) {
+             return false;
+         }
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index a5feb4572..61e237b6f 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -1,17 +1,20 @@
+ // SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ 
+-// Steps 1-2 of the passthrough backend (see nx2_passthrough.h). The RM setup is the one the USCL passthrough tools
++// The passthrough backend (see nx2_passthrough.h): channels, guest VA mirror, patched programs, and with
++// EDEN_NX2_PASSTHROUGH_WORDS=1 the guest's own methods (Words). The RM setup is the one the USCL passthrough tools
+ // verified on an RTX 4060 (uscl-eglantine/passthrough: nvrm_probe, pt_replay): root client, device, subdevice,
+ // an RM-owned VA space, a TSG with a context share and an AMPERE_CHANNEL_GPFIFO_A channel holding the guest's
+ // engine classes (ADA_A, ADA_COMPUTE_A, AMPERE_DMA_COPY_B), work submission through the usermode doorbell.
+ // Only RM ioctls: no register access. Every failure logs, frees the RM client and leaves the backend off.
+ 
+ #include <algorithm>
++#include <array>
+ #include <atomic>
+ #include <cstring>
+ #include <deque>
+ #include <set>
++#include <unordered_map>
+ #include <thread>
+ #include <map>
+ #include <optional>
+@@ -23,6 +26,8 @@
+ #include <string>
+ #include <vector>
+ 
++#include <fmt/format.h>
++
+ #include "common/logging.h"
+ #include "video_core/nx2_helper_loads.h"
+ #include "video_core/nx2_passthrough.h"
+@@ -91,6 +96,13 @@ constexpr NvU32 ENTRIES = 0x400;
+ // the guest's pages) and the helper-load trampolines, both in video memory the CPU writes.
+ constexpr NvU64 PAGE = 0x1000, SHADOW_POOL = 32ull << 20, ARENA = 8ull << 20;
+ constexpr auto WAIT_LIMIT = std::chrono::seconds(2);
++// Host QMDs, a ring of 256-byte slots: copies of QMDs the guest launches from memory (dependence fields
++// cleared), and where the host writes inline QMDs (the guest's slots are Eglantine's: it reads them back).
++// Shader local memory per host channel: the guest sizes its own for T239's TPCs, the host addresses up to 72
++// TPC slots (AD107's GR litter maxima), so the guest's buffer would overflow into other guest memory.
++constexpr NvU64 QMD_ARENA = 4ull << 20, LM_PER_TPC = 1ull << 20, LM_SIZE = LM_PER_TPC * 72;
++// Host classes for the guest's (Ampere B) classes.
++constexpr NvU32 I2M_CLASS = 0xA140, TWOD_CLASS = 0x902D;
+ 
+ struct Error : std::runtime_error {
+     NvU32 status;
+@@ -152,6 +164,9 @@ public:
+         shadow_mem = AllocVidmem(SHADOW_POOL);
+         shadow_cpu = static_cast<volatile u8*>(
+             MapCpu(shadow_mem, SHADOW_POOL, DRF_DEF(OS33, _FLAGS, _CACHING_TYPE, _WRITECOMBINED)));
++        const NvHandle qmds = AllocVidmem(QMD_ARENA);
++        qmd_cpu = static_cast<volatile NvU32*>(MapCpu(qmds, QMD_ARENA, DRF_DEF(OS33, _FLAGS, _CACHING_TYPE, _WRITECOMBINED)));
++        qmd_gva = MapGpu(qmds, QMD_ARENA);
+         const NvHandle arena = AllocVidmem(ARENA);
+         arena_cpu = static_cast<volatile u8*>(MapCpu(arena, ARENA, DRF_DEF(OS33, _FLAGS, _CACHING_TYPE, _WRITECOMBINED)));
+         arena_gva = MapGpu(arena, ARENA);
+@@ -171,6 +186,20 @@ public:
+         NvU64 gva = 0, gpput = 0;
+         NvU32 token = 0, fence = 0;
+         bool copy_bound = false;
++        std::vector<NvU32> classes; // engine objects allocated on the channel
++        NvU32 copy_seq = 0;         // GpuCopyQmd's copies done (semaphore at COPY_SEM)
++        // The last submissions by GPFIFO slot, for the log when the channel stops (Postmortem).
++        struct Sent {
++            u64 entry = 0;
++            NvU64 guest = 0;
++            std::vector<NvU32> words;
++        };
++        std::vector<Sent> sent = std::vector<Sent>(ENTRIES);
++        u64 cur_entry = 0;
++        NvU64 cur_guest = 0;
++        NvU64 lm_gva = 0;           // shader local memory (on first use)
++        u64 unflushed = 0;          // submissions since the last doorbell
++        std::chrono::steady_clock::time_point oldest{};
+         // In-flight submissions: their fence and pushbuffer span (word offsets in [0, PB_WORDS)).
+         struct Pending {
+             NvU32 fence;
+@@ -180,6 +209,7 @@ public:
+         NvU64 head = 0; // next free pushbuffer word
+     };
+     static constexpr NvU64 PB_WORDS = (CHECK - PB) / 4;
++    static constexpr NvU64 COPY_SEM = SEM + 0x10;
+ 
+     /// The host channel for guest channel `guest`: its own TSG (own graphics context, as the guest's channels
+     /// have), on the one VA space; created on first use.
+@@ -208,6 +238,15 @@ public:
+         const NvHandle chan = Alloc(tsg, AMPERE_CHANNEL_GPFIFO_A, &ch, "channel");
+         for (const NvU32 cls : {ADA_A, ADA_COMPUTE_A, AMPERE_DMA_COPY_B}) {
+             Alloc(chan, cls, nullptr, "engine object");
++            c.classes.push_back(cls);
++        }
++        for (const NvU32 cls : {I2M_CLASS, TWOD_CLASS}) { // the guest binds them too; optional here
++            try {
++                Alloc(chan, cls, nullptr, "engine object");
++                c.classes.push_back(cls);
++            } catch (const Error& e) {
++                LOG_WARNING(HW_GPU, "Nx2 passthrough: class {:#x} not available (status {:#x})", cls, e.status);
++            }
+         }
+         if (preempt) BindPreemption(chan);
+         NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS sch{};
+@@ -218,6 +257,7 @@ public:
+         Control(chan, NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN, &tok, "work submit token");
+         c.token = tok.workSubmitToken;
+         *reinterpret_cast<volatile NvU32*>(c.cpu + SEM) = 0;
++        *reinterpret_cast<volatile NvU32*>(c.cpu + COPY_SEM) = 0;
+         LOG_INFO(HW_GPU, "Nx2 passthrough: host channel for guest channel {} (token {:#x}, preemption {})", guest,
+                  c.token, preempt ? "GFXP/CILP" : "default");
+         return c;
+@@ -225,16 +265,20 @@ public:
+ 
+     /// Appends `words` plus a fence release (no WFI) to the channel and rings its doorbell. `wait`: returns once
+     /// the GPU has executed them (WFI). The CPU only waits when the ring is full. False on a 2 s timeout.
+-    bool Submit(Channel& c, std::span<const NvU32> words, bool wait) {
++    /// `tail` false: no fence (the words end inside a method run the next submission continues; the next fence
++    /// covers them). `flush`: ring the doorbell now.
++    bool Submit(Channel& c, std::span<const NvU32> words, bool wait, bool tail = true, bool flush = false) {
++        tail = tail || wait;
+         const NvU64 sem = c.gva + SEM;
+-        const NvU32 fence = ++c.fence;
+-        const NvU32 tail[6] = {Hdr(0, NVC56F_SEM_ADDR_LO, 5), static_cast<NvU32>(sem), static_cast<NvU32>(sem >> 32),
++        const NvU32 fence = tail ? ++c.fence : c.fence + 1;
++        const NvU32 tail_words[6] = {Hdr(0, NVC56F_SEM_ADDR_LO, 5), static_cast<NvU32>(sem), static_cast<NvU32>(sem >> 32),
+                                fence, 0,
+                                static_cast<NvU32>(DRF_DEF(C56F, _SEM_EXECUTE, _OPERATION, _RELEASE) |
+                                                   (wait ? DRF_DEF(C56F, _SEM_EXECUTE, _RELEASE_WFI, _EN)
+                                                         : DRF_DEF(C56F, _SEM_EXECUTE, _RELEASE_WFI, _DIS)) |
+                                                   DRF_DEF(C56F, _SEM_EXECUTE, _PAYLOAD_SIZE, _32BIT))};
+-        const NvU64 n = words.size() + 6;
++        const NvU64 n = words.size() + (tail ? 6 : 0);
++        if (n == 0) return true;
+         if (n >= PB_WORDS / 2) return false;
+         const auto start = std::chrono::steady_clock::now();
+         NvU64 at;
+@@ -244,30 +288,122 @@ public:
+         }
+         auto* pb = reinterpret_cast<volatile NvU32*>(c.cpu + PB) + at;
+         for (size_t i = 0; i < words.size(); ++i) pb[i] = words[i];
+-        for (size_t i = 0; i < 6; ++i) pb[words.size() + i] = tail[i];
++        for (size_t i = 0; tail && i < 6; ++i) pb[words.size() + i] = tail_words[i];
+         c.pending.push_back({fence, at, at + n});
+         c.head = at + n;
++        auto& sent = c.sent[c.gpput % ENTRIES];
++        sent.entry = c.cur_entry;
++        sent.guest = c.cur_guest;
++        sent.words.assign(words.begin(), words.begin() + std::min<size_t>(words.size(), 256));
+         reinterpret_cast<volatile NvU64*>(c.cpu + RING)[c.gpput % ENTRIES] = (c.gva + PB + at * 4) | (n << 42);
+         ++c.gpput;
+         // The doorbell rings every 64 submissions (EDEN_NX2_PASSTHROUGH_BATCH): one per entry cost 15% of MKW's
+-        // racing fps next to Vulkan (the GPU kept switching to our channels), 64 cost 1%. shortcut: nothing flushes
+-        // a partial batch yet; once the guest's words run, flush where the guest waits.
++        // racing fps next to Vulkan (the GPU kept switching to our channels), 64 cost 1%. Words mode also rings
++        // after entries that release a semaphore (another channel may wait for it) and for batches older than
++        // 2 ms (FlushStale).
+         static const u64 batch = [] {
+             const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_BATCH");
+             return v != nullptr ? std::max<u64>(1, std::strtoull(v, nullptr, 0)) : 64;
+         }();
+-        if (wait || c.gpput % batch == 0) {
+-            __sync_synchronize();
+-            reinterpret_cast<volatile AmpereAControlGPFifo*>(c.cpu + USERD)->GPPut = static_cast<NvU32>(c.gpput % ENTRIES);
+-            __sync_synchronize();
+-            mmio[NVC361_NOTIFY_CHANNEL_PENDING / 4] = c.token;
+-        }
++        if (c.unflushed++ == 0) c.oldest = std::chrono::steady_clock::now();
++        if (wait || flush || c.unflushed >= batch) Ring(c);
+         while (wait && static_cast<s32>(*reinterpret_cast<volatile NvU32*>(c.cpu + SEM) - fence) < 0) {
+             if (std::chrono::steady_clock::now() - start > WAIT_LIMIT) return false;
+         }
+         return true;
+     }
+ 
++    /// Words mode: the host GPU may still run work that uses a mapping about to change (it runs behind
++    /// Eglantine). An unmap-then-map leaves the page reading 0 in between: a program fetched then raised Xid 13
++    /// "Shader Program Header". So mirror changes that drop a live mapping wait for the channels first.
++    void Quiesce() {
++        if (!live || channels.empty()) return;
++        const auto t0 = std::chrono::steady_clock::now();
++        if (!Drain()) throw Error("drain before a mirror change", 0);
++        quiesce_time += std::chrono::steady_clock::now() - t0;
++        ++quiesces;
++    }
++    bool live = false;
++    NvU64 quiesces = 0;
++    std::array<NvU64, 3> quiesce_sites{}; // new shadow page, shadow write, (unused)
++    std::vector<u8> shadow_copy = std::vector<u8>(SHADOW_POOL); // what the shadow pool holds (CPU side)
++    std::set<u32> fresh_shadow; // shadow pages made during the current bind (BindProgram clears)
++    std::chrono::nanoseconds quiesce_time{};
++
++    /// Waits until every channel executed what it was given up to its last fence. False after 2 s.
++    bool Drain() {
++        const auto start = std::chrono::steady_clock::now();
++        for (auto& [guest, c] : channels) {
++            Ring(c);
++            while (static_cast<s32>(*reinterpret_cast<volatile NvU32*>(c.cpu + SEM) - c.fence) < 0) {
++                if (std::chrono::steady_clock::now() - start > WAIT_LIMIT) return false;
++            }
++        }
++        return true;
++    }
++
++    void Ring(Channel& c) {
++        if (c.unflushed == 0) return;
++        __sync_synchronize();
++        reinterpret_cast<volatile AmpereAControlGPFifo*>(c.cpu + USERD)->GPPut = static_cast<NvU32>(c.gpput % ENTRIES);
++        __sync_synchronize();
++        mmio[NVC361_NOTIFY_CHANNEL_PENDING / 4] = c.token;
++        c.unflushed = 0;
++        ++doorbells;
++    }
++
++    /// Rings channels whose oldest unannounced submission waited longer than 2 ms.
++    void FlushStale() {
++        const auto now = std::chrono::steady_clock::now();
++        for (auto& [guest, c] : channels) {
++            if (c.unflushed != 0 && now - c.oldest > std::chrono::milliseconds(2)) Ring(c);
++        }
++    }
++
++    /// The channel's shader local memory (allocated on first use).
++    NvU64 LocalMemory(Channel& c) {
++        if (c.lm_gva == 0) c.lm_gva = MapGpu(AllocVidmem(LM_SIZE, false), LM_SIZE);
++        return c.lm_gva;
++    }
++
++    /// A free host QMD slot. shortcut: a ring of 16384 slots, reused after 16384 launches (MKW: ~150 a frame),
++    /// assumed done by then.
++    NvU64 QmdSlot() {
++        return qmd_gva + (qmd_next++ % (QMD_ARENA / 256)) * 256;
++    }
++
++    /// Each channel's progress for the log: submissions done (fence) and GPFIFO get/put.
++    void LogChannels() {
++        for (auto& [guest, c] : channels) {
++            const NvU32 done = *reinterpret_cast<volatile NvU32*>(c.cpu + SEM);
++            const NvU32 get = reinterpret_cast<volatile AmpereAControlGPFifo*>(c.cpu + USERD)->GPGet;
++            LOG_INFO(HW_GPU, "Nx2 passthrough: channel {}: fence {} of {} done, GPGet {} GPPut {} ({} unannounced)",
++                     guest, done, c.fence, get, c.gpput % ENTRIES, c.unflushed);
++        }
++    }
++
++    /// For each channel that stopped short of its last fence: the submissions around GPGet.
++    void Postmortem() {
++        for (auto& [guest, c] : channels) {
++            const NvU32 done = *reinterpret_cast<volatile NvU32*>(c.cpu + SEM);
++            if (static_cast<s32>(done - c.fence) >= 0) continue;
++            const NvU32 get = reinterpret_cast<volatile AmpereAControlGPFifo*>(c.cpu + USERD)->GPGet;
++            LOG_ERROR(HW_GPU, "Nx2 passthrough: channel {} stopped: fence {} of {}, GPGet {} GPPut {}", guest, done,
++                      c.fence, get, c.gpput % ENTRIES);
++            for (int d = -4; d <= 1; ++d) {
++                const auto& e = c.sent[(get + ENTRIES + d) % ENTRIES];
++                std::string hex;
++                for (const NvU32 w : e.words) hex += fmt::format("{:08x} ", w);
++                LOG_ERROR(HW_GPU, "Nx2 passthrough: GP {} ({:+}): entry {} at {:#x}, {} words: {}", (get + ENTRIES + d) % ENTRIES,
++                          d, e.entry, e.guest, e.words.size(), hex);
++            }
++        }
++    }
++
++    static bool HasClass(const Channel& c, NvU32 cls) {
++        return std::find(c.classes.begin(), c.classes.end(), cls) != c.classes.end();
++    }
++
+     void Close() {
+         for (auto& [ptr, size] : maps) munmap(ptr, size);
+         maps.clear();
+@@ -346,9 +482,17 @@ public:
+     }
+ 
+     /// Unmaps [va, va + size); the parts of overlapping mappings outside it stay mapped.
+-    void Unmap(NvU64 va, NvU64 size) {
++    /// `quiesce`: wait for the channels first (a program page becoming a shadow page; guest unmaps and kind
++    /// changes do not wait: a data page reading 0 for a moment does not fault, and waiting for them stalled
++    /// MKW's loading for seconds).
++    void Unmap(NvU64 va, NvU64 size, bool quiesce = false) {
+         const NvU64 hi = va + size;
+-        for (auto& [pva, p] : TakePieces(va, hi)) {
++        auto taken = TakePieces(va, hi);
++        if (!taken.empty() && quiesce) {
++            ++quiesce_sites[0];
++            Quiesce();
++        }
++        for (auto& [pva, p] : taken) {
+             RmUnmap(pva, p.mem);
+             if (p.shadow != ~0u) { // the guest remaps code: the page is rebuilt at the next bind
+                 free_shadow.push_back(p.shadow);
+@@ -363,7 +507,8 @@ public:
+     void SetKind(NvU64 va, NvU64 size, std::optional<NvU32> host_kind) {
+         AssignKind(va, va + size, host_kind);
+         ++kind_changes;
+-        for (auto& [pva, p] : TakePieces(va, va + size)) {
++        auto taken = TakePieces(va, va + size);
++        for (auto& [pva, p] : taken) {
+             if (p.shadow != ~0u) { // shadow pages stay as they are (pitch)
+                 pieces[pva] = p;
+                 continue;
+@@ -381,6 +526,7 @@ public:
+     bool BindProgram(u32 stage, NvU64 va, u64 epoch) {
+         Program& pr = programs[va];
+         if (pr.epoch == epoch && pr.stage == stage) return false;
++        fresh_shadow.clear();
+         pr.epoch = epoch;
+         pr.stage = stage;
+         // Binds run ~20k/s: a program that shares no page with a patched one needs nothing (stages 0-4).
+@@ -473,6 +619,7 @@ public:
+     }
+ 
+     // Counters for the log.
++    NvU64 doorbells = 0;
+     NvU64 ring_waits = 0, pinned = 0, rm_maps = 0, rm_unmaps = 0, kind_changes = 0, kind_fallbacks = 0;
+     std::chrono::nanoseconds import_time{};
+     size_t Pieces() const { return pieces.size(); }
+@@ -550,6 +697,13 @@ private:
+                 if (index == ~0u) return changed;
+             }
+             const NvU64 lo = std::max(va, page), hi = std::min<NvU64>(va + bytes.size(), page + PAGE);
++            u8* copy = shadow_copy.data() + index * PAGE + (lo - page);
++            if (std::memcmp(copy, bytes.data() + (lo - va), hi - lo) == 0) continue; // as the GPU has it already
++            if (!fresh_shadow.contains(index)) {
++                ++quiesce_sites[1];
++                Quiesce(); // the GPU may be running code in this page
++            }
++            std::memcpy(copy, bytes.data() + (lo - va), hi - lo);
+             volatile u8* dst = shadow_cpu + index * PAGE + (lo - page);
+             for (NvU64 i = 0; i < hi - lo; ++i) dst[i] = bytes[lo - va + i];
+             changed = true;
+@@ -565,7 +719,9 @@ private:
+         if (!free_shadow.empty() && index == free_shadow.back()) free_shadow.pop_back();
+         const NvU64 off = static_cast<NvU64>(src - guest_base);
+         for (NvU64 i = 0; i < PAGE; ++i) shadow_cpu[index * PAGE + i] = src[i];
+-        Unmap(page, PAGE);
++        std::memcpy(shadow_copy.data() + index * PAGE, src, PAGE);
++        fresh_shadow.insert(index); // not mapped before this bind: nothing runs it yet
++        Unmap(page, PAGE, true);
+         NVOS46_PARAMETERS p{};
+         p.hClient = root;
+         p.hDevice = device;
+@@ -741,6 +897,16 @@ private:
+     volatile u8* shadow_cpu = nullptr;
+     volatile u8* arena_cpu = nullptr;
+     NvU64 arena_gva = 0, arena_used = 0;
++    volatile NvU32* qmd_cpu = nullptr;
++    NvU64 qmd_gva = 0;
++
++public:
++    NvU64 qmd_next = 0;
++    NvU32 SlotWord(NvU64 slot, u32 i) const { return qmd_cpu[(slot - qmd_gva) / 4 + i]; }
++    /// Guest inline QMD address -> the host slot it went to and qmd_next then (stale once the ring wrapped).
++    std::unordered_map<NvU64, std::pair<NvU64, NvU64>> inline_qmds;
++
++private:
+     u32 shadow_next = 0;
+     std::vector<u32> free_shadow;
+     std::set<NvU64> shadowed_pages; // pages a patched program needs as shadow pages
+@@ -814,7 +980,7 @@ private:
+         return p.dmaOffset;
+     }
+ 
+-    NvHandle AllocVidmem(NvU64 size) {
++    NvHandle AllocVidmem(NvU64 size, bool contiguous = true) {
+         NV_MEMORY_ALLOCATION_PARAMS a{};
+         a.owner = root;
+         a.size = size;
+@@ -822,7 +988,9 @@ private:
+         a.limit = size - 1;
+         a.format = 6;
+         a.type = NVOS32_TYPE_IMAGE;
+-        a.attr = DRF_DEF(OS32, _ATTR, _PHYSICALITY, _CONTIGUOUS) | DRF_DEF(OS32, _ATTR, _LOCATION, _VIDMEM);
++        a.attr = (contiguous ? DRF_DEF(OS32, _ATTR, _PHYSICALITY, _CONTIGUOUS)
++                             : DRF_DEF(OS32, _ATTR, _PHYSICALITY, _NONCONTIGUOUS)) |
++                 DRF_DEF(OS32, _ATTR, _LOCATION, _VIDMEM);
+         a.attr2 = DRF_DEF(OS32, _ATTR2, _GPU_CACHEABLE, _YES) | DRF_DEF(OS32, _ATTR2, _ZBC, _PREFER_NO_ZBC);
+         a.flags = NVOS32_ALLOC_FLAGS_MAP_NOT_REQUIRED | NVOS32_ALLOC_FLAGS_ALIGNMENT_FORCE |
+                   NVOS32_ALLOC_FLAGS_IGNORE_BANK_PLACEMENT | NVOS32_ALLOC_FLAGS_PERSISTENT_VIDMEM;
+@@ -856,6 +1024,119 @@ private:
+     std::vector<std::pair<void*, size_t>> maps;
+ };
+ 
++
++// --- Words mode (EDEN_NX2_PASSTHROUGH_WORDS=1): the guest's methods copied into the host pushbuffer ---
++
++// Method word indices; the guest's Ampere B classes and the host's Ada classes share them.
++namespace Mthd {
++constexpr u32 SET_OBJECT = 0, NOP = 0x08 / 4, SEM_A = 0x10 / 4, SEM_B = 0x14 / 4, SEM_C = 0x18 / 4, SEM_D = 0x1C / 4,
++              MEM_OP_A = 0x28 / 4, MEM_OP_B = 0x2C / 4, MEM_OP_C = 0x30 / 4, MEM_OP_D = 0x34 / 4,
++              SEM_ADDR_LO = 0x5C / 4, SEM_ADDR_HI = 0x60 / 4, SEM_PAYLOAD_LO = 0x64 / 4, SEM_PAYLOAD_HI = 0x68 / 4,
++              SEM_EXECUTE = 0x6C / 4, WFI = 0x78 / 4, HOST_END = 0x40;
++constexpr u32 INSTRUMENTATION_A = 0x150 / 4, INSTRUMENTATION_B = 0x154 / 4, LINE_LENGTH_IN = 0x180 / 4,
++              LINE_COUNT = 0x184 / 4, LAUNCH_DMA = 0x1B0 / 4, LOAD_INLINE_DATA = 0x1B4 / 4,
++              INVALIDATE_SHADER_CACHES = 0x21C / 4, SEND_PCAS_A = 0x2B4 / 4, SEND_SIGNALING_PCAS_B = 0x2BC / 4,
++              SEND_SIGNALING_PCAS2_B = 0x2C0 / 4, LM_NON_THROTTLED_B = 0x2E8 / 4, SPA_VERSION = 0x310 / 4,
++              INLINE_QMD_ADDRESS_A = 0x318 / 4, INLINE_QMD_ADDRESS_B = 0x31C / 4, INLINE_QMD_DATA = 0x320 / 4,
++              LM_A = 0x790 / 4, LM_B = 0x794 / 4, LM_D = 0x79C / 4, SRGB_WRITE = 0x15B8 / 4, SET_ZCULL = 0x1968 / 4,
++              REPORT_A = 0x1B00 / 4, REPORT_B = 0x1B04 / 4, REPORT_D = 0x1B0C / 4, BINDLESS_TEXTURE = 0x2608 / 4,
++              MACRO = 0xE00;
++} // namespace Mthd
++
++/// Firmware and software methods (they trap into RM), instrumentation, zcull (its on-chip state is not the
++/// guest's; culling only) and the shader ISA version (the host keeps its own) never reach the host.
++bool Never(bool compute, u32 m) {
++    using namespace Mthd;
++    if (m == INSTRUMENTATION_A || m == INSTRUMENTATION_B || m == SPA_VERSION) return true;
++    const u32 b = m * 4;
++    if (compute) return (b >= 0x220 && b <= 0x23C) || (b >= 0x24C && b <= 0x268) || (b >= 0x500 && b <= 0x53C);
++    return b == 0x1014 || b == 0x1028 || b == 0x102C || (b >= 0x10B0 && b <= 0x10C8) || (b >= 0x10D0 && b <= 0x10DC) ||
++           b == 0x1100 || b == 0x1104 || b == 0x12C8 || m == SET_ZCULL || (b >= 0x2300 && b <= 0x237C);
++}
++
++/// The host class for a guest class (0: not run on the host).
++NvU32 HostClass(u32 guest) {
++    switch (guest & 0xFFFF) {
++    case 0xC797: return ADA_A;          // AMPERE_B
++    case 0xC7C0: return ADA_COMPUTE_A;  // AMPERE_COMPUTE_B
++    case 0xC7B5: return AMPERE_DMA_COPY_B;
++    case I2M_CLASS: return I2M_CLASS;
++    case TWOD_CLASS: return TWOD_CLASS;
++    default: return 0;
++    }
++}
++
++enum Count : size_t {
++    WordsIn, WordsOut, DropSyncpoint, DropHostMethod, DropNever, DropUnbound, DropSemaphoreUnmapped, DropReportTrap,
++    DropMemOp, DropDependence, QmdFromMemory, QmdFromSlot, QmdUnmapped, BarrierLaunches, DependenceUnderflow, InlineQmds, SrgbWrite, LocalMemory, LocalMemoryTooSmall,
++    MacroReplaced, MacroHostMme, MacroDropped, MacroUnpaired, Invalidates, MidRun, BadHeader, Releases, ReleasesDropped, ByReference, FreshDiffers, AcquiresDropped, CountEnd
++};
++constexpr const char* COUNT_NAMES[CountEnd] = {
++    "words in", "words out", "syncpoint methods dropped", "host methods dropped", "firmware/sw/zcull/ISA methods dropped",
++    "methods on unbound subchannels", "semaphores at unmapped VAs dropped", "report traps dropped",
++    "TLB/comptag mem ops dropped", "dependence launches dropped", "QMDs launched from host copies",
++    "QMDs launched from the slot their inline write went to",
++    "QMD launches dropped (unmapped, no compute subchannel)", "barrier QMDs launched at 0", "dependence underflows",
++    "inline QMDs", "SET_SRGB_WRITE -> 0", "local memory moved",
++    "local memory larger than the host buffer", "compute macro calls replaced by the front's methods",
++    "compute macro calls left to the host MME", "compute macro calls dropped (QMD output, incomplete trace)",
++    "front macro traces left unpaired", "shader cache invalidates", "entries ending inside a method run",
++    "unknown headers", "doorbells at releases", "semaphore releases left to Eglantine",
++    "macro parameter entries read again after a drain", "of them differing from Eglantine's words",
++    "semaphore acquires left to Eglantine"};
++
++/// Per guest channel: the decode state (a method run continues into the next entry, as on the GPU), the guest
++/// state the rewrites need, and the host words of the entry being copied.
++struct Xlate {
++    u32 method = 0, subc = 0, left = 0, mode = 0;
++    std::array<NvU32, 8> cls{}; // host class bound on each subchannel (0: none)
++    std::array<u32, 8> report_a{}, report_b{};
++    u32 sem_a = 0, sem_b = 0, sem_lo = 0, sem_hi = 0, pcas_a = 0, qmd_word = 0, i2m_len = 0, i2m_count = 0;
++    NvU64 qmd_slot = 0; // the host slot inline QMDs go to
++    std::array<std::array<u32, 5>, 8> color_targets{}; // A, B, WIDTH, HEIGHT, FORMAT
++    u32 qmd_guest_a = 0, qmd_guest_b = 0; // the guest's inline QMD address (SHIFTED8)
++    std::array<u32, 64> qmd{};
++    bool in_call = false, invalidate = false, release = false, first = false, held = false;
++    u32 call_subc = 0;
++    std::vector<std::pair<u32, u32>> call;                // a compute macro call, collected until its run ends
++    std::deque<std::vector<std::pair<u32, u32>>> traced;  // the front's emits per compute macro call, in order
++    std::vector<NvU32> out;                               // host words of the entry
++    size_t hdr = 0;                                       // the open run: its header, subchannel, method, length
++    u32 run_subc = 0, run_m = 0, run_n = 0, run_mode = 0;
++
++    /// Appends a method write: incrementing runs, else non-incrementing runs of one method.
++    void Put(u32 sc, u32 m, u32 v) {
++        if (run_n != 0 && sc == run_subc && run_n < 0x1FFF) {
++            if (run_n == 1 && m == run_m) run_mode = 3;
++            if ((run_mode == 1 && m == run_m + run_n) || (run_mode == 3 && m == run_m)) {
++                out.push_back(v);
++                ++run_n;
++                out[hdr] = (run_mode << 29) | (run_n << 16) | (sc << 13) | run_m;
++                return;
++            }
++        }
++        hdr = out.size();
++        out.push_back((1u << 29) | (1u << 16) | (sc << 13) | m);
++        out.push_back(v);
++        run_subc = sc;
++        run_m = m;
++        run_n = 1;
++        run_mode = 1;
++    }
++
++    static bool EncoderSelfTest() {
++        Xlate t;
++        for (const auto [sc, m, v] : {std::array<u32, 3>{0, 0x100, 1}, {0, 0x101, 2}, {0, 0x101, 3}, {0, 0x101, 4},
++                                      {1, 0x200, 5}, {1, 0x200, 6}, {1, 0x201, 7}}) {
++            t.Put(sc, m, v);
++        }
++        const std::vector<NvU32> want = {Hdr(0, 0x400, 2), 1, 2, (3u << 29) | (2u << 16) | 0x101, 3, 4,
++                                         (3u << 29) | (2u << 16) | (1u << 13) | 0x200, 5, 6,
++                                         Hdr(1, 0x804, 1), 7};
++        return t.out == want;
++    }
++};
++
+ struct State {
+     std::mutex mutex;
+     std::unique_ptr<Host> host;
+@@ -877,6 +1158,19 @@ struct State {
+     std::map<s32, Recorded> recorded; // per guest channel: the entry being processed // wrong: differs from the mirrored memory too
+     u32 check_every = 0;
+     std::chrono::nanoseconds busy{}, worst{};
++    bool submit_words = false; // EDEN_NX2_PASSTHROUGH_WORDS=1
++    std::vector<NvU64> watch;  // EDEN_NX2_PASSTHROUGH_WATCH
++    std::vector<std::pair<NvU64, NvU64>> copied_qmds; // (guest QMD, slot) launched in the entry (watch only)
++    struct QmdDep {
++        s32 dependencies = 0, deferred = 0;
++        bool loaded = false, scheduled = false, completed = false;
++    };
++    std::unordered_map<NvU64, QmdDep> qmd_deps; // NVN's QMD dependence, every channel (Words::Dependence)
++    s32 entry_channel = 0;
++    std::map<s32, Xlate> xlate;
++    std::array<u64, CountEnd> counts{};
++    NvU64 output_target = 0; // the last 2560x1440 sRGB colour target bound (Words)
++    std::chrono::nanoseconds drain_time{};
+ };
+ 
+ State& Get() {
+@@ -886,19 +1180,31 @@ State& Get() {
+ 
+ /// Opens the host side on first use (any hook); false while the backend is off. Called with the mutex held.
+ bool Ready(State& s) {
++    if (!Requested()) return false; // the nvhost hooks (kinds, unmaps) call in unconditionally
+     if (!s.tried) {
+         s.tried = true;
+         std::atexit(Shutdown);
+         if (const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_CHECK")) {
+             s.check_every = static_cast<u32>(std::strtoul(v, nullptr, 0));
+         }
++        if (const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_WORDS")) {
++            s.submit_words = v[0] == '1';
++        }
++        if (const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_WATCH")) {
++            for (char* end = nullptr; *v != 0; v = *end == ',' ? end + 1 : end) {
++                s.watch.push_back(std::strtoull(v, &end, 16));
++                if (end == v) break;
++            }
++        }
+         auto host = std::make_unique<Host>();
+         try {
+             host->Open();
+             if (!host->KindMapSelfTest()) throw Error("kind map self-test", 0);
++            if (!Xlate::EncoderSelfTest()) throw Error("encoder self-test", 0);
++            host->live = s.submit_words;
+             s.host = std::move(host);
+-            LOG_INFO(HW_GPU, "Nx2 passthrough: host channel up, guest VA [{:#x}, {:#x}) sparse, check every {} entries",
+-                     GUEST_VA_LO, GUEST_VA_HI, s.check_every);
++            LOG_INFO(HW_GPU, "Nx2 passthrough: host channel up, guest VA [{:#x}, {:#x}) sparse, check every {} entries, "
++                     "guest words {}", GUEST_VA_LO, GUEST_VA_HI, s.check_every, s.submit_words ? "submitted" : "not submitted");
+         } catch (const Error& e) {
+             LOG_ERROR(HW_GPU, "Nx2 passthrough off: {} failed (status {:#x}, errno {})", e.what(), e.status, errno);
+         }
+@@ -914,6 +1220,7 @@ void Guarded(State& s, const char* what, F&& f) {
+     } catch (const Error& e) {
+         LOG_ERROR(HW_GPU, "Nx2 passthrough off: {}: {} failed (status {:#x}, errno {})", what, e.what(), e.status,
+                   errno);
++        s.host->Postmortem();
+         s.host.reset();
+     }
+ }
+@@ -934,8 +1241,521 @@ void LogStats(State& s) {
+              h.Pieces(), h.rm_maps, h.rm_unmaps, h.kind_changes, h.kind_fallbacks, h.pinned >> 20,
+              std::chrono::duration_cast<std::chrono::milliseconds>(h.import_time).count(), s.checked, s.check_mismatch,
+              s.check_wrong);
++    if (s.submit_words) {
++        std::string line;
++        for (size_t i = 0; i < CountEnd; ++i) {
++            if (s.counts[i] != 0) line += fmt::format("{}{} {}", line.empty() ? "" : ", ", s.counts[i], COUNT_NAMES[i]);
++        }
++        LOG_INFO(HW_GPU, "Nx2 passthrough words: {}; {} doorbells, {} ms draining, {} waits before mirror changes ({} new shadow pages, {} shadow rewrites, {}; {} ms)",
++                 line, h.doorbells, std::chrono::duration_cast<std::chrono::milliseconds>(s.drain_time).count(),
++                 h.quiesces, h.quiesce_sites[0], h.quiesce_sites[1], h.quiesce_sites[2], std::chrono::duration_cast<std::chrono::milliseconds>(h.quiesce_time).count());
++    }
++}
++
++
++/// EDEN_NX2_PASSTHROUGH_DROP=<mask> (bisecting): 1 report semaphores, 2 host semaphores, 4 compute launches
++/// (macro calls, QMDs), 8 inline-to-memory uploads, 16 copy engine launches, 32 every 3D-class method,
++/// 64 semaphore acquires.
++u32 DropMask() {
++    static const u32 mask = [] {
++        const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_DROP");
++        return v != nullptr ? static_cast<u32>(std::strtoul(v, nullptr, 0)) : 0u;
++    }();
++    return mask;
++}
++
++/// EDEN_NX2_PASSTHROUGH_RELEASES=1: the host also writes the guest's semaphores. Off by default: Eglantine
++/// still executes every entry and writes them itself, at other times; two writers of NVN's fence and barrier
++/// slots deadlocked MKW (a slot left one behind). Acquires go with them: the host runs behind Eglantine, so a
++/// slot can be past the value it waits for (MKW stalled a channel 1000 entries deep). shortcut: the host's
++/// channels are then ordered only within themselves.
++bool HostReleases() {
++    static const bool on = [] {
++        const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_RELEASES");
++        return v != nullptr && v[0] == '1';
++    }();
++    return on;
+ }
+ 
++/// Copies one entry's words into the host pushbuffer with the host-class rewrites.
++struct Words {
++    State& s;
++    Host& h;
++    Host::Channel& c;
++    Xlate& x;
++
++    void Put(u32 sc, u32 m, u32 v) { x.Put(sc, m, v); }
++
++    /// Raw words of our own (check copies): they end the open run.
++    void Raw(std::span<const NvU32> w) {
++        x.out.insert(x.out.end(), w.begin(), w.end());
++        x.run_n = 0;
++    }
++
++    bool Mapped(NvU64 va) const {
++        return va >= GUEST_VA_LO && va < GUEST_VA_HI && h.MirroredHost(va) != nullptr;
++    }
++
++    void Run(std::span<const u32> words) {
++        s.counts[WordsIn] += words.size();
++        for (const u32 w : words) {
++            if (x.left != 0) {
++                const u32 m = x.method;
++                if (x.mode == 1) {
++                    ++x.method;
++                } else if (x.mode == 5) { // increment once: the first argument at method, the rest at method + 1
++                    ++x.method;
++                    x.mode = 3;
++                }
++                Word(x.subc, m, w, x.first);
++                x.first = false;
++                --x.left;
++                continue;
++            }
++            const u32 mode = w >> 29, count = (w >> 16) & 0x1FFF, sc = (w >> 13) & 7, m = w & 0x1FFF;
++            if (mode == 4) { // immediate: the argument is in the header
++                Word(sc, m, count, true);
++            } else if (mode == 1 || mode == 3 || mode == 5) {
++                x.method = m;
++                x.subc = sc;
++                x.left = count;
++                x.mode = mode;
++                x.first = true;
++            } else if (w != 0) {
++                ++s.counts[BadHeader];
++            }
++        }
++    }
++
++    /// A compute macro call collects its parameters until a word that is not one arrives (another method or
++    /// subchannel, or a run that starts a new call): as on the GPU, and as Eglantine runs calls whose
++    /// parameters continue in the next entry. `first`: the first word of a method run.
++    void Word(u32 sc, u32 m, u32 v, bool first) {
++        const bool param = m >= Mthd::MACRO && x.cls[sc] == ADA_COMPUTE_A;
++        if (x.in_call && (!param || sc != x.call_subc || (first && (m & 1) == 0))) EndCall();
++        if (param) {
++            if (!x.in_call) {
++                x.in_call = true;
++                x.call_subc = sc;
++                x.call.clear();
++            }
++            x.call.emplace_back(m, v);
++            return;
++        }
++        Method(sc, m, v);
++    }
++
++    void EndCall() {
++        x.in_call = false;
++        std::vector<std::pair<u32, u32>> emits;
++        const bool traced = !x.traced.empty();
++        if (traced) {
++            emits = std::move(x.traced.front());
++            x.traced.pop_front();
++        }
++        if (DropMask() & 4) {
++            ++s.counts[MacroDropped];
++            return;
++        }
++        if (traced && Complete(emits)) {
++            ++s.counts[MacroReplaced];
++            for (const auto& [m, v] : emits) Method(x.call_subc, m, v);
++            return;
++        }
++        // The host MME runs the call itself unless it touches QMDs (it writes inline QMDs one word late) or the
++        // front never saw it.
++        const bool qmd = !traced || std::any_of(emits.begin(), emits.end(), [](const auto& e) {
++            return (e.first >= Mthd::SEND_PCAS_A && e.first <= Mthd::SEND_SIGNALING_PCAS2_B) ||
++                   (e.first >= Mthd::INLINE_QMD_ADDRESS_A && e.first < Mthd::INLINE_QMD_DATA + 64);
++        });
++        if (qmd) {
++            ++s.counts[MacroDropped];
++            return;
++        }
++        ++s.counts[MacroHostMme];
++        for (const auto& [m, v] : x.call) Put(x.call_subc, m, v);
++    }
++
++    /// Whether the front's trace of a call is all of its output (ptcap's trace_complete): whole inline QMDs,
++    /// every inline-to-memory upload with all its data words, no macro calls.
++    bool Complete(std::span<const std::pair<u32, u32>> emits) const {
++        u32 qmd = 0, len = x.i2m_len, count = x.i2m_count;
++        u64 need = 0;
++        for (const auto& [m, v] : emits) {
++            if (m >= Mthd::MACRO) return false;
++            qmd += m >= Mthd::INLINE_QMD_DATA && m < Mthd::INLINE_QMD_DATA + 64;
++            if ((m == Mthd::LOAD_INLINE_DATA) != (need > 0)) return false;
++            if (need != 0) {
++                --need;
++                continue;
++            }
++            if (m == Mthd::LINE_LENGTH_IN) len = v;
++            if (m == Mthd::LINE_COUNT) count = v;
++            if (m == Mthd::LAUNCH_DMA) need = (u64{len} * std::max(1u, count) + 3) / 4;
++        }
++        return need == 0 && qmd % 64 == 0;
++    }
++
++    void Method(u32 sc, u32 m, u32 v) {
++        using namespace Mthd;
++        if (m < HOST_END) {
++            HostMethod(sc, m, v);
++            return;
++        }
++        const NvU32 cls = x.cls[sc];
++        if (cls == 0) {
++            ++s.counts[DropUnbound];
++            return;
++        }
++        if (const u32 drop = DropMask()) {
++            const bool i2m = m == LAUNCH_DMA || m == LOAD_INLINE_DATA;
++            if (((drop & 1) && m == REPORT_D && cls != AMPERE_DMA_COPY_B) || ((drop & 8) && i2m && cls != AMPERE_DMA_COPY_B) ||
++                ((drop & 16) && cls == AMPERE_DMA_COPY_B && m == 0x300 / 4) || ((drop & 32) && cls == ADA_A) ||
++                ((drop & 4) && cls == ADA_COMPUTE_A &&
++                 (m == SEND_SIGNALING_PCAS_B || m == SEND_SIGNALING_PCAS2_B ||
++                  (m >= INLINE_QMD_DATA && m < INLINE_QMD_DATA + 64)))) {
++                return;
++            }
++        }
++        if (cls == ADA_A || cls == ADA_COMPUTE_A) {
++            const bool compute = cls == ADA_COMPUTE_A;
++            if (Never(compute, m)) {
++                ++s.counts[DropNever];
++                return;
++            }
++            switch (m) {
++            case LM_A:
++            case LM_B: {
++                const NvU64 lm = h.LocalMemory(c);
++                v = m == LM_A ? static_cast<u32>(lm >> 32) : static_cast<u32>(lm);
++                ++s.counts[LocalMemory];
++                break;
++            }
++            case LINE_LENGTH_IN: x.i2m_len = v; break;
++            case LINE_COUNT: x.i2m_count = v; break;
++            case REPORT_A: x.report_a[sc] = v; break;
++            case REPORT_B: x.report_b[sc] = v; break;
++            case REPORT_D: {
++                const NvU64 va = (NvU64{x.report_a[sc] & 0xFF} << 32) | x.report_b[sc];
++                if ((v & 3) == 3) { // trap: an interrupt for RM
++                    ++s.counts[DropReportTrap];
++                    return;
++                }
++                if (!Mapped(va)) { // NVN releases to VA 0 (nothing on the console; outside our range: a fault)
++                    ++s.counts[DropSemaphoreUnmapped];
++                    return;
++                }
++                if ((v & 3) == 1 && ((DropMask() & 64) || !HostReleases())) {
++                    ++s.counts[AcquiresDropped];
++                    return;
++                }
++                if ((v & 3) != 1 && !HostReleases()) {
++                    ++s.counts[ReleasesDropped];
++                    return;
++                }
++                x.release |= (v & 3) != 1;
++                break;
++            }
++            default: break;
++            }
++            if (!compute && m >= 0x800 / 4 && m < 0xA00 / 4 && (m & 0xF) <= 4) { // SET_COLOR_TARGET_A..FORMAT(j)
++                auto& ct = x.color_targets[(m - 0x800 / 4) >> 4];
++                ct[m & 0xF] = v;
++                // The game's output (2560x1440 sRGB RGBA8) for EDEN_NX2_PASSTHROUGH_SNAP address 0.
++                if ((m & 0xF) == 4 && v == 0xD6 && ct[2] == 2560 && ct[3] == 1440) {
++                    s.output_target = (NvU64{ct[0] & 0xFF} << 32) | ct[1];
++                }
++            }
++            if (!compute && m == SRGB_WRITE && v != 0) {
++                // With it set, Ada sRGB-encodes writes into plain UNORM targets too; NVN sets 1 and keeps data in
++                // UNORM targets, so the guest GPU does not encode them (Phase 1, tenth pass).
++                v = 0;
++                ++s.counts[SrgbWrite];
++            }
++            if (!compute && m == LM_D && v > LM_PER_TPC) ++s.counts[LocalMemoryTooSmall];
++            if (compute) {
++                if (m == LM_NON_THROTTLED_B && v > LM_PER_TPC) ++s.counts[LocalMemoryTooSmall];
++                if (!Compute(sc, m, v)) return;
++            }
++        }
++        Put(sc, m, v);
++    }
++
++    /// NVN's QMD dependence (barrier QMDs: scheduled with a count, raised by PCAS2 0xC, lowered by PCAS2 7 and by
++    /// the QMDs that name them as dependent; they run at 0, with release payloads NVN patched while they
++    /// waited). Tracked here in stream order with Eglantine's rules (native_qmd.h, one table for every channel)
++    /// instead of by the host's scheduler, which would count against state Eglantine keeps for itself; a QMD
++    /// that reaches 0 is copied and launched without dependence at that point of the stream.
++    void Dependence(NvU64 qmd, u32 action, s32 delta) {
++        auto& table = s.qmd_deps;
++        if (table.size() >= 4096 && !table.contains(qmd)) {
++            std::erase_if(table, [](const auto& e) { return e.second.completed && e.second.deferred == 0; });
++        }
++        auto& d = table[qmd];
++        if (action == 2 || action == 3) {
++            if (action == 3 || !d.loaded) {
++                const u8* src = h.MirroredHost(qmd);
++                u32 w4 = 0;
++                if (src != nullptr) std::memcpy(&w4, src + 16, 4);
++                d.dependencies = static_cast<s32>((w4 >> 14) & 0xFFFF) + d.deferred;
++                d.deferred = 0;
++                d.loaded = true;
++                d.completed = false;
++            }
++            d.scheduled = true;
++        } else {
++            if (!d.loaded || d.completed) {
++                d.deferred += delta;
++                return;
++            }
++            d.dependencies += delta;
++        }
++        if (!d.loaded || !d.scheduled || d.completed || d.dependencies > 0) return;
++        if (d.dependencies < 0) ++s.counts[DependenceUnderflow];
++        d.completed = true;
++        ++s.counts[BarrierLaunches];
++        Launch(qmd);
++        // Its own dependent QMD, read now (Eglantine reads it at execution).
++        if (const u8* src = h.MirroredHost(qmd); src != nullptr && ++depth_ < 64) {
++            u32 w[17];
++            std::memcpy(w, src, sizeof(w));
++            if (w[16] & 1) Dependent(w[15], w[16]);
++            --depth_;
++        }
++    }
++
++    void Dependent(u32 pointer, u32 w16) {
++        const u32 action = (w16 >> 1) & 7;
++        const NvU64 target = NvU64{pointer} << 8;
++        if (action == 4) Dependence(target, 7, -1);
++        else if (action == 3) Dependence(target, 3, 0);
++        else if (action == 1) Dependence(target, 2, 0);
++        else ++s.counts[DropDependence];
++    }
++
++    /// Launches the QMD at guest VA `qmd` (as the GPU timeline has it, without dependence) on this channel.
++    void Launch(NvU64 qmd) {
++        u32 sc = 8;
++        for (u32 i = 0; i < 8 && sc == 8; ++i) sc = x.cls[i] == ADA_COMPUTE_A ? i : 8;
++        if (sc == 8 || !Mapped(qmd) || (qmd & 0xFF) != 0) {
++            ++s.counts[QmdUnmapped];
++            return;
++        }
++        ++s.counts[QmdFromMemory];
++        const NvU64 slot = GpuCopyQmd(qmd);
++        if (!s.watch.empty()) s.copied_qmds.emplace_back(qmd, slot);
++        Put(sc, Mthd::SEND_PCAS_A, static_cast<u32>(slot >> 8));
++        Put(sc, Mthd::SEND_SIGNALING_PCAS2_B, 3); // INVALIDATE_COPY_SCHEDULE
++        x.release = true;
++    }
++    int depth_ = 0;
++
++    /// The QMD at guest VA `va` as the GPU timeline has it (the stream may have written it just before: a CPU
++    /// read at translation time saw stale payloads, measured), copied into a host slot by the copy engine with
++    /// its dependence fields cleared by semaphore AND reductions, all on the channel; returns the slot.
++    NvU64 GpuCopyQmd(NvU64 va) {
++        using namespace Mthd;
++        const NvU64 slot = h.QmdSlot(), done = c.gva + Host::COPY_SEM;
++        const u32 seq = ++c.copy_seq;
++        Put(0, WFI, 0); // the stream's own writes of the QMD land first
++        if (!c.copy_bound) Put(4, SET_OBJECT, AMPERE_DMA_COPY_B);
++        for (const auto [mthd, val] : {std::pair<u32, u32>{NVC7B5_OFFSET_IN_UPPER, static_cast<u32>(va >> 32)},
++                                       {NVC7B5_OFFSET_IN_UPPER + 4, static_cast<u32>(va)},
++                                       {NVC7B5_OFFSET_OUT_UPPER, static_cast<u32>(slot >> 32)},
++                                       {NVC7B5_OFFSET_OUT_UPPER + 4, static_cast<u32>(slot)},
++                                       {NVC7B5_LINE_LENGTH_IN, 256},
++                                       {NVC7B5_LINE_COUNT, 1},
++                                       {NVC7B5_SET_SEMAPHORE_A, static_cast<u32>(done >> 32)},
++                                       {NVC7B5_SET_SEMAPHORE_B, static_cast<u32>(done)},
++                                       {NVC7B5_SET_SEMAPHORE_PAYLOAD, seq}}) {
++            Put(4, mthd / 4, val);
++        }
++        Put(4, NVC7B5_LAUNCH_DMA / 4,
++            DRF_DEF(C7B5, _LAUNCH_DMA, _DATA_TRANSFER_TYPE, _NON_PIPELINED) | DRF_DEF(C7B5, _LAUNCH_DMA, _FLUSH_ENABLE, _TRUE) |
++                DRF_DEF(C7B5, _LAUNCH_DMA, _SEMAPHORE_TYPE, _RELEASE_ONE_WORD_SEMAPHORE) |
++                DRF_DEF(C7B5, _LAUNCH_DMA, _SRC_MEMORY_LAYOUT, _PITCH) | DRF_DEF(C7B5, _LAUNCH_DMA, _DST_MEMORY_LAYOUT, _PITCH));
++        if (x.cls[4] != 0 && x.cls[4] != AMPERE_DMA_COPY_B) { // the guest's subchannel 4 back
++            Put(4, SET_OBJECT, x.cls[4]);
++            c.copy_bound = false;
++        } else {
++            c.copy_bound = true;
++        }
++        const auto sem = [&](NvU64 at, u32 payload, u32 exec) {
++            Put(0, SEM_ADDR_LO, static_cast<u32>(at));
++            Put(0, SEM_ADDR_HI, static_cast<u32>(at >> 32));
++            Put(0, SEM_PAYLOAD_LO, payload);
++            Put(0, SEM_PAYLOAD_HI, 0);
++            Put(0, SEM_EXECUTE, exec);
++        };
++        sem(done, seq, DRF_DEF(C56F, _SEM_EXECUTE, _OPERATION, _ACQ_STRICT_GEQ)); // the copy is in the slot
++        const u32 and_op = DRF_DEF(C56F, _SEM_EXECUTE, _OPERATION, _REDUCTION) | DRF_DEF(C56F, _SEM_EXECUTE, _RELEASE_WFI, _EN) |
++                           DRF_DEF(C56F, _SEM_EXECUTE, _REDUCTION, _IAND) | DRF_DEF(C56F, _SEM_EXECUTE, _REDUCTION_FORMAT, _UNSIGNED);
++        sem(slot + 16, ~(0xFFFFu << 14), and_op); // DEPENDENCE_COUNTER
++        sem(slot + 64, ~0x21u, and_op);           // DEPENDENT_QMD0/1_ENABLE
++        if (!HostReleases()) {
++            for (const u32 word : {25u, 29u, 53u}) sem(slot + word * 4, ~(1u << 23), and_op); // RELEASEn_ENABLE
++        }
++        Put(0, WFI, 0);
++        return slot;
++    }
++
++    /// EDEN_NX2_PASSTHROUGH_WATCH: logs the releases of a QMD (its 64 words) that hit a watched VA.
++    void WatchQmd(const u32* q, const char* how) {
++        for (int r = 0; r < 2 && !s.watch.empty(); ++r) {
++            const u32* rel = q + 24 + r * 4;
++            if (!(rel[1] & (1u << 23))) continue; // RELEASEn_ENABLE
++            const NvU64 va = (NvU64{rel[1] & 0xFF} << 32) | rel[0];
++            for (NvU64& w : s.watch) {
++                if (w == va || (w < GUEST_VA_LO && (va & 0xFFFFF) == w)) {
++                    w = va;
++                    LOG_INFO(HW_GPU, "Nx2 passthrough watch: {} QMD release{} to {:#x} payload {:#x} (control {:#x}) in "
++                             "entry {}", how, r, va, rel[2], rel[1], s.entries);
++                }
++            }
++        }
++    }
++
++    /// QMD dependence (NVN's barrier ring: inline QMDs decrement a barrier QMD's counter, PCAS2 0xC raises it,
++    /// the barrier launches from memory once it reaches 0). The host would keep its own counts in guest
++    /// memory against NVN's and Eglantine's (a wait forever, Phase 1). Dropped: launches run in submission
++    /// order, and a barrier QMD launched from memory waits for the work before it (host WFI) instead.
++    bool Compute(u32 sc, u32& m, u32& v) {
++        using namespace Mthd;
++        switch (m) {
++        case INLINE_QMD_ADDRESS_A:
++        case INLINE_QMD_ADDRESS_B: { // our slot instead of the guest's (a new one once a QMD was written)
++            (m == INLINE_QMD_ADDRESS_A ? x.qmd_guest_a : x.qmd_guest_b) = v;
++            if (x.qmd_slot == 0 || x.qmd_word != 0) x.qmd_slot = h.QmdSlot();
++            x.qmd_word = 0;
++            v = m == INLINE_QMD_ADDRESS_A ? static_cast<u32>((x.qmd_slot >> 8) >> 32) : static_cast<u32>(x.qmd_slot >> 8);
++            return true;
++        }
++        case SEND_PCAS_A: x.pcas_a = v; return true;
++        case SEND_SIGNALING_PCAS2_B: {
++            const NvU64 qmd = NvU64{x.pcas_a} << 8;
++            const u32 action = v & 0xF;
++            switch (action) {
++            case 0x0:
++            case 0x1: return true; // no launch
++            case 0x2:
++            case 0x3: Dependence(qmd, action, 0); return false;
++            case 0x7: Dependence(qmd, action, -static_cast<s32>(((v >> 14) & 0x3FF) + 1)); return false;
++            case 0xC: Dependence(qmd, action, static_cast<s32>(((v >> 14) & 0x3FF) + 1)); return false;
++            default: ++s.counts[DropDependence]; return false;
++            }
++        }
++        case SEND_SIGNALING_PCAS_B: {
++            if ((v & 2) == 0) return true; // INVALIDATE only
++            Launch(NvU64{x.pcas_a} << 8);  // SCHEDULE: no dependence in this form
++            return false;
++        }
++        default: break;
++        }
++        if (m >= INLINE_QMD_DATA && m < INLINE_QMD_DATA + 64) { // a sequential 64-word buffer, not registers
++            const u32 w = x.qmd_word++ % 64;
++            x.qmd[w] = v;
++            if (w == 4) v &= ~(0xFFFFu << 14); // DEPENDENCE_COUNTER
++            if (w == 16) v &= ~0x21u;          // DEPENDENT_QMD0/1_ENABLE
++            if ((w == 25 || w == 29 || w == 53) && !HostReleases()) v &= ~(1u << 23); // RELEASE0/1/2_ENABLE
++            if (w == 63) {
++                WatchQmd(x.qmd.data(), "inline");
++                // Its dependent QMD (the hardware's part is cleared above): as Eglantine runs it at launch.
++                // shortcut: an inline QMD with a dependence count of its own launches at once.
++                if (x.qmd[16] & 1) Dependent(x.qmd[15], x.qmd[16]);
++                const NvU64 guest = ((NvU64{x.qmd_guest_a} << 32) | x.qmd_guest_b) << 8;
++                h.inline_qmds[guest] = {x.qmd_slot, h.qmd_next};
++                ++s.counts[InlineQmds];
++                x.release = true; // its own releases, if any
++            }
++        }
++        return true;
++    }
++
++    void HostMethod(u32 sc, u32 m, u32 v) {
++        using namespace Mthd;
++        switch (m) {
++        case SET_OBJECT: {
++            const NvU32 host = HostClass(v);
++            if (host == 0 || !Host::HasClass(c, host)) {
++                x.cls[sc] = 0;
++                ++s.counts[DropUnbound];
++                return;
++            }
++            x.cls[sc] = host;
++            if (sc == 4) c.copy_bound = host == AMPERE_DMA_COPY_B;
++            Put(sc, SET_OBJECT, host);
++            // Defaults the guest relies on that differ on the host (Phase 1 restore): zcull off, the bindless
++            // texture cbuf slot 0, sRGB writes off.
++            if (host == ADA_A) {
++                Put(sc, SET_ZCULL, 0);
++                Put(sc, SRGB_WRITE, 0);
++            }
++            if (host == ADA_COMPUTE_A) Put(sc, BINDLESS_TEXTURE, 0);
++            return;
++        }
++        case SEM_A: x.sem_a = v; break;
++        case SEM_B: x.sem_b = v; break;
++        case SEM_D: {
++            if (DropMask() & 2) return;
++            if ((v & 0x12) == 0 && ((DropMask() & 64) || !HostReleases())) {
++                ++s.counts[AcquiresDropped];
++                return;
++            }
++            if (!Mapped((NvU64{x.sem_a & 0xFF} << 32) | (x.sem_b & ~3u))) {
++                ++s.counts[DropSemaphoreUnmapped];
++                return;
++            }
++            if ((v & 0x12) != 0 && !HostReleases()) { // release, reduction
++                ++s.counts[ReleasesDropped];
++                return;
++            }
++            x.release |= (v & 0x12) != 0;
++            break;
++        }
++        case SEM_ADDR_LO: x.sem_lo = v; break;
++        case SEM_ADDR_HI: x.sem_hi = v; break;
++        case SEM_EXECUTE: {
++            if (DropMask() & 2) return;
++            if ((v & 7) != 1 && (v & 7) != 6 && ((DropMask() & 64) || !HostReleases())) {
++                ++s.counts[AcquiresDropped];
++                return;
++            }
++            if (!Mapped((NvU64{x.sem_hi & 0xFF} << 32) | (x.sem_lo & ~3u))) {
++                ++s.counts[DropSemaphoreUnmapped];
++                return;
++            }
++            if (((v & 7) == 1 || (v & 7) == 6) && !HostReleases()) { // release, reduction
++                ++s.counts[ReleasesDropped];
++                return;
++            }
++            x.release |= (v & 7) == 1 || (v & 7) == 6;
++            break;
++        }
++        case SEM_C:
++        case SEM_PAYLOAD_LO:
++        case SEM_PAYLOAD_HI:
++        case NOP:
++        case WFI:
++        case MEM_OP_A:
++        case MEM_OP_B:
++        case MEM_OP_C: break;
++        case MEM_OP_D: {
++            // Membars and L2 flushes/invalidates; TLB invalidates name the guest's page directory, not ours.
++            const u32 op = v >> 27;
++            if (op != 0x5 && op != 0xD && op != 0xE && op != 0x10 && op != 0x15) {
++                ++s.counts[DropMemOp];
++                return;
++            }
++            break;
++        }
++        case 0x70 / 4:
++        case 0x74 / 4: ++s.counts[DropSyncpoint]; return; // Tegra syncpoints: no such methods on a dGPU host
++        default: ++s.counts[DropHostMethod]; return;
++        }
++        Put(sc, m, v);
++    }
++};
++
+ } // Anonymous namespace
+ 
+ bool Requested() {
+@@ -993,7 +1813,34 @@ void OnProgramBind(u32 stage, GPUVAddr program, bool from_macro) {
+     // unpatched (old) for up to that long; hook the shader cache's invalidations when a game needs it.
+     const u64 epoch = static_cast<u64>(std::chrono::steady_clock::now().time_since_epoch() /
+                                        std::chrono::milliseconds(100));
+-    Guarded(s, "program", [&](Host& h) { h.BindProgram(stage, program, epoch); });
++    bool changed = false;
++    Guarded(s, "program", [&](Host& h) { changed = h.BindProgram(stage, program, epoch); });
++    if (changed) { // the GPU's instruction caches may hold the page as it was, on every channel
++        for (auto& [ch, x] : s.xlate) x.invalidate = true;
++    }
++}
++
++void OnStep(s32 channel) {
++    if (!Requested()) [[likely]] {
++        return;
++    }
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    s.entry_channel = channel;
++}
++
++void OnComputeMacro() {
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    if (s.host && s.submit_words) s.xlate[s.entry_channel].traced.emplace_back();
++}
++
++void OnComputeMacroEmit(u32 method, u32 value) {
++    State& s = Get();
++    std::scoped_lock lk{s.mutex};
++    if (!s.host || !s.submit_words) return;
++    auto& traced = s.xlate[s.entry_channel].traced;
++    if (!traced.empty()) traced.back().emplace_back(method, value);
+ }
+ 
+ void OnGuestKind(GPUVAddr gpu_addr, u64 size, u32 kind, u32 fallback_kind) {
+@@ -1016,6 +1863,7 @@ void OnEntry(s32 channel, GPUVAddr address, std::span<const CommandHeader> comma
+     std::scoped_lock lk{s.mutex};
+     if (!Ready(s)) return;
+     s.entry_thread = std::this_thread::get_id();
++    s.entry_channel = channel;
+     auto& e = s.recorded[channel];
+     e.valid = true;
+     e.address = address;
+@@ -1039,11 +1887,19 @@ void OnEntryDone(s32 channel) {
+     Host::Channel* c = nullptr;
+     Guarded(s, "channel", [&](Host& h) { c = &h.ChannelFor(channel); });
+     if (!s.host) return;
++    // Words mode: our own methods go between entries only where no guest method run continues.
++    Xlate* x = s.submit_words && s.memory_manager != nullptr ? &s.xlate[channel] : nullptr;
++    const bool boundary = x == nullptr || (x->left == 0 && !x->in_call);
+     // EDEN_NX2_PASSTHROUGH_CHECK: each newly patched program is read back at its guest VA by the GPU.
+     for (auto& [va, expected] : s.host->pending_checks) {
++        if (!boundary) break;
+         if (s.check_every == 0 || expected.size() > CHECK_SZ) break;
+         std::vector<NvU32> copy;
+         s.host->QueueCheckCopy(*c, copy, va, expected.size());
++        if (x != nullptr && x->cls[4] != 0 && x->cls[4] != AMPERE_DMA_COPY_B) { // the guest's subchannel 4 back
++            copy.insert(copy.end(), {Hdr(4, 0, 1), x->cls[4]});
++            c->copy_bound = false;
++        }
+         bool ok = false;
+         Guarded(s, "program check", [&](Host& h) { ok = h.Submit(*c, copy, true); });
+         if (!s.host) return;
+@@ -1058,23 +1914,197 @@ void OnEntryDone(s32 channel) {
+             }
+         }
+     }
+-    s.host->pending_checks.clear();
++    if (boundary) s.host->pending_checks.clear();
+     static const bool submit = [] { // EDEN_NX2_PASSTHROUGH_SUBMIT=0 (bisecting): no submissions at all
+         const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_SUBMIT");
+         return v == nullptr || v[0] != '0';
+     }();
+-    if (!submit) return;
+-    std::vector<NvU32> words;
++    if (!submit && x == nullptr) return;
++    std::vector<NvU32> marker;
++    std::vector<NvU32>& out = x != nullptr ? x->out : marker;
+     const u64 bytes = commands.size_bytes();
+-    const bool check = s.check_every != 0 && address != 0 && bytes != 0 && bytes <= CHECK_SZ &&
+-                       address >= GUEST_VA_LO && address + bytes <= GUEST_VA_HI && s.entries % s.check_every == 0;
+-    if (check) s.host->QueueCheckCopy(*c, words, address, bytes);
++    bool check = s.check_every != 0 && address != 0 && bytes != 0 && bytes <= CHECK_SZ && boundary &&
++                 address >= GUEST_VA_LO && address + bytes <= GUEST_VA_HI && s.entries % s.check_every == 0;
+     const auto start = std::chrono::steady_clock::now();
++    bool tail = true, flush = false, hold = false;
++    if (x != nullptr) {
++        if (!x->held) { // else the words of entries that ended inside a method run are still here
++            x->out.clear();
++            x->run_n = 0;
++            x->release = false;
++        }
++        Guarded(s, "words", [&](Host& h) {
++            Words w{s, h, *c, *x};
++            if (check) {
++                std::vector<NvU32> copy;
++                h.QueueCheckCopy(*c, copy, address, bytes);
++                if (x->cls[4] != 0 && x->cls[4] != AMPERE_DMA_COPY_B) {
++                    copy.insert(copy.end(), {Hdr(4, 0, 1), x->cls[4]});
++                    c->copy_bound = false;
++                }
++                w.Raw(copy);
++            }
++            if (boundary && x->invalidate) {
++                for (u32 sc = 0; sc < 8; ++sc) {
++                    if (x->cls[sc] == ADA_A || x->cls[sc] == ADA_COMPUTE_A) {
++                        w.Put(sc, Mthd::INVALIDATE_SHADER_CACHES, 1); // INSTRUCTION
++                    }
++                }
++                x->invalidate = false;
++                ++s.counts[Invalidates];
++            }
++            // MKW's GPU culling writes the parameters of macro draws into command memory (a 5-word entry that
++            // continues a call); Eglantine reads those words before the host GPU wrote them (a stale copy gives
++            // the host MME other parameters: 69 of 1617 such entries differ in MKW). EDEN_NX2_PASSTHROUGH_REREAD=1
++            // (bisecting) reads such an entry again once every channel ran what came before it: a CPU wait on
++            // the entry thread, which deadlocked against Eglantine. shortcut: Eglantine's words are used; a
++            // GPU-timeline copy of the parameters is the fix.
++            static const bool reread = [] {
++                const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_REREAD");
++                return v != nullptr && v[0] == '1';
++            }();
++            std::span<const u32> words{reinterpret_cast<const u32*>(commands.data()), commands.size()};
++            std::vector<u32> fresh;
++            if (reread && x->left >= commands.size() && x->left != 0 && x->cls[x->subc] == ADA_A && x->method >= Mthd::MACRO &&
++                address >= GUEST_VA_LO && (address & 0xFFF) + bytes <= 0x1000 && h.MirroredHost(address) != nullptr) {
++                const auto t0 = std::chrono::steady_clock::now();
++                if (!h.Drain()) throw Error("drain before a macro parameter entry", 0);
++                s.drain_time += std::chrono::steady_clock::now() - t0;
++                fresh.resize(commands.size());
++                std::memcpy(fresh.data(), h.MirroredHost(address), bytes);
++                s.counts[FreshDiffers] += std::memcmp(fresh.data(), commands.data(), bytes) != 0;
++                ++s.counts[ByReference];
++                words = fresh;
++            }
++            w.Run(words);
++        });
++        if (!s.host) return;
++        if (!x->traced.empty() && !x->in_call) { // the front ran calls the stream did not show here
++            s.counts[MacroUnpaired] += x->traced.size();
++            x->traced.clear();
++        }
++        tail = x->left == 0 && !x->in_call;
++        s.counts[MidRun] += !tail;
++        // An entry that ends inside a method run (MKW: a macro call whose parameters follow in the next entry)
++        // waits for its continuation: a host MME left mid-call while the channel is switched out raised Xid 13
++        // MISSING_MACRO_DATA.
++        hold = x->held = !tail;
++        check = check && tail;
++        flush = x->release;
++        s.counts[Releases] += flush;
++        if (!hold) s.counts[WordsOut] += x->out.size();
++    } else if (check) {
++        s.host->QueueCheckCopy(*c, out, address, bytes);
++    }
++    // EDEN_NX2_PASSTHROUGH_SYNC=1 (bisecting): wait for every entry, so the host GPU never runs behind Eglantine.
++    static const bool sync = [] {
++        const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_SYNC");
++        return v != nullptr && v[0] == '1';
++    }();
++    if (!submit) return; // words mode: translated, not submitted
++    // EDEN_NX2_PASSTHROUGH_WATCH=<va>[,<va>...] (bisecting, with SYNC): logs who changes those guest words:
++    // the host GPU while it ran an entry, or anyone else between two entries.
++    std::vector<NvU64>& watch = s.watch;
++    const auto read_watch = [&](size_t i) -> std::optional<u32> {
++        // Below the guest VA range: the low 20 bits of a VA a QMD releases to, until one does (VAs move).
++        const u8* p = watch[i] < GUEST_VA_LO ? nullptr : s.host->MirroredHost(watch[i]);
++        if (p == nullptr) return std::nullopt;
++        u32 v;
++        std::memcpy(&v, p, 4);
++        return v;
++    };
++    static std::vector<std::optional<u32>> watched;
++    watched.resize(watch.size());
++    for (size_t i = 0; i < watch.size(); ++i) {
++        const auto now = read_watch(i);
++        if (now != watched[i]) {
++            LOG_INFO(HW_GPU, "Nx2 passthrough watch: {:#x} = {:#x} before entry {} (channel {}), was {:#x}", watch[i],
++                     now.value_or(~0u), s.entries, channel, watched[i].value_or(~0u));
++        }
++        watched[i] = now;
++    }
++    c->cur_entry = s.entries;
++    c->cur_guest = address;
+     bool done = false;
+-    Guarded(s, "submit", [&](Host& h) { done = h.Submit(*c, words, check); });
++    Guarded(s, "submit", [&](Host& h) {
++        done = hold || h.Submit(*c, out, check || (sync && tail), tail, flush);
++        h.FlushStale();
++    });
++    // EDEN_NX2_PASSTHROUGH_SNAP=<seconds>:<va>:<size>:<file>[,...]: once that long after the backend came up,
++    // waits for the host channels and writes guest memory at va (what the host GPU rendered there) to file.
++    static auto snaps = [] {
++        std::vector<std::tuple<double, NvU64, NvU64, std::string>> out;
++        if (const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_SNAP")) {
++            std::string spec = v;
++            for (size_t at = 0; at < spec.size();) {
++                const size_t end = std::min(spec.find(',', at), spec.size());
++                const std::string one = spec.substr(at, end - at);
++                double sec = 0;
++                unsigned long long va = 0, size = 0;
++                char path[512]{};
++                if (std::sscanf(one.c_str(), "%lf:%llx:%llx:%511s", &sec, &va, &size, path) == 4) {
++                    out.emplace_back(sec, va, size, path);
++                }
++                at = end + 1;
++            }
++        }
++        return out;
++    }();
++    static const auto snap_start = std::chrono::steady_clock::now();
++    for (auto it = snaps.begin(); s.host && it != snaps.end();) {
++        auto [sec, va, size, path] = *it;
++        if (va == 0) va = s.output_target; // 0: the game's output
++        if (std::chrono::duration<double>(std::chrono::steady_clock::now() - snap_start).count() < sec) {
++            ++it;
++            continue;
++        }
++        Guarded(s, "snapshot", [&](Host& h) {
++            if (!h.Drain()) throw Error("drain for a snapshot", 0);
++            std::vector<u8> bytes(size);
++            NvU64 mapped = 0;
++            for (NvU64 o = 0; o < size; o += PAGE) {
++                const NvU64 n = std::min<NvU64>(PAGE, size - o);
++                if (const u8* src = h.MirroredHost(va + o)) {
++                    std::memcpy(bytes.data() + o, src, n);
++                    mapped += n;
++                }
++            }
++            if (FILE* f = std::fopen(path.c_str(), "wb")) {
++                std::fwrite(bytes.data(), 1, bytes.size(), f);
++                std::fclose(f);
++            }
++            if (va == 0) return;
++            LOG_INFO(HW_GPU, "Nx2 passthrough snapshot: {:#x} +{:#x} ({:#x} mapped) after entry {} -> {}", va, size,
++                     mapped, s.entries, path);
++        });
++        it = snaps.erase(it);
++    }
++    for (const auto& [qmd, slot] : s.copied_qmds) {
++        if (!s.host) break;
++        const u8* g = s.host->MirroredHost(qmd);
++        u32 gw[8]{};
++        if (g != nullptr) std::memcpy(gw, g + 96, sizeof(gw));
++        LOG_INFO(HW_GPU, "Nx2 passthrough watch: QMD {:#x} entry {} ({}): slot releases {:08x} {:08x} {:08x} | {:08x} "
++                 "{:08x} {:08x}, counter {:#x}; guest memory now {:08x} {:08x} {:08x} | {:08x} {:08x} {:08x}", qmd,
++                 s.entries, sync && tail ? "done" : "async", s.host->SlotWord(slot, 24), s.host->SlotWord(slot, 25),
++                 s.host->SlotWord(slot, 26), s.host->SlotWord(slot, 28), s.host->SlotWord(slot, 29),
++                 s.host->SlotWord(slot, 30), (s.host->SlotWord(slot, 4) >> 14) & 0xFFFF, gw[0], gw[1], gw[2], gw[4],
++                 gw[5], gw[6]);
++    }
++    s.copied_qmds.clear();
++    for (size_t i = 0; s.host && i < watch.size(); ++i) {
++        const auto now = read_watch(i);
++        if (now != watched[i]) {
++            LOG_INFO(HW_GPU, "Nx2 passthrough watch: {:#x} = {:#x} after entry {} at {:#x} (channel {}, {}), was {:#x}",
++                     watch[i], now.value_or(~0u), s.entries, address, channel, sync && tail ? "host GPU done" : "async",
++                     watched[i].value_or(~0u));
++        }
++        watched[i] = now;
++    }
+     if (!s.host) return;
+     if (!done) {
+         LOG_ERROR(HW_GPU, "Nx2 passthrough off: entry {:#x} not done within 2 s", address);
++        s.host->Postmortem();
+         s.host.reset();
+         return;
+     }
+@@ -1125,6 +2155,7 @@ void Shutdown() {
+     if (s.host) {
+         LOG_INFO(HW_GPU, "Nx2 passthrough: shutting down after {} entries", s.entries);
+         LogStats(s);
++        s.host->LogChannels();
+         s.host.reset();
+     }
+ }
+@@ -1151,6 +2182,9 @@ void OnUnmap(const void*, GPUVAddr, u64) {}
+ void OnGuestKind(GPUVAddr, u64, u32, u32) {}
+ void OnProgramBind(u32, GPUVAddr, bool) {}
+ void OnEntryDone(s32) {}
++void OnStep(s32) {}
++void OnComputeMacro() {}
++void OnComputeMacroEmit(u32, u32) {}
+ void Shutdown() {}
+ 
+ } // namespace Tegra::Nx2Passthrough
+diff --git a/src/video_core/nx2_passthrough.h b/src/video_core/nx2_passthrough.h
+index b04537843..3cfa7e549 100644
+--- a/src/video_core/nx2_passthrough.h
++++ b/src/video_core/nx2_passthrough.h
+@@ -16,7 +16,9 @@
+ // guest's device memory (Eglantine's host memory) is imported as OS descriptors and mapped inside it at the
+ // guest's own VAs with the guest's PTE kinds. EDEN_NX2_PASSTHROUGH_CHECK=<n>: every n-th entry the host copy
+ // engine reads the entry's words at their guest VA and compares them with what Eglantine parsed.
+-// The guest's own methods are not submitted yet; Vulkan still renders.
++// Step 3: bound pixel programs are patched for helper-lane loads in shadow pages.
++// EDEN_NX2_PASSTHROUGH_WORDS=1: the guest's own methods run on the host channels, copied with the host-class
++// rewrites (nx2_passthrough.cpp, Words); Vulkan still renders and presents.
+ namespace Tegra::Nx2Passthrough {
+ 
+ /// EDEN_NX2_PASSTHROUGH=1 (read once).
+@@ -26,6 +28,8 @@ bool Requested();
+ /// OnEntryDone once the entry's methods (and the program binds they make) have been processed.
+ void OnEntry(s32 channel, GPUVAddr address, std::span<const CommandHeader> commands);
+ void OnEntryDone(s32 channel);
++/// The DMA pusher works on `channel` (also when it resumes an entry after an acquire, without OnEntry).
++void OnStep(s32 channel);
+ 
+ /// The GPU memory manager `memory_manager` maps [gpu_addr, gpu_addr + size) to host memory `host` (one
+ /// contiguous run of the guest's device memory `guest_memory`). Only the first memory manager is followed.
+@@ -42,6 +46,12 @@ void OnGuestKind(GPUVAddr gpu_addr, u64 size, u32 kind, u32 fallback_kind);
+ /// (5: pixel), on the thread that parses its command lists, before the entry is done.
+ void OnProgramBind(u32 stage, GPUVAddr program, bool from_macro);
+ 
++/// The split front runs a compute macro on the entry thread while the entry is processed; its emitted
++/// methods follow. With EDEN_NX2_PASSTHROUGH_WORDS=1 they replace the call in the host's copy of the entry
++/// (the host MME writes an inline QMD one word late).
++void OnComputeMacro();
++void OnComputeMacroEmit(u32 method, u32 value);
++
+ /// Frees the host channel and RM client (also done at process exit).
+ void Shutdown();
+ 
+-- 
+2.56.0
+

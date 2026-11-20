@@ -1,0 +1,93 @@
+From b38bc8c7d5a7e7c6e9201bf1647d5923d83dc3d5 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 16:41:13 -0700
+Subject: [PATCH] nx2: passthrough backend: acquire waits measured per
+ semaphore
+
+EDEN_NX2_PASSTHROUGH_TIMES=1 also logs, every 5 s, the guest channels' acquire suspensions per (channel,
+semaphore): count, total and mean wait (Puller::ResumeAcquire). MKW race, sole async: ~800 suspensions/s,
+1.27 s/s of waiting summed over channels. Channel 2 waits on 0x2105849010 ~495 times a second (~40 a frame),
+~1 ms each (485 ms/s): a fine-grained handshake with channel 1 (which waits on 0x2105849000), every hop a
+host-GPU round trip through Eglantine's front; channels 1 and 2 also wait ~5 ms and ~8.5 ms on four
+per-frame semaphores at 0x21f6a97000-140 (~600 ms/s together).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/engines/puller.cpp  |  4 ++++
+ src/video_core/nx2_passthrough.cpp | 33 ++++++++++++++++++++++++++++++
+ src/video_core/nx2_passthrough.h   |  2 ++
+ 3 files changed, 39 insertions(+)
+
+diff --git a/src/video_core/engines/puller.cpp b/src/video_core/engines/puller.cpp
+index 5d0339aed..4d98ea2a6 100644
+--- a/src/video_core/engines/puller.cpp
++++ b/src/video_core/engines/puller.cpp
+@@ -327,6 +327,10 @@ bool Puller::ResumeAcquire(DmaPusher& dma_pusher) {
+     // counting those made the count odd ("suspended") at random, so submit-time snapshots were
+     // thrown away for about half of all entries (CommandList::snapshot_suspensions).
+     if (pending_acquire) {
++        if (Nx2Passthrough::Timing()) [[unlikely]] {
++            Nx2Passthrough::NoteAcquire(dma_pusher.channel_state.bind_id, pending_acquire->address,
++                                        (std::chrono::steady_clock::now() - pending_acquire->since).count());
++        }
+         // Latched only by GPU writes (Nx2SemaphoreWaiters::OnWrite): the CPU released it otherwise.
+         dma_pusher.resumed_by_gpu = Nx2SemaphoreWaiters::Get().Latched(this);
+         pending_acquire.reset();
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index 9f8aad3d6..b4581e02e 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -3973,4 +3973,37 @@ void NoteTime(Time what, u64 ns) {
+     LOG_INFO(HW_GPU, "Nx2 passthrough times: {}", line);
+ }
+ 
++void NoteAcquire(s32 channel, GPUVAddr address, u64 ns) {
++    struct Wait {
++        u64 count = 0, ns = 0;
++    };
++    static std::mutex m;
++    static std::map<std::pair<s32, GPUVAddr>, Wait> waits;
++    static auto window = std::chrono::steady_clock::now();
++    std::scoped_lock lk{m};
++    Wait& w = waits[{channel, address}];
++    ++w.count;
++    w.ns += ns;
++    const auto now = std::chrono::steady_clock::now();
++    if (now - window < std::chrono::seconds(5)) return;
++    const double secs = std::chrono::duration<double>(now - window).count();
++    window = now;
++    std::vector<std::pair<std::pair<s32, GPUVAddr>, Wait>> top(waits.begin(), waits.end());
++    std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second.ns > b.second.ns; });
++    u64 total = 0, count = 0;
++    for (const auto& [k, v] : top) {
++        total += v.ns;
++        count += v.count;
++    }
++    std::string line;
++    for (size_t i = 0; i < std::min<size_t>(top.size(), 8); ++i) {
++        line += fmt::format("; ch {} {:#x}: {:.0f}/s, {:.1f} ms/s, mean {:.0f} us", top[i].first.first, top[i].first.second,
++                            double(top[i].second.count) / secs, double(top[i].second.ns) / 1e6 / secs,
++                            double(top[i].second.ns) / 1e3 / double(top[i].second.count));
++    }
++    LOG_INFO(HW_GPU, "Nx2 passthrough acquire waits: {:.0f}/s, {:.1f} ms/s over {} semaphores{}", double(count) / secs,
++             double(total) / 1e6 / secs, top.size(), line);
++    waits.clear();
++}
++
+ } // namespace Tegra::Nx2Passthrough
+diff --git a/src/video_core/nx2_passthrough.h b/src/video_core/nx2_passthrough.h
+index 241b94643..60925797d 100644
+--- a/src/video_core/nx2_passthrough.h
++++ b/src/video_core/nx2_passthrough.h
+@@ -122,6 +122,8 @@ void DeferToBack(std::function<void()> f);
+ enum class Time : u32 { FrontIdle, FrontAcquire, PresentFront, PresentBack, WaitHost, Count };
+ bool Timing();
+ void NoteTime(Time what, u64 ns);
++/// The same: a guest channel resumed after waiting `ns` on the semaphore at `address` (top waits logged).
++void NoteAcquire(s32 channel, GPUVAddr address, u64 ns);
+ 
+ /// Frees the host channel and RM client (also done at process exit).
+ void Shutdown();
+-- 
+2.56.0
+

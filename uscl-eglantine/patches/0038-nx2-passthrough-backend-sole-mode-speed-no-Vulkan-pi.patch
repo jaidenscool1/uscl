@@ -1,0 +1,174 @@
+From 0a2b95fdb0c3c25ffbee209ddebb71f8f662b305 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 16:45:46 -0700
+Subject: [PATCH] nx2: passthrough backend: sole mode speed: no Vulkan pipeline
+ builds, no writer waits, cheaper store and scanner
+
+Racing went from ~16.6 to ~19.9 fps (chunks 4-11), frames still right (0 washed):
+- Sole mode draws nothing with Vulkan: the disk shader cache's pipelines are not
+  built (they took ~1.5 cores through boot and the race;
+  EDEN_NX2_PASSTHROUGH_DISK_PIPELINES=1 builds them).
+- The front no longer waits for the back to run queued compute/copy work before
+  each entry (WaitForWriters): in sole mode the back runs none of it.
+- The pool scanner compares a window around the pages seen changing every 2 ms
+  and the whole pool every ~20 ms (streaming 4 MiB twice every 2 ms cost ~2 fps).
+- The upload store is an ordered map: an overlay is a range lookup, and pages
+  without store words keep the fast paths (the 100 ms header refresh read every
+  pool page through 1024 hash lookups: ~3 fps).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/dma_pusher.cpp                 |  5 ++-
+ src/video_core/nx2_passthrough.cpp            | 41 ++++++++++++++-----
+ .../renderer_vulkan/vk_rasterizer.cpp         |  5 +++
+ 3 files changed, 39 insertions(+), 12 deletions(-)
+
+diff --git a/src/video_core/dma_pusher.cpp b/src/video_core/dma_pusher.cpp
+index ea972bcde..3e0a6d3b9 100644
+--- a/src/video_core/dma_pusher.cpp
++++ b/src/video_core/dma_pusher.cpp
+@@ -258,8 +258,11 @@ bool DmaPusher::Step() {
+             const char* text = std::getenv("EDEN_NX2_ENTRY_WRITER_STATS");
+             return text != nullptr ? std::atoi(text) : 0;
+         }();
++        // Sole passthrough mode: the back runs no compute or copy work (the host GPU does) and marks no pages, so
++        // waiting for it to get past them only stalled the front (~25% of its time in pf3); GPU-written words are
++        // the passthrough's (BeforeEntry above, macro parameters by reference).
+         if (!skip_record_read && !gpu_written && VideoCommon::GpuSplit::Get().Active() &&
+-            entry_writer_stats != 2 &&
++            entry_writer_stats != 2 && !Nx2Passthrough::Sole() &&
+             VideoCommon::GpuSplit::Get().WaitForWriters()) {
+             gpu_written =
+                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index 5e94baeee..c53e7733e 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -480,6 +480,7 @@ public:
+     /// Sole mode, upload store on (State): lays the uploaded words the stream has and memory may not over
+     /// guest bytes read at va (the host wrote them only into a shadow page, or not yet, or into its L2).
+     std::function<void(NvU64, std::span<u8>)> overlay;
++    std::function<bool(NvU64, size_t)> overlay_any; // whether the store has words in [va, va + size)
+     NvU64 quiesces = 0;
+     std::array<NvU64, 3> quiesce_sites{}; // new shadow page, shadow write, (unused)
+     std::vector<u8> shadow_copy = std::vector<u8>(SHADOW_POOL); // what the shadow pool holds (CPU side)
+@@ -845,7 +846,8 @@ public:
+                     const size_t n = std::min<size_t>(PAGE, bytes - o);
+                     const u8* src = MirroredHost(va + o);
+                     const bool whole = src != nullptr && MirroredHost(va + o + n - 1) == src + n - 1;
+-                    if (whole && !overlay && !pool.dirty.contains(o) && std::memcmp(src, pool.copy.data() + o, n) == 0) {
++                    if (whole && !(overlay_any && overlay_any(va + o, n)) && !pool.dirty.contains(o) &&
++                        std::memcmp(src, pool.copy.data() + o, n) == 0) {
+                         continue;
+                     }
+                     std::vector<u8> page(n);
+@@ -2147,7 +2149,7 @@ private:
+ 
+     /// Whether guest memory at va still holds `bytes` (compared in place; with the upload store over it).
+     bool GuestEquals(NvU64 va, std::span<const u8> bytes) const {
+-        if (overlay) {
++        if (overlay_any && overlay_any(va, bytes.size())) {
+             std::vector<u8> cur(bytes.size());
+             return ReadGuest(va, cur) == bytes.size() && std::memcmp(cur.data(), bytes.data(), bytes.size()) == 0;
+         }
+@@ -2893,7 +2895,7 @@ struct State {
+         Host::Channel* c;
+         NvU32 fence = 0;
+     };
+-    std::unordered_map<NvU64, Upload> i2m;
++    std::map<NvU64, Upload> i2m; // ordered: readers lay a range over guest memory (StoreOverlay)
+     // The submission that carries each promised VA's last write: once the host passed it, memory's value is the
+     // promise (MKW's NVN fence slots are reset to 0 every frame by a write the translator does not see).
+     std::unordered_map<NvU64, std::pair<Host::Channel*, NvU32>> last_write;
+@@ -2924,6 +2926,8 @@ void ScanPools(State& s, std::chrono::microseconds period) {
+     std::vector<std::tuple<NvU64, const u8*, size_t>> pages;
+     std::vector<NvU64> changed;
+     NvU64 pages_gen = ~NvU64{0};
++    u64 scans = 0;
++    std::vector<size_t> recent; // indices (into pages) of the last pages seen changing
+     while (!s.poller_stop.load(std::memory_order_relaxed)) {
+         std::this_thread::sleep_for(period);
+         {
+@@ -2933,12 +2937,21 @@ void ScanPools(State& s, std::chrono::microseconds period) {
+             const NvU64 gen = s.host->rm_maps + s.host->rm_unmaps + s.host->kind_changes + s.host->PoolBytes();
+             if (gen != pages_gen) {
+                 pages_gen = gen;
++                recent.clear();
+                 pages.clear();
+                 s.host->PoolPages(pages);
+             }
+         }
++        // The guest's rewrites move through the pool like a ring: between whole scans (every 10th, ~20 ms) only
++        // the pages near the ones that changed lately are compared (the whole 4 MiB pool and its copy every 2 ms
++        // kept evicting the cache the other threads use: -2 fps).
++        const bool whole = ++scans % 10 == 0;
+         changed.clear();
+-        for (const auto& [va, src, n] : pages) {
++        for (size_t i = 0; i < pages.size(); ++i) {
++            const auto& [va, src, n] = pages[i];
++            if (!whole && !std::any_of(recent.begin(), recent.end(), [&](size_t r) { return i + 16 >= r && i <= r + 16; })) {
++                continue;
++            }
+             auto& copy = seen[va];
+             if (copy.size() != n) {
+                 copy.assign(src, src + n);
+@@ -2947,6 +2960,10 @@ void ScanPools(State& s, std::chrono::microseconds period) {
+             if (std::memcmp(copy.data(), src, n) == 0) continue;
+             std::memcpy(copy.data(), src, n);
+             changed.push_back(va);
++            if (std::find(recent.begin(), recent.end(), i) == recent.end()) {
++                if (recent.size() >= 8) recent.erase(recent.begin());
++                recent.push_back(i);
++            }
+         }
+         if (changed.empty()) continue;
+         std::scoped_lock lk{s.mutex};
+@@ -3028,12 +3045,8 @@ void StoreOverlay(State& s, NvU64 va, std::span<u8> bytes) {
+         }
+         return landed;
+     };
+-    if (s.i2m.size() * 4 < bytes.size()) {
+-        std::erase_if(s.i2m, [&](const auto& kv) { return kv.first >= va && kv.first + 4 <= va + bytes.size() && lay(kv.first, kv.second); });
+-        return;
+-    }
+-    for (NvU64 at = (va + 3) & ~NvU64{3}; at + 4 <= va + bytes.size(); at += 4) {
+-        if (const auto it = s.i2m.find(at); it != s.i2m.end() && lay(at, it->second)) s.i2m.erase(it);
++    for (auto it = s.i2m.lower_bound(va); it != s.i2m.end() && it->first + 4 <= va + bytes.size();) {
++        it = lay(it->first, it->second) ? s.i2m.erase(it) : std::next(it);
+     }
+ }
+ 
+@@ -3061,7 +3074,13 @@ bool Ready(State& s) {
+             if (!host->KindMapSelfTest()) throw Error("kind map self-test", 0);
+             if (!Xlate::EncoderSelfTest()) throw Error("encoder self-test", 0);
+             host->live = s.submit_words;
+-            if (SoleUploads()) host->overlay = [&s](NvU64 va, std::span<u8> bytes) { StoreOverlay(s, va, bytes); };
++            if (SoleUploads()) {
++                host->overlay = [&s](NvU64 va, std::span<u8> bytes) { StoreOverlay(s, va, bytes); };
++                host->overlay_any = [&s](NvU64 va, size_t size) {
++                    const auto it = s.i2m.lower_bound(va);
++                    return it != s.i2m.end() && it->first < va + size;
++                };
++            }
+             s.host = std::move(host);
+             if (Sole()) s.poller = std::thread([&s] { Poll(s); });
+             static const auto scan = std::chrono::microseconds([] {
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index cce574043..28988a5de 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -3105,6 +3105,11 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
+ 
+ void RasterizerVulkan::LoadDiskResources(u64 title_id, std::stop_token stop_loading,
+                                          const VideoCore::DiskResourceLoadCallback& callback) {
++    // Passthrough sole mode draws nothing with Vulkan: building the disk cache's pipelines took ~1.5 cores
++    // through boot and the race (pf1). EDEN_NX2_PASSTHROUGH_DISK_PIPELINES=1: built anyway (measuring).
++    if (Tegra::Nx2Passthrough::Sole() && std::getenv("EDEN_NX2_PASSTHROUGH_DISK_PIPELINES") == nullptr) {
++        return;
++    }
+     pipeline_cache.LoadDiskResources(title_id, stop_loading, callback);
+ }
+ 
+-- 
+2.56.0
+

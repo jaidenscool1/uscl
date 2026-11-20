@@ -1,0 +1,256 @@
+From 256b9ba07d13b6a683791b7bb2b80c9ff032bb4d Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 13:12:13 -0700
+Subject: [PATCH 24/25] nx2: passthrough backend: transcoded textures in video
+ memory, read after the host's uploads
+
+- Each 256 MiB ASTC arena chunk gets a video memory twin while EDEN_NX2_PASSTHROUGH_ASTC_VRAM_MB allows (2048
+  in sole mode): decoded textures are copied into it with the copy engine (one waited submission per pool
+  refresh) and the headers point there, so the GPU no longer samples them over PCIe.
+- Sole mode: a texture's guest bytes are read once the host GPU passed what was submitted when its header
+  was first seen (the host's copies upload texture data; read earlier, an upload in flight was decoded
+  black for good: a racer and Lakitu came out as black silhouettes).
+- Pools are translated again only on the pages whose headers wait for a finished copy or for their data
+  (every page after each decode: 42M header rewrites in an MKW race; now ~0.3M).
+
+MKW, async sole mode: race 27.5 / 27.8 fps (26.8 / 26.3 before), 2 GiB of textures in video memory.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/nx2_passthrough.cpp | 139 ++++++++++++++++++++++++++---
+ 1 file changed, 125 insertions(+), 14 deletions(-)
+
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index ccbf2d617..b095cb41f 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -554,26 +554,73 @@ public:
+         if (pools.empty() || epoch == pools_epoch || astc_cpu == nullptr) return;
+         pools_epoch = epoch;
+         GrowAstc();
+-        bool fresh = false;
++        ReadAstc();
++        // Only the pages of headers whose copy got ready (or that wait for their texture's data) are translated
++        // again: translating every pool page after each decode rewrote 42M headers in an MKW race.
++        std::vector<NvU64> touch(retry.begin(), retry.end());
++        retry.clear();
++        std::vector<NvU32> copies; // into the chunks' video memory twins, before the headers point there
+         {
+             std::scoped_lock lk{astc_mutex};
+             for (auto& [header, result] : astc_done) {
++                if (const auto w = waiting.find(header); w != waiting.end()) {
++                    touch.insert(touch.end(), w->second.begin(), w->second.end());
++                    waiting.erase(w);
++                }
+                 if (result == std::pair<NvU64, u32>{0, 1}) { // no committed room yet: queued again later
+                     astc_queued.erase(header);
+-                    fresh = true;
+                     continue;
+                 }
++                if (result.first != 0) {
++                    const NvU64 src = result.first;
++                    for (size_t c = 0; c < astc_chunks.size() && c < astc_vram.size(); ++c) {
++                        if (astc_vram[c] == 0 || result.first < astc_chunks[c] || result.first >= astc_chunks[c] + ASTC_CHUNK) {
++                            continue;
++                        }
++                        const NvU64 dst = astc_vram[c] + (result.first - astc_chunks[c]);
++                        const NvU64 bytes = astc_sizes[result.first];
++                        copies.insert(copies.end(), {Hdr(4, NVC7B5_OFFSET_IN_UPPER, 4), static_cast<NvU32>(result.first >> 32),
++                                                     static_cast<NvU32>(result.first), static_cast<NvU32>(dst >> 32),
++                                                     static_cast<NvU32>(dst), Hdr(4, NVC7B5_LINE_LENGTH_IN, 2),
++                                                     static_cast<NvU32>(bytes), 1, Hdr(4, NVC7B5_LAUNCH_DMA, 1),
++                                                     DRF_DEF(C7B5, _LAUNCH_DMA, _DATA_TRANSFER_TYPE, _NON_PIPELINED) |
++                                                         DRF_DEF(C7B5, _LAUNCH_DMA, _FLUSH_ENABLE, _TRUE) |
++                                                         DRF_DEF(C7B5, _LAUNCH_DMA, _SRC_MEMORY_LAYOUT, _PITCH) |
++                                                         DRF_DEF(C7B5, _LAUNCH_DMA, _DST_MEMORY_LAYOUT, _PITCH)});
++                        astc_in_vram += bytes;
++                        result.first = dst;
++                        break;
++                    }
++                    astc_sizes.erase(src);
++                }
+                 decoded[header] = result;
+-                fresh = true;
+                 result.first != 0 ? ++astc_decoded : ++astc_failed;
+             }
+             astc_done.clear();
+         }
++        for (size_t at = 0; at < copies.size();) { // at most 4096 copies a submission
++            const size_t n = std::min<size_t>(copies.size() - at, 4096 * 10);
++            Channel& c = ChannelFor(-1);
++            std::vector<NvU32> w;
++            if (!c.copy_bound) {
++                w.insert(w.end(), {Hdr(4, 0, 1), AMPERE_DMA_COPY_B});
++                c.copy_bound = true;
++            }
++            w.insert(w.end(), copies.begin() + at, copies.begin() + at + n);
++            if (!Submit(c, w, true)) throw Error("copy decoded textures to video memory", 0);
++            at += n;
++        }
++        for (const NvU64 a : touch) {
++            auto it = pools.upper_bound(a);
++            if (it == pools.begin()) continue;
++            --it;
++            if (a < it->first + u64{it->second.count} * 32) it->second.dirty.insert((a - it->first) & ~(PAGE - 1));
++        }
+         for (auto& [va, pool] : pools) {
+             const size_t bytes = size_t{pool.count} * 32;
+             std::vector<u8> cur(bytes);
+             cur.resize(ReadGuest(va, cur));
+-            const bool full = pool.full || fresh || pool.copy.size() != cur.size();
++            const bool full = pool.full || pool.copy.size() != cur.size();
+             if (pool.full) ShadowRange(va, cur.size());
+             for (size_t o = 0; o < cur.size(); o += PAGE) {
+                 const size_t n = std::min<size_t>(PAGE, cur.size() - o);
+@@ -631,7 +678,11 @@ public:
+         }
+         // Decoded once the game samples it (Eglantine's texture cache read it); in sole mode Eglantine binds no
+         // textures, so every header of a pool counts.
+-        if (astc_queued.contains(h) || (!Sole() && !used_headers.contains(header_va))) return;
++        if (!Sole() && !used_headers.contains(header_va)) return;
++        if (astc_queued.contains(h)) {
++            waiting[h].insert(header_va); // its page is translated again when the copy is ready
++            return;
++        }
+         Tegra::Texture::TICEntry tic{};
+         std::memcpy(&tic, h.data(), 32);
+         const VideoCommon::ImageInfo info(tic);
+@@ -657,15 +708,52 @@ public:
+         const size_t probe = std::min<size_t>(guest_size, head.size());
+         if (ReadGuest(tic.Address(), std::span<u8>(head).first(probe)) != probe ||
+             std::all_of(head.begin(), head.begin() + probe, [](u8 b) { return b == 0; })) {
+-            return; // not there yet: looked at again at a later refresh
++            retry.insert(header_va); // not there yet: looked at again at the next refresh
++            return;
+         }
+-        AstcJob job{h, std::vector<u8>(guest_size)};
+-        if (ReadGuest(tic.Address(), job.guest) != guest_size) return;
+         astc_queued.insert(h);
++        waiting[h].insert(header_va);
++        // Sole mode: the host GPU's copies write texture data; read it once what was submitted so far ran (read
++        // earlier, an upload still in flight was decoded black for good).
++        std::vector<std::pair<Channel*, NvU32>> after;
++        if (Sole()) {
++            for (auto& [guest, c] : channels) {
++                if (!c.pending.empty()) after.emplace_back(&c, c.fence);
++            }
++        }
++        astc_reading.push_back({h, tic.Address(), guest_size, std::move(after)});
++    }
++
++    /// Entry thread: textures whose data the host GPU has finished writing are read and handed to the workers.
++    void ReadAstc() {
++        std::vector<AstcJob> ready;
++        std::erase_if(astc_reading, [&](AstcRead& r) {
++            if (!std::all_of(r.after.begin(), r.after.end(), [](const auto& f) { return PassedFence(*f.first, f.second); })) {
++                return false;
++            }
++            AstcJob job{r.header, std::vector<u8>(r.size)};
++            if (ReadGuest(r.address, job.guest) != r.size) { // unmapped meanwhile: looked at again
++                astc_queued.erase(r.header);
++                if (const auto w = waiting.find(r.header); w != waiting.end()) {
++                    retry.insert(w->second.begin(), w->second.end());
++                    waiting.erase(w);
++                }
++                return true;
++            }
++            ready.push_back(std::move(job));
++            return true;
++        });
++        if (ready.empty()) return;
+         std::scoped_lock lk{astc_mutex};
+-        astc_jobs.push_back(std::move(job));
+-        astc_cv.notify_one();
++        for (auto& job : ready) astc_jobs.push_back(std::move(job));
++        astc_cv.notify_all();
+     }
++    struct AstcRead {
++        Header header;
++        NvU64 address, size;
++        std::vector<std::pair<Channel*, NvU32>> after; // host fences to pass first (sole mode)
++    };
++    std::vector<AstcRead> astc_reading;
+ 
+     /// Logs (8 times) a used header whose texture lies outside the guest range and the arena (Xid 31 hunt).
+     void CheckHeaderAddress(const Header& h, NvU64 header_va, const char* what) {
+@@ -677,6 +765,9 @@ public:
+             for (const NvU64 c : astc_chunks) {
+                 if (a >= c && a < c + ASTC_CHUNK) return;
+             }
++            for (const NvU64 c : astc_vram) {
++                if (c != 0 && a >= c && a < c + ASTC_CHUNK) return;
++            }
+         }
+         if (++odd_headers <= 8) {
+             LOG_WARNING(HW_GPU, "Nx2 passthrough: {} header at {:#x} points at {:#x}: {:08x} {:08x} {:08x} {:08x} {:08x} "
+@@ -1021,7 +1112,7 @@ public:
+     std::atomic<std::chrono::nanoseconds::rep> vt_busy{0};
+ 
+     void SetMemoryManager(Tegra::MemoryManager* mm) { memory_manager = mm; }
+-    NvU64 astc_decoded = 0, astc_failed = 0, astc_too_large = 0, astc_headers = 0;
++    NvU64 astc_decoded = 0, astc_failed = 0, astc_too_large = 0, astc_headers = 0, astc_in_vram = 0;
+     NvU64 AstcArenaUsed() const { return astc_used.load(); }
+ 
+ private:
+@@ -1061,6 +1152,21 @@ private:
+             if (have > cur + 2 || NvU64{have + 1} * ASTC_CHUNK > astc_size) return;
+             const NvU64 gva = MapGpu(ImportHost(astc_cpu + have * ASTC_CHUNK, ASTC_CHUNK, 0x73000000u + static_cast<NvU32>(have)),
+                                      ASTC_CHUNK);
++            // EDEN_NX2_PASSTHROUGH_ASTC_VRAM_MB (2048 in sole mode): chunks get a video memory twin the decoded
++            // textures are copied into (the GPU samples them every frame; over PCIe from host memory otherwise).
++            static const NvU64 vram_budget = [] {
++                const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_ASTC_VRAM_MB");
++                return (v != nullptr ? std::strtoull(v, nullptr, 0) : (Sole() ? 2048ull : 0ull)) << 20;
++            }();
++            NvU64 twin = 0;
++            if (NvU64{have + 1} * ASTC_CHUNK <= vram_budget) {
++                try {
++                    twin = MapGpu(AllocVidmem(ASTC_CHUNK, false), ASTC_CHUNK);
++                } catch (const Error& e) {
++                    LOG_WARNING(HW_GPU, "Nx2 passthrough: no video memory for ASTC chunk {} (status {:#x})", have, e.status);
++                }
++            }
++            astc_vram.push_back(twin);
+             std::scoped_lock lk{astc_mutex};
+             astc_chunks.push_back(gva);
+         }
+@@ -1176,6 +1282,7 @@ private:
+             va = astc_chunks[astc_chunk] + astc_offset;
+             astc_offset += size;
+             astc_used += size;
++            astc_sizes[va] = swizzled.size();
+         }
+         std::memcpy(astc_cpu + cpu_off, swizzled.data(), swizzled.size());
+         return {va, rgba_only ? 0x08u : bc1 ? 0x24u : 0x26u}; // A8B8G8R8, DXT1, DXT45
+@@ -1335,11 +1442,15 @@ private:
+     std::map<Header, std::pair<NvU64, u32>> decoded; // entry thread: header -> its copy's VA (0: raw), format
+     std::set<Header> astc_queued;
+     std::set<NvU64> used_headers; // header VAs Eglantine sampled
++    std::map<Header, std::set<NvU64>> waiting; // queued textures: the header VAs that show them
++    std::set<NvU64> retry;                     // headers whose texture data was not there yet
+     Tegra::MemoryManager* memory_manager = nullptr;
+     std::mutex astc_mutex;
+     std::condition_variable astc_cv;
+     std::deque<AstcJob> astc_jobs;
+     std::vector<std::pair<Header, std::pair<NvU64, u32>>> astc_done;
++    std::unordered_map<NvU64, NvU64> astc_sizes; // decoded copies not copied on yet: bytes (astc_mutex)
++    std::vector<NvU64> astc_vram;                // per chunk: its video memory twin's VA (0: none; entry thread)
+     bool astc_stop = false;
+     std::vector<std::thread> astc_threads;
+     u8* astc_cpu = nullptr;
+@@ -2271,9 +2382,9 @@ void LogStats(State& s) {
+         for (size_t i = 0; i < CountEnd; ++i) {
+             if (s.counts[i] != 0) line += fmt::format("{}{} {}", line.empty() ? "" : ", ", s.counts[i], COUNT_NAMES[i]);
+         }
+-        LOG_INFO(HW_GPU, "Nx2 passthrough ASTC: {} textures decoded ({} MiB), {} failed, {} left raw (too large), {} "
+-                 "headers repointed", h.astc_decoded, h.AstcArenaUsed() >> 20, h.astc_failed, h.astc_too_large,
+-                 h.astc_headers);
++        LOG_INFO(HW_GPU, "Nx2 passthrough ASTC: {} textures decoded ({} MiB, {} MiB in video memory), {} failed, {} "
++                 "left raw (too large), {} headers repointed", h.astc_decoded, h.AstcArenaUsed() >> 20,
++                 h.astc_in_vram >> 20, h.astc_failed, h.astc_too_large, h.astc_headers);
+         if (Sole()) {
+             LOG_INFO(HW_GPU, "Nx2 passthrough sole: {} syncpoint callbacks after the host GPU, {} at once, {} armed; "
+                      "{} MiB of GPU-only memory in video memory ({} allocations)", s.after_run, s.after_now,
+-- 
+2.56.0
+

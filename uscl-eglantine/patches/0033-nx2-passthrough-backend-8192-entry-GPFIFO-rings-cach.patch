@@ -1,0 +1,317 @@
+From c6b6dfc289e25ebc5810bdfb87659606481137e2 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 20:49:29 -0700
+Subject: [PATCH 33/35] nx2: passthrough backend: 8192-entry GPFIFO rings,
+ cached guest memory switch, GPU time profiler
+
+- GPFIFO rings of 8192 entries (was 1024): with hardware acquires the front runs ahead, and a frame is ~8k guest
+  entries; with 1024 it spun on a full ring (reading the fence over the BAR), unable to parse the channel the
+  blocked one waited for. MKW racing ~17 -> ~21 fps.
+- EDEN_NX2_PASSTHROUGH_SYSMEM_CACHED=1: guest system memory (and VT copies) GPU-cacheable, as on the console; the
+  guest's own L2_SYSMEM_INVALIDATE / L2_FLUSH_DIRTY (~8 a frame) keep it coherent. PCIe reads 2-5.7 -> 1.3-3 GB/s.
+- Acquires the backend inserts yield the GPU (ACQUIRE_SWITCH_TSG).
+- Measuring: EDEN_NX2_PASSTHROUGH_GPUTIME=1 (GPU time per channel and per program, WFI timestamps around every
+  submission), EDEN_NX2_PASSTHROUGH_WHERE=1 (where each colour target lives).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/nx2_passthrough.cpp | 153 +++++++++++++++++++++++++++--
+ 1 file changed, 144 insertions(+), 9 deletions(-)
+
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index f7d6bc96d..05c07166c 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -101,7 +101,7 @@ namespace {
+ 
+ // Channel memory (video memory, CPU-mapped write-combined): GPFIFO ring, USERD, semaphore, pushbuffer, and the
+ // buffer the live check copies guest words into.
+-constexpr NvU64 CH_SZ = 8 << 20, RING = 0, USERD = 0x2000, SEM = 0x3000, PB = 0x10000, CHECK = 4 << 20;
++constexpr NvU64 CH_SZ = 8 << 20, RING = 0, USERD = 0x10000, SEM = 0x11000, PB = 0x20000, CHECK = 4 << 20;
+ constexpr NvU64 CHECK_SZ = CH_SZ - CHECK;
+ // The guest's GPU VA range (MKW: 0x114b41b000-0x86a91c6000, one memory manager) is one RM sparse range: an
+ // address nothing maps reads 0 and drops writes instead of faulting. The channel's own memory lies below it.
+@@ -109,7 +109,11 @@ constexpr NvU64 GUEST_VA_LO = 1ull << 36, GUEST_VA_HI = 1ull << 40;
+ // Guest memory is imported (pinned) in granules on first use: measured ~210 ms per GiB, no size limit up to
+ // 12 GiB (nvrm_probe guestvm), so only memory the guest maps for the GPU is pinned.
+ constexpr NvU64 GRANULE = 64ull << 20;
+-constexpr NvU32 ENTRIES = 0x400;
++// 8192 GPFIFO entries (64 KiB, below USERD): with hardware acquires the front runs ahead of the GPU, and a frame is
++// ~8k guest entries; with 1024 the front spun on a full ring (reading the fence over the BAR), unable to parse the
++// channel the blocked one waited for.
++constexpr NvU32 ENTRIES = 0x2000;
++static_assert(RING + ENTRIES * 8 <= USERD);
+ // Patched pixel programs: shadow copies of the 4 KiB guest pages they lie in (mapped at the guest VAs instead of
+ // the guest's pages) and the helper-load trampolines, both in video memory the CPU writes.
+ constexpr NvU64 PAGE = 0x1000, SHADOW_POOL = 32ull << 20, ARENA = 8ull << 20;
+@@ -147,6 +151,14 @@ std::mutex gpu_done_mutex;
+ std::vector<GpuBlocks> gpu_done;   // (gpu_done_mutex)
+ std::atomic<u64> gpu_in_flight{0}; // decode image bytes on the Vulkan device
+ 
++/// EDEN_NX2_PASSTHROUGH_GPUTIME=1 (measuring): every submission is timed on the GPU (a WFI timestamp before and after
++/// its words: serializes each channel) and the poller logs, every 5 s, GPU time per channel and per signature (the
++/// compute program a submission's dispatch runs, else the pixel program bound when it was submitted).
++bool GpuTime() {
++    static const bool on = std::getenv("EDEN_NX2_PASSTHROUGH_GPUTIME") != nullptr;
++    return on;
++}
++
+ class Host {
+ public:
+     ~Host() {
+@@ -249,7 +261,15 @@ public:
+         };
+         std::deque<Pending> pending;
+         NvU64 head = 0; // next free pushbuffer word
++        // EDEN_NX2_PASSTHROUGH_GPUTIME: per fence slot, GPU timestamps before and after the submission's words.
++        volatile NvU8* gt_cpu = nullptr;
++        NvU64 gt_gva = 0;
++        std::vector<std::pair<s32, NvU64>> gt_meta; // guest channel, signature
++        NvU32 gt_done = 0;
++        s32 gt_guest = 0;
++        NvU64 gt_sig = 0;
+     };
++    static constexpr NvU64 GT_SLOTS = 16384;
+     static constexpr NvU64 PB_WORDS = (CHECK - PB) / 4;
+     static constexpr NvU64 COPY_SEM = SEM + 0x10;
+ 
+@@ -300,6 +320,12 @@ public:
+         c.token = tok.workSubmitToken;
+         *reinterpret_cast<volatile NvU32*>(c.cpu + SEM) = 0;
+         *reinterpret_cast<volatile NvU32*>(c.cpu + COPY_SEM) = 0;
++        if (GpuTime()) {
++            const NvHandle gt = AllocVidmem(GT_SLOTS * 32);
++            c.gt_cpu = static_cast<volatile NvU8*>(MapCpu(gt, GT_SLOTS * 32, DRF_DEF(OS33, _FLAGS, _CACHING_TYPE, _WRITECOMBINED)));
++            c.gt_gva = MapGpu(gt, GT_SLOTS * 32);
++            c.gt_meta.resize(GT_SLOTS);
++        }
+         LOG_INFO(HW_GPU, "Nx2 passthrough: host channel for guest channel {} (token {:#x}, preemption {})", guest,
+                  c.token, preempt ? "GFXP/CILP" : "default");
+         return c;
+@@ -322,6 +348,22 @@ public:
+                                                   (wfi ? DRF_DEF(C56F, _SEM_EXECUTE, _RELEASE_WFI, _EN)
+                                                         : DRF_DEF(C56F, _SEM_EXECUTE, _RELEASE_WFI, _DIS)) |
+                                                   DRF_DEF(C56F, _SEM_EXECUTE, _PAYLOAD_SIZE, _32BIT))};
++        std::vector<NvU32> timed;
++        if (c.gt_cpu != nullptr && tail && ref_n == 0) {
++            const NvU64 slot = fence % GT_SLOTS, at_ts = c.gt_gva + slot * 32;
++            c.gt_meta[slot] = {c.gt_guest, c.gt_sig};
++            const auto ts = [&](NvU64 va, bool wfi_ts) {
++                timed.insert(timed.end(), {Hdr(0, NVC56F_SEM_ADDR_LO, 5), static_cast<NvU32>(va), static_cast<NvU32>(va >> 32),
++                                           fence, 0,
++                                           static_cast<NvU32>(DRF_DEF(C56F, _SEM_EXECUTE, _OPERATION, _RELEASE) |
++                                                              DRF_DEF(C56F, _SEM_EXECUTE, _RELEASE_TIMESTAMP, _EN) |
++                                                              (wfi_ts ? DRF_DEF(C56F, _SEM_EXECUTE, _RELEASE_WFI, _EN) : 0))});
++            };
++            ts(at_ts, true); // the work before is done: what follows starts on an idle channel
++            timed.insert(timed.end(), words.begin(), words.end());
++            ts(at_ts + 16, true);
++            words = timed;
++        }
+         const NvU64 n = words.size() + (tail ? 6 : 0);
+         if (n == 0) return true;
+         if (n >= PB_WORDS / 2) return false;
+@@ -1686,9 +1728,15 @@ private:
+             p.hDma = v.obj;
+             p.hMemory = mem;
+             p.length = VT_PAGE;
+-            // Not cached in L2: cells are rewritten by the CPU.
++            // Not cached in L2: cells are rewritten by the CPU. EDEN_NX2_PASSTHROUGH_SYSMEM_CACHED=1: cached too (the
++            // guest's own L2_SYSMEM_INVALIDATEs, several a frame, drop rewritten cells; a cell rewritten mid-frame
++            // races with its sampling either way).
++            static const bool cached = [] {
++                const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_SYSMEM_CACHED");
++                return v != nullptr && v[0] == '1';
++            }();
+             p.flags = DRF_DEF(OS46, _FLAGS, _DMA_OFFSET_FIXED, _TRUE) | DRF_DEF(OS46, _FLAGS, _PAGE_SIZE, _4KB) |
+-                      DRF_DEF(OS46, _FLAGS, _GPU_CACHEABLE, _NO);
++                      (cached ? DRF_DEF(OS46, _FLAGS, _GPU_CACHEABLE, _YES) : DRF_DEF(OS46, _FLAGS, _GPU_CACHEABLE, _NO));
+             p.dmaOffset = v.out_va + page * VT_PAGE;
+             Ioctl(ctl, NV_ESC_RM_MAP_MEMORY_DMA, &p, "map VT page");
+             if (p.status != NV_OK) throw Error("map VT page", p.status);
+@@ -1893,6 +1941,15 @@ public:
+     // uncached system memory, up to EDEN_NX2_PASSTHROUGH_VRAM_MB (3072 in sole mode). shortcut: first come,
+     // first served; regions past the budget stay in system memory.
+     void SetGpuOnly(NvU64 start, NvU64 size) { gpu_only[start] = size; }
++    auto& Channels() { return channels; }
++    /// Where `va` lives (measuring): "unmapped", "video memory", "system memory"; and whether it is GPU-only.
++    std::pair<const char*, bool> Where(NvU64 va) const {
++        const auto g = gpu_only.upper_bound(va);
++        const bool only = g != gpu_only.begin() && va < std::prev(g)->first + std::prev(g)->second;
++        const auto it = pieces.upper_bound(va);
++        if (it == pieces.begin() || va >= std::prev(it)->first + std::prev(it)->second.size) return {"unmapped", only};
++        return {std::prev(it)->second.vmem != 0 ? "video memory" : "system memory", only};
++    }
+     NvU64 vram_used = 0, vram_maps = 0;
+ 
+     // Counters for the log.
+@@ -2144,10 +2201,16 @@ private:
+         p.length = size;
+         // Not cached in the GPU's L2: the guest CPU rewrites this memory all the time (rings reused every frame)
+         // and nothing invalidates the L2 on a CPU write (measured: cached, 6% of re-read pushbuffer entries stale).
++        // EDEN_NX2_PASSTHROUGH_SYSMEM_CACHED=1: cached like on the console, where all memory is system memory behind
++        // the GPU's L2 and the guest's own L2_SYSMEM_INVALIDATE / L2_FLUSH_DIRTY keep it coherent (MKW: ~8 a frame).
++        static const bool sysmem_cached = [] {
++            const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_SYSMEM_CACHED");
++            return v != nullptr && v[0] == '1';
++        }();
+         p.flags = DRF_DEF(OS46, _FLAGS, _DMA_OFFSET_FIXED, _TRUE) | DRF_DEF(OS46, _FLAGS, _PAGE_SIZE, _4KB) |
+                   DRF_DEF(OS46, _FLAGS, _PAGE_KIND_OVERRIDE, _YES) |
+-                  (vmem != 0 ? DRF_DEF(OS46, _FLAGS, _GPU_CACHEABLE, _YES) // only the GPU touches it
+-                             : DRF_DEF(OS46, _FLAGS, _GPU_CACHEABLE, _NO));
++                  (vmem != 0 || sysmem_cached ? DRF_DEF(OS46, _FLAGS, _GPU_CACHEABLE, _YES) // only the GPU touches it
++                                              : DRF_DEF(OS46, _FLAGS, _GPU_CACHEABLE, _NO));
+         p.kindOverride = kind;
+         p.dmaOffset = va;
+         Ioctl(ctl, NV_ESC_RM_MAP_MEMORY_DMA, &p, "map guest memory");
+@@ -2479,7 +2542,9 @@ struct Xlate {
+     std::vector<Write> writes;                   // semaphore writes in the entry (Words::Promise), until submitted
+     std::deque<std::pair<NvU64, u32>> keep;      // acquires the front left to the host (HwAcquire), in order
+     std::deque<std::array<NvU64, 4>> kept_log;
+-    std::vector<NvU32> prefix;                   // host acquires for the channel's next words (HwAcquireLate)   // the last ones: address, value, memory, promised (postmortem)
++    std::vector<NvU32> prefix;                   // host acquires for the channel's next words (HwAcquireLate)
++    NvU64 gt_program = 0;                        // GPUTIME: the last inline QMD's program in the submission
++    u32 gt_draws = 0;                            // GPUTIME: 3D macro calls in the submission   // the last ones: address, value, memory, promised (postmortem)
+     NvU64 qmd_slot = 0; // the host slot inline QMDs go to
+     std::array<u32, 2> header_pool{};
+     u32 qmd_guest_a = 0, qmd_guest_b = 0; // the guest's inline QMD address (SHIFTED8)
+@@ -2585,6 +2650,9 @@ struct State {
+     // an add wrote are never promised.
+     std::unordered_map<NvU64, u32> promised;
+     std::unordered_set<NvU64> unpredictable;
++    NvU64 gt_pixel = 0; // GPUTIME: the pixel program bound last
++    std::map<std::pair<s32, NvU64>, std::pair<u64, u64>> gt_sum; // (channel, signature) -> GPU ns, submissions
++    std::chrono::steady_clock::time_point gt_since = std::chrono::steady_clock::now();
+     std::unordered_map<NvU64, u32> i2m; // words small inline-to-memory uploads wrote, in stream order (Launch)
+     // The submission that carries each promised VA's last write: once the host passed it, memory's value is the
+     // promise (MKW's NVN fence slots are reset to 0 every frame by a write the translator does not see).
+@@ -2806,6 +2874,7 @@ struct Words {
+     /// parameters continue in the next entry. `first`: the first word of a method run.
+     void Word(u32 sc, u32 m, u32 v, bool first) {
+         const bool param = m >= Mthd::MACRO && x.cls[sc] == ADA_COMPUTE_A;
++        x.gt_draws += first && m >= Mthd::MACRO && (m & 1) == 0 && x.cls[sc] == ADA_A;
+         if (x.in_call && (!param || sc != x.call_subc || (first && (m & 1) == 0))) EndCall();
+         if (param) {
+             if (!x.in_call) {
+@@ -3181,6 +3250,7 @@ struct Words {
+                 h.inline_qmds[guest] = {x.qmd_slot, h.qmd_next};
+                 ++s.counts[InlineQmds];
+                 if (HostReleases()) PromiseQmd(x.qmd.data());
++                x.gt_program = (NvU64{x.qmd[49] & 0x1FFFF} << 32) | x.qmd[48];
+                 x.release = true; // its own releases, if any
+             }
+         }
+@@ -3355,6 +3425,48 @@ void CheckAhead(State& s) {
+     }
+ }
+ 
++/// GPUTIME, poller: sums the finished submissions' GPU time; logs every 5 s.
++void GpuTimes(State& s) {
++    for (auto& [guest, c] : s.host->Channels()) {
++        if (c.gt_cpu == nullptr) continue;
++        const NvU32 passed = Host::Passed(c);
++        while (static_cast<s32>(passed - c.gt_done) > 0) {
++            const NvU32 fence = ++c.gt_done;
++            const NvU64 slot = fence % Host::GT_SLOTS;
++            const volatile NvU8* p = c.gt_cpu + slot * 32;
++            if (*reinterpret_cast<const volatile NvU32*>(p) != fence || *reinterpret_cast<const volatile NvU32*>(p + 16) != fence) {
++                continue; // an untimed submission (by reference, or before the ring)
++            }
++            const u64 t0 = *reinterpret_cast<const volatile u64*>(p + 8), t1 = *reinterpret_cast<const volatile u64*>(p + 24);
++            auto& e = s.gt_sum[c.gt_meta[slot]];
++            e.first += t1 - t0;
++            ++e.second;
++        }
++    }
++    const auto now = std::chrono::steady_clock::now();
++    const double secs = std::chrono::duration<double>(now - s.gt_since).count();
++    if (secs < 5.0) return;
++    std::map<s32, u64> per_channel;
++    std::vector<std::pair<u64, std::pair<s32, NvU64>>> top;
++    for (const auto& [key, e] : s.gt_sum) {
++        per_channel[key.first] += e.first;
++        top.emplace_back(e.first, key);
++    }
++    std::sort(top.rbegin(), top.rend());
++    std::string line;
++    for (const auto& [ch, ns] : per_channel) line += fmt::format(" ch {} {:.0f} ms/s;", ch, ns / 1e6 / secs);
++    LOG_INFO(HW_GPU, "Nx2 passthrough GPU time:{}", line);
++    for (size_t i = 0; i < std::min<size_t>(top.size(), 16); ++i) {
++        const auto& [ns, key] = top[i];
++        const NvU64 sig = key.second;
++        const char* kind = (sig >> 62) == 1 ? "compute" : (sig >> 62) == 2 ? "draws, pixel" : "other";
++        LOG_INFO(HW_GPU, "Nx2 passthrough GPU time: ch {} {} {:#x}: {:.1f} ms/s in {:.0f} submissions/s", key.first,
++                 kind, sig & ((NvU64{1} << 62) - 1), ns / 1e6 / secs, s.gt_sum[key].second / secs);
++    }
++    s.gt_sum.clear();
++    s.gt_since = now;
++}
++
+ /// Sole mode: rings stale doorbells (the entry thread may be blocked on a guest wait) and runs the armed
+ /// callbacks whose fence the host GPU passed; all of them once the backend is off.
+ void Poll(State& s) {
+@@ -3389,6 +3501,7 @@ void Poll(State& s) {
+             }
+             s.after_run += run.size();
+             if (HwAcqMode() == 2) CheckAhead(s);
++            if (GpuTime() && s.host) GpuTimes(s);
+         }
+         for (auto& f : run) f();
+         // The GPU thread sleeps up to 1 ms while a channel waits on an acquire, woken by Eglantine's own releases;
+@@ -3498,8 +3611,9 @@ bool HwAcquireLate(s32 channel, GPUVAddr address, u32 value, bool circular, cons
+     if (!promised || !meets(*promised)) return false;
+     x.prefix.insert(x.prefix.end(),
+                     {Hdr(0, NVC56F_SEM_ADDR_LO, 5), static_cast<NvU32>(address), static_cast<NvU32>(address >> 32), value, 0,
+-                     static_cast<NvU32>(circular ? DRF_DEF(C56F, _SEM_EXECUTE, _OPERATION, _ACQ_CIRC_GEQ)
+-                              : DRF_DEF(C56F, _SEM_EXECUTE, _OPERATION, _ACQ_STRICT_GEQ))});
++                     static_cast<NvU32>((circular ? DRF_DEF(C56F, _SEM_EXECUTE, _OPERATION, _ACQ_CIRC_GEQ)
++                                                  : DRF_DEF(C56F, _SEM_EXECUTE, _OPERATION, _ACQ_STRICT_GEQ)) |
++                                         DRF_DEF(C56F, _SEM_EXECUTE, _ACQUIRE_SWITCH_TSG, _EN))}); // yield the GPU
+     ++s.counts[HwLate];
+     NoteKept(s, x, channel, address, value, now, *promised, meets);
+     return true;
+@@ -3589,6 +3703,7 @@ void OnProgramBind(u32 stage, GPUVAddr program, bool from_macro) {
+     s.macro_binds += from_macro;
+     s.foreign_binds += std::this_thread::get_id() != s.entry_thread;
+     if (stage == 5) s.pixel_programs.insert(program);
++    if (stage == 5) s.gt_pixel = program;
+     if (program < GUEST_VA_LO || program >= GUEST_VA_HI) return;
+     // Patched before the entry that binds it is submitted (OnEntryDone). shortcut: a known program is compared
+     // with guest memory again at most every 100 ms, so code rewritten in place at the same address runs
+@@ -3632,6 +3747,16 @@ void OnPresent(GPUVAddr address, u32 width, u32 height, u32 block_height_log2, u
+ void OnColorTarget(GPUVAddr address, u32 width, u32 height, u32 format) {
+     State& s = Get();
+     std::scoped_lock lk{s.mutex};
++    // EDEN_NX2_PASSTHROUGH_WHERE=1 (measuring): where each colour target lives, once per target.
++    static const bool where = std::getenv("EDEN_NX2_PASSTHROUGH_WHERE") != nullptr;
++    if (where && s.host && address != 0) {
++        static std::set<GPUVAddr> seen;
++        if (seen.size() < 400 && seen.insert(address).second) {
++            const auto [w, only] = s.host->Where(address);
++            LOG_INFO(HW_GPU, "Nx2 passthrough where: colour target {:#x} {}x{} format {:#x}: {}{}", address, width,
++                     height, format, w, only ? " (GPU-only region)" : "");
++        }
++    }
+     const u64 area = u64{width} * height;
+     if (format == 0xD6 && address != 0 && area >= s.output_area) {
+         s.output_area = area;
+@@ -3914,6 +4039,16 @@ void SubmitEntry(s32 channel, size_t to, bool final) {
+     c->cur_entry = s.entries;
+     c->cur_guest = address;
+     bool done = false;
++    if (x != nullptr) {
++        c->gt_guest = channel;
++        c->gt_sig = x->gt_program != 0 ? (NvU64{1} << 62) | x->gt_program
++                    : x->gt_draws != 0 ? (NvU64{2} << 62) | s.gt_pixel
++                                       : NvU64{3} << 62;
++        if (!hold) {
++            x->gt_program = 0;
++            x->gt_draws = 0;
++        }
++    }
+     Guarded(s, "submit", [&](Host& h) {
+         // A part up to an acquire (sole mode) rings at once: other channels' waits may need its releases.
+         // HWACQ: the fence after promised writes waits for them to land (a QMD's release lands when its grid is
+-- 
+2.56.0
+

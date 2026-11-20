@@ -6,7 +6,7 @@ import json, os, signal, subprocess, sys, time
 T = os.path.dirname(os.path.abspath(__file__))
 DBG = "/home/main/src/eglantine/tools/nx2/debug_mcp.py"
 BIN = os.environ.get("RUN_BIN", "/home/main/src/eglantine/.claude/worktrees/perf/build-lto/bin/eglantine")
-LOG = "/home/main/.config/uscl/uscl/switch/data/eglantine/log/eden_log.txt"
+LOG = os.environ.get("USCL_SWITCH_PROFILE", "/home/main/.local/share/uscl/eglantine-test") + "/data/eglantine/log/eden_log.txt"
 def stuck_note(pid):
     """The watchdog's verdict for this emulator (launch.py), or ''."""
     path = os.path.join(T, f"STUCK-{pid}.txt")

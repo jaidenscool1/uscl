@@ -1,0 +1,718 @@
+From 92b7b813f3e9cf56829c8038f604be09af69cf8f Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 15:26:27 -0700
+Subject: [PATCH 27/28] nx2: passthrough backend: sole mode decodes ASTC on the
+ Vulkan device
+
+In sole mode the Vulkan device is idle, and the CPU path (Eglantine's software ASTC decoder + stb BC
+encode, six workers) finished only ~20-50 large textures a second in a race: a course's racers, Lakitu
+and HUD pieces stayed black for seconds to minutes. 2D textures (and arrays) now go through the Vulkan
+texture cache's own GPU transcode (astc_decoder.comp, then bc_encoder.comp), into a host-visible buffer
+instead of an image (TextureCacheRuntime::TranscodeAstcForPassthrough; registered with the backend by
+RasterizerVulkan in sole mode, Nx2Passthrough::SetGpuAstc). A worker checks a texture's opacity (BC1 when
+opaque, else BC3), the entry thread hands checked textures to the GPU back thread (the scheduler's owner)
+outside the backend's lock, at most 512 MiB of decode images at a time (EDEN_NX2_PASSTHROUGH_GPU_ASTC_MB),
+one submission per batch; workers swizzle the returned blocks into the arena as before.
+
+- The decoder reads the guest layout: ImageInfo::native_tiling must be the memory manager's, as the
+  texture cache sets it (without it every other 8x8 block decoded black: median error 20 per channel).
+  EDEN_NX2_PASSTHROUGH_GPU_ASTC_CHECK=<n> compares the first n against the CPU decoder: median 1.97,
+  p90 4.6, worst 10.4 (BC1 quantization).
+- A present can run on the GPU front in sole mode (a guest syncpoint action calls Composite) while the
+  back records these batches: RendererVulkan::Composite takes Nx2Passthrough::VulkanMutex() in sole mode
+  (without it: SIGSEGV in vkDestroyImageView, TickFrame and the batch recycling the same decode images).
+- EDEN_NX2_PASSTHROUGH_GPU_ASTC=0 keeps the CPU path.
+
+MKW, sole async: 37k textures decoded by the Vulkan device, 0 failed, from boot to the menus in ~40 s;
+the race start frame has every racer, Lakitu, the HUD and the ground textured (before: black silhouettes
+at the countdown). Racing ~12.5 fps either way (bounded by drains, not textures).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/nx2_passthrough.cpp            | 219 +++++++++++++++++-
+ src/video_core/nx2_passthrough.h              |  18 ++
+ .../renderer_vulkan/renderer_vulkan.cpp       |   7 +
+ .../renderer_vulkan/vk_rasterizer.cpp         |  15 ++
+ .../renderer_vulkan/vk_texture_cache.cpp      | 134 ++++++++---
+ .../renderer_vulkan/vk_texture_cache.h        |  22 ++
+ 6 files changed, 370 insertions(+), 45 deletions(-)
+
+diff --git a/src/video_core/nx2_passthrough.cpp b/src/video_core/nx2_passthrough.cpp
+index 52d909e2c..8b4e104e2 100644
+--- a/src/video_core/nx2_passthrough.cpp
++++ b/src/video_core/nx2_passthrough.cpp
+@@ -33,12 +33,14 @@
+ #include "common/cityhash.h"
+ #include "common/div_ceil.h"
+ #include "common/logging.h"
++#include "video_core/gpu_split.h"
+ #include "video_core/host1x/syncpoint_manager.h"
+ #include "video_core/memory_manager.h"
+ #include "video_core/nx2.h"
+ #include "video_core/nx2_helper_loads.h"
+ #include "video_core/nx2_passthrough.h"
+ #include "video_core/surface.h"
++#include "video_core/texture_cache/decode_bc.h"
+ #include "video_core/texture_cache/image_info.h"
+ #include "video_core/texture_cache/util.h"
+ #include "video_core/textures/astc.h"
+@@ -128,6 +130,22 @@ NvU32 Hdr(NvU32 subc, NvU32 mthd, NvU32 n) {
+     return (1u << 29) | (n << 16) | (subc << 13) | (mthd >> 2);
+ }
+ 
++// Sole mode: the Vulkan device decodes ASTC (SetGpuAstc). A worker checks a job's opacity and queues it in
++// Host::astc_gpu; the entry thread hands queued jobs to the scheduler's thread outside the state lock; finished
++// blocks come back through gpu_done for a worker to swizzle into the arena.
++GpuAstc gpu_astc;                     // set while the Vulkan rasterizer lives; called on the entry thread
++std::atomic<bool> gpu_astc_on{false}; // workers' view of it
++struct GpuBlocks {
++    std::array<u32, 8> header;
++    bool bc3;
++    u64 decode_bytes;
++    std::vector<u8> blocks;
++    std::vector<u8> source; // EDEN_NX2_PASSTHROUGH_GPU_ASTC_CHECK: the guest's ASTC bytes, to compare with the CPU
++};
++std::mutex gpu_done_mutex;
++std::vector<GpuBlocks> gpu_done;   // (gpu_done_mutex)
++std::atomic<u64> gpu_in_flight{0}; // decode image bytes on the Vulkan device
++
+ class Host {
+ public:
+     ~Host() {
+@@ -527,6 +545,8 @@ public:
+     // texture header pools become shadow pages; an ASTC header there points at an A8B8G8R8 copy in a host
+     // arena, decoded by a worker with Eglantine's own decoder and re-swizzled to the header's block layout.
+     // Until its copy is ready (or when it is too large) a header stays as the guest wrote it.
++    // Sole mode: 2D textures are decoded and BC-encoded on the Vulkan device instead (SetGpuAstc: the CPU finished
++    // ~20-50 large textures a second, so a course's racers stayed black for minutes); the workers only swizzle.
+     // shortcut: decoded once; data the guest uploads later into the same texture is not seen; the arena is a
+     // bump allocator never freed (EDEN_NX2_PASSTHROUGH_ASTC_MB, 2048 by default). BC7/BC1 targets: plan step 6.
+     static bool IsAstc(u32 w0) {
+@@ -1149,13 +1169,18 @@ public:
+     std::atomic<std::chrono::nanoseconds::rep> vt_busy{0};
+ 
+     void SetMemoryManager(Tegra::MemoryManager* mm) { memory_manager = mm; }
++    bool NativeTiling() const { return memory_manager != nullptr && memory_manager->UsesNativeTiling(); }
+     NvU64 astc_decoded = 0, astc_failed = 0, astc_too_large = 0, astc_headers = 0, astc_in_vram = 0;
+     NvU64 AstcArenaUsed() const { return astc_used.load(); }
+ 
+ private:
+     struct AstcJob {
+         Header header;
+-        std::vector<u8> guest;
++        std::vector<u8> guest; // the guest's ASTC bytes, or (blocks) the Vulkan device's BC blocks
++        bool blocks = false;
++        bool bc3 = false;
++        u64 decode_bytes = 0; // RGBA8 bytes the Vulkan device decodes it to
++        std::vector<u8> source; // blocks under EDEN_NX2_PASSTHROUGH_GPU_ASTC_CHECK: the ASTC bytes
+     };
+ 
+     /// The arena: the CPU range reserved for the whole cap, imported (pinned) and mapped for the GPU in 256 MiB
+@@ -1248,6 +1273,11 @@ private:
+                 job = std::move(astc_jobs.front());
+                 astc_jobs.pop_front();
+             }
++            if (!job.blocks && ForGpu(job)) {
++                std::scoped_lock lk{astc_mutex};
++                astc_gpu.push_back(std::move(job));
++                continue;
++            }
+             std::pair<NvU64, u32> result{};
+             try {
+                 result = Decode(job);
+@@ -1259,6 +1289,54 @@ private:
+         }
+     }
+ 
++    /// Whether the Vulkan device decodes `job` (a 2D texture or array; EDEN_NX2_PASSTHROUGH_GPU_ASTC=0: never); sets
++    /// its target (BC1 when opaque) and decode size.
++    bool ForGpu(AstcJob& job) {
++        static const bool off = [] {
++            const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_GPU_ASTC");
++            const char* f = std::getenv("EDEN_NX2_PASSTHROUGH_ASTC_FORMAT");
++            return (v != nullptr && v[0] == '0') || (f != nullptr && std::string_view{f} == "rgba");
++        }();
++        if (off || !gpu_astc_on.load()) return false;
++        Tegra::Texture::TICEntry tic{};
++        std::memcpy(&tic, job.header.data(), 32);
++        const VideoCommon::ImageInfo info(tic);
++        if (info.type != VideoCommon::ImageType::e2D || info.size.depth != 1 || info.resources.levels < 1) return false;
++        job.bc3 = !Tegra::Texture::ASTC::IsOpaque(job.guest); // block order does not matter: the guest layout will do
++        job.decode_bytes = 0;
++        for (s32 l = 0; l < info.resources.levels; ++l) {
++            job.decode_bytes += u64{std::max(info.size.width >> l, 1u)} * std::max(info.size.height >> l, 1u) * 4;
++        }
++        job.decode_bytes *= static_cast<u64>(info.resources.layers);
++        return true;
++    }
++
++public:
++    /// Entry thread: jobs for the Vulkan device while it holds less than `budget` bytes of decode images.
++    std::vector<AstcJob> TakeGpuJobs(u64 budget) {
++        std::vector<AstcJob> out;
++        std::scoped_lock lk{astc_mutex};
++        while (!astc_gpu.empty() && (gpu_in_flight.load() == 0 || gpu_in_flight.load() + astc_gpu.front().decode_bytes <= budget)) {
++            gpu_in_flight += astc_gpu.front().decode_bytes;
++            out.push_back(std::move(astc_gpu.front()));
++            astc_gpu.pop_front();
++        }
++        return out;
++    }
++
++    /// Entry thread: the Vulkan device's blocks go to the workers (swizzled into the arena there).
++    void QueueBlocks(std::vector<GpuBlocks>&& done) {
++        std::scoped_lock lk{astc_mutex};
++        for (GpuBlocks& b : done) {
++            astc_jobs.push_front(AstcJob{b.header, std::move(b.blocks), true, b.bc3, 0, std::move(b.source)}); // ahead of CPU decodes
++            ++astc_gpu_decoded;
++        }
++        astc_cv.notify_all();
++    }
++    NvU64 astc_gpu_decoded = 0;
++
++private:
++
+     /// The texture `job` describes, decoded, in the header's own block-linear layout, in the arena: VA and
+     /// the TIC COMPONENTS code (0: none). BC1 when it is opaque, else BC3 (EDEN_NX2_PASSTHROUGH_ASTC_FORMAT=rgba:
+     /// A8B8G8R8, 4x the memory): the RTX samples BCn.
+@@ -1272,11 +1350,24 @@ private:
+         Tegra::Texture::TICEntry tic{};
+         std::memcpy(&tic, job.header.data(), 32);
+         const ImageInfo info(tic);
++        if (job.blocks) { // the Vulkan device's blocks: each level's layers in order
++            std::vector<BufferImageCopy> copies;
++            u64 at = 0;
++            for (s32 l = 0; l < info.resources.levels; ++l) {
++                const u32 w = std::max(info.size.width >> l, 1u), h = std::max(info.size.height >> l, 1u);
++                copies.push_back({.buffer_offset = at, .image_subresource{.base_level = l, .base_layer = 0,
++                                                                          .num_layers = info.resources.layers},
++                                  .image_extent{w, h, 1}});
++                at += u64{Common::DivCeil(w, 4u)} * Common::DivCeil(h, 4u) * static_cast<u64>(info.resources.layers) *
++                      (job.bc3 ? 16 : 8);
++            }
++            if (at != job.guest.size()) return {}; // shortcut: a size mismatch counts as failed (none expected)
++            if (!job.source.empty()) CheckGpu(info, job, copies[0]);
++            return Place(info, copies, job.guest, !job.bc3, false);
++        }
+         std::vector<u8> linear(CalculateUnswizzledSizeBytes(info));
+         auto copies = UnswizzleImage(*memory_manager, tic.Address(), info, job.guest, linear);
+         const bool bc1 = !rgba_only && Tegra::Texture::ASTC::IsOpaque(linear);
+-        ImageInfo out_info = info;
+-        out_info.format = rgba_only ? PixelFormat::A8B8G8R8_UNORM : bc1 ? PixelFormat::BC1_RGBA_UNORM : PixelFormat::BC3_UNORM;
+         const u32 bw = VideoCore::Surface::DefaultBlockWidth(info.format);
+         const u32 bh = VideoCore::Surface::DefaultBlockHeight(info.format);
+         size_t total = 0;
+@@ -1303,8 +1394,47 @@ private:
+                 rgba, w, h, depth, std::span<u8>(pixels).subspan(out, bytes));
+             out += bytes;
+         }
+-        std::vector<u8> swizzled(CalculateGuestSizeInBytes(out_info));
+-        SwizzleImageToBuffer(out_info, copies, pixels, swizzled, memory_manager->UsesNativeTiling());
++        return Place(info, copies, pixels, bc1, rgba_only);
++    }
++
++    /// EDEN_NX2_PASSTHROUGH_GPU_ASTC_CHECK: level 0, layer 0 of the Vulkan device's blocks decoded again on the
++    /// CPU against Eglantine's software ASTC decoder (mean / max absolute difference per channel).
++    void CheckGpu(const VideoCommon::ImageInfo& info, const AstcJob& job, VideoCommon::BufferImageCopy level0) {
++        using namespace VideoCommon;
++        Tegra::Texture::TICEntry tic{};
++        std::memcpy(&tic, job.header.data(), 32);
++        std::vector<u8> linear(CalculateUnswizzledSizeBytes(info));
++        auto copies = UnswizzleImage(*memory_manager, tic.Address(), info, job.source, linear);
++        const u32 w = info.size.width, h = info.size.height;
++        std::vector<u8> ref(size_t{w} * h * 4), gpu(ref.size());
++        Tegra::Texture::ASTC::Decompress(std::span<const u8>(linear).subspan(copies[0].buffer_offset), w, h, 1,
++                                         VideoCore::Surface::DefaultBlockWidth(info.format),
++                                         VideoCore::Surface::DefaultBlockHeight(info.format), ref);
++        level0.image_subresource.num_layers = 1;
++        level0.buffer_row_length = Common::DivCeil(w, 4u) * 4;
++        DecompressBCn(job.guest, gpu, level0,
++                      job.bc3 ? VideoCore::Surface::PixelFormat::BC3_UNORM : VideoCore::Surface::PixelFormat::BC1_RGBA_UNORM);
++        u64 sum = 0;
++        int worst = 0;
++        for (size_t i = 0; i < ref.size(); ++i) {
++            const int d = std::abs(int(ref[i]) - int(gpu[i]));
++            sum += d;
++            worst = std::max(worst, d);
++        }
++        LOG_INFO(HW_GPU, "Nx2 passthrough GPU ASTC check: format {} {}x{} levels {} layers {} {}: mean {:.2f} max {} "
++                 "(first texels ref {:02x}{:02x}{:02x}{:02x} gpu {:02x}{:02x}{:02x}{:02x})", static_cast<u32>(info.format), w, h,
++                 info.resources.levels, info.resources.layers, job.bc3 ? "BC3" : "BC1", double(sum) / double(ref.size()),
++                 worst, ref[0], ref[1], ref[2], ref[3], gpu[0], gpu[1], gpu[2], gpu[3]);
++    }
++
++    /// Decoded `pixels` (`copies` per level) swizzled into the header's own layout in the arena.
++    std::pair<NvU64, u32> Place(const VideoCommon::ImageInfo& info, std::span<const VideoCommon::BufferImageCopy> copies,
++                                std::span<const u8> pixels, bool bc1, bool rgba_only) {
++        using VideoCore::Surface::PixelFormat;
++        VideoCommon::ImageInfo out_info = info;
++        out_info.format = rgba_only ? PixelFormat::A8B8G8R8_UNORM : bc1 ? PixelFormat::BC1_RGBA_UNORM : PixelFormat::BC3_UNORM;
++        std::vector<u8> swizzled(VideoCommon::CalculateGuestSizeInBytes(out_info));
++        VideoCommon::SwizzleImageToBuffer(out_info, copies, pixels, swizzled, memory_manager->UsesNativeTiling());
+         // 4 KiB: the header takes 512-byte aligned addresses (64 KiB padding filled 2 GiB with 26k small textures)
+         const NvU64 size = (swizzled.size() + 0xFFF) & ~NvU64{0xFFF};
+         NvU64 cpu_off, va;
+@@ -1507,6 +1637,7 @@ private:
+     std::mutex astc_mutex;
+     std::condition_variable astc_cv;
+     std::deque<AstcJob> astc_jobs;
++    std::deque<AstcJob> astc_gpu; // checked, waiting for the Vulkan device (astc_mutex)
+     std::vector<std::pair<Header, std::pair<NvU64, u32>>> astc_done;
+     std::unordered_map<NvU64, NvU64> astc_sizes; // decoded copies not copied on yet: bytes (astc_mutex)
+     std::vector<NvU64> astc_vram;                // per chunk: its video memory twin's VA (0: none; entry thread)
+@@ -2441,9 +2572,9 @@ void LogStats(State& s) {
+         for (size_t i = 0; i < CountEnd; ++i) {
+             if (s.counts[i] != 0) line += fmt::format("{}{} {}", line.empty() ? "" : ", ", s.counts[i], COUNT_NAMES[i]);
+         }
+-        LOG_INFO(HW_GPU, "Nx2 passthrough ASTC: {} textures decoded ({} MiB, {} MiB in video memory), {} failed, {} "
+-                 "left raw (too large), {} headers repointed", h.astc_decoded, h.AstcArenaUsed() >> 20,
+-                 h.astc_in_vram >> 20, h.astc_failed, h.astc_too_large, h.astc_headers);
++        LOG_INFO(HW_GPU, "Nx2 passthrough ASTC: {} textures decoded ({} by the Vulkan device; {} MiB, {} MiB in video "
++                 "memory), {} failed, {} left raw (too large), {} headers repointed", h.astc_decoded, h.astc_gpu_decoded,
++                 h.AstcArenaUsed() >> 20, h.astc_in_vram >> 20, h.astc_failed, h.astc_too_large, h.astc_headers);
+         if (Sole()) {
+             LOG_INFO(HW_GPU, "Nx2 passthrough sole: {} syncpoint callbacks after the host GPU, {} at once, {} armed; "
+                      "{} MiB of GPU-only memory in video memory ({} allocations)", s.after_run, s.after_now,
+@@ -3581,11 +3712,78 @@ void SubmitEntry(s32 channel, size_t to, bool final) {
+ 
+ } // Anonymous namespace
+ 
++/// Entry thread, outside the state lock (the scheduler's thread takes it, SoleSyncpoint, so a full split ring
++/// must not be waited on while holding it): finished blocks to the workers, checked jobs to the Vulkan device
++/// (EDEN_NX2_PASSTHROUGH_GPU_ASTC_MB of decode images at a time, 512 by default), and a poll for finished ones
++/// at most every millisecond.
++void DispatchGpuAstc() {
++    if (!gpu_astc_on.load(std::memory_order_relaxed)) return;
++    static const u64 budget = [] {
++        const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_GPU_ASTC_MB");
++        return (v != nullptr ? std::strtoull(v, nullptr, 0) : 512ull) << 20;
++    }();
++    static std::chrono::steady_clock::time_point last_poll{};
++    std::vector<GpuBlocks> done;
++    {
++        std::scoped_lock lk{gpu_done_mutex};
++        done.swap(gpu_done);
++    }
++    State& s = Get();
++    std::vector<std::tuple<std::array<u32, 8>, std::vector<u8>, bool, u64>> jobs;
++    bool native = false;
++    {
++        std::scoped_lock lk{s.mutex};
++        if (!s.host) return;
++        native = s.host->NativeTiling();
++        if (!done.empty()) s.host->QueueBlocks(std::move(done));
++        for (auto& j : s.host->TakeGpuJobs(budget)) jobs.emplace_back(j.header, std::move(j.guest), j.bc3, j.decode_bytes);
++    }
++    const auto now = std::chrono::steady_clock::now();
++    if (jobs.empty() && (gpu_in_flight.load() == 0 || now - last_poll < std::chrono::milliseconds(1))) return;
++    last_poll = now;
++    auto run = [jobs = std::move(jobs), native] {
++        std::scoped_lock vk{VulkanMutex()};
++        for (const auto& [header, guest, bc3, bytes] : jobs) {
++            static const int check_n = [] {
++                const char* v = std::getenv("EDEN_NX2_PASSTHROUGH_GPU_ASTC_CHECK");
++                return v != nullptr ? std::atoi(v) : 0;
++            }();
++            static int checked = 0;
++            std::vector<u8> source = checked < check_n ? guest : std::vector<u8>{};
++            checked += !source.empty();
++            gpu_astc.transcode(header, guest, native, bc3, [header, bc3, bytes, source = std::move(source)](std::span<const u8> blocks) {
++                std::scoped_lock lk{gpu_done_mutex};
++                gpu_done.push_back({header, bc3, bytes, std::vector<u8>(blocks.begin(), blocks.end()), source});
++                gpu_in_flight -= bytes;
++            });
++        }
++        gpu_astc.poll();
++    };
++    auto& split = VideoCommon::GpuSplit::Get();
++    if (split.Active()) {
++        split.DeferFunction(std::move(run));
++    } else {
++        run();
++    }
++}
++
++std::mutex& VulkanMutex() {
++    static std::mutex m;
++    return m;
++}
++
++void SetGpuAstc(GpuAstc g) {
++    gpu_astc_on = false;
++    gpu_astc = std::move(g);
++    gpu_astc_on = static_cast<bool>(gpu_astc.transcode) && static_cast<bool>(gpu_astc.poll);
++}
++
+ void OnEntryDone(s32 channel) {
+     if (!Requested()) [[likely]] {
+         return;
+     }
+     SubmitEntry(channel, ~size_t{0}, true);
++    DispatchGpuAstc();
+ }
+ 
+ void OnEntrySuspended(s32 channel, size_t words) {
+@@ -3651,6 +3849,11 @@ void AfterEntry(s32, std::function<void()> done) {
+ }
+ void WaitHost() {}
+ void SoleSyncpoint(Host1x::SyncpointManager&, u32, s32) {}
++void SetGpuAstc(GpuAstc) {}
++std::mutex& VulkanMutex() {
++    static std::mutex m;
++    return m;
++}
+ 
+ } // namespace Tegra::Nx2Passthrough
+ 
+diff --git a/src/video_core/nx2_passthrough.h b/src/video_core/nx2_passthrough.h
+index 8291cd288..a541cac82 100644
+--- a/src/video_core/nx2_passthrough.h
++++ b/src/video_core/nx2_passthrough.h
+@@ -3,7 +3,9 @@
+ 
+ #pragma once
+ 
++#include <array>
+ #include <functional>
++#include <mutex>
+ #include <span>
+ 
+ #include "common/common_types.h"
+@@ -94,6 +96,22 @@ void SoleSyncpoint(Host1x::SyncpointManager& syncpoints, u32 id, s32 channel = -
+ /// Sole mode: waits (at most 250 ms) until the host GPU has run what was submitted so far (before presenting).
+ void WaitHost();
+ 
++/// Sole mode: the Vulkan device, otherwise idle, transcodes ASTC textures for the backend (the CPU decoder
++/// finished ~20-50 large textures a second). `transcode(header, guest, bc3, done)`: the texture TIC `header`
++/// describes, its guest bytes `guest` (its own layout; `native_tiling`: the memory manager's), to BC1 (`bc3`
++/// false) or BC3 blocks, each level's layers in order, handed to `done` by a later `poll`. Both run on the thread
++/// that owns the Vulkan scheduler.
++struct GpuAstc {
++    std::function<void(const std::array<u32, 8>& header, std::span<const u8> guest, bool native_tiling, bool bc3,
++                       std::function<void(std::span<const u8>)> done)>
++        transcode;
++    std::function<void()> poll;
++};
++void SetGpuAstc(GpuAstc gpu_astc);
++/// Sole mode: held around the GpuAstc batches and the presenter's use of the Vulkan scheduler (a present can
++/// run on the GPU front: a guest syncpoint action, while the batches run on the back).
++std::mutex& VulkanMutex();
++
+ /// Frees the host channel and RM client (also done at process exit).
+ void Shutdown();
+ 
+diff --git a/src/video_core/renderer_vulkan/renderer_vulkan.cpp b/src/video_core/renderer_vulkan/renderer_vulkan.cpp
+index eae7328ed..8fee813f8 100644
+--- a/src/video_core/renderer_vulkan/renderer_vulkan.cpp
++++ b/src/video_core/renderer_vulkan/renderer_vulkan.cpp
+@@ -32,6 +32,7 @@
+ #include "video_core/post_processing/fx_chain.h"
+ #endif
+ #include "video_core/renderer_vulkan/renderer_vulkan.h"
++#include "video_core/nx2_passthrough.h"
+ #include "video_core/renderer_vulkan/vk_blit_screen.h"
+ #include "video_core/renderer_vulkan/vk_rasterizer.h"
+ #include "video_core/renderer_vulkan/vk_scheduler.h"
+@@ -212,6 +213,12 @@ RendererVulkan::~RendererVulkan() {
+ }
+ 
+ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebuffers) {
++    // Passthrough sole mode: the present can run on the GPU front (a guest syncpoint action) while the back
++    // records the passthrough's ASTC batches into the same scheduler.
++    std::unique_lock passthrough_lock{Tegra::Nx2Passthrough::VulkanMutex(), std::defer_lock};
++    if (Tegra::Nx2Passthrough::Sole()) {
++        passthrough_lock.lock();
++    }
+     SCOPE_EXIT {
+         render_window.OnFrameDisplayed();
+     };
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 19d10d334..f82297cd3 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -441,6 +441,20 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
+     VideoCommon::GpuSplit::Get().SetIdleHook(
+         [](void* argument) { static_cast<RasterizerVulkan*>(argument)->FlushSplitIdle(); },
+         this);
++    if (Tegra::Nx2Passthrough::Sole()) {
++        Tegra::Nx2Passthrough::SetGpuAstc({
++            .transcode =
++                [this](const std::array<u32, 8>& header, std::span<const u8> guest, bool native_tiling,
++                       bool bc3, std::function<void(std::span<const u8>)> done) {
++                    Tegra::Texture::TICEntry tic{};
++                    std::memcpy(&tic, header.data(), sizeof(tic));
++                    VideoCommon::ImageInfo info(tic);
++                    info.native_tiling = native_tiling; // as the texture cache sets it: the decoder reads that layout
++                    texture_cache_runtime.TranscodeAstcForPassthrough(info, guest, bc3, std::move(done));
++                },
++            .poll = [this] { texture_cache_runtime.PollPassthroughTranscodes(); },
++        });
++    }
+     submit_while_waited =
+         VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::SubmitWhileWaited);
+     if (submit_while_waited) {
+@@ -464,6 +478,7 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
+ 
+ RasterizerVulkan::~RasterizerVulkan() {
+     VideoCommon::GpuSplit::Get().SetIdleHook(nullptr, nullptr);
++    Tegra::Nx2Passthrough::SetGpuAstc({});
+     // The channels are gone by now, and submitting invalidates the state tracker's flags.
+     state_tracker.ClearChannel();
+     scheduler.WaitWorker();
+diff --git a/src/video_core/renderer_vulkan/vk_texture_cache.cpp b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
+index 8c92e76b9..58333694d 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
+@@ -27,6 +27,7 @@
+ 
+ #include "video_core/renderer_vulkan/vk_texture_cache.h"
+ #include "video_core/nx2.h"
++#include "video_core/nx2_passthrough.h"
+ #include "video_core/gpu_logging/gpu_logging.h"
+ 
+ #include "video_core/engines/fermi_2d.h"
+@@ -1230,7 +1231,8 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
+         !device.IsOptimalAstcSupported()) {
+         astc_decoder_pass.emplace(device, scheduler, descriptor_pool, staging_buffer_pool,
+                                   compute_pass_descriptor_queue, memory_allocator);
+-        if (Settings::GetAstcRecompression() != Settings::AstcRecompression::Uncompressed) {
++        if (Settings::GetAstcRecompression() != Settings::AstcRecompression::Uncompressed ||
++            Tegra::Nx2Passthrough::Sole()) { // the passthrough transcodes ASTC with it
+             bc_encoder_pass.emplace(device, scheduler, descriptor_pool,
+                                     compute_pass_descriptor_queue);
+         }
+@@ -2963,6 +2965,32 @@ void TextureCacheRuntime::RecycleImage(Image& image, u64 completed_tick) {
+     }
+ }
+ 
++void TextureCacheRuntime::RecycleTranscodes() {
++    // Finished decode images wait for the next texture of their shape, up to this much memory.
++    static constexpr u64 MaxFreeTranscodeBytes = u64{256} << 20;
++    const auto decode_bytes = [](const PendingTranscode& t) {
++        u64 bytes{};
++        for (u32 level = 0; level < t.levels; ++level) {
++            bytes += u64{(std::max)(t.width >> level, 1U)} * (std::max)(t.height >> level, 1U) * 4;
++        }
++        return bytes * t.layers;
++    };
++    u64 free_bytes{};
++    for (const PendingTranscode& t : free_transcodes) {
++        free_bytes += decode_bytes(t);
++    }
++    while (!pending_transcodes.empty() && scheduler.IsFree(pending_transcodes.front().tick)) {
++        PendingTranscode& done = pending_transcodes.front();
++        const u64 bytes = decode_bytes(done);
++        if (free_bytes + bytes <= MaxFreeTranscodeBytes) {
++            done.unused_frames = 0;
++            free_bytes += bytes;
++            free_transcodes.push_back(std::move(done));
++        }
++        pending_transcodes.pop_front();
++    }
++}
++
+ void TextureCacheRuntime::TickFrame() {
+     if (PlainGpuUnswizzleEnabled()) {
+         static const bool log_plain = std::getenv("EDEN_NX2_TC_LOG") != nullptr;
+@@ -3000,29 +3028,7 @@ void TextureCacheRuntime::TickFrame() {
+         }
+     }
+     static constexpr u32 MAX_UNUSED_SCRATCH_FRAMES = 60;
+-    // Finished decode images wait for the next texture of their shape, up to this much memory.
+-    static constexpr u64 MaxFreeTranscodeBytes = u64{256} << 20;
+-    const auto decode_bytes = [](const PendingTranscode& t) {
+-        u64 bytes{};
+-        for (u32 level = 0; level < t.levels; ++level) {
+-            bytes += u64{(std::max)(t.width >> level, 1U)} * (std::max)(t.height >> level, 1U) * 4;
+-        }
+-        return bytes * t.layers;
+-    };
+-    u64 free_bytes{};
+-    for (const PendingTranscode& t : free_transcodes) {
+-        free_bytes += decode_bytes(t);
+-    }
+-    while (!pending_transcodes.empty() && scheduler.IsFree(pending_transcodes.front().tick)) {
+-        PendingTranscode& done = pending_transcodes.front();
+-        const u64 bytes = decode_bytes(done);
+-        if (free_bytes + bytes <= MaxFreeTranscodeBytes) {
+-            done.unused_frames = 0;
+-            free_bytes += bytes;
+-            free_transcodes.push_back(std::move(done));
+-        }
+-        pending_transcodes.pop_front();
+-    }
++    RecycleTranscodes();
+     std::erase_if(free_transcodes, [](PendingTranscode& t) {
+         return ++t.unused_frames > MAX_UNUSED_SCRATCH_FRAMES;
+     });
+@@ -5052,7 +5058,32 @@ void TextureCacheRuntime::AccelerateImageUploadLayers(
+ void TextureCacheRuntime::TranscodeAstcToBcn(
+     Image& image, const StagingBufferRef& map,
+     std::span<const VideoCommon::SwizzleParameters> swizzles) {
+-    const ImageInfo& info = image.info;
++    // Encode every level into one buffer, then copy it into the image.
++    const bool bc3 = !IsOpaqueBc1Astc(device, image.info) &&
++                     Settings::GetAstcRecompression() != Settings::AstcRecompression::Bc1;
++    const auto [output, copies] =
++        EncodeAstcAsBcn(image.info, image.guest_size_bytes, map, swizzles, bc3, [this](u64 size) {
++            return staging_buffer_pool.Request(size, MemoryUsage::DeviceLocal);
++        });
++    scheduler.Record([](vk::CommandBuffer cmdbuf) {
++        const VkMemoryBarrier barrier{
++            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
++            .pNext = nullptr,
++            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
++            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
++        };
++        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                               0, barrier);
++    });
++    image.UploadMemory(output.buffer, output.offset, copies);
++}
++
++std::pair<StagingBufferRef, boost::container::small_vector<VideoCommon::BufferImageCopy, 16>>
++TextureCacheRuntime::EncodeAstcAsBcn(const ImageInfo& info, size_t guest_size,
++                                     const StagingBufferRef& map,
++                                     std::span<const VideoCommon::SwizzleParameters> swizzles,
++                                     bool bc3, const std::function<StagingBufferRef(u64)>& request,
++                                     bool submit) {
+     const u32 width = info.size.width;
+     const u32 height = info.size.height;
+     const u32 levels = static_cast<u32>(info.resources.levels);
+@@ -5101,19 +5132,16 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
+         }
+     }
+     astc_decoder_pass->AssembleInto(
+-        info, 0, image.guest_size_bytes,
++        info, 0, guest_size,
+         ASTCDecoderPass::Target{
+             .image = *pending.image,
+             .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
+             .initialized = false,
+             .level_view = [&pending](s32 level) { return *pending.views[level]; },
+-            .wait = true,
++            .wait = submit,
+         },
+         map, swizzles);
+ 
+-    // Encode every level into one buffer, then copy it into the image.
+-    const bool bc3 = !IsOpaqueBc1Astc(device, info) &&
+-                     Settings::GetAstcRecompression() != Settings::AstcRecompression::Bc1;
+     const u64 block_bytes = bc3 ? 16 : 8;
+     boost::container::small_vector<VideoCommon::BufferImageCopy, 16> copies;
+     u64 total = 0;
+@@ -5138,25 +5166,57 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
+         });
+         total += size;
+     }
+-    const auto output = staging_buffer_pool.Request(total, MemoryUsage::DeviceLocal);
++    const auto output = request(total);
+     for (u32 level = 0; level < levels; ++level) {
+         bc_encoder_pass->Encode(*pending.views[level], copies[level].image_extent.width,
+                                 copies[level].image_extent.height, layers, bc3, output.buffer,
+                                 output.offset, total, copies[level].buffer_offset);
+     }
++    pending.tick = scheduler.CurrentTick();
++    pending_transcodes.push_back(std::move(pending));
++    return {output, copies};
++}
++
++void TextureCacheRuntime::TranscodeAstcForPassthrough(const ImageInfo& info, std::span<const u8> guest,
++                                                      bool bc3,
++                                                      std::function<void(std::span<const u8>)> done) {
++    const auto map = staging_buffer_pool.Request(guest.size(), MemoryUsage::Upload);
++    std::memcpy(map.mapped_span.data(), guest.data(), guest.size());
++    const auto swizzles = VideoCommon::FullUploadSwizzles(info);
++    u64 size = 0;
++    const auto [output, copies] =
++        EncodeAstcAsBcn(info, guest.size(), map, swizzles, bc3, [this, &size](u64 total) {
++            size = total;
++            return staging_buffer_pool.Request(total, MemoryUsage::Download, true);
++        }, false); // one submission per batch (PollPassthroughTranscodes), not per texture
+     scheduler.Record([](vk::CommandBuffer cmdbuf) {
+         const VkMemoryBarrier barrier{
+             .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+             .pNext = nullptr,
+             .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+-            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
++            .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+         };
+-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+-                               0, barrier);
++        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
++                               barrier);
+     });
+-    image.UploadMemory(output.buffer, output.offset, copies);
+-    pending.tick = scheduler.CurrentTick();
+-    pending_transcodes.push_back(std::move(pending));
++    passthrough_transcodes.push_back({scheduler.CurrentTick(), output, size, std::move(done)});
++}
++
++void TextureCacheRuntime::PollPassthroughTranscodes() {
++    if (passthrough_transcodes.empty()) {
++        return;
++    }
++    if (!scheduler.IsSubmitted(passthrough_transcodes.back().tick)) {
++        scheduler.Flush();
++    }
++    scheduler.GpuCaughtUp(); // refreshes the known GPU tick
++    while (!passthrough_transcodes.empty() && scheduler.IsFree(passthrough_transcodes.front().tick)) {
++        PassthroughTranscode& t = passthrough_transcodes.front();
++        t.done(t.output.mapped_span.first(t.size));
++        staging_buffer_pool.FreeDeferred(t.output);
++        passthrough_transcodes.pop_front();
++    }
++    RecycleTranscodes(); // between presents too: a burst of textures keeps few decode images
+ }
+ 
+ void TextureCacheRuntime::TransitionImageLayout(Image& image) {
+diff --git a/src/video_core/renderer_vulkan/vk_texture_cache.h b/src/video_core/renderer_vulkan/vk_texture_cache.h
+index dab172560..88fe46a7b 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_cache.h
++++ b/src/video_core/renderer_vulkan/vk_texture_cache.h
+@@ -12,6 +12,7 @@
+ #include <cstdlib>
+ #include <chrono>
+ #include <deque>
++#include <functional>
+ #include <memory>
+ #include <optional>
+ #include <span>
+@@ -176,6 +177,13 @@ public:
+ 
+     void InsertUploadMemoryBarrier() {}
+ 
++    /// Passthrough sole mode (nx2_passthrough.h, GpuAstc): decodes `guest` (an ASTC texture in its
++    /// guest layout) on this idle device and encodes it to BC1 (`bc3` false) or BC3 blocks, each
++    /// level's layers in order; PollPassthroughTranscodes hands them to `done` once written.
++    void TranscodeAstcForPassthrough(const VideoCommon::ImageInfo& info, std::span<const u8> guest, bool bc3,
++                                     std::function<void(std::span<const u8>)> done);
++    void PollPassthroughTranscodes();
++
+     void TransitionImageLayout(Image& image);
+ 
+     bool HasBrokenTextureViewFormats() const noexcept {
+@@ -278,6 +286,20 @@ public:
+     /// astc_recompression=Bc1/Bc3): decode into a temporary RGBA8 image, encode, copy.
+     void TranscodeAstcToBcn(Image& image, const StagingBufferRef& map,
+                             std::span<const VideoCommon::SwizzleParameters> swizzles);
++    /// Its decode and encode: the blocks in a buffer from `request(size)`, and the levels' copies.
++    std::pair<StagingBufferRef, boost::container::small_vector<VideoCommon::BufferImageCopy, 16>>
++    EncodeAstcAsBcn(const VideoCommon::ImageInfo& info, size_t guest_size, const StagingBufferRef& map,
++                    std::span<const VideoCommon::SwizzleParameters> swizzles, bool bc3,
++                    const std::function<StagingBufferRef(u64)>& request, bool submit = true);
++    struct PassthroughTranscode {
++        u64 tick;
++        StagingBufferRef output;
++        u64 size;
++        std::function<void(std::span<const u8>)> done;
++    };
++    std::deque<PassthroughTranscode> passthrough_transcodes;
++    /// Decode images the GPU is done with move to free_transcodes (up to a cap) or are freed.
++    void RecycleTranscodes();
+ 
+     /// Temporary decode images, reusable once the GPU is past `tick`.
+     struct PendingTranscode {
+-- 
+2.56.0
+
