@@ -1,6 +1,8 @@
 # USCL Changelog
 
-## Unreleased
+## 0.5.5-alpha — 2026-11-21
+
+Switch games start and find their keys and firmware without setup (PR #24). No new two-PC gameplay result is claimed.
 
 - Switch firmware is identified by its content, not its folder name. USCL reads the real version from the firmware and skips firmware your keys can't open. It ignores folders that only look like firmware (another emulator's installed games), and finds keys packed in the same folder or zip as the firmware.
 - Switch keys are found without importing them by hand. USCL now also looks on every other drive, including the Switch's SD card (`switch\prod.keys` from Lockpick_RCM). It accepts the names key files get on Windows (`prod.keys.txt`, `prod (1).keys`, `keys.txt`), checks each file's `header_key` against a real NCA on the PC and picks the keys that work. Starting a Switch game without usable keys searches once more and starts the game if they turn up.

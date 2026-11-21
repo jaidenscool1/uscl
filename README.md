@@ -139,8 +139,8 @@ Either way, [`uscl-bridge`](uscl-bridge/) carries the traffic between the host's
 connection. The servers only listen on your own PC, and nothing leaves Steam's network except the game itself.
 
 Read the bundled [changelog](CHANGELOG.md) in **Settings → USCL Changelog** in any theme, even offline.
-The v0.5.4-alpha release line includes the reviewed console-theme and installer work.
-See [release assets and notes](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.4-alpha).
+The v0.5.5-alpha release line adds automatic Switch keys and firmware, the Switch launch fix and the USCL online ticker.
+See [release assets and notes](https://github.com/jaidenscool1/uscl/releases/tag/v0.5.5-alpha).
 The [Switch 2 tracker](docs/SWITCH2-PROGRESS.md) separates the release baseline from pending CPU/GPU translation work.
 
 ## Fork maintenance
