@@ -39,6 +39,20 @@ public:
 	// the update's control data, behind its title key, so it isn't shown.
 	static QString versionString(quint32 version);
 
+	// A folder of system software (.nca files, or one folder down) read with these keys: whether it is a firmware set
+	// (it has the SystemVersion title), its version ("22.5.0", from that title, empty if unread) and the newest key
+	// generation its NCAs need. readable: the header_key opened at least one of them.
+	struct Firmware
+	{
+		bool readable = false, isFirmware = false;
+		QString version;
+		int generation = -1;
+	};
+	static Firmware firmware(const QString& dir, const QMap<QString, QByteArray>& keys);
+	// an NCA header's key generation (master key index), and its AES-CTR section key from the key area
+	static int keyGeneration(const QByteArray& header);
+	static QByteArray sectionKey(const QByteArray& header, const QMap<QString, QByteArray>& keys);
+
 	static QByteArray aesEncrypt(const QByteArray& key, const QByteArray& block);
 	static QByteArray aesDecrypt(const QByteArray& key, const QByteArray& block);
 	// Nintendo's AES-XTS: 0x200-byte sectors, sector number as a big-endian tweak; key = data key + tweak key

@@ -254,7 +254,7 @@ namespace
 	}
 
 	// prod.keys / title.keys and system software (a folder of .nca files, or a firmware .zip) under dir
-	void collectConsoleFiles(const QString& dir, int depth, QStringList& keys, QStringList& titles, QStringList& firmware, const QString& skip,
+	void collectConsoleFiles(const QString& dir, int depth, QStringList& keys, QStringList& titles, QStringList& firmware, QStringList& zips, const QString& skip,
 	                         QSet<QString>& visited, const QDeadlineTimer& until = QDeadlineTimer(QDeadlineTimer::Forever))
 	{
 		const QString canonical = QFileInfo(dir).canonicalFilePath();
@@ -274,20 +274,27 @@ namespace
 				titles << path;
 			else if (name.endsWith(".nca", Qt::CaseInsensitive))
 				ncas++;
-			else if (name.contains("irmware", Qt::CaseInsensitive) && name.endsWith(".zip", Qt::CaseInsensitive) && !firmware.contains(path))
-				firmware << path;
+			else if (name.endsWith(".zip", Qt::CaseInsensitive))
+			{
+				if (name.contains("irmware", Qt::CaseInsensitive) && !firmware.contains(path))
+					firmware << path;
+				// keys may come packed with the firmware, or zipped on their own
+				static const QRegularExpression keyish("irmware|key|switch", QRegularExpression::CaseInsensitiveOption);
+				if (keyish.match(name).hasMatch() && !zips.contains(path))
+					zips << path;
+			}
 		}
 		if (ncas >= 40 && !firmware.contains(d.absolutePath()))   // a set has hundreds
 			firmware << d.absolutePath();
 		if (depth > 0)
 			for (const QFileInfo& sub : d.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot))
-				collectConsoleFiles(sub.absoluteFilePath(), depth - 1, keys, titles, firmware, skip, visited, until);
+				collectConsoleFiles(sub.absoluteFilePath(), depth - 1, keys, titles, firmware, zips, skip, visited, until);
 	}
 
 	// Every other drive: the Switch's SD card (Lockpick_RCM writes X:\switch\prod.keys), USB sticks, and emulators kept
 	// on a second drive (D:\Emulators\yuzu\user\keys). Shallow everywhere, deeper in folders named for games or
 	// emulators, never inside the system's own folders; bounded in time so a slow network drive can't stall it.
-	void collectFromDrives(QStringList& keys, QStringList& titles, QStringList& firmware, const QString& skip, QSet<QString>& visited)
+	void collectFromDrives(QStringList& keys, QStringList& titles, QStringList& firmware, QStringList& zips, const QString& skip, QSet<QString>& visited)
 	{
 		static const QStringList system = {"windows", "program files", "program files (x86)", "programdata", "$recycle.bin",
 		                                   "system volume information", "recovery", "perflogs", "$winreagent", "config.msi",
@@ -305,10 +312,10 @@ namespace
 			if (!root.startsWith("/media/") && !root.startsWith("/run/media/") && !root.startsWith("/mnt/") && !root.startsWith("/Volumes/"))
 				continue;
 #endif
-			collectConsoleFiles(root, 0, keys, titles, firmware, skip, visited, until);
+			collectConsoleFiles(root, 0, keys, titles, firmware, zips, skip, visited, until);
 			for (const QFileInfo& sub : QDir(root).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot))
 				if (!system.contains(sub.fileName().toLower()) && !(sub.fileName() == "Users" || sub.fileName() == "home"))
-					collectConsoleFiles(sub.absoluteFilePath(), likely.match(sub.fileName()).hasMatch() ? 5 : 1, keys, titles, firmware, skip, visited, until);
+					collectConsoleFiles(sub.absoluteFilePath(), likely.match(sub.fileName()).hasMatch() ? 5 : 1, keys, titles, firmware, zips, skip, visited, until);
 		}
 	}
 
@@ -359,6 +366,56 @@ namespace
 					break;
 				}
 			}
+		}
+		return out;
+	}
+
+	// The key files inside a zip (keys shipped with a firmware .zip, or zipped on their own), extracted to a folder of
+	// USCL's so they can be checked like the others. Lists with the system's tar (Windows 10+) or unzip.
+	QStringList keysFromZip(const QString& zip)
+	{
+		QStringList entries;
+		for (const QStringList& cmd : {QStringList{"tar", "-tf", zip}, QStringList{"unzip", "-Z1", zip}})
+		{
+			QProcess p;
+			p.start(cmd[0], cmd.mid(1));
+			if (p.waitForFinished(60 * 1000) && p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0)
+			{
+				entries = QString::fromUtf8(p.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
+				break;
+			}
+		}
+		QStringList wanted;
+		for (const QString& e : entries)
+		{
+			const QString name = e.trimmed().section('/', -1);
+			if (isProdKeysName(name) || isTitleKeysName(name))
+				wanted << e.trimmed();
+		}
+		if (wanted.isEmpty())
+			return {};
+		const QString dir = SwitchCore::profileDir() + "cache/zip-keys/" +
+		                    QString::fromLatin1(QCryptographicHash::hash(zip.toUtf8(), QCryptographicHash::Sha1).toHex().left(12)) + '/';
+		QStringList out;
+		for (const QString& entry : wanted)
+		{
+			const QString target = dir + QString::number(out.size()) + '/';
+			if (!QDir().mkpath(target))
+				continue;
+			for (const QStringList& cmd : {QStringList{"tar", "-xf", zip, "-C", target, entry}, QStringList{"unzip", "-o", "-j", zip, entry, "-d", target}})
+			{
+				QProcess p;
+				p.start(cmd[0], cmd.mid(1));
+				if (p.waitForFinished(60 * 1000) && p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0)
+					break;
+			}
+			// tar keeps the entry's folders, unzip -j doesn't
+			for (const QString& file : {target + entry, target + entry.section('/', -1)})
+				if (QFileInfo(file).isFile() && QFileInfo(file).size() <= 1024 * 1024)
+				{
+					out << file;
+					break;
+				}
 		}
 		return out;
 	}
@@ -776,31 +833,34 @@ QVariantMap SwitchCore::installedConsoleFiles()
 
 QVariantMap SwitchCore::findConsoleFiles(const QStringList& folders)
 {
-	QStringList keys, titles, firmware;
+	QStringList keys, titles, firmware, zips;
 	const QString home = QDir::homePath(), skip = profileDir();
 	QSet<QString> visited;
 	for (const QString& folder : folders)
 	{
 		const QUrl url(folder);
-		collectConsoleFiles(url.isLocalFile() ? url.toLocalFile() : folder, 8, keys, titles, firmware, skip, visited);
+		collectConsoleFiles(url.isLocalFile() ? url.toLocalFile() : folder, 8, keys, titles, firmware, zips, skip, visited);
 	}
 	// Selected games folders supplement the normal search; keys often live on another drive.
 	for (const auto location : {QStandardPaths::DownloadLocation, QStandardPaths::DesktopLocation, QStandardPaths::DocumentsLocation})
 		for (const QString& dir : QStandardPaths::standardLocations(location))
-			collectConsoleFiles(dir, 6, keys, titles, firmware, skip, visited);
+			collectConsoleFiles(dir, 6, keys, titles, firmware, zips, skip, visited);
 	for (const auto& [dir, depth] : {std::pair{home + "/Downloads", 6}, {home + "/Desktop", 4}, {home + "/Documents", 4},
 	                                 {home + "/.var/app", 5}})
-		collectConsoleFiles(dir, depth, keys, titles, firmware, skip, visited);
+		collectConsoleFiles(dir, depth, keys, titles, firmware, zips, skip, visited);
 	// Other emulators' profiles can be outside the home directory on Windows.
 	for (const QString& base : {home + "/.local/share", home + "/.config", qEnvironmentVariable("APPDATA"), qEnvironmentVariable("LOCALAPPDATA")})
 		for (const char* name : {"eden", "yuzu", "suyu", "sudachi", "citron", "torzu", "Ryujinx", "eglantine"})
 			if (!base.isEmpty())
-				collectConsoleFiles(base + '/' + name, 4, keys, titles, firmware, skip, visited);
-	collectConsoleFiles(home, 1, keys, titles, firmware, skip, visited);
+				collectConsoleFiles(base + '/' + name, 4, keys, titles, firmware, zips, skip, visited);
+	collectConsoleFiles(home, 1, keys, titles, firmware, zips, skip, visited);
 	// keys are often kept next to the games: the library's Switch game folders
 	for (const QString& game : library())
-		collectConsoleFiles(QFileInfo(game).absolutePath(), 2, keys, titles, firmware, skip, visited);
-	collectFromDrives(keys, titles, firmware, skip, visited);
+		collectConsoleFiles(QFileInfo(game).absolutePath(), 2, keys, titles, firmware, zips, skip, visited);
+	collectFromDrives(keys, titles, firmware, zips, skip, visited);
+	for (const QString& zip : zips)
+		for (const QString& file : keysFromZip(zip))
+			(isTitleKeysName(QFileInfo(file).fileName()) ? titles : keys) << file;
 
 	// The right keys: ones whose header_key opens a real NCA on this PC (when there's one to test), then ones with a
 	// header_key at all (nothing decrypts without it), then the newest master key. Keys that fail the test are wrong.
@@ -834,13 +894,32 @@ QVariantMap SwitchCore::findConsoleFiles(const QStringList& folders)
 	QString bestFirmware;
 	QVersionNumber best;
 	QStringList skipped;
+	// Read each firmware folder with the keys: a folder with many .nca files that lacks the SystemVersion title isn't
+	// system software (another emulator's installed games); its real version beats the folder's name, and its NCAs'
+	// key generation says whether the keys can open it. A .zip, or a folder the keys can't read, goes by its name.
+	QMap<QString, QByteArray> keyset;
+	for (const QString& k : {bestKeys, dataDir() + "keys/prod.keys", profileDir() + "data/eglantine/keys/prod.keys"})
+		if (QFile kf(k); keyset.value("header_key").size() != 32 && !k.isEmpty() && kf.open(QIODevice::ReadOnly) && kf.size() <= 1024 * 1024)
+			keyset = SwitchContent::parseKeys(kf.readAll());
 	for (const QString& f : firmware)
 	{
-		const QVersionNumber v = versionInName(QFileInfo(f).fileName());
-		if (!v.isNull() && keyForFirmware(v) > usable)
+		QVersionNumber v = versionInName(QFileInfo(f).fileName());
+		int generation = v.isNull() ? -1 : keyForFirmware(v);
+		if (QFileInfo(f).isDir())
 		{
-			if (!skipped.contains(v.toString()))
-				skipped << v.toString();
+			const SwitchContent::Firmware info = SwitchContent::firmware(f, keyset);
+			if (info.readable && !info.isFirmware)
+				continue;
+			if (!info.version.isEmpty())
+				v = QVersionNumber::fromString(info.version);
+			if (info.readable)
+				generation = info.generation;
+		}
+		if (generation > usable)
+		{
+			const QString name = v.isNull() ? QFileInfo(f).fileName() : v.toString();
+			if (!skipped.contains(name))
+				skipped << name;
 			continue;
 		}
 		const bool better = bestFirmware.isEmpty() || v > best || (v == best && bestFirmware.endsWith(".zip") && !f.endsWith(".zip"));
@@ -871,7 +950,18 @@ QString SwitchCore::installConsoleFiles(const QVariantMap& found, QString* error
 	// each core on its own: one may have keys or system software the other lacks
 	for (const QString& core : {dataDir(), profileDir() + "data/eglantine/"})
 	{
-		const QVariantMap have = coreFiles(core);
+		QVariantMap have = coreFiles(core);
+		// installed system software of unknown version (from before USCL read versions, or put there by hand): read it
+		if (have.value("firmware").toBool() && have.value("version").toString().isEmpty())
+		{
+			QFile kf(core + "keys/prod.keys");
+			const auto info = kf.open(QIODevice::ReadOnly) && kf.size() <= 1024 * 1024
+			                      ? SwitchContent::firmware(core + "nand/system/Contents/registered", SwitchContent::parseKeys(kf.readAll()))
+			                      : SwitchContent::Firmware();
+			QSaveFile v(core + "firmware-version.txt");
+			if (!info.version.isEmpty() && v.open(QIODevice::WriteOnly) && v.write(info.version.toLatin1()) == info.version.size() && v.commit())
+				have = coreFiles(core);
+		}
 		// also replaces installed keys that are wrong (their header_key doesn't open this PC's NCAs) or lack header_key
 		const QString installed_keys = core + "keys/prod.keys";
 		const bool installedBroken = usableProdKeys(installed_keys) && found.value("keysChecked").toBool() &&

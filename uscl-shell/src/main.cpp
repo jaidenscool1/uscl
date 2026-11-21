@@ -559,7 +559,7 @@ namespace
 					const auto found = SwitchCore::findConsoleFiles({root.filePath("games/keyscan")});
 					check(found.value("keys").toString() == right_keys && found.value("keysChecked").toBool(), "Switch picks the keys that open this PC's NCAs");
 					check(found.value("titleKeyFiles").toStringList().contains(titles), "Switch finds renamed title keys");
-					check(found.value("firmware").toString().endsWith("keyscan/fw"), "Switch finds the firmware folder next to the keys");
+					check(found.value("firmware").toString().isEmpty(), "Switch skips a folder of NCAs without the SystemVersion title");
 					QFile::remove(right_keys);
 					// with no key that opens them, the NCAs can't tell wrong keys from damaged files: used, but not "checked"
 					const auto only_wrong = SwitchCore::findConsoleFiles({root.filePath("games/keyscan")});
@@ -570,6 +570,63 @@ namespace
 					      SwitchCore::prerequisiteError(kart).contains("header_key"), "Switch reports keys without header_key");
 					check(SwitchCore::importKeys(test_keys).isEmpty(), "Switch test keys restored after key search");
 					QDir(root.filePath("games/keyscan")).removeRecursively();
+
+					// Firmware: read by its content, with keys in the same folder. An NCA header (key generation 5 + 1)
+					// for program `id`, content type `type`; the SystemVersion one carries a RomFS saying 22.5.0.
+					QByteArray kaek(16, '\0'), section(16, '\0');
+					for (int i = 0; i < 16; i++) kaek[i] = char(0x40 + i), section[i] = char(0x90 + i);
+					const auto firmwareNca = [&](quint64 id, int type, bool version) {
+						QByteArray h(0xC00, '\0');
+						h.replace(0x200, 4, "NCA3");
+						h[0x205] = char(type), h[0x220] = 6;
+						qToLittleEndian(id, h.data() + 0x210);
+						if (!version)
+							return SwitchContent::xts(right, h, 0, true);
+						qToLittleEndian(quint32(6), h.data() + 0x240);                    // section 0 at 0xC00
+						h[0x402] = 0, h[0x403] = 3, h[0x404] = 3;                        // RomFS, IVFC, AES-CTR
+						h.replace(0x408, 4, "IVFC");
+						qToLittleEndian(quint64(0x200), h.data() + 0x490);                // level 6 (data) 0x200 into it
+						for (int i = 0; i < 8; i++) h[0x540 + i] = char(0x21 + i);
+						QByteArray area(0x20, '\0');
+						area += SwitchContent::aesEncrypt(kaek, section) + QByteArray(16, '\0');
+						h.replace(0x300, 0x40, area);
+						QByteArray romfs(0x400, '\0');
+						qToLittleEndian(quint64(0x50), romfs.data());
+						qToLittleEndian(quint64(0x200), romfs.data() + 0x48);
+						romfs[0x200] = 22, romfs[0x201] = 5, romfs[0x202] = 0;
+						QByteArray counter(16, '\0');
+						for (int i = 0; i < 8; i++) counter[i] = char(0x28 - i);
+						qToBigEndian(quint64(0xC00 >> 4), counter.data() + 8);
+						return SwitchContent::xts(right, h, 0, true) + SwitchContent::ctr(section, counter, QByteArray(0x200, '\0') + romfs);
+					};
+					const QString same = "keyscan2/Switch Stuff/";   // keys and firmware together, a name with no version
+					write(same + "prod.keys", "header_key = " + right.toHex() + "\nkey_area_key_application_05 = " + kaek.toHex() +
+					                          "\nmaster_key_05 = " + QByteArray(32, '7') + "\n");
+					for (int i = 0; i < 44; i++) write(same + QString("%1.nca").arg(i, 32, 16, QChar('0')), firmwareNca(0x0100000000000800 + i, 4, false));
+					write(same + "ffffffffffffffffffffffffffffffff.nca", firmwareNca(0x0100000000000809, 4, true));
+					for (int i = 0; i < 45; i++)   // another emulator's installed games: many NCAs, no SystemVersion
+						write(QString("keyscan2/yuzu/nand/user/Contents/registered/%1.nca").arg(i, 32, 16, QChar('0')), firmwareNca(0x0100152000022000 + i, 0, false));
+					const auto fw = SwitchContent::firmware(root.filePath("games/" + same), SwitchContent::parseKeys(QFile(root.filePath("games/" + same + "prod.keys")).open(QIODevice::ReadOnly) ? QByteArray() : QByteArray()));
+					check(!fw.readable, "Switch firmware unread without keys");
+					QFile same_keys(root.filePath("games/" + same + "prod.keys"));
+					const auto keyset = same_keys.open(QIODevice::ReadOnly) ? SwitchContent::parseKeys(same_keys.readAll()) : QMap<QString, QByteArray>();
+					const auto read = SwitchContent::firmware(root.filePath("games/" + same), keyset);
+					check(read.isFirmware && read.version == "22.5.0" && read.generation == 5, "Switch firmware version read from SystemVersion");
+					check(!SwitchContent::firmware(root.filePath("games/keyscan2/yuzu/nand/user/Contents/registered"), keyset).isFirmware, "installed games aren't firmware");
+					const auto found2 = SwitchCore::findConsoleFiles({root.filePath("games/keyscan2")});
+					check(found2.value("keys").toString().endsWith(same + "prod.keys") && found2.value("firmware").toString().endsWith("Switch Stuff") &&
+					      found2.value("version").toString() == "22.5.0", "Switch keys and firmware in one folder: both found, firmware versioned");
+					QString error;
+					const QString did = SwitchCore::installConsoleFiles(found2, &error);
+					check(error.isEmpty() && did.contains("22.5.0") && SwitchCore::installedConsoleFiles().value("version").toString() == "22.5.0",
+					      "Switch installs the firmware it found, with its real version");
+					QFile::remove(SwitchCore::dataDir() + "firmware-version.txt");   // an install from before versions were read
+					SwitchCore::installConsoleFiles({}, &error);
+					check(SwitchCore::installedConsoleFiles().value("version").toString() == "22.5.0", "Switch reads an installed firmware's unknown version");
+					for (const QString& core : {SwitchCore::dataDir(), SwitchCore::profileDir() + "data/eglantine/"})
+						QDir(core + "nand/system").removeRecursively(), QFile::remove(core + "firmware-version.txt");
+					check(SwitchCore::importKeys(test_keys).isEmpty(), "Switch test keys restored after firmware search");
+					QDir(root.filePath("games/keyscan2")).removeRecursively();
 				}
 				{
 					// Installed update / DLC (SwitchContent): AES against FIPS-197 and IEEE 1619, then a NAND of content

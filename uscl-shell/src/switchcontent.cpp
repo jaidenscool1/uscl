@@ -231,6 +231,82 @@ QString SwitchContent::versionString(quint32 v)
 	return QStringLiteral("v%1").arg(v);
 }
 
+int SwitchContent::keyGeneration(const QByteArray& header)
+{
+	const int generation = std::max(quint8(header[0x206]), quint8(header[0x220]));
+	return generation > 0 ? generation - 1 : 0;
+}
+
+QByteArray SwitchContent::sectionKey(const QByteArray& header, const QMap<QString, QByteArray>& keys)
+{
+	// without a title key (rights ID zero) the key area holds the section keys, AES-CTR's the third
+	if (header.size() < 0x340 || header.mid(0x230, 16) != QByteArray(16, '\0'))
+		return {};
+	static const char* const areas[] = {"application", "ocean", "system"};
+	const int area = quint8(header[0x207]);
+	if (area > 2)
+		return {};
+	const QByteArray kaek = keys.value(QStringLiteral("key_area_key_%1_%2").arg(areas[area]).arg(keyGeneration(header), 2, 16, QChar('0')));
+	return aesDecrypt(kaek, header.mid(0x320, 16));
+}
+
+SwitchContent::Firmware SwitchContent::firmware(const QString& dir, const QMap<QString, QByteArray>& keys)
+{
+	Firmware result;
+	const QByteArray header_key = keys.value("header_key");
+	if (header_key.size() != 32)
+		return result;
+	// like the install's copy: the folder's .nca files, or one folder down (a zip's own folder)
+	QFileInfoList files = QDir(dir).entryInfoList({"*.nca"}, QDir::Files);
+	for (const QFileInfo& sub : QDir(dir).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot))
+		if (files.isEmpty())
+			files = QDir(sub.absoluteFilePath()).entryInfoList({"*.nca"}, QDir::Files);
+	QString system_version;   // the SystemVersion title's data NCA (0100000000000809)
+	QByteArray system_header;
+	for (const QFileInfo& file : files)
+	{
+		QFile f(file.absoluteFilePath());
+		const QByteArray head = f.open(QIODevice::ReadOnly) ? xts(header_key, f.read(0xC00), 0, false) : QByteArray();
+		if (head.size() != 0xC00 || (head.mid(0x200, 4) != "NCA3" && head.mid(0x200, 4) != "NCA2"))
+			continue;
+		result.readable = true;
+		result.generation = std::max(result.generation, keyGeneration(head));
+		if (le64(head, 0x210) == 0x0100000000000809ULL && quint8(head[0x205]) == 4)
+			system_version = file.absoluteFilePath(), system_header = head;
+	}
+	result.isFirmware = !system_version.isEmpty();
+	if (!result.isFirmware)
+		return result;
+	// its RomFS (behind an IVFC hash tree, AES-CTR) holds one file: major, minor, micro first
+	const QByteArray key = sectionKey(system_header, keys);
+	const QByteArray fs = system_header.mid(0x400, 0x200);
+	if (key.isEmpty() || fs[2] != 0 || fs[3] != 3 || fs[4] != 3 || fs.mid(0x8, 4) != "IVFC")
+		return result;
+	QFile f(system_version);
+	if (!f.open(QIODevice::ReadOnly))
+		return result;
+	const qint64 section = qint64(le32(system_header, 0x240)) * 0x200;
+	const qint64 romfs = section + qint64(le64(fs, 0x8 + 0x10 + 5 * 0x18));   // level 6 of the tree: the data
+	QByteArray upper(8, '\0');
+	for (int i = 0; i < 8; i++)
+		upper[i] = fs[0x147 - i];
+	const auto read = [&](qint64 at, int size) -> QByteArray {
+		const qint64 aligned = at & ~qint64(15);
+		QByteArray counter = upper + QByteArray(8, '\0');
+		qToBigEndian(quint64(aligned >> 4), bytes(counter) + 8);
+		if (!f.seek(aligned))
+			return {};
+		return ctr(key, counter, f.read(at - aligned + size)).mid(int(at - aligned), size);
+	};
+	const QByteArray header = read(romfs, 0x50);
+	if (header.size() != 0x50 || le64(header, 0) != 0x50)
+		return result;
+	const QByteArray file = read(romfs + qint64(le64(header, 0x48)), 4);   // its one file, at the start of the data
+	if (file.size() == 4 && quint8(file[0]) > 0 && quint8(file[0]) < 100)
+		result.version = QStringLiteral("%1.%2.%3").arg(quint8(file[0])).arg(quint8(file[1])).arg(quint8(file[2]));
+	return result;
+}
+
 bool SwitchContent::readMeta(const QString& nca, const QMap<QString, QByteArray>& keys, Meta& meta)
 {
 	QFile f(nca);
@@ -250,18 +326,7 @@ bool SwitchContent::readMeta(const QString& nca, const QMap<QString, QByteArray>
 	if (rest.size() != 0x800)
 		return true;
 	head += rest;
-	// metas never use a title key, so the key area holds the section key (AES-CTR: the third)
-	if (head.mid(0x230, 16) != QByteArray(16, '\0'))
-		return true;
-	int generation = std::max(quint8(head[0x206]), quint8(head[0x220]));
-	if (generation > 0)
-		generation--;
-	static const char* const areas[] = {"application", "ocean", "system"};
-	const int area = quint8(head[0x207]);
-	if (area > 2)
-		return true;
-	const QByteArray kaek = keys.value(QStringLiteral("key_area_key_%1_%2").arg(areas[area]).arg(generation, 2, 16, QChar('0')));
-	const QByteArray section_key = aesDecrypt(kaek, head.mid(0x320, 16));
+	const QByteArray section_key = sectionKey(head, keys);
 	const QByteArray fs = head.mid(0x400, 0x200);
 	// section 0: a PFS0 (type 1) behind a SHA-256 hash table (2), AES-CTR (3)
 	if (section_key.isEmpty() || fs[2] != 1 || fs[3] != 2 || fs[4] != 3)
