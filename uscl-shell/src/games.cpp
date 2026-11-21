@@ -2,6 +2,7 @@
 
 #include "gameart.h"
 #include "gameupdates.h"
+#include "switchcontent.h"
 #include "switchcore.h"
 
 #include <QCoreApplication>
@@ -166,8 +167,15 @@ QMap<QString, QString> GameModel::readGamesYml(const QByteArray& yml)
 	return out;
 }
 
+QString GameModel::switchContent(const QString& path, const QString& serial)
+{
+	return SwitchContent::label(SwitchContent::installed(path, serial));
+}
+
 QString GameModel::gameHash(const QString& path, const QString& serial)
 {
+	if (SwitchCore::isSerial(serial))
+		return SwitchContent::installed(path, serial).build;
 	// shortcut: only EBOOT.BIN, the one file an ISO and a disc folder of the same game always share; add the
 	// game's other executables (USRDIR/*.self) if mismatched copies get through
 	QByteArray eboot;

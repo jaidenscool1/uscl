@@ -118,6 +118,14 @@ Window {
                 dialog.confirm(qsTr("Online Session"), qsTr("The host is playing %1, not this game. Start it anyway?").arg(gameTitle(host[0])), function() { startGame(g) })
                 return
             }
+            if (g.console === "Switch" && host[1] && games.gameHash(g.path, g.serial) !== host[1]) {
+                // the update and DLC Eden has installed (SwitchContent); the host's come as words after the build
+                sound("error")
+                dialog.show(qsTr("Online Session"), qsTr("Your %1 doesn't have the same update and DLC as the host's.\n\nHost: %2\nYou: %3\n\nInstall the same ones in Controllers, Updates and DLC (Eden: File → Install Files to NAND), then start the game again.")
+                            .arg(g.title).arg(host.slice(2).join(" ") || qsTr("unknown")).arg(games.switchContent(g.path, g.serial)),
+                            { buttons: [{ title: qsTr("Controllers, Updates and DLC"), action: launcher.openSwitchSettings }, { title: qsTr("OK") }] })
+                return
+            }
             if (g.console !== "Switch" && host[1] && games.gameHash(g.path, g.serial) !== host[1]) {
                 sound("error")
                 dialog.show(qsTr("Online Session"), qsTr("Your copy of %1 doesn't match the host's: a different update, or changed game files. Install the same update as the host to play together.").arg(g.title))
@@ -347,7 +355,9 @@ Window {
     }
     readonly property int autoScaleValue: system.recommendedScale(Screen.height * Screen.devicePixelRatio)
     function gameInfo(g) {
-        return qsTr("%1\n\nSerial: %2      Console: %3\n%4").arg(g.title).arg(g.serial).arg(g.console).arg(g.path)
+        var info = qsTr("%1\n\nSerial: %2      Console: %3\n%4").arg(g.title).arg(g.serial).arg(g.console).arg(g.path)
+        if (g.console === "Switch") info += "\n" + qsTr("Installed: %1").arg(games.switchContent(g.path, g.serial))
+        return info
     }
 
     function typeName(after) {

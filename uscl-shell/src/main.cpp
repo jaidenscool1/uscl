@@ -9,6 +9,7 @@
 #include "online.h"
 #include "system.h"
 #include "updater.h"
+#include "switchcontent.h"
 #include "switchcore.h"
 
 #include <QFontDatabase>
@@ -500,6 +501,72 @@ namespace
 				QFile::remove(version.fileName());
 				QFile::remove(needs);
 				check(SwitchCore::importKeys(test_keys).isEmpty(), "Switch test keys restored");
+				{
+					// Installed update / DLC (SwitchContent): AES against FIPS-197 and IEEE 1619, then a NAND of content
+					// metas encrypted the way Nintendo's are. (Checked once against Python's cryptography as well.)
+					const auto hex = [](const char* s) { return QByteArray::fromHex(s); };
+					check(SwitchContent::aesEncrypt(hex("000102030405060708090a0b0c0d0e0f"), hex("00112233445566778899aabbccddeeff")) == hex("69c4e0d86a7b0430d8cdb78070b4c55a") &&
+					      SwitchContent::aesDecrypt(hex("000102030405060708090a0b0c0d0e0f"), hex("69c4e0d86a7b0430d8cdb78070b4c55a")) == hex("00112233445566778899aabbccddeeff"), "AES-128 known answer");
+					check(SwitchContent::xts(QByteArray(32, '\0'), QByteArray(0x200, '\0'), 0, true).left(32) ==
+					      hex("917cf69ebd68b2ec9b9fe9a3eadda692cd43d2f59598ed858c02c2652fbf922e"), "AES-XTS known answer");
+					QByteArray header_key(32, '\0'), kaek(16, '\0'), section_key(16, '\0');
+					for (int i = 0; i < 32; i++) header_key[i] = char(i);
+					for (int i = 0; i < 16; i++) kaek[i] = char(0x40 + i), section_key[i] = char(0x80 + i);
+					// a content meta for program `id`: header (XTS), key area, section 0 = PFS0 holding the CNMT (CTR)
+					const auto meta = [&](quint64 id, quint32 version, quint8 type) {
+						QByteArray h(0xC00, '\0');
+						h.replace(0x200, 4, "NCA3");
+						h[0x205] = 1, h[0x220] = 6;   // key generation 6: key_area_key_application_05
+						qToLittleEndian(id, h.data() + 0x210);
+						QByteArray cnmt(0x40, '\0');
+						qToLittleEndian(id, cnmt.data());
+						qToLittleEndian(version, cnmt.data() + 8);
+						cnmt[0xC] = char(type);
+						const QByteArray names("x.cnmt\0\0\0\0\0\0\0\0\0\0", 16);
+						QByteArray pfs("PFS0", 4);
+						pfs += QByteArray(12 + 0x18, '\0');
+						put32(pfs, 4, 1), put32(pfs, 8, names.size()), put32(pfs, 0x18, cnmt.size());
+						pfs += names + cnmt;
+						qToLittleEndian(quint32(6), h.data() + 0x240);   // section at 0xC00, the PFS0 0x203 into it
+						qToLittleEndian(quint64(0x203), h.data() + 0x440);
+						qToLittleEndian(quint64(pfs.size()), h.data() + 0x448);
+						h[0x402] = 1, h[0x403] = 2, h[0x404] = 3;
+						for (int i = 0; i < 8; i++) h[0x540 + i] = char(i + 1);
+						QByteArray area(0x10, '\0');
+						for (int i = 0; i < 3; i++) area += SwitchContent::aesEncrypt(kaek, i == 1 ? section_key : QByteArray(16, '\0'));
+						h.replace(0x300, 0x40, area);
+						QByteArray counter(16, '\0');
+						for (int i = 0; i < 8; i++) counter[i] = char(8 - i);
+						qToBigEndian(quint64(0xC00 >> 4), counter.data() + 8);
+						return SwitchContent::xts(header_key, h, 0, true) + SwitchContent::ctr(section_key, counter, QByteArray(0x203, '\0') + pfs);
+					};
+					const QString nand = SwitchCore::dataDir() + "nand/user/Contents/registered/";
+					const auto install = [&](const QString& name, const QByteArray& nca) {
+						QDir().mkpath(QFileInfo(nand + name).absolutePath());
+						QFile f(nand + name);
+						check(f.open(QIODevice::WriteOnly) && f.write(nca) == nca.size(), "Switch NAND fixture");
+					};
+					QFile prod(SwitchCore::dataDir() + "keys/prod.keys");
+					const QByteArray real_keys = prod.open(QIODevice::ReadOnly) ? prod.readAll() : QByteArray();
+					prod.close();
+					check(prod.open(QIODevice::WriteOnly) && prod.write("header_key = " + header_key.toHex() + "\nkey_area_key_application_05 = " + kaek.toHex() + "\n") > 0, "Switch content keys fixture");
+					prod.close();
+					const QString kart_id = "0100152000022000";
+					check(SwitchContent::installed(kart, kart_id).build == "base" && GameModel::switchContent(kart, kart_id) == "No update", "Switch game without update or DLC");
+					install("00000012/aa11.cnmt.nca", meta(0x0100152000022800, 524288, 0x81));
+					install("000000ab/bb22.cnmt.nca/00", meta(0x0100152000023001, 0, 0x82));   // a split NCA folder
+					install("cc33.cnmt.nca", meta(0x0100AAAA00000800, 65536, 0x81));           // another game's update
+					const QString with_update = GameModel::gameHash(kart, kart_id);
+					check(with_update.size() == 16 && GameModel::switchContent(kart, kart_id) == "Update v524288, 1 DLC", "Switch installed update and DLC");
+					QFile::remove(nand + "00000012/aa11.cnmt.nca");   // Eden replaces the old update's content with the new one
+					install("00000034/ee55.cnmt.nca", meta(0x0100152000022800, 589824, 0x81));
+					check(GameModel::gameHash(kart, kart_id) != with_update && SwitchContent::installed(kart, kart_id).update == "v589824", "Switch build changes with the update");
+					check(SwitchContent::installed("/d/Sports/updates/65536/exefs/main", {}).update == "v65536" &&
+					      SwitchContent::installed("/d/Sports/base/exefs/main", {}).build == "base", "Switch dump runs its update folder");
+					QDir(SwitchCore::dataDir() + "nand/user").removeRecursively();
+					check(prod.open(QIODevice::WriteOnly) && prod.write(real_keys) == real_keys.size(), "Switch test keys restored after content test");
+					prod.close();
+				}
 #ifdef __linux__
 				const QByteArray old_driver = qgetenv("SDL_VIDEODRIVER"), old_display = qgetenv("DISPLAY");
 				const bool driver_set = qEnvironmentVariableIsSet("SDL_VIDEODRIVER"), display_set = qEnvironmentVariableIsSet("DISPLAY");

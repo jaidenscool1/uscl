@@ -1,6 +1,7 @@
 #include "online.h"
 #include "games.h"
 #include "launcher.h"
+#include "switchcontent.h"
 #include "switchcore.h"
 
 #include <QCoreApplication>
@@ -578,7 +579,9 @@ void Online::host(const QString& serial, const QString& title, const QString& pa
 		QFile::remove(data + "/kicks.txt");
 		env.insert("USCL_BANS", data + "/bans.txt");
 		env.insert("USCL_KICKS", data + "/kicks.txt");
-		env.insert("USCL_GAME", serial);
+		// "<serial> <build> <label>": members check they have the same update and DLC (SwitchContent)
+		const SwitchContent::Installed content = SwitchContent::installed(path, serial);
+		env.insert("USCL_GAME", content.build.isEmpty() ? serial : serial + " " + content.build + " " + SwitchContent::label(content));
 		start(bridge, toolPath("uscl-bridge"), {"host", "switch"}, QCoreApplication::applicationDirPath(), env);
 		return;
 	}

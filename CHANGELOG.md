@@ -1,5 +1,9 @@
 # USCL Changelog
 
+## Unreleased
+
+- Switch: show each game's installed update and DLC (read from Eden's NAND) in its Information panel, and check them when joining a session. A member whose update or DLC differs from the host's is told what the host has and what they have, before the game starts. Updates still come from the player's own dumps.
+
 ## 0.5.4-alpha — 2026-11-18
 
 - Fix session readiness parsing after the bridge added short session codes; Switch games such as Mario Kart 8 Deluxe can launch after hosting connects.

@@ -27,7 +27,7 @@ Tested 2026-11-14/15 (Linux, i5-10600K + RTX 4060, firmware/keys 22.5.0): Mario 
 
 ## Friends over Steam
 
-1. Use the same Eden release and game updates/DLC on every PC. Every player has their own game and console files.
+1. Use the same Eden release and game updates/DLC on every PC. Every player has their own game and console files. USCL checks the update and DLC when a member starts the game (below).
 2. From the game's USCL options, select Host Online Session. USCL starts an unlisted Eden room bound to `127.0.0.1:24872` and a Steam bridge with the `switch` preset. No RPCN or Demonware service starts for this route.
 3. Friends join the USCL session through the Friends tab or an existing Steam invite, and wait for the session to show connected.
 4. Everyone starts the Switch game from USCL. The patched graphical core receives `--uscl-room <nickname>@127.0.0.1:24872`; an alternative SDL core receives `--multiplayer` instead. A requested graphical room join must succeed before the game boots. The host connects directly to the room. Members connect through the bridge's UDP forward to the host's room. Normal Steam session kick/ban handling applies to relayed traffic.
@@ -35,7 +35,15 @@ Tested 2026-11-14/15 (Linux, i5-10600K + RTX 4060, firmware/keys 22.5.0): Mario 
 
 This uses emulated local wireless (LDN), not Nintendo's Online Play service. It supports games with that multiplayer mode; it is not a blanket promise for all Switch games. The room transport is ENet over forwarded UDP, leaving retransmission and ordering to ENet. The host must remain connected.
 
-The title ID in a bracketed filename is used as the library/session ID; without one, a size/header fingerprint provides a location-independent fallback. Titles and IDs are not decrypted from game contents. Installed update/DLC versions are not yet verified automatically, so match them manually. Switch game hashes do not use RPCS3's EBOOT hash check.
+The title ID in a bracketed filename is used as the library/session ID; without one, a size/header fingerprint provides a location-independent fallback. Titles and IDs are not decrypted from game contents. Switch game hashes do not use RPCS3's EBOOT hash check.
+
+### Matching updates and DLC
+
+The game's Information panel shows what Eden has installed for it, e.g. `Installed: Update v524288, 2 DLC`. The host's session carries the same as a build fingerprint (`<title ID> <build> <label>` in the lobby's `game` field). A member whose fingerprint differs can't start the game in that session. Instead they see the host's update and DLC next to their own, with a shortcut to Controllers, Updates and DLC.
+
+How it's read (`uscl-shell/src/switchcontent.cpp`): every NCA under `nand/user/Contents/registered/` in USCL's Eden profile has its header decrypted with the player's `header_key`. The content metas whose program ID is the game's update (title ID + `0x800`) or DLC (`+0x1001` and up) are kept. The update's title version comes from its CNMT, which needs `key_area_key_application_XX`. Without that key it shows "Update installed". The fingerprint hashes those metas' content IDs and versions, and is `base` when nothing is installed. For an extracted dump, it's the `updates/<version>` folder the game runs from. Nothing is downloaded: Nintendo's update servers need a console's own certificate, so updates still come from the player's own dumps, installed in Eden.
+
+Shown versions are title versions (`v524288` = the 8th update), the way NSP file names tag them. The version players see in the game (e.g. "3.0.1") is in the update's control data, behind its title key, and isn't shown. Not covered yet: add-ons disabled in Eden's per-game properties still count as installed, and content installed to the SD card (`sdmc`) instead of NAND isn't read.
 
 ## Development preview and validation
 
