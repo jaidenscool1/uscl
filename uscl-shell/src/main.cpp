@@ -388,7 +388,11 @@ namespace
 					const bool core_set = qEnvironmentVariableIsSet("USCL_SWITCH_CORE"), gui_set = qEnvironmentVariableIsSet("USCL_SWITCH_GUI");
 					qunsetenv("USCL_SWITCH_FRONTEND");
 					qunsetenv("USCL_SWITCH_CORE");
+#ifdef _WIN32
+					const QString gui = write("bin/eden.exe", "MZ");   // Windows: executable means .exe
+#else
 					const QString gui = write("bin/eden", "#!/bin/sh\n");
+#endif
 					QFile(gui).setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
 					qputenv("USCL_SWITCH_GUI", gui.toUtf8());
 					check(SwitchCore::executable(false, kart) == gui && SwitchCore::arguments(kart, false, "P") == QStringList{"-f", "-g", kart},
