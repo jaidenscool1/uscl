@@ -349,6 +349,7 @@ bool Launcher::openSwitchSettings()
 }
 
 QString Launcher::switchStatus(const QString& path) { return SwitchCore::prerequisiteError(path); }
+bool Launcher::switchFilesMissing(const QString& path) { return SwitchCore::consoleFilesMissing(path); }
 QString Launcher::switchProfile() { return SwitchCore::dataDir(); }
 QString Launcher::importSwitchKeys(const QString& path) { return SwitchCore::importKeys(QUrl(path).isLocalFile() ? QUrl(path).toLocalFile() : path); }
 QString Launcher::importSwitchFirmware(const QString& path) { return SwitchCore::importFirmware(QUrl(path).isLocalFile() ? QUrl(path).toLocalFile() : path); }

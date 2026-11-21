@@ -55,7 +55,10 @@ public:
 
 	// The executable the game boots (an installed update's, else the disc's), as a short SHA-256: online sessions
 	// check that everyone runs the same game files. Empty when there's no EBOOT.BIN to read.
+	// For a Switch game: which update and DLC Eden has installed for it (SwitchContent), "base" for neither.
 	Q_INVOKABLE static QString gameHash(const QString& path, const QString& serial);
+	// A Switch game's installed update and DLC, for people: "Update v524288, 2 DLC"
+	Q_INVOKABLE static QString switchContent(const QString& path, const QString& serial);
 
 	// RPCS3's settings folder: ~/.config/uscl on Linux, the folder of rpcs3.exe on Windows
 	static QString rpcs3ConfigDir();

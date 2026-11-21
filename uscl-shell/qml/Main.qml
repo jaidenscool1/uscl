@@ -118,6 +118,14 @@ Window {
                 dialog.confirm(qsTr("Online Session"), qsTr("The host is playing %1, not this game. Start it anyway?").arg(gameTitle(host[0])), function() { startGame(g) })
                 return
             }
+            if (g.console === "Switch" && host[1] && games.gameHash(g.path, g.serial) !== host[1]) {
+                // the update and DLC Eden has installed (SwitchContent); the host's come as words after the build
+                sound("error")
+                dialog.show(qsTr("Online Session"), qsTr("Your %1 doesn't have the same update and DLC as the host's.\n\nHost: %2\nYou: %3\n\nInstall the same ones in Controllers, Updates and DLC (Eden: File → Install Files to NAND), then start the game again.")
+                            .arg(g.title).arg(host.slice(2).join(" ") || qsTr("unknown")).arg(games.switchContent(g.path, g.serial)),
+                            { buttons: [{ title: qsTr("Controllers, Updates and DLC"), action: launcher.openSwitchSettings }, { title: qsTr("OK") }] })
+                return
+            }
             if (g.console !== "Switch" && host[1] && games.gameHash(g.path, g.serial) !== host[1]) {
                 sound("error")
                 dialog.show(qsTr("Online Session"), qsTr("Your copy of %1 doesn't match the host's: a different update, or changed game files. Install the same update as the host to play together.").arg(g.title))
@@ -141,6 +149,16 @@ Window {
         launchGame(g)
     }
     function launchGame(g) {
+        // Switch keys or system software missing or too old: look on the PC once more (an SD card plugged in since,
+        // a new download) and start the game when that's done; the error only shows if nothing usable turned up
+        if (g.console === "Switch" && switchKeysTried !== g.serial && launcher.switchFilesMissing(g.path)) {
+            switchKeysTried = g.serial
+            switchKeysGame = g
+            notice.show(qsTr("Looking for your Switch keys..."), ic("cat_switch"))
+            games.setupSwitchFiles()
+            return
+        }
+        switchKeysTried = ""
         launcher.setLoadingTheme(activeTheme, themePalette.background, themePalette.text, themePalette.accent, themePalette.panel)
         if (prefs.autoControllers) launcher.prepareInput(gamepad.names, g.console)   // every console: pads -> players 1, 2...
         if (emuConsoles.indexOf(g.console) >= 0) {   // Wii -> Dolphin, 3DS -> Azahar
@@ -347,7 +365,11 @@ Window {
     }
     readonly property int autoScaleValue: system.recommendedScale(Screen.height * Screen.devicePixelRatio)
     function gameInfo(g) {
-        return qsTr("%1\n\nSerial: %2      Console: %3\n%4").arg(g.title).arg(g.serial).arg(g.console).arg(g.path)
+        var info = qsTr("%1\n\nSerial: %2      Console: %3\n%4").arg(g.title).arg(g.serial).arg(g.console).arg(g.path)
+        if (g.console === "Switch") info += "\n" + qsTr("Installed: %1").arg(games.switchContent(g.path, g.serial))
+        var cap = online.capability(g.serial)
+        info += "\n\n" + cap.label + ": " + cap.detail
+        return info
     }
 
     function typeName(after) {
@@ -831,10 +853,11 @@ Window {
         var named = ["PS3", "PS4", "Switch"].indexOf(g.console || "PS3") < 0
         var desc = gameUpdates.available[g.serial] ? updateInfo(g.serial) : named ? (consoleMeta[g.console] || [g.console])[0] : g.serial
         var badge = gameUpdates.available[g.serial] ? qsTr("Update") : ""
+        var cap = online.capability(g.serial)   // the USCL ticker: how well it plays online (GAMES.md)
         return {
                 gameId: g.serial, title: g.title, desc: desc, help: desc, icon: g.icon || ic("it_games"), wide: !!g.icon && wideIcon(g),
                 pic: g.pic || "", console: menuConsole(g),
-                badge: badge, value: badge,
+                badge: badge, value: badge || cap.label, ticker: cap.label, tickerLevel: cap.level,
                 action: function() { play(g) },
                 info: function() { dialog.show(qsTr("Information"), gameInfo(g)) },
                 options: function() {
@@ -1096,6 +1119,13 @@ Window {
         }
         // Switch keys / system software (at start, after Add Games, from Settings): say what changed
         function onSwitchFilesDone(installed, tooNew, error) {
+            if (switchKeysGame) {   // a game waiting on this search (launchGame): start it, or show why it can't
+                var waiting = switchKeysGame
+                switchKeysGame = null
+                cfgTick++
+                launchGame(waiting)
+                return
+            }
             if (setup.open) return   // the setup screen shows it
             if (error) dialog.show(qsTr("Switch Emulation"), error)
             else if (installed) {
@@ -1109,6 +1139,8 @@ Window {
         }
     }
     property bool switchLookRequested: false
+    property string switchKeysTried: ""   // the Switch game whose start already searched for keys once
+    property var switchKeysGame: null     // the Switch game waiting for that search
     Connections {
         target: online
         function onStateChanged() {

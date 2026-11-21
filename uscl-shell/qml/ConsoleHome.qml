@@ -764,6 +764,16 @@ Item {
                         font.pixelSize: 21
                     }
                 }
+                // the game's USCL ticker, bottom left of its cover: how well it plays online
+                Ticker {
+                    visible: !!tile.modelData.ticker && !tile.modelData.key
+                    x: 12
+                    y: parent.width - height - 12
+                    z: 3
+                    text: tile.modelData.ticker || ""
+                    level: tile.modelData.tickerLevel || ""
+                    dim: !tile.selected
+                }
                 MouseArea {
                     anchors.fill: parent
                     acceptedButtons: Qt.LeftButton | Qt.RightButton

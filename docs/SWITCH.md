@@ -4,8 +4,16 @@ USCL discovers extracted `.nsp`, `.xci`, and `.nro` games in Add Games and launc
 
 ## Setup
 
-1. For Mario Kart with friends, use the **USCL-patched Eden graphical build** and its matching `eden-room` server. The pinned base is **v0.2.1**; source patches and a Linux build helper are in [uscl-eden](../uscl-eden/README.md). In Settings → Switch Emulation → Choose Switch Emulator, select that build's `eden` executable. This also selects it for controller/update settings. The alternative CLI option supports `eden-cli` builds, but the upstream v0.2.1 CLI fails room joining and its updated-game rendering is unresolved in this environment. USCL's desktop development preview selects the locally built graphical core automatically.
-2. Import your console's `prod.keys` using Settings → Switch Emulation. Import an extracted Switch firmware directory if the game needs it; USCL does not block every game merely because firmware is absent. Imported files stay in its Switch profile. A blank key template or firmware from another console platform cannot replace those files. USCL does not download keys or firmware.
+1. For Mario Kart with friends, use the **USCL-patched Eden graphical build** and its matching `eden-room` server. The pinned base is **v0.2.1**; source patches and a Linux build helper are in [uscl-eden](../uscl-eden/README.md). USCL's installers bundle it (`Eden\eden.exe` on Windows), and Switch games run in it unless another emulator is chosen in Settings → Switch Emulation. Before this, games defaulted to the bundled `eden-cli`, which opens to a black window for updated games. To use another build, choose its `eden` executable in Settings → Switch Emulation → Choose Switch Emulator. That also selects it for controller/update settings. The alternative CLI option supports `eden-cli` builds, but the upstream v0.2.1 CLI fails room joining and its updated-game rendering is unresolved in this environment. USCL's desktop development preview selects the locally built graphical core automatically.
+2. Put your console's `prod.keys` (dumped from your own Switch with Lockpick_RCM) and its firmware anywhere USCL looks, and it installs them by itself for both Switch cores (Eden and Eglantine). It looks when it starts, after Add Games, and again when a Switch game is started without usable keys. It looks in:
+   - Downloads, Desktop, Documents (including OneDrive-moved ones)
+   - other emulators' folders (yuzu, Ryujinx, Eden, ...)
+   - the library's game folders
+   - every other drive, including the Switch's SD card (`X:\switch\prod.keys`), plus folders named for games or emulators
+
+   Firmware is found and installed the same way: a folder of `.nca` files or a firmware `.zip`. It can share a folder or zip with the keys, and the folder's name doesn't matter. A firmware folder is read with the keys. It must contain the SystemVersion title (`0100000000000809`), which leaves out other emulators' installed-games folders. Its real version comes from that title, and its NCAs' key generation decides whether your keys can open it. Firmware your keys can't open is skipped, and the player is told why. A `.zip`, or a folder the keys can't read, goes by the version in its name. Installed firmware of unknown version gets its version read, so it can be upgraded later. Keys inside a zip whose name mentions keys, firmware or Switch are extracted and checked like any other key file.
+
+   Names as players have them work too: `prod.keys.txt`, `prod (1).keys`, `keys.txt`, `title.keys.txt`. When there's a real NCA on the PC (installed firmware, a firmware folder, an NSP), each key file's `header_key` is tested against it. Keys that don't open it are skipped, and installed keys that fail it are replaced. Keys without a `header_key` are only used when nothing better is found, and the game says why it can't start. Settings → Switch Emulation can still import them by hand. USCL does not block every game merely because firmware is absent. Imported files stay in its Switch profile. A blank key template or firmware from another console platform cannot replace those files. USCL does not download keys or firmware.
 3. Extract game archives before using Add Games. Split RAR volumes must be extracted together. Recognized base-game containers appear in the library; filename-tagged update and DLC containers are excluded. Install those through Controllers, Updates and DLC, which opens Eden's settings application.
 4. Start the game from USCL. With Settings → Automatic Controller Setup on (the default), every connected controller, USB or Bluetooth, becomes players 1, 2, … in the order it was connected, mapped by Eden itself with its per-controller layout, Joy-Con pairs and motion (uscl-eden patch 0012, `USCL_AUTO_PADS`). Turn the setting off to use controllers configured in Eden. The graphical frontend reads native Qt settings; alternative CLI launches receive a separate `sdl2-config.ini` with translated keyboard bindings, preserving the settings application's file. Homebrew NRO files can launch without USCL's commercial-game key/firmware prerequisite checks.
 
@@ -27,7 +35,7 @@ Tested 2026-11-14/15 (Linux, i5-10600K + RTX 4060, firmware/keys 22.5.0): Mario 
 
 ## Friends over Steam
 
-1. Use the same Eden release and game updates/DLC on every PC. Every player has their own game and console files.
+1. Use the same Eden release and game updates/DLC on every PC. Every player has their own game and console files. USCL checks the update and DLC when a member starts the game (below).
 2. From the game's USCL options, select Host Online Session. USCL starts an unlisted Eden room bound to `127.0.0.1:24872` and a Steam bridge with the `switch` preset. No RPCN or Demonware service starts for this route.
 3. Friends join the USCL session through the Friends tab or an existing Steam invite, and wait for the session to show connected.
 4. Everyone starts the Switch game from USCL. The patched graphical core receives `--uscl-room <nickname>@127.0.0.1:24872`; an alternative SDL core receives `--multiplayer` instead. A requested graphical room join must succeed before the game boots. The host connects directly to the room. Members connect through the bridge's UDP forward to the host's room. Normal Steam session kick/ban handling applies to relayed traffic.
@@ -35,7 +43,15 @@ Tested 2026-11-14/15 (Linux, i5-10600K + RTX 4060, firmware/keys 22.5.0): Mario 
 
 This uses emulated local wireless (LDN), not Nintendo's Online Play service. It supports games with that multiplayer mode; it is not a blanket promise for all Switch games. The room transport is ENet over forwarded UDP, leaving retransmission and ordering to ENet. The host must remain connected.
 
-The title ID in a bracketed filename is used as the library/session ID; without one, a size/header fingerprint provides a location-independent fallback. Titles and IDs are not decrypted from game contents. Installed update/DLC versions are not yet verified automatically, so match them manually. Switch game hashes do not use RPCS3's EBOOT hash check.
+The title ID in a bracketed filename is used as the library/session ID; without one, a size/header fingerprint provides a location-independent fallback. Titles and IDs are not decrypted from game contents. Switch game hashes do not use RPCS3's EBOOT hash check.
+
+### Matching updates and DLC
+
+The game's Information panel shows what Eden has installed for it, e.g. `Installed: Update v524288, 2 DLC`. The host's session carries the same as a build fingerprint (`<title ID> <build> <label>` in the lobby's `game` field). A member whose fingerprint differs can't start the game in that session. Instead they see the host's update and DLC next to their own, with a shortcut to Controllers, Updates and DLC.
+
+How it's read (`uscl-shell/src/switchcontent.cpp`): every NCA under `nand/user/Contents/registered/` in USCL's Eden profile has its header decrypted with the player's `header_key`. The content metas whose program ID is the game's update (title ID + `0x800`) or DLC (`+0x1001` and up) are kept. The update's title version comes from its CNMT, which needs `key_area_key_application_XX`. Without that key it shows "Update installed". The fingerprint hashes those metas' content IDs and versions, and is `base` when nothing is installed. For an extracted dump, it's the `updates/<version>` folder the game runs from. Nothing is downloaded: Nintendo's update servers need a console's own certificate, so updates still come from the player's own dumps, installed in Eden.
+
+Shown versions are title versions (`v524288` = the 8th update), the way NSP file names tag them. The version players see in the game (e.g. "3.0.1") is in the update's control data, behind its title key, and isn't shown. Not covered yet: add-ons disabled in Eden's per-game properties still count as installed, and content installed to the SD card (`sdmc`) instead of NAND isn't read.
 
 ## Development preview and validation
 

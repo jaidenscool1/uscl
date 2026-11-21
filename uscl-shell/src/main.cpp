@@ -9,6 +9,7 @@
 #include "online.h"
 #include "system.h"
 #include "updater.h"
+#include "switchcontent.h"
 #include "switchcore.h"
 
 #include <QFontDatabase>
@@ -113,6 +114,17 @@ namespace
 		const QVariantList servers{QVariantMap{{"id", "a"}}, QVariantMap{{"id", "b"}}, QVariantMap{{"id", "c"}}, QVariantMap{{"id", "d"}}};
 		check(ids(DiscordParty::sortedServers(servers, "c", {"d", "b"})) == QStringList{"c", "d", "b", "a"} &&
 		      ids(DiscordParty::sortedServers(servers, "", {})) == QStringList{"a", "b", "c", "d"}, "Discord server order");
+		{
+			// the USCL ticker, from the tracker built into the app (GAMES.md): one row of each status
+			const auto level = [](const QString& serial) { return Online::capability(serial).value("level").toString(); };
+			check(level("BLUS31011") == "online" && level("BLUS31426") == "beta" && level("BLUS31436") == "soon", "online ticker from GAMES.md");
+			check(level("0400C3F00006E000") == "offline" && level("0100152000022000") == "soon", "online ticker for Switch rows");
+			check(level("0100AAAA00000000") == "beta" && Online::capability("0100AAAA00000000").value("detail").toString().contains("tested"),
+			      "untracked game with an online route is an untested beta");
+			check(level("BLUS99999") == "offline" && level("") == "offline", "untracked PS3 game is offline");
+			check(Online::capability("BLUS1", "| Game | [BLUS1](games/BLUS1.md) | 1.0 | PSN | ✅ plays | next |").value("level") == "online" &&
+			      Online::capability("BLUS2", "| Game | BLUS2 | own | ❌ none |").value("level") == "offline", "ticker row formats");
+		}
 		check(Online::sanitizeName("Player One") == "Player_One", "name: spaces");
 		check(Online::sanitizeName("ab") == "abPlayer", "name: too short");
 		check(Online::sanitizeName("Zoë ★ the Great Destroyer") == "Zo_the_Great_Des", "name: symbols, length");
@@ -366,6 +378,39 @@ namespace
 				check(SwitchCore::arguments(world, true, "P") == QStringList{"-f", "-g", world}, "Switch 2 launch arguments");
 				check(SwitchCore::prerequisiteError(world).contains("Eglantine"), "Switch 2 reports a missing core");
 				qunsetenv("USCL_SWITCH2_CORE");
+				{
+					// Nothing chosen: games run in the graphical eden (the tested one), not eden-cli, which shows a blank window
+					QSettings settings;
+					QMap<QString, QVariant> saved;
+					for (const QString& key : {"switch/frontend", "switch/USCL_SWITCH_CORE"})
+						if (settings.contains(key)) saved.insert(key, settings.value(key)), settings.remove(key);
+					const QByteArray old_core = qgetenv("USCL_SWITCH_CORE"), old_gui = qgetenv("USCL_SWITCH_GUI");
+					const bool core_set = qEnvironmentVariableIsSet("USCL_SWITCH_CORE"), gui_set = qEnvironmentVariableIsSet("USCL_SWITCH_GUI");
+					qunsetenv("USCL_SWITCH_FRONTEND");
+					qunsetenv("USCL_SWITCH_CORE");
+#ifdef _WIN32
+					const QString gui = write("bin/eden.exe", "MZ");   // Windows: executable means .exe
+#else
+					const QString gui = write("bin/eden", "#!/bin/sh\n");
+#endif
+					QFile(gui).setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+					qputenv("USCL_SWITCH_GUI", gui.toUtf8());
+					check(SwitchCore::executable(false, kart) == gui && SwitchCore::arguments(kart, false, "P") == QStringList{"-f", "-g", kart},
+					      "Switch games default to the graphical eden");
+					check(SwitchCore::arguments(kart, true, "Player").contains("--uscl-room"), "default Switch core joins rooms the patched way");
+					qputenv("USCL_SWITCH_CORE", "/opt/eden-cli");
+					check(SwitchCore::executable(false, kart) == "/opt/eden-cli" && SwitchCore::arguments(kart, false, "P").contains("--fullscreen"),
+					      "a chosen Switch core keeps the CLI frontend");
+					settings.setValue("switch/frontend", "sdl");
+					qunsetenv("USCL_SWITCH_CORE");
+					check(!SwitchCore::arguments(kart, false, "P").contains("-g"), "a chosen SDL frontend is kept");
+					settings.remove("switch/frontend");
+					for (auto it = saved.cbegin(); it != saved.cend(); ++it) settings.setValue(it.key(), it.value());
+					if (core_set) qputenv("USCL_SWITCH_CORE", old_core); else qunsetenv("USCL_SWITCH_CORE");
+					if (gui_set) qputenv("USCL_SWITCH_GUI", old_gui); else qunsetenv("USCL_SWITCH_GUI");
+					qputenv("USCL_SWITCH_FRONTEND", "sdl");
+					QFile::remove(gui);
+				}
 				QDir(root.filePath("games/ns2")).removeRecursively(); // the scans below count the Switch 1 fixtures only
 			}
 			{
@@ -476,7 +521,7 @@ namespace
 				const QString program = write("fake-core", "#!/bin/sh\nprintf '%s\\n' \"$@\"\nprintf 'DATA=%s\\n' \"$XDG_DATA_HOME\"\nprintf 'ONLINE=%s\\n' \"$USCL_ONLINE\"\nprintf 'THEME=%s\\n' \"$USCL_THEME\"\nprintf 'STYLE=%s\\n' \"$USCL_LOADING_STYLE\"\nprintf 'COLORS=%s\\n' \"$USCL_LOADING_COLORS\"\n");
 				QFile::setPermissions(program, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
 				qputenv("USCL_SWITCH_CORE", program.toUtf8());
-				const QString test_keys = write("test-prod.keys", "header_key = " + QByteArray(64, '0') + '\n');
+				const QString test_keys = write("test-prod.keys", "header_key = " + QByteArray(64, '5') + '\n');
 				check(SwitchCore::importKeys(test_keys).isEmpty() && SwitchCore::prerequisiteError(kart).isEmpty(),
 				      "Switch games can reach the core without a blanket firmware requirement");
 				// a game whose ticket asks for master key 0c (rights ID ends in key generation 0d), keys up to 0b
@@ -486,7 +531,7 @@ namespace
 				put32(future, 8, 40);
 				future.replace(16 + 24, 36, "0100a00000000000000000000000000d.tik");
 				const QString needs = write("Future Game [0100A00000000000].nsp", future);
-				QByteArray keys;
+				QByteArray keys = "header_key = " + QByteArray(64, '5') + '\n';
 				for (int i = 0; i <= 0x0b; i++)
 					keys += QString("master_key_%1 = %2\n").arg(i, 2, 16, QChar('0')).arg(QString(32, '1')).toLatin1();
 				check(SwitchCore::importKeys(write("old-prod.keys", keys)).isEmpty() && SwitchCore::prerequisiteError(needs).contains("master key 0c") &&
@@ -500,6 +545,159 @@ namespace
 				QFile::remove(version.fileName());
 				QFile::remove(needs);
 				check(SwitchCore::importKeys(test_keys).isEmpty(), "Switch test keys restored");
+				{
+					// Finding the right keys: names as players have them, and a header_key checked against a real NCA
+					QByteArray right(32, '\0'), wrong(32, '\xAA');
+					for (int i = 0; i < 32; i++) right[i] = char(i);
+					QByteArray header(0xC00, '\0');
+					header.replace(0x200, 4, "NCA3");
+					const QByteArray nca = SwitchContent::xts(right, header, 0, true);
+					for (int i = 0; i < 40; i++) write(QString("keyscan/fw/%1.nca").arg(i, 32, 16, QChar('0')), nca);
+					const auto keyFile = [](const QByteArray& h, int master) {
+						return "header_key = " + h.toHex() + "\nmaster_key_" + QByteArray::number(master, 16).rightJustified(2, '0') + " = " + QByteArray(32, '7') + "\n";
+					};
+					const QString wrong_keys = write("keyscan/wrong/prod.keys", keyFile(wrong, 0x0f));   // newer, but wrong
+					const QString right_keys = write("keyscan/Downloaded/prod (1).keys.txt", keyFile(right, 0x0a));
+					write("keyscan/notes/keys.txt", "not keys at all\n");
+					const QString titles = write("keyscan/Title.keys.txt", QByteArray(32, 'a') + " = " + QByteArray(32, 'b') + "\n");
+					const auto found = SwitchCore::findConsoleFiles({root.filePath("games/keyscan")});
+					check(found.value("keys").toString() == right_keys && found.value("keysChecked").toBool(), "Switch picks the keys that open this PC's NCAs");
+					check(found.value("titleKeyFiles").toStringList().contains(titles), "Switch finds renamed title keys");
+					check(found.value("firmware").toString().isEmpty(), "Switch skips a folder of NCAs without the SystemVersion title");
+					QFile::remove(right_keys);
+					// with no key that opens them, the NCAs can't tell wrong keys from damaged files: used, but not "checked"
+					const auto only_wrong = SwitchCore::findConsoleFiles({root.filePath("games/keyscan")});
+					check(only_wrong.value("keys").toString() == wrong_keys && !only_wrong.value("keysChecked").toBool(), "Switch keys it can't verify aren't marked checked");
+					check(!SwitchCore::consoleFilesMissing(kart), "Switch console files present for a game that names no key generation");
+					write("profile-keys-incomplete.keys", "master_key_00 = " + QByteArray(32, '7') + "\n");
+					check(SwitchCore::importKeys(root.filePath("games/profile-keys-incomplete.keys")).isEmpty() && SwitchCore::consoleFilesMissing(kart) &&
+					      SwitchCore::prerequisiteError(kart).contains("header_key"), "Switch reports keys without header_key");
+					check(SwitchCore::importKeys(test_keys).isEmpty(), "Switch test keys restored after key search");
+					QDir(root.filePath("games/keyscan")).removeRecursively();
+
+					// Firmware: read by its content, with keys in the same folder. An NCA header (key generation 5 + 1)
+					// for program `id`, content type `type`; the SystemVersion one carries a RomFS saying 22.5.0.
+					QByteArray kaek(16, '\0'), section(16, '\0');
+					for (int i = 0; i < 16; i++) kaek[i] = char(0x40 + i), section[i] = char(0x90 + i);
+					const auto firmwareNca = [&](quint64 id, int type, bool version) {
+						QByteArray h(0xC00, '\0');
+						h.replace(0x200, 4, "NCA3");
+						h[0x205] = char(type), h[0x220] = 6;
+						qToLittleEndian(id, h.data() + 0x210);
+						if (!version)
+							return SwitchContent::xts(right, h, 0, true);
+						qToLittleEndian(quint32(6), h.data() + 0x240);                    // section 0 at 0xC00
+						h[0x402] = 0, h[0x403] = 3, h[0x404] = 3;                        // RomFS, IVFC, AES-CTR
+						h.replace(0x408, 4, "IVFC");
+						qToLittleEndian(quint64(0x200), h.data() + 0x490);                // level 6 (data) 0x200 into it
+						for (int i = 0; i < 8; i++) h[0x540 + i] = char(0x21 + i);
+						QByteArray area(0x20, '\0');
+						area += SwitchContent::aesEncrypt(kaek, section) + QByteArray(16, '\0');
+						h.replace(0x300, 0x40, area);
+						QByteArray romfs(0x400, '\0');
+						qToLittleEndian(quint64(0x50), romfs.data());
+						qToLittleEndian(quint64(0x200), romfs.data() + 0x48);
+						romfs[0x200] = 22, romfs[0x201] = 5, romfs[0x202] = 0;
+						QByteArray counter(16, '\0');
+						for (int i = 0; i < 8; i++) counter[i] = char(0x28 - i);
+						qToBigEndian(quint64(0xC00 >> 4), counter.data() + 8);
+						return SwitchContent::xts(right, h, 0, true) + SwitchContent::ctr(section, counter, QByteArray(0x200, '\0') + romfs);
+					};
+					const QString same = "keyscan2/Switch Stuff/";   // keys and firmware together, a name with no version
+					write(same + "prod.keys", "header_key = " + right.toHex() + "\nkey_area_key_application_05 = " + kaek.toHex() +
+					                          "\nmaster_key_05 = " + QByteArray(32, '7') + "\n");
+					for (int i = 0; i < 44; i++) write(same + QString("%1.nca").arg(i, 32, 16, QChar('0')), firmwareNca(0x0100000000000800 + i, 4, false));
+					write(same + "ffffffffffffffffffffffffffffffff.nca", firmwareNca(0x0100000000000809, 4, true));
+					for (int i = 0; i < 45; i++)   // another emulator's installed games: many NCAs, no SystemVersion
+						write(QString("keyscan2/yuzu/nand/user/Contents/registered/%1.nca").arg(i, 32, 16, QChar('0')), firmwareNca(0x0100152000022000 + i, 0, false));
+					const auto fw = SwitchContent::firmware(root.filePath("games/" + same), SwitchContent::parseKeys(QFile(root.filePath("games/" + same + "prod.keys")).open(QIODevice::ReadOnly) ? QByteArray() : QByteArray()));
+					check(!fw.readable, "Switch firmware unread without keys");
+					QFile same_keys(root.filePath("games/" + same + "prod.keys"));
+					const auto keyset = same_keys.open(QIODevice::ReadOnly) ? SwitchContent::parseKeys(same_keys.readAll()) : QMap<QString, QByteArray>();
+					const auto read = SwitchContent::firmware(root.filePath("games/" + same), keyset);
+					check(read.isFirmware && read.version == "22.5.0" && read.generation == 5, "Switch firmware version read from SystemVersion");
+					check(!SwitchContent::firmware(root.filePath("games/keyscan2/yuzu/nand/user/Contents/registered"), keyset).isFirmware, "installed games aren't firmware");
+					const auto found2 = SwitchCore::findConsoleFiles({root.filePath("games/keyscan2")});
+					check(found2.value("keys").toString().endsWith(same + "prod.keys") && found2.value("firmware").toString().endsWith("Switch Stuff") &&
+					      found2.value("version").toString() == "22.5.0", "Switch keys and firmware in one folder: both found, firmware versioned");
+					QString error;
+					const QString did = SwitchCore::installConsoleFiles(found2, &error);
+					check(error.isEmpty() && did.contains("22.5.0") && SwitchCore::installedConsoleFiles().value("version").toString() == "22.5.0",
+					      "Switch installs the firmware it found, with its real version");
+					QFile::remove(SwitchCore::dataDir() + "firmware-version.txt");   // an install from before versions were read
+					SwitchCore::installConsoleFiles({}, &error);
+					check(SwitchCore::installedConsoleFiles().value("version").toString() == "22.5.0", "Switch reads an installed firmware's unknown version");
+					for (const QString& core : {SwitchCore::dataDir(), SwitchCore::profileDir() + "data/eglantine/"})
+						QDir(core + "nand/system").removeRecursively(), QFile::remove(core + "firmware-version.txt");
+					check(SwitchCore::importKeys(test_keys).isEmpty(), "Switch test keys restored after firmware search");
+					QDir(root.filePath("games/keyscan2")).removeRecursively();
+				}
+				{
+					// Installed update / DLC (SwitchContent): AES against FIPS-197 and IEEE 1619, then a NAND of content
+					// metas encrypted the way Nintendo's are. (Checked once against Python's cryptography as well.)
+					const auto hex = [](const char* s) { return QByteArray::fromHex(s); };
+					check(SwitchContent::aesEncrypt(hex("000102030405060708090a0b0c0d0e0f"), hex("00112233445566778899aabbccddeeff")) == hex("69c4e0d86a7b0430d8cdb78070b4c55a") &&
+					      SwitchContent::aesDecrypt(hex("000102030405060708090a0b0c0d0e0f"), hex("69c4e0d86a7b0430d8cdb78070b4c55a")) == hex("00112233445566778899aabbccddeeff"), "AES-128 known answer");
+					check(SwitchContent::xts(QByteArray(32, '\0'), QByteArray(0x200, '\0'), 0, true).left(32) ==
+					      hex("917cf69ebd68b2ec9b9fe9a3eadda692cd43d2f59598ed858c02c2652fbf922e"), "AES-XTS known answer");
+					QByteArray header_key(32, '\0'), kaek(16, '\0'), section_key(16, '\0');
+					for (int i = 0; i < 32; i++) header_key[i] = char(i);
+					for (int i = 0; i < 16; i++) kaek[i] = char(0x40 + i), section_key[i] = char(0x80 + i);
+					// a content meta for program `id`: header (XTS), key area, section 0 = PFS0 holding the CNMT (CTR)
+					const auto meta = [&](quint64 id, quint32 version, quint8 type) {
+						QByteArray h(0xC00, '\0');
+						h.replace(0x200, 4, "NCA3");
+						h[0x205] = 1, h[0x220] = 6;   // key generation 6: key_area_key_application_05
+						qToLittleEndian(id, h.data() + 0x210);
+						QByteArray cnmt(0x40, '\0');
+						qToLittleEndian(id, cnmt.data());
+						qToLittleEndian(version, cnmt.data() + 8);
+						cnmt[0xC] = char(type);
+						const QByteArray names("x.cnmt\0\0\0\0\0\0\0\0\0\0", 16);
+						QByteArray pfs("PFS0", 4);
+						pfs += QByteArray(12 + 0x18, '\0');
+						put32(pfs, 4, 1), put32(pfs, 8, names.size()), put32(pfs, 0x18, cnmt.size());
+						pfs += names + cnmt;
+						qToLittleEndian(quint32(6), h.data() + 0x240);   // section at 0xC00, the PFS0 0x203 into it
+						qToLittleEndian(quint64(0x203), h.data() + 0x440);
+						qToLittleEndian(quint64(pfs.size()), h.data() + 0x448);
+						h[0x402] = 1, h[0x403] = 2, h[0x404] = 3;
+						for (int i = 0; i < 8; i++) h[0x540 + i] = char(i + 1);
+						QByteArray area(0x10, '\0');
+						for (int i = 0; i < 3; i++) area += SwitchContent::aesEncrypt(kaek, i == 1 ? section_key : QByteArray(16, '\0'));
+						h.replace(0x300, 0x40, area);
+						QByteArray counter(16, '\0');
+						for (int i = 0; i < 8; i++) counter[i] = char(8 - i);
+						qToBigEndian(quint64(0xC00 >> 4), counter.data() + 8);
+						return SwitchContent::xts(header_key, h, 0, true) + SwitchContent::ctr(section_key, counter, QByteArray(0x203, '\0') + pfs);
+					};
+					const QString nand = SwitchCore::dataDir() + "nand/user/Contents/registered/";
+					const auto install = [&](const QString& name, const QByteArray& nca) {
+						QDir().mkpath(QFileInfo(nand + name).absolutePath());
+						QFile f(nand + name);
+						check(f.open(QIODevice::WriteOnly) && f.write(nca) == nca.size(), "Switch NAND fixture");
+					};
+					QFile prod(SwitchCore::dataDir() + "keys/prod.keys");
+					const QByteArray real_keys = prod.open(QIODevice::ReadOnly) ? prod.readAll() : QByteArray();
+					prod.close();
+					check(prod.open(QIODevice::WriteOnly) && prod.write("header_key = " + header_key.toHex() + "\nkey_area_key_application_05 = " + kaek.toHex() + "\n") > 0, "Switch content keys fixture");
+					prod.close();
+					const QString kart_id = "0100152000022000";
+					check(SwitchContent::installed(kart, kart_id).build == "base" && GameModel::switchContent(kart, kart_id) == "No update", "Switch game without update or DLC");
+					install("00000012/aa11.cnmt.nca", meta(0x0100152000022800, 524288, 0x81));
+					install("000000ab/bb22.cnmt.nca/00", meta(0x0100152000023001, 0, 0x82));   // a split NCA folder
+					install("cc33.cnmt.nca", meta(0x0100AAAA00000800, 65536, 0x81));           // another game's update
+					const QString with_update = GameModel::gameHash(kart, kart_id);
+					check(with_update.size() == 16 && GameModel::switchContent(kart, kart_id) == "Update v524288, 1 DLC", "Switch installed update and DLC");
+					QFile::remove(nand + "00000012/aa11.cnmt.nca");   // Eden replaces the old update's content with the new one
+					install("00000034/ee55.cnmt.nca", meta(0x0100152000022800, 589824, 0x81));
+					check(GameModel::gameHash(kart, kart_id) != with_update && SwitchContent::installed(kart, kart_id).update == "v589824", "Switch build changes with the update");
+					check(SwitchContent::installed("/d/Sports/updates/65536/exefs/main", {}).update == "v65536" &&
+					      SwitchContent::installed("/d/Sports/base/exefs/main", {}).build == "base", "Switch dump runs its update folder");
+					QDir(SwitchCore::dataDir() + "nand/user").removeRecursively();
+					check(prod.open(QIODevice::WriteOnly) && prod.write(real_keys) == real_keys.size(), "Switch test keys restored after content test");
+					prod.close();
+				}
 #ifdef __linux__
 				const QByteArray old_driver = qgetenv("SDL_VIDEODRIVER"), old_display = qgetenv("DISPLAY");
 				const bool driver_set = qEnvironmentVariableIsSet("SDL_VIDEODRIVER"), display_set = qEnvironmentVariableIsSet("DISPLAY");
