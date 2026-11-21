@@ -26,6 +26,11 @@ public:
 	static QStringList arguments(const QString& path, bool online, const QString& nickname);
 	static QString prepareLaunchConfig();
 	static QString prerequisiteError(const QString& path = {});
+	// The game can't start for want of console files a new search might find: no (complete) keys, keys or system
+	// software older than the game needs. The home screen searches the PC once more before showing the error.
+	static bool consoleFilesMissing(const QString& path);
+	// the master key a game's tickets need, -1 if it doesn't say
+	static int neededMasterKey(const QString& path);
 	static QString importKeys(const QString& path);
 	static QString importFirmware(const QString& path);
 	static QMap<QString, QString> library();

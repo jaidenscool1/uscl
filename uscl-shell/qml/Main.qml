@@ -149,6 +149,16 @@ Window {
         launchGame(g)
     }
     function launchGame(g) {
+        // Switch keys or system software missing or too old: look on the PC once more (an SD card plugged in since,
+        // a new download) and start the game when that's done; the error only shows if nothing usable turned up
+        if (g.console === "Switch" && switchKeysTried !== g.serial && launcher.switchFilesMissing(g.path)) {
+            switchKeysTried = g.serial
+            switchKeysGame = g
+            notice.show(qsTr("Looking for your Switch keys..."), ic("cat_switch"))
+            games.setupSwitchFiles()
+            return
+        }
+        switchKeysTried = ""
         launcher.setLoadingTheme(activeTheme, themePalette.background, themePalette.text, themePalette.accent, themePalette.panel)
         if (prefs.autoControllers) launcher.prepareInput(gamepad.names, g.console)   // every console: pads -> players 1, 2...
         if (emuConsoles.indexOf(g.console) >= 0) {   // Wii -> Dolphin, 3DS -> Azahar
@@ -1109,6 +1119,13 @@ Window {
         }
         // Switch keys / system software (at start, after Add Games, from Settings): say what changed
         function onSwitchFilesDone(installed, tooNew, error) {
+            if (switchKeysGame) {   // a game waiting on this search (launchGame): start it, or show why it can't
+                var waiting = switchKeysGame
+                switchKeysGame = null
+                cfgTick++
+                launchGame(waiting)
+                return
+            }
             if (setup.open) return   // the setup screen shows it
             if (error) dialog.show(qsTr("Switch Emulation"), error)
             else if (installed) {
@@ -1122,6 +1139,8 @@ Window {
         }
     }
     property bool switchLookRequested: false
+    property string switchKeysTried: ""   // the Switch game whose start already searched for keys once
+    property var switchKeysGame: null     // the Switch game waiting for that search
     Connections {
         target: online
         function onStateChanged() {

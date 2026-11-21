@@ -33,7 +33,7 @@ Item {
             if (installed) text = qsTr("Installed: %1.").arg(installed)
             else if (have.master >= 0) text = qsTr("Already installed: console keys up to master key %1%2.").arg(("0" + have.master.toString(16)).slice(-2))
                                               .arg(have.version ? qsTr(", system software %1").arg(have.version) : "")
-            else text = qsTr("No Switch console keys found. Switch games need prod.keys dumped from your own Switch: put it, and the system software, in Downloads and USCL picks them up when it starts. Or import them in Settings → Switch Emulation.")
+            else text = qsTr("No Switch console keys found. Switch games need prod.keys dumped from your own Switch: put it, and the system software, in Downloads or leave it on the Switch's SD card, and USCL picks them up. Or import them in Settings → Switch Emulation.")
             if (tooNew.length) text += "\n" + qsTr("System software %1 is here too, but it needs newer keys than yours.").arg(tooNew.join(", "))
             if (error) text += "\n" + error
             setup.switchResult = text

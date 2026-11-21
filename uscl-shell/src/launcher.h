@@ -38,6 +38,8 @@ public:
 	static QString azaharConfigFile();
 	Q_INVOKABLE bool openSwitchSettings();
 	Q_INVOKABLE static QString switchStatus(const QString& path = {});
+	// the game's console keys or system software are missing or too old (SwitchCore::consoleFilesMissing)
+	Q_INVOKABLE static bool switchFilesMissing(const QString& path);
 	Q_INVOKABLE static QString importSwitchKeys(const QString& path);
 	Q_INVOKABLE static QString importSwitchFirmware(const QString& path);
 	// installed Switch keys / system software: {master: highest master key or -1, version, firmware, titleKeys}

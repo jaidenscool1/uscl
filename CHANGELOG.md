@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Switch keys are found without importing them by hand. USCL now also looks on every other drive, including the Switch's SD card (`switch\prod.keys` from Lockpick_RCM). It accepts the names key files get on Windows (`prod.keys.txt`, `prod (1).keys`, `keys.txt`), checks each file's `header_key` against a real NCA on the PC and picks the keys that work. Starting a Switch game without usable keys searches once more and starts the game if they turn up.
 - A USCL ticker next to every game shows how well it plays online: USCL Online, USCL Online Beta, USCL Online Soon or Offline. It's read from the game tracker built into the app, and the Information panel explains it.
 - Switch: games now run in the bundled, patched graphical Eden (the tested one) by default. They used to start in `eden-cli`, which stopped on a black screen. A Switch emulator chosen in Settings → Switch Emulation is kept.
 - Switch: show each game's installed update and DLC (read from Eden's NAND) in its Information panel, and check them when joining a session. A member whose update or DLC differs from the host's is told what the host has and what they have, before the game starts. Updates still come from the player's own dumps.

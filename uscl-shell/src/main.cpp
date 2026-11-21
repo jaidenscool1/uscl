@@ -517,7 +517,7 @@ namespace
 				const QString program = write("fake-core", "#!/bin/sh\nprintf '%s\\n' \"$@\"\nprintf 'DATA=%s\\n' \"$XDG_DATA_HOME\"\nprintf 'ONLINE=%s\\n' \"$USCL_ONLINE\"\nprintf 'THEME=%s\\n' \"$USCL_THEME\"\nprintf 'STYLE=%s\\n' \"$USCL_LOADING_STYLE\"\nprintf 'COLORS=%s\\n' \"$USCL_LOADING_COLORS\"\n");
 				QFile::setPermissions(program, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
 				qputenv("USCL_SWITCH_CORE", program.toUtf8());
-				const QString test_keys = write("test-prod.keys", "header_key = " + QByteArray(64, '0') + '\n');
+				const QString test_keys = write("test-prod.keys", "header_key = " + QByteArray(64, '5') + '\n');
 				check(SwitchCore::importKeys(test_keys).isEmpty() && SwitchCore::prerequisiteError(kart).isEmpty(),
 				      "Switch games can reach the core without a blanket firmware requirement");
 				// a game whose ticket asks for master key 0c (rights ID ends in key generation 0d), keys up to 0b
@@ -527,7 +527,7 @@ namespace
 				put32(future, 8, 40);
 				future.replace(16 + 24, 36, "0100a00000000000000000000000000d.tik");
 				const QString needs = write("Future Game [0100A00000000000].nsp", future);
-				QByteArray keys;
+				QByteArray keys = "header_key = " + QByteArray(64, '5') + '\n';
 				for (int i = 0; i <= 0x0b; i++)
 					keys += QString("master_key_%1 = %2\n").arg(i, 2, 16, QChar('0')).arg(QString(32, '1')).toLatin1();
 				check(SwitchCore::importKeys(write("old-prod.keys", keys)).isEmpty() && SwitchCore::prerequisiteError(needs).contains("master key 0c") &&
@@ -541,6 +541,36 @@ namespace
 				QFile::remove(version.fileName());
 				QFile::remove(needs);
 				check(SwitchCore::importKeys(test_keys).isEmpty(), "Switch test keys restored");
+				{
+					// Finding the right keys: names as players have them, and a header_key checked against a real NCA
+					QByteArray right(32, '\0'), wrong(32, '\xAA');
+					for (int i = 0; i < 32; i++) right[i] = char(i);
+					QByteArray header(0xC00, '\0');
+					header.replace(0x200, 4, "NCA3");
+					const QByteArray nca = SwitchContent::xts(right, header, 0, true);
+					for (int i = 0; i < 40; i++) write(QString("keyscan/fw/%1.nca").arg(i, 32, 16, QChar('0')), nca);
+					const auto keyFile = [](const QByteArray& h, int master) {
+						return "header_key = " + h.toHex() + "\nmaster_key_" + QByteArray::number(master, 16).rightJustified(2, '0') + " = " + QByteArray(32, '7') + "\n";
+					};
+					const QString wrong_keys = write("keyscan/wrong/prod.keys", keyFile(wrong, 0x0f));   // newer, but wrong
+					const QString right_keys = write("keyscan/Downloaded/prod (1).keys.txt", keyFile(right, 0x0a));
+					write("keyscan/notes/keys.txt", "not keys at all\n");
+					const QString titles = write("keyscan/Title.keys.txt", QByteArray(32, 'a') + " = " + QByteArray(32, 'b') + "\n");
+					const auto found = SwitchCore::findConsoleFiles({root.filePath("games/keyscan")});
+					check(found.value("keys").toString() == right_keys && found.value("keysChecked").toBool(), "Switch picks the keys that open this PC's NCAs");
+					check(found.value("titleKeyFiles").toStringList().contains(titles), "Switch finds renamed title keys");
+					check(found.value("firmware").toString().endsWith("keyscan/fw"), "Switch finds the firmware folder next to the keys");
+					QFile::remove(right_keys);
+					// with no key that opens them, the NCAs can't tell wrong keys from damaged files: used, but not "checked"
+					const auto only_wrong = SwitchCore::findConsoleFiles({root.filePath("games/keyscan")});
+					check(only_wrong.value("keys").toString() == wrong_keys && !only_wrong.value("keysChecked").toBool(), "Switch keys it can't verify aren't marked checked");
+					check(!SwitchCore::consoleFilesMissing(kart), "Switch console files present for a game that names no key generation");
+					write("profile-keys-incomplete.keys", "master_key_00 = " + QByteArray(32, '7') + "\n");
+					check(SwitchCore::importKeys(root.filePath("games/profile-keys-incomplete.keys")).isEmpty() && SwitchCore::consoleFilesMissing(kart) &&
+					      SwitchCore::prerequisiteError(kart).contains("header_key"), "Switch reports keys without header_key");
+					check(SwitchCore::importKeys(test_keys).isEmpty(), "Switch test keys restored after key search");
+					QDir(root.filePath("games/keyscan")).removeRecursively();
+				}
 				{
 					// Installed update / DLC (SwitchContent): AES against FIPS-197 and IEEE 1619, then a NAND of content
 					// metas encrypted the way Nintendo's are. (Checked once against Python's cryptography as well.)
