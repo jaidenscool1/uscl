@@ -49,6 +49,7 @@ qt_add_qml_module(uscl
         qml/ConsoleGlyph.qml
         qml/RoundedCoverMask.qml
         qml/Xmb.qml
+        qml/Ticker.qml
         qml/Page.qml
         qml/OptionsPanel.qml
         qml/Dialog.qml
@@ -77,7 +78,7 @@ qt_add_qml_module(uscl
 qt_add_resources(uscl "uscl_changelog"
     PREFIX "/uscl"
     BASE "${CMAKE_CURRENT_SOURCE_DIR}/.."
-    FILES "${CMAKE_CURRENT_SOURCE_DIR}/../CHANGELOG.md"
+    FILES "${CMAKE_CURRENT_SOURCE_DIR}/../CHANGELOG.md" "${CMAKE_CURRENT_SOURCE_DIR}/../GAMES.md"
 )
 
 # the release tag sets the version (CI: -DUSCL_VERSION=${tag}); updates come from the public releases repo

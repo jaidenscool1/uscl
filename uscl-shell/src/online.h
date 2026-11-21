@@ -60,6 +60,11 @@ public:
 	Q_INVOKABLE static bool steamRunning();
 	// games that go online by themselves when started, like on a PS3 (each in the player's own session)
 	Q_INVOKABLE static bool supports(const QString& serial);
+	// How well a game plays online through USCL, for the ticker next to it: {level, label, detail}. level is
+	// "online" (✅ in GAMES.md), "beta" (🧪, or a route that should work but wasn't tested with this game), "soon"
+	// (🚧 / 📋) or "offline". Read from GAMES.md, built into the app, so the tracker is the one place to change.
+	Q_INVOKABLE static QVariantMap capability(const QString& serial);
+	static QVariantMap capability(const QString& serial, const QString& tracker);
 	// host: take a player out of this session (kick) or out of every session this PC hosts (ban); bans are
 	// keyed by Steam ID, so a new name doesn't get around them. The bridge applies both within 2 seconds.
 	Q_INVOKABLE void kick(const QString& id, const QString& name);

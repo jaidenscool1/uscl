@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A USCL ticker next to every game shows how well it plays online: USCL Online, USCL Online Beta, USCL Online Soon or Offline. It's read from the game tracker built into the app, and the Information panel explains it.
 - Switch: games now run in the bundled, patched graphical Eden (the tested one) by default. They used to start in `eden-cli`, which stopped on a black screen. A Switch emulator chosen in Settings → Switch Emulation is kept.
 - Switch: show each game's installed update and DLC (read from Eden's NAND) in its Information panel, and check them when joining a session. A member whose update or DLC differs from the host's is told what the host has and what they have, before the game starts. Updates still come from the player's own dumps.
 

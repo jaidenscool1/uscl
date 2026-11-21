@@ -219,6 +219,15 @@ Item {
                     color: "#d8f0a020"
                     Text { id: badgeText; anchors.centerIn: parent; text: row.modelData.badge || ""; color: "black"; font.pixelSize: 21; font.bold: true }
                 }
+                // a game's USCL ticker, after the title (and its tag): how well it plays online
+                Ticker {
+                    visible: !!row.modelData.ticker
+                    x: titleText.x + Math.min(titleText.implicitWidth, titleText.width) + 18 + (row.modelData.badge ? badgeText.implicitWidth + 36 : 0)
+                    y: row.sel ? 270 : 38
+                    text: row.modelData.ticker || ""
+                    level: row.modelData.tickerLevel || ""
+                    dim: !row.sel
+                }
                 Text {
                     visible: (row.sel || row.fr) && !!row.modelData.desc
                     x: row.fr ? titleText.x + 2 : row.wide ? 220 + icon.width / 2 + 42 : 327

@@ -3,6 +3,10 @@
 US (BLUS/BCUS) PS3 games with online multiplayer: what plays through USCL today, what's being worked on, and
 what's next. One row per game; details live in `games/<serial>.md`. Update the row in the same PR as the work.
 
+The status emoji also drives the **USCL ticker** next to each game in the app (`Online::capability`): ✅ "USCL Online",
+🧪 "USCL Online Beta", 🚧/📋 "USCL Online Soon", anything else "Offline". Games not listed show "USCL Online Beta"
+when USCL has a route for them, and "Offline" otherwise. Keep the serial in its own cell and the emoji first in the status cell.
+
 **Status:** ✅ plays online through USCL · 🧪 works in a local test, not yet across PCs over Steam ·
 🚧 in progress · 📋 next up · ⬜ not started · ❌ no online multiplayer
 

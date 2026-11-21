@@ -114,6 +114,17 @@ namespace
 		const QVariantList servers{QVariantMap{{"id", "a"}}, QVariantMap{{"id", "b"}}, QVariantMap{{"id", "c"}}, QVariantMap{{"id", "d"}}};
 		check(ids(DiscordParty::sortedServers(servers, "c", {"d", "b"})) == QStringList{"c", "d", "b", "a"} &&
 		      ids(DiscordParty::sortedServers(servers, "", {})) == QStringList{"a", "b", "c", "d"}, "Discord server order");
+		{
+			// the USCL ticker, from the tracker built into the app (GAMES.md): one row of each status
+			const auto level = [](const QString& serial) { return Online::capability(serial).value("level").toString(); };
+			check(level("BLUS31011") == "online" && level("BLUS31426") == "beta" && level("BLUS31436") == "soon", "online ticker from GAMES.md");
+			check(level("0400C3F00006E000") == "offline" && level("0100152000022000") == "soon", "online ticker for Switch rows");
+			check(level("0100AAAA00000000") == "beta" && Online::capability("0100AAAA00000000").value("detail").toString().contains("tested"),
+			      "untracked game with an online route is an untested beta");
+			check(level("BLUS99999") == "offline" && level("") == "offline", "untracked PS3 game is offline");
+			check(Online::capability("BLUS1", "| Game | [BLUS1](games/BLUS1.md) | 1.0 | PSN | ✅ plays | next |").value("level") == "online" &&
+			      Online::capability("BLUS2", "| Game | BLUS2 | own | ❌ none |").value("level") == "offline", "ticker row formats");
+		}
 		check(Online::sanitizeName("Player One") == "Player_One", "name: spaces");
 		check(Online::sanitizeName("ab") == "abPlayer", "name: too short");
 		check(Online::sanitizeName("Zoë ★ the Great Destroyer") == "Zo_the_Great_Des", "name: symbols, length");

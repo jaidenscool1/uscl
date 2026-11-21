@@ -291,6 +291,52 @@ QString Online::personaFromVdf(const QByteArray& vdf)
 	return best;
 }
 
+QVariantMap Online::capability(const QString& serial)
+{
+	static const QString tracker = [] {
+		QFile f(":/uscl/GAMES.md");
+		return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
+	}();
+	return capability(serial, tracker);
+}
+
+QVariantMap Online::capability(const QString& serial, const QString& tracker)
+{
+	// the game's row: its serial in a cell ("| BLUS31011 |" or "| [BLUS31011](games/...) |"), then its status emoji
+	QString level;
+	if (!serial.isEmpty())
+	{
+		const QRegularExpression row("^\\|.*\\|\\s*\\[?" + QRegularExpression::escape(serial) + "\\]?(?:\\([^)]*\\))?\\s*\\|(.*)$",
+		                             QRegularExpression::MultilineOption | QRegularExpression::CaseInsensitiveOption);
+		const QString rest = row.match(tracker).captured(1);
+		for (const QString& cell : rest.split('|'))
+		{
+			const QString c = cell.trimmed();
+			if (c.startsWith(QString::fromUtf8("✅"))) level = "online";
+			else if (c.startsWith(QString::fromUtf8("🧪"))) level = "beta";
+			else if (c.startsWith(QString::fromUtf8("🚧")) || c.startsWith(QString::fromUtf8("📋"))) level = "soon";
+			else if (c.startsWith(QString::fromUtf8("🟠")) || c.startsWith(QString::fromUtf8("⬜")) || c.startsWith(QString::fromUtf8("❌"))) level = "offline";
+			if (!level.isEmpty())
+				break;
+		}
+	}
+	const bool untested = level.isEmpty() && supports(serial);
+	if (level.isEmpty())
+		level = untested ? "beta" : "offline";
+	QString label, detail;
+	if (level == "online")
+		label = tr("USCL Online"), detail = tr("Plays online with friends through USCL.");
+	else if (level == "beta")
+		label = tr("USCL Online Beta"),
+		detail = untested ? tr("Online through USCL should work, but hasn't been tested with this game yet.")
+		                  : tr("Online works in USCL's tests, but hasn't been confirmed between two PCs yet.");
+	else if (level == "soon")
+		label = tr("USCL Online Soon"), detail = tr("Online play is being worked on. The game plays offline for now.");
+	else
+		label = tr("Offline"), detail = tr("Plays offline. USCL doesn't support online play for this game yet.");
+	return {{"level", level}, {"label", label}, {"detail", detail}};
+}
+
 bool Online::supports(const QString& serial)
 {
 	// RPCN alone is enough for these (GAMES.md); the rest need a preset's servers

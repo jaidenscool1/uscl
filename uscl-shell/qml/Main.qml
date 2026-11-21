@@ -357,6 +357,8 @@ Window {
     function gameInfo(g) {
         var info = qsTr("%1\n\nSerial: %2      Console: %3\n%4").arg(g.title).arg(g.serial).arg(g.console).arg(g.path)
         if (g.console === "Switch") info += "\n" + qsTr("Installed: %1").arg(games.switchContent(g.path, g.serial))
+        var cap = online.capability(g.serial)
+        info += "\n\n" + cap.label + ": " + cap.detail
         return info
     }
 
@@ -841,10 +843,11 @@ Window {
         var named = ["PS3", "PS4", "Switch"].indexOf(g.console || "PS3") < 0
         var desc = gameUpdates.available[g.serial] ? updateInfo(g.serial) : named ? (consoleMeta[g.console] || [g.console])[0] : g.serial
         var badge = gameUpdates.available[g.serial] ? qsTr("Update") : ""
+        var cap = online.capability(g.serial)   // the USCL ticker: how well it plays online (GAMES.md)
         return {
                 gameId: g.serial, title: g.title, desc: desc, help: desc, icon: g.icon || ic("it_games"), wide: !!g.icon && wideIcon(g),
                 pic: g.pic || "", console: menuConsole(g),
-                badge: badge, value: badge,
+                badge: badge, value: badge || cap.label, ticker: cap.label, tickerLevel: cap.level,
                 action: function() { play(g) },
                 info: function() { dialog.show(qsTr("Information"), gameInfo(g)) },
                 options: function() {
