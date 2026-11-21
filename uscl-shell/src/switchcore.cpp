@@ -22,9 +22,21 @@
 
 namespace
 {
+	QString findTool(const QString& variable, const QString& name);
+
+	// The core a Switch game runs in: the patched graphical eden (Qt) or eden-cli (SDL). Both are bundled, but only the
+	// graphical one is tested: eden-cli boots updated games to a blank window. So with nothing chosen (Settings →
+	// Switch Emulation, or USCL_SWITCH_FRONTEND / USCL_SWITCH_CORE), games run in the graphical eden when it's there.
 	bool qtFrontend()
 	{
-		return qEnvironmentVariable("USCL_SWITCH_FRONTEND", QSettings().value("switch/frontend", "sdl").toString()) == "qt";
+		if (qEnvironmentVariableIsSet("USCL_SWITCH_FRONTEND"))
+			return qEnvironmentVariable("USCL_SWITCH_FRONTEND") == "qt";
+		const QSettings settings;
+		if (settings.contains("switch/frontend"))
+			return settings.value("switch/frontend").toString() == "qt";
+		if (qEnvironmentVariableIsSet("USCL_SWITCH_CORE") || settings.contains("switch/USCL_SWITCH_CORE"))
+			return false;   // a core chosen without a frontend: eden-cli, as before
+		return QFileInfo(findTool("USCL_SWITCH_GUI", "eden")).isExecutable();
 	}
 
 	QString configDir()
@@ -392,7 +404,12 @@ QString SwitchCore::executable(bool settings, const QString& game)
 	// Eden can't run Switch 2 builds or compressed dumps; Eglantine (an Eden fork with NX2 support) can.
 	if (!game.isEmpty() && needsEglantine(game))
 		return findTool("USCL_SWITCH2_CORE", "eglantine");
-	return findTool(settings ? "USCL_SWITCH_GUI" : "USCL_SWITCH_CORE", settings ? "eden" : "eden-cli");
+	if (settings)
+		return findTool("USCL_SWITCH_GUI", "eden");
+	// no core chosen: games run in the same graphical eden as the settings app (qtFrontend)
+	if (!qEnvironmentVariableIsSet("USCL_SWITCH_CORE") && !QSettings().contains("switch/USCL_SWITCH_CORE") && qtFrontend())
+		return findTool("USCL_SWITCH_GUI", "eden");
+	return findTool("USCL_SWITCH_CORE", qtFrontend() ? "eden" : "eden-cli");
 }
 
 QString SwitchCore::roomExecutable()

@@ -367,6 +367,35 @@ namespace
 				check(SwitchCore::arguments(world, true, "P") == QStringList{"-f", "-g", world}, "Switch 2 launch arguments");
 				check(SwitchCore::prerequisiteError(world).contains("Eglantine"), "Switch 2 reports a missing core");
 				qunsetenv("USCL_SWITCH2_CORE");
+				{
+					// Nothing chosen: games run in the graphical eden (the tested one), not eden-cli, which shows a blank window
+					QSettings settings;
+					QMap<QString, QVariant> saved;
+					for (const QString& key : {"switch/frontend", "switch/USCL_SWITCH_CORE"})
+						if (settings.contains(key)) saved.insert(key, settings.value(key)), settings.remove(key);
+					const QByteArray old_core = qgetenv("USCL_SWITCH_CORE"), old_gui = qgetenv("USCL_SWITCH_GUI");
+					const bool core_set = qEnvironmentVariableIsSet("USCL_SWITCH_CORE"), gui_set = qEnvironmentVariableIsSet("USCL_SWITCH_GUI");
+					qunsetenv("USCL_SWITCH_FRONTEND");
+					qunsetenv("USCL_SWITCH_CORE");
+					const QString gui = write("bin/eden", "#!/bin/sh\n");
+					QFile(gui).setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+					qputenv("USCL_SWITCH_GUI", gui.toUtf8());
+					check(SwitchCore::executable(false, kart) == gui && SwitchCore::arguments(kart, false, "P") == QStringList{"-f", "-g", kart},
+					      "Switch games default to the graphical eden");
+					check(SwitchCore::arguments(kart, true, "Player").contains("--uscl-room"), "default Switch core joins rooms the patched way");
+					qputenv("USCL_SWITCH_CORE", "/opt/eden-cli");
+					check(SwitchCore::executable(false, kart) == "/opt/eden-cli" && SwitchCore::arguments(kart, false, "P").contains("--fullscreen"),
+					      "a chosen Switch core keeps the CLI frontend");
+					settings.setValue("switch/frontend", "sdl");
+					qunsetenv("USCL_SWITCH_CORE");
+					check(!SwitchCore::arguments(kart, false, "P").contains("-g"), "a chosen SDL frontend is kept");
+					settings.remove("switch/frontend");
+					for (auto it = saved.cbegin(); it != saved.cend(); ++it) settings.setValue(it.key(), it.value());
+					if (core_set) qputenv("USCL_SWITCH_CORE", old_core); else qunsetenv("USCL_SWITCH_CORE");
+					if (gui_set) qputenv("USCL_SWITCH_GUI", old_gui); else qunsetenv("USCL_SWITCH_GUI");
+					qputenv("USCL_SWITCH_FRONTEND", "sdl");
+					QFile::remove(gui);
+				}
 				QDir(root.filePath("games/ns2")).removeRecursively(); // the scans below count the Switch 1 fixtures only
 			}
 			{
