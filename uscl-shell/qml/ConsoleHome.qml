@@ -169,6 +169,7 @@ Item {
         tab = theme === "xboxone" || theme === "x360classic" ? 1 : 0;
     }
     property real functionExtrasOpacity: 0
+    readonly property real ps4Pitch: categoryFocus ? 140 : 96   // PS4 function row spacing: compact at home, wide when focused
     onCategoryFocusChanged: {
         if (style.ps4 && categoryFocus && animate) functionExtrasArrival.restart();
         else { functionExtrasArrival.stop(); functionExtrasOpacity = categoryFocus ? 1 : 0; }
@@ -454,11 +455,11 @@ Item {
     // Profile lives where the console puts it, separate from the status clock.
     Item {
         objectName: "consoleProfile"
-        x: home.nintendo ? 64 : style.one ? 96 : style.ps4 ? 850 : 1550
+        x: home.nintendo ? 64 : style.one ? 96 : 1550
         y: home.nintendo ? 60 : style.one ? 58 : style.ps5 ? 34 : 78
         width: home.nintendo ? 110 : style.ps5 ? 64 : 390
         height: home.nintendo ? 110 : 80
-        visible: !style.blades && !style.metro
+        visible: !style.blades && !style.metro && !style.ps4   // PS4: the avatar is the Profile function in the top row
         opacity: style.ps4 && home.categoryFocus ? 0 : 1
         Behavior on opacity { NumberAnimation { duration: home.animate ? (home.categoryFocus ? 100 : 270) : 0 } }
         Rectangle {
@@ -512,9 +513,11 @@ Item {
     Item {
         id: functions
         visible: !style.xbox
-        x: home.nintendo ? (home.width - (home.shortcuts.length - 1) * (style.lightSwitch ? 124 : 162)) / 2 : style.ps5 ? 1340 : 100
-        y: home.nintendo ? (style.lightSwitch ? 790 : 753) : style.ps4 ? (home.categoryFocus ? 670 : 76) : 38
-        width: home.nintendo ? (home.shortcuts.length - 1) * (style.lightSwitch ? 124 : 162) : style.ps5 ? 220 : home.width - 200
+        // PS4: every function in one centred row at the top; Up brings it down and enlarges it (the function screen)
+        x: home.nintendo ? (home.width - (home.shortcuts.length - 1) * (style.lightSwitch ? 124 : 162)) / 2 : style.ps5 ? 1340 : style.ps4 ? (home.width - home.shortcuts.length * home.ps4Pitch) / 2 - 10 : 100
+        y: home.nintendo ? (style.lightSwitch ? 790 : 753) : style.ps4 ? (home.categoryFocus ? 300 : 30) : 38
+        width: home.nintendo ? (home.shortcuts.length - 1) * (style.lightSwitch ? 124 : 162) : style.ps5 ? 220 : style.ps4 ? home.shortcuts.length * home.ps4Pitch : home.width - 200
+        Behavior on x { NumberAnimation { duration: home.animate && style.ps4 ? 270 : 0; easing.type: Easing.OutCubic } }
         height: style.ps5 ? 70 : 150
         Behavior on y {
             NumberAnimation {
@@ -528,7 +531,6 @@ Item {
                 id: fn
                 required property var modelData
                 required property int index
-                readonly property bool compactVisible: ["updates","friends","settings","power"].indexOf(modelData.key) >= 0
                 readonly property bool included: home.nintendo ? index > 0 : style.ps5 ? modelData.key
                                                                                          === "settings"
                                                                                          || modelData.key
@@ -538,20 +540,14 @@ Item {
                                                                                      ? 0 : 1) : index
                 objectName: "homeShortcut_" + modelData.key
                 visible: included
-                opacity: style.ps4 && !compactVisible ? home.functionExtrasOpacity : 1
                 enabled: opacity > .9
-                x: style.ps4 && !home.categoryFocus && compactVisible ? ({
-                                                           updates: 115,
-                                                           friends: 644,
-                                                           settings: 1490,
-                                                           power: 1650
-                                                       }[modelData.key] || 0) : slot * (home.nintendo ? (style.lightSwitch ? 124 : 162) :
+                x: style.ps4 ? slot * home.ps4Pitch : slot * (home.nintendo ? (style.lightSwitch ? 124 : 162) :
                                                                                                         style.ps5
                                                                                                         ? 110 : functions.width
                                                                                                           / home.shortcuts.length)
                 width: home.nintendo ? (style.lightSwitch ? 120 : 152) : style.ps5 ? 90 : 150
                 height: style.ps5 ? 70 : home.nintendo && !style.lightSwitch ? 170 : 140
-                Behavior on x { NumberAnimation { duration: home.animate && style.ps4 && fn.compactVisible ? 270 : 0; easing.type: Easing.OutCubic } }
+                Behavior on x { NumberAnimation { duration: home.animate && style.ps4 ? 270 : 0; easing.type: Easing.OutCubic } }
                 readonly property bool selected: home.categoryFocus && home.shortcutIndex === index
                 Rectangle {
                     x: 10
@@ -560,14 +556,16 @@ Item {
                     height: width
                     radius: home.nintendo ? width / 2 : style.ps5 ? 32 : 0
                     color: home.nintendo && !style.lightSwitch ? "#414141" : style.lightSwitch && fn.modelData.key === "online" ? "#e60020" : "transparent"
-                    border.width: fn.selected && !style.lightSwitch ? 4 : 0
-                    border.color: style.accent
+                    border.width: fn.selected && !style.lightSwitch ? (style.ps4 ? 3 : 4) : 0
+                    border.color: style.ps4 ? "#e8eef8" : style.accent
+                    // PS4: a light box behind the selected function, as on the console
+                    Rectangle { anchors.fill: parent; anchors.margins: 3; visible: style.ps4 && fn.selected; color: "#28ffffff" }
                 }
                 ConsoleGlyph {
                     objectName: "functionGlyph"
-                    x: style.ps5 ? 24 : home.nintendo && !style.lightSwitch ? 44 : 28
-                    y: style.ps5 ? 10 : home.nintendo && !style.lightSwitch ? 34 : 18
-                    width: style.ps5 ? 36 : fn.selected && !home.nintendo ? 80 : 64
+                    x: style.ps4 ? 60 - width / 2 : style.ps5 ? 24 : home.nintendo && !style.lightSwitch ? 44 : 28
+                    y: style.ps4 ? 50 - height / 2 : style.ps5 ? 10 : home.nintendo && !style.lightSwitch ? 34 : 18
+                    width: style.ps5 ? 36 : style.ps4 ? (fn.selected ? 72 : home.categoryFocus ? 60 : 40) : fn.selected && !home.nintendo ? 80 : 64
                     Behavior on width { NumberAnimation { duration: home.animate ? 150 : 0; easing.type: Easing.OutCubic } }
                     height: width
                     kind: fn.modelData.key
@@ -580,6 +578,15 @@ Item {
                                               friends: "#09afba"
                                           }[kind] || (style.lightSwitch ? "#555555" : "#eeeeee")) : "white"
                     opacity: fn.selected || home.nintendo ? 1 : .7
+                    visible: !(style.ps4 && fn.modelData.key === "profile")
+                }
+                // PS4: Profile is the player's picture
+                Image {
+                    visible: style.ps4 && fn.modelData.key === "profile"
+                    width: fn.selected ? 72 : home.categoryFocus ? 60 : 44; height: width
+                    x: 60 - width / 2; y: 50 - height / 2
+                    Behavior on width { NumberAnimation { duration: home.animate ? 150 : 0; easing.type: Easing.OutCubic } }
+                    source: home.avatar; mipmap: true; fillMode: Image.PreserveAspectFit
                 }
                 ConsoleFocusRing {
                     x: 7; y: -3; width: 106; height: 106; radius: 53
@@ -605,6 +612,23 @@ Item {
                     }
                 }
             }
+        }
+    }
+    // PS4 function screen: what the selected function is, under the row
+    Column {
+        visible: style.ps4
+        opacity: home.categoryFocus ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: home.animate ? 200 : 0 } }
+        x: 200; width: home.width - 400; y: 450; spacing: 10
+        readonly property var fn: home.shortcuts[home.shortcutIndex] || ({})
+        Text {
+            width: parent.width; horizontalAlignment: Text.AlignHCenter; color: "#c7d3ea"; font.pixelSize: 26
+            text: ({ updates: qsTr("Game updates: download and install them"), online: qsTr("Host or join an online session over Steam"),
+                     friends: qsTr("Your Steam friends, their USCL profiles and sessions"), help: qsTr("Controls, quitting a game and playing online"),
+                     changelog: qsTr("What's new in this USCL"), party: qsTr("Discord voice chats"),
+                     profile: qsTr("Your trophies, play time and Online ID"), library: qsTr("Every game you've added"),
+                     controllers: qsTr("Connected controllers and their buttons"), settings: qsTr("Theme, video, sound, network and more"),
+                     power: qsTr("Quit USCL") })[parent.fn.key] || ""
         }
     }
     Text {
