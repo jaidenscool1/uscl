@@ -252,16 +252,18 @@ Item {
         height: 920 - y
         clip: true
         model: visible ? screen.controller.settingsSections : []
-        currentIndex: screen.controller.sectionFocus ? screen.controller.sectionCursor :
-                                                       screen.controller.settingsSection
-        onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
+        // the section shown (or the cursor while the sidebar has focus); not ListView.currentIndex, which the
+        // view resets to 0 when its model appears
+        readonly property int active: screen.controller.sectionFocus ? screen.controller.sectionCursor : screen.controller.settingsSection
+        onActiveChanged: positionViewAtIndex(active, ListView.Contain)
+        onCountChanged: if (count) positionViewAtIndex(active, ListView.Contain)
         delegate: Rectangle {
             required property var modelData
             required property int index
             width: 440
             height: 82
-            color: index === systemSections.currentIndex ? style.panel : "transparent"
-            border.width: index === systemSections.currentIndex && screen.controller.sectionFocus ? 4 : 0
+            color: index === systemSections.active ? style.panel : "transparent"
+            border.width: index === systemSections.active && screen.controller.sectionFocus ? 4 : 0
             border.color: style.accent
             Text {
                 x: 24

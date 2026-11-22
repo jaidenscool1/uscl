@@ -27,6 +27,7 @@ qt_add_executable(uscl
     src/system.cpp src/system.h
     src/online.cpp src/online.h
     src/profile.cpp src/profile.h
+    src/tour.cpp src/tour.h
     src/updater.cpp src/updater.h
     third_party/tweetnacl/tweetnacl.c
 )

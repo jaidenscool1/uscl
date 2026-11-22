@@ -196,10 +196,10 @@ Item {
                     width: Math.max(0, (row.fr ? icon.x - 4 + xmb.friendCardWidth - 110 : row.width - 90) - x)
                     verticalAlignment: Text.AlignVCenter
                     text: row.modelData.title
-                    color: row.sel || row.fr ? "white" : "#b4ffffff"
+                    color: row.sel || row.fr ? "white" : "#e6ffffff"   // bright: the silk wave passes behind the list
                     font.pixelSize: row.fr ? (row.sel ? 38 : 32) : row.sel ? 40 : 29
                     elide: Text.ElideRight
-                    style: Text.Raised; styleColor: row.sel ? "#90000000" : "#70000000"
+                    style: Text.Outline; styleColor: "#50000000"   // a soft edge keeps it readable over the bright silk wave
                 }
                 // the PS3's status icon before the name: red circle with a cross offline, blue online, amber away
                 Rectangle {
@@ -239,7 +239,7 @@ Item {
                     text: row.modelData.desc || ""
                     color: "#d8ffffff"
                     elide: Text.ElideRight
-                    style: Text.Raised; styleColor: "#70000000"
+                    style: Text.Outline; styleColor: "#50000000"
                 }
             }
         }
@@ -259,7 +259,7 @@ Item {
                 required property var modelData
                 height: 50; spacing: 16
                 Image { y: 7; width: 36; height: 36; source: xmb.current ? xmb.current.icon : ""; opacity: 0.56; mipmap: true; fillMode: Image.PreserveAspectFit }
-                Text { height: 50; verticalAlignment: Text.AlignVCenter; text: parent.modelData; color: "#b0ffffff"; font.pixelSize: 25; style: Text.Raised; styleColor: "#60000000" }
+                Text { height: 50; verticalAlignment: Text.AlignVCenter; text: parent.modelData; color: "#b0ffffff"; font.pixelSize: 25; style: Text.Outline; styleColor: "#50000000" }
             }
         }
         SequentialAnimation {

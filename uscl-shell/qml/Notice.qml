@@ -12,6 +12,8 @@ Item {
     opacity: 0
     visible: opacity > 0
     Behavior on opacity { NumberAnimation { duration: 260 } }
+    // slides in from the right edge as it fades in
+    transform: Translate { x: notice.opacity < 1 ? 40 * (1 - notice.opacity) : 0 }
     Rectangle { anchors.fill: parent; visible: notice.theme !== "ps3"; color: themeStyle.panel; radius: themeStyle.radius; border.width: 1; border.color: themeStyle.accent }
     Image { visible: notice.theme === "ps3"; anchors.fill: parent; source: "qrc:/qt/qml/Uscl/xmb/ui/notify_card.png" }
     Image { x: 24; y: 28; width: 56; height: 56; source: notice.icon; visible: notice.icon !== ""; mipmap: true }

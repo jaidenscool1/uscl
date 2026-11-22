@@ -1222,9 +1222,11 @@ Item {
     }
     Text {
         visible: !home.guideOpen && !(style.ps4 && home.categoryFocus)
-        x: 96
+        // Xbox 360 Classic: inside the open blade, clear of the blades stacked at both sides
+        x: style.blades ? home.tab * 70 + 60 : 96
         y: 1010
-        width: home.width - 192
+        width: home.width - x - (style.blades ? (3 - home.tab) * 70 + 60 : 96)
+        Behavior on x { NumberAnimation { duration: home.animate ? 200 : 0; easing.type: Easing.OutCubic } }
         color: style.blades ? "white" : style.muted
         font.pixelSize: 24
         elide: Text.ElideRight

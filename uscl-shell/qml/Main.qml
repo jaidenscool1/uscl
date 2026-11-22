@@ -525,9 +525,11 @@ Window {
     }
     function guide() {
         var navigationHelp = activeTheme === "ps3" ? "" : qsTr("\nHome screen: Home opens quick access. L1 / R1 changes Xbox tabs or focuses system shortcuts. On Xbox 360 Classic, left / right changes blades and up / down selects items. Library: Up from the first row focuses Sort; Left from the first column focuses console filters and library tools. Sorting keeps the same game selected. Mouse: click to focus, click again to open; right-click for options.")
-        dialog.show(qsTr("User's Guide"), (xboxPad
+        // the theme's own buttons (an Xbox pad always gets Xbox names)
+        var nintendoText = function(t) { return t.replace(/✕/g, "A").replace(/○/g, "B").replace(/△/g, "+").replace(/L1 \/ R1/g, "L / R").replace(/PS button/g, "HOME button") }
+        dialog.show(qsTr("User's Guide"), (xboxPad || themePalette.xbox
             ? qsTr("D-pad or left stick: move     A: select     B: back     Y: options\nLB / RB: jump through long lists\nGuide button in a game: back here while the game keeps running. To close it: Y on the game → Close Game.\nOnline: start a game and it goes online by itself; friends join you from Friends.")
-            : qsTr("D-pad or left stick: move     ✕: select     ○: back     △: options\nL1 / R1: jump through long lists\nPS button in a game: back here while the game keeps running. To close it: △ on the game → Close Game.\nOnline: start a game and it goes online by itself; friends join you from Friends.")) + navigationHelp)
+            : (themePalette.nintendo ? nintendoText : function(t) { return t })(qsTr("D-pad or left stick: move     ✕: select     ○: back     △: options\nL1 / R1: jump through long lists\nPS button in a game: back here while the game keeps running. To close it: △ on the game → Close Game.\nOnline: start a game and it goes online by itself; friends join you from Friends."))) + navigationHelp)
     }
 
     // ---------------------------------------------------------------- USCL updates (like RPCS3's updater: ask, download, restart)
@@ -592,7 +594,7 @@ Window {
     // a row whose value comes from a list of choices; get/set read and write the stored value
     function choiceRow(title, help, choices, get, set, icon) {
         var v = get()
-        var label = v
+        var label = v === "" || v === undefined ? qsTr("Default") : v   // RPCS3 writes its settings file on first run
         for (var i = 0; i < choices.length; i++) if (String(choices[i][1]) === String(v)) label = choices[i][0]
         return { title: title, value: label, help: help, icon: icon, choices: true, action: function() {
             options.show(choices.map(function(c) {
@@ -817,7 +819,7 @@ Window {
     }
     function addGames() {
         browseRoots = games.roots(); browsePath = ""
-        openPage(browsePage, ic("it_addgames"), gamesCat, browseBack)
+        openPage(browsePage, ic("it_addgames"), gamesCat, browseBack, qsTr("Add Games"))
     }
 
     // ---------------------------------------------------------------- pages
@@ -835,6 +837,8 @@ Window {
         var catIcon = cats[catIndex !== undefined ? catIndex : xmb.cat].icon
         pageStack = pageStack.concat([{ rows: rowsFn, parentIcon: parentIcon, catIcon: catIcon, title: heading, settingsSection: cats[1].items.findIndex(function(e) { return e.title === heading }), presentation: presentation || "", selected: 0, back: backFn || null }])
         page.resetNavigation()
+        // start on the first row that does something, not on a status line above it
+        page.current = Math.max(0, page.displayRows.findIndex(function(r) { return !r.disabled }))
         page.fromHome = pageStack.length === 1
         page.open()
     }
@@ -851,7 +855,8 @@ Window {
     }
     function openConsoleSection(section) {
         if (section === "library") {
-            openPage(function() { return cats[gamesCat].items.filter(function(e) { return !!e.console }) }, ic("cat_game"), gamesCat, null,
+            // the PS3 Game column lists console folders: its library lists every game itself
+            openPage(function() { return activeTheme === "ps3" ? Array.from({ length: games.count }, function(_, i) { return gameItem(games.get(i)) }) : cats[gamesCat].items.filter(function(e) { return !!e.console }) }, ic("cat_game"), gamesCat, null,
                      themePalette.nintendo ? qsTr("All Software") : qsTr("Game Library"), "library")
             return
         }
@@ -1004,7 +1009,7 @@ Window {
             { id: "add", title: qsTr("Add Games"), icon: ic("it_addgames"), action: addGames,
               desc: games.scanning ? qsTr("Looking for games...") : qsTr("Find the games in a folder, and every folder inside it") },
             { id: "updates", title: qsTr("Game Updates"), icon: ic("it_update"), badge: pending ? String(pending) : "",
-              action: function() { updatePick = ({}); openPage(updatesPage, ic("it_update"), gamesCat) },
+              action: function() { updatePick = ({}); openPage(updatesPage, ic("it_update"), gamesCat, null, qsTr("Game Updates")) },
               desc: gameUpdates.busy ? gameUpdates.status
                   : pending ? qsTr("%n game(s) have updates: choose which to install", "", pending)
                   : gameUpdates.checking ? qsTr("Checking for updates...") : qsTr("All your games are up to date") },
@@ -1394,7 +1399,9 @@ Window {
 
             ClockBox {
                 theme: root.activeTheme
-                x: stage.width - (root.activeTheme === "ps5" ? 56 : 40) - width
+                // Xbox 360 Classic home: left of the blades stacked on the right
+                x: stage.width - (root.activeTheme === "ps5" ? 56 : root.activeTheme === "x360classic" && dashboard.visible ? 100 + (3 - dashboard.tab) * 70 : 40) - width
+                Behavior on x { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
                 y: root.activeTheme === "ps5" ? 28 : root.activeTheme === "switch" || root.activeTheme === "switch2" ? 80 : 44
                 avatar: root.avatarUrl(prefs.avatar)
                 internet: system.internet

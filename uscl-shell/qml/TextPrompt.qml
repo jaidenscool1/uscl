@@ -31,14 +31,17 @@ Item {
     visible: opacity > 0
     opacity: open ? 1 : 0
     Behavior on opacity { NumberAnimation { duration: 180 } }
+    property real rise: open ? 0 : 24   // the panel rises into place as it fades in
+    Behavior on rise { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
 
     Rectangle { anchors.fill: parent; color: "#c8000000" }
     MouseArea { anchors.fill: parent; onWheel: function(wheel) { wheel.accepted = true } }
-    Rectangle { visible: prompt.theme !== "ps3"; x: 160; y: 230; width: parent.width - 320; height: 670; color: themeStyle.panel; radius: themeStyle.radius; border.width: 1; border.color: themeStyle.accent }
+    Rectangle { visible: prompt.theme !== "ps3"; x: 160; y: 230; width: parent.width - 320; height: 670; color: themeStyle.panel; radius: themeStyle.radius; border.width: 1; border.color: themeStyle.accent; transform: Translate { y: prompt.rise } }
     Rectangle { visible: prompt.theme === "ps3"; y: 250; width: parent.width; height: 2; color: "#50ffffff" }
     Rectangle { visible: prompt.theme === "ps3"; y: 890; width: parent.width; height: 2; color: "#50ffffff" }
     Column {
         width: 1000
+        transform: Translate { y: prompt.rise }
         x: (parent.width - width) / 2; y: 300
         spacing: 26
         Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; text: prompt.heading; color: prompt.theme === "ps3" ? "#b4ffffff" : themeStyle.text; font.pixelSize: 25 }
@@ -54,7 +57,8 @@ Item {
                 anchors.fill: parent; anchors.margins: 18
                 horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter
                 color: prompt.theme === "ps3" ? "white" : themeStyle.text; font.pixelSize: 34
-                selectionColor: "#80ffffff"
+                selectionColor: prompt.theme === "ps3" ? "#80ffffff" : themeStyle.accent
+                selectedTextColor: prompt.theme === "ps3" || themeStyle.xbox || themeStyle.lightSwitch ? "white" : "#15213a"   // readable on each accent
                 maximumLength: 16
                 onAccepted: prompt.submit()
                 Keys.onEscapePressed: { prompt.sound("back"); prompt.close() }
@@ -63,5 +67,6 @@ Item {
         Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; text: prompt.error; visible: text !== ""; color: prompt.theme === "ps3" ? "#ffb0b0" : themeStyle.danger; font.pixelSize: 25 }
         Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; text: qsTr("Letters, numbers, - and _ (3 to 16). Type with the keyboard, Enter saves."); color: prompt.theme === "ps3" ? "#a0ffffff" : themeStyle.muted; font.pixelSize: 23 }
     }
-    Hints { theme: prompt.theme; y: 906; anchors.horizontalCenter: parent.horizontalCenter; accept: qsTr("Save") }
+    // inside the panel on the modern themes, where the theme's text colour is readable
+    Hints { theme: prompt.theme; y: prompt.theme === "ps3" ? 906 : 830; anchors.horizontalCenter: parent.horizontalCenter; accept: qsTr("Save") }
 }

@@ -8,6 +8,7 @@
 #include "gameart.h"
 #include "online.h"
 #include "profile.h"
+#include "tour.h"
 #include "system.h"
 #include "updater.h"
 #include "switchcontent.h"
@@ -1049,7 +1050,10 @@ int main(int argc, char* argv[])
 		return 0;
 	}
 
-	const bool smoke_test = app.arguments().contains("--qml-smoke-test");
+	// --qml-tour <folder>: screenshots of every menu (tour.cpp), in the same scratch settings as the smoke test
+	const int tour_arg = app.arguments().indexOf("--qml-tour");
+	const QString tour_dir = tour_arg >= 0 && tour_arg + 1 < app.arguments().size() ? app.arguments()[tour_arg + 1] : QString();
+	const bool smoke_test = app.arguments().contains("--qml-smoke-test") || !tour_dir.isEmpty();
 	std::unique_ptr<QTemporaryDir> smoke_dir;
 	QString smoke_theme = "ps3";
 	if (smoke_test)
@@ -1057,6 +1061,14 @@ int main(int argc, char* argv[])
 		// QML smoke tests must never alter a player's preferences or library.
 		smoke_dir = std::make_unique<QTemporaryDir>();
 		if (!smoke_dir->isValid()) return 1;
+		if (!tour_dir.isEmpty())
+		{
+			// the tour shows the player's own games: copies of the library lists, read from the scratch folder
+			const QString real = GameModel::rpcs3ConfigDir(), scratch = smoke_dir->path() + "/uscl/";
+			QDir().mkpath(scratch + "uscl");
+			for (const QString& f : {"games.yml", "emu_games.json", "uscl/ps4_games.yml", "uscl/profile.json"})
+				QFile::copy(real + f, scratch + f);
+		}
 		qputenv("XDG_CONFIG_HOME", smoke_dir->path().toUtf8());
 		QSettings::setDefaultFormat(QSettings::IniFormat);
 		QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, smoke_dir->path());
@@ -1102,7 +1114,9 @@ int main(int argc, char* argv[])
 	engine.rootContext()->setContextProperty("smokeTest", smoke_test);
 	QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
 	engine.loadFromModule("Uscl", "Main");
-	if (smoke_test && !engine.rootObjects().isEmpty())
+	if (!tour_dir.isEmpty() && !engine.rootObjects().isEmpty())
+		startTour(engine.rootObjects().first(), tour_dir);
+	else if (smoke_test && !engine.rootObjects().isEmpty())
 	{
         const QString soundTheme = smoke_theme == "ps3" ? "xmb" : smoke_theme;
         for (const QString& cue : {"cursor", "category", "select", "back", "cancel", "error", "notify", "startup"})

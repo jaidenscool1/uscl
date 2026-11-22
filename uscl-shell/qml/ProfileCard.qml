@@ -228,6 +228,8 @@ Item {
                     visible: text !== ""
                     text: card.tab === "uscl"
                           ? (!card.uscl.games ? qsTr("%1's USCL profile shows here once they open USCL while Steam is running.").arg(card.person.name || "")
+                             : !card.uscl.games.length ? (card.person.me ? qsTr("Play a game from USCL to fill your profile: play time and trophies show here.")
+                                                                         : qsTr("%1 hasn't played a game from USCL yet.").arg(card.person.name || ""))
                              : !card.person.me && card.uscl.live === false ? qsTr("As of %1, the last time USCL saw them.").arg(card.dayText(card.uscl.seen)) : "")
                           : card.steam.loading && !card.steam.name ? qsTr("Loading the Steam profile...")
                           : card.steam.error ? card.steam.error

@@ -77,6 +77,10 @@ ctest --test-dir <build folder> --output-on-failure
 python uscl-shell/tools/theme_smoke.py <path to built uscl>
 ```
 
+`uscl --windowed --qml-tour <folder>` (with `QT_QPA_PLATFORM=offscreen`) walks every menu, settings page, dialog,
+the profile card and the trophy popup in all eight themes, saves a screenshot of each in the folder and prints
+QML warnings per step (`src/tour.cpp`). It runs on scratch settings with copies of your game lists.
+
 The smoke test loads each theme with temporary preferences, checks the whole stage fits 16:9, 4:3 and
 ultrawide windows, and rejects QML errors and missing packaged assets. See [theme details and previews](../docs/CONSOLE-THEMES.md).
 
