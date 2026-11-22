@@ -8,6 +8,9 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDesktopServices>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QXmlStreamReader>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -333,10 +336,10 @@ QString Online::sanitizeName(const QString& persona)
 	return out;
 }
 
-QString Online::personaFromVdf(const QByteArray& vdf)
+QString Online::personaFromVdf(const QByteArray& vdf, QString* steamId)
 {
 	// loginusers.vdf: "users" { "<steamid>" { "PersonaName" "..." "MostRecent" "1" "timestamp" "..." } ... }
-	static const QRegularExpression user(R"re("\d+"\s*\{([^{}]*)\})re");
+	static const QRegularExpression user(R"re("(\d+)"\s*\{([^{}]*)\})re");
 	static const QRegularExpression field(R"re("(\w+)"\s+"((?:[^"\\]|\\.)*)")re");
 	QString best;
 	qint64 best_time = -1;
@@ -346,7 +349,8 @@ QString Online::personaFromVdf(const QByteArray& vdf)
 		QString name;
 		qint64 time = 0;
 		bool recent = false;
-		auto f = field.globalMatch(it.next().captured(1));
+		const auto u = it.next();
+		auto f = field.globalMatch(u.captured(2));
 		while (f.hasNext())
 		{
 			const auto m = f.next();
@@ -364,6 +368,8 @@ QString Online::personaFromVdf(const QByteArray& vdf)
 		{
 			best = name;
 			best_time = time;
+			if (steamId)
+				*steamId = u.captured(1);
 		}
 	}
 	return best;
@@ -461,6 +467,17 @@ void Online::startSteam()
 
 QString Online::steamName() const
 {
+	return sanitizeName(steamAccount().first);
+}
+
+QString Online::steamId() const
+{
+	return steamAccount().second;
+}
+
+// the Steam account signed in last on this PC: {persona name, Steam ID}
+QPair<QString, QString> Online::steamAccount()
+{
 	QStringList candidates;
 #ifdef _WIN32
 	const QString steam = QSettings("HKEY_CURRENT_USER\\Software\\Valve\\Steam", QSettings::NativeFormat).value("SteamPath").toString();
@@ -476,12 +493,112 @@ QString Online::steamName() const
 		QFile f(path);
 		if (f.open(QIODevice::ReadOnly))
 		{
-			const QString persona = personaFromVdf(f.readAll());
+			QString id;
+			const QString persona = personaFromVdf(f.readAll(), &id);
 			if (!persona.isEmpty())
-				return sanitizeName(persona);
+				return {persona, id};
 		}
 	}
 	return {};
+}
+
+// ---- Steam profiles, shown inside USCL ----
+
+void Online::loadSteamProfile(const QString& id)
+{
+	static const QRegularExpression steam_id("^[0-9]{1,20}$");
+	if (!steam_id.match(id).hasMatch())
+		return;
+	const QVariantMap had = m_steam_profiles.value(id).toMap();
+	if (had["loading"].toBool() || (had.contains("fetched") && QDateTime::currentSecsSinceEpoch() - had["fetched"].toLongLong() < 300))
+		return;
+	QVariantMap loading = had;
+	loading["loading"] = true;
+	m_steam_profiles[id] = loading;
+	emit steamProfilesChanged();
+	// the public profile page as XML: no Web API key needed; private and friends-only profiles give the basics only
+	QNetworkRequest request(QUrl("https://steamcommunity.com/profiles/" + id + "/?xml=1"));
+	request.setHeader(QNetworkRequest::UserAgentHeader, "USCL");
+	request.setTransferTimeout(15000);
+	QNetworkReply* reply = m_net.get(request);
+	connect(reply, &QNetworkReply::finished, this, [this, reply, id] {
+		reply->deleteLater();
+		QVariantMap p = reply->error() == QNetworkReply::NoError ? readSteamProfileXml(reply->readAll()) : QVariantMap{};
+		if (p.isEmpty())
+			p["error"] = reply->error() == QNetworkReply::NoError ? tr("Steam didn't send this profile.") : tr("Couldn't reach Steam: %1").arg(reply->errorString());
+		p["fetched"] = QDateTime::currentSecsSinceEpoch();
+		m_steam_profiles[id] = p;
+		emit steamProfilesChanged();
+	});
+}
+
+QVariantMap Online::readSteamProfileXml(const QByteArray& xml)
+{
+	// <profile> fields (depth 2), <mostPlayedGames><mostPlayedGame>..., <groups><group><groupName> (when detailed)
+	const auto plain = [](QString html) {
+		static const QRegularExpression br("<br\\s*/?>", QRegularExpression::CaseInsensitiveOption), tag("<[^>]*>");
+		html.replace(br, "\n").remove(tag);
+		return html.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").trimmed();
+	};
+	QVariantMap p;
+	QVariantList games, groups;
+	QVariantMap game;
+	QXmlStreamReader r(xml);
+	int depth = 0;
+	bool in_game = false;
+	while (!r.atEnd())
+	{
+		r.readNext();
+		if (r.isEndElement())
+		{
+			if (r.name() == u"mostPlayedGame") { in_game = false; if (!game.isEmpty()) games << game; game.clear(); }
+			depth--;
+			continue;
+		}
+		if (!r.isStartElement())
+			continue;
+		depth++;
+		const QString name = r.name().toString();
+		if (depth == 1 && name != "profile")
+			return {};
+		if (name == "mostPlayedGame") { in_game = true; continue; }
+		if (in_game)
+		{
+			static const QHash<QString, QString> keys{{"gameName", "name"}, {"gameIcon", "icon"}, {"gameLogo", "logo"}, {"gameLink", "link"},
+			                                          {"hoursPlayed", "hours2wk"}, {"hoursOnRecord", "hoursTotal"}};
+			if (keys.contains(name)) game[keys[name]] = r.readElementText().trimmed();
+			else r.skipCurrentElement();
+			depth--;
+			continue;
+		}
+		if (name == "groupName")
+		{
+			groups << r.readElementText().trimmed();
+			depth--;
+			continue;
+		}
+		if (depth == 2)
+		{
+			static const QHash<QString, QString> keys{{"steamID", "name"}, {"onlineState", "online"}, {"stateMessage", "status"},
+			                                          {"privacyState", "privacy"}, {"avatarFull", "avatar"}, {"vacBanned", "vacBanned"},
+			                                          {"memberSince", "memberSince"}, {"location", "location"}, {"realname", "realName"},
+			                                          {"summary", "summary"}, {"headline", "headline"}};
+			if (keys.contains(name))
+			{
+				p[keys[name]] = plain(r.readElementText());
+				depth--;
+			}
+		}
+	}
+	if (r.hasError() && p.isEmpty())
+		return {};
+	if (!p.contains("name"))
+		return {};
+	p["status"] = p["status"].toString().replace('\n', ' ').simplified(); // "In-Game\nPortal 2" -> one line
+	p["vacBanned"] = p["vacBanned"].toString() == "1";
+	p["games"] = games;
+	p["groups"] = groups;
+	return p;
 }
 
 // ---- RPCS3 settings ----

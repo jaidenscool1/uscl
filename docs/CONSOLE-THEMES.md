@@ -221,9 +221,14 @@ unlocked" pill and Xbox One bar at the bottom (grades shown as 15/30/90/180G), S
 Over a game it's a small always-on-top, click-through window; RPCS3's and shadPS4's own popups are switched off.
 
 Friends: ✕ (or △) on a friend offers Join Session (when they're in one), View USCL Profile and View Steam
-Profile. The USCL profile (trophies by grade, total play time, the 6 latest games) reaches friends through
-Steam Rich Presence: `uscl-bridge presence <uscl/presence.json>` runs while USCL is open. The last profile seen
-is cached, so offline friends still show it. My Profile, the game options (Trophies) and Trophy Collection
-(Game column / library sidebar) list trophies per game.
+Profile. Both open the profile card (`qml/ProfileCard.qml`): picture, name, status, trophy cups and Steam level,
+then a USCL tab and a Steam tab in the same layout (stat tiles, then the latest games; the page scrolls with the
+selection, L1/R1 or left/right switch tabs, mouse wheel and clicks work). The USCL tab (trophies by grade, total
+play time, the 6 latest games) reaches friends through Steam Rich Presence: `uscl-bridge presence
+<uscl/presence.json>` runs while USCL is open; the last profile seen is cached for offline friends. The Steam tab
+is the public Steam Community profile (`steamcommunity.com/profiles/<id>/?xml=1`, no API key): member since,
+location, bio, recent games with hours, groups; friends-only and private profiles show the basics only.
+My Profile → View My Profile / Steam Account opens your own; ✕ on one of your games there opens its trophies.
+The game options (Trophies) and Trophy Collection (Game column / library sidebar) list trophies per game.
 
 `python3 -I uscl-shell/tools/trophy_icons.py` renders the four grade cups (original art) into `xmb/trophies/`.

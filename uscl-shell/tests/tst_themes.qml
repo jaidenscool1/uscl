@@ -18,6 +18,7 @@ Item {
     TextPrompt { id: prompt; anchors.fill: parent }
     GameLaunch { id: launchScreen; anchors.fill: parent; shown: false }
     TrophyToast { id: trophyToast; x: stageX; y: stageY }
+    ProfileCard { id: profileCard }
     TestCase {
         name: "ConsoleThemes"
         when: windowShown
@@ -27,7 +28,7 @@ Item {
         SignalSpy { id: optionsSpy; target: navigation; signalName: "showOptions" }
         function init() {
             failOnWarning(/(ReferenceError|TypeError|Unable to assign|Binding loop|Cannot open)/)
-            menu.close(); dialog.close(); prompt.close(); page.visible = false
+            menu.close(); dialog.close(); prompt.close(); profileCard.close(); page.visible = false
             home.visible = true; navigation.visible = false; home.animate = true
             page.rows = []; page.setSort("library"); page.resetNavigation()
             home.reset()
@@ -660,6 +661,35 @@ Item {
             compare(trophyToast.trophy.name, "Second"); compare(trophyToast.gradeName, "Platinum")
             tryCompare(trophyToast, "active", false, 8000)
             shown.destroy()
+        }
+        function test_profile_card_data() { return test_trophy_toast_data() }
+        function test_profile_card(data) {
+            profileCard.theme = data.tag
+            var games = []
+            for (var i = 0; i < 8; i++) games.push({title: "Game " + i, console: "Wii", seconds: 3600 * i, earned: i, total: 6, last: 1795000000})
+            profileCard.uscl = {earned: 12, bronze: 8, silver: 3, gold: 1, platinum: 0, seconds: 99999, games: games}
+            profileCard.steam = {name: "Friend", games: [{name: "Steam Game", hoursTotal: "12"}], memberSince: "2012"}
+            var opened = Qt.createQmlObject('import QtTest; SignalSpy { signalName: "openGame" }', profileCard); opened.target = profileCard
+            var steam = Qt.createQmlObject('import QtTest; SignalSpy { signalName: "openSteam" }', profileCard); steam.target = profileCard
+            profileCard.show({id: "1", name: "Me", me: true}, "uscl")
+            verify(profileCard.open); compare(profileCard.focusIndex, 0); compare(profileCard.buttons.length, 2)
+            for (i = 0; i < 8; i++) profileCard.input("down")
+            compare(profileCard.focusIndex, 8)
+            wait(250)
+            verify(findChild(profileCard, "profileContent").contentY > 0)   // the page scrolled to the selected game
+            profileCard.input("down"); verify(profileCard.atButtons)          // past the last game: the buttons
+            profileCard.input("down"); verify(profileCard.atButtons)
+            profileCard.input("accept"); compare(steam.count, 1)             // Open in Steam
+            profileCard.input("right"); compare(profileCard.buttonIndex, 1)
+            profileCard.input("up"); compare(profileCard.focusIndex, 8)     // back to the last game
+            profileCard.input("accept"); compare(opened.count, 1); compare(opened.signalArguments[0][0].title, "Game 7"); verify(!profileCard.open)
+            profileCard.show({id: "2", name: "Friend", session: "5"}, "uscl")
+            compare(profileCard.buttons[0].key, "join")
+            profileCard.input("r1"); compare(profileCard.tab, "steam"); compare(profileCard.rows.length, 1)
+            profileCard.input("left"); compare(profileCard.tab, "uscl")
+            profileCard.input("down"); profileCard.input("accept"); compare(opened.count, 1)   // a friend's game: nothing to open
+            profileCard.input("back"); verify(!profileCard.open)
+            opened.destroy(); steam.destroy()
         }
         function test_friend_rows_and_buttons() {
             page.theme = "xboxone"; page.visible = true

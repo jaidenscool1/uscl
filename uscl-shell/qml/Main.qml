@@ -310,20 +310,14 @@ Window {
         var own = findGame(g.serial)
         return own && own.icon || ic((consoleMeta[g.console] || [g.console, "cat_game"])[1])
     }
-    // a profile's rows: the player's own (profile.summary) or a friend's (from their Rich Presence)
-    function profileRows(p, mine) {
-        var best = p.platinum ? "platinum" : p.gold ? "gold" : p.silver ? "silver" : "bronze"
-        var rows = [{ title: qsTr("Trophies"), icon: cupIcon(best), value: String(p.earned || 0), help: trophyCounts(p),
-                      action: mine ? function() { openPage(trophyGamesPage, cupIcon("gold"), 0, null, qsTr("Trophies")) } : null },
-                    { title: qsTr("Play Time"), icon: ic("it_clock"), value: playTime(p.seconds || 0), help: qsTr("All games started from USCL") }]
-        ;(p.games || []).slice(0, mine ? 12 : 6).forEach(function(g) {
-            var bits = []
-            if (g.total) bits.push(qsTr("Trophies %1 / %2").arg(g.earned).arg(g.total))
-            if (g.last) bits.push(qsTr("Last played %1").arg(dayText(g.last)))
-            rows.push({ title: g.title, icon: profileGameIcon(g), value: g.seconds ? playTime(g.seconds) : "", help: bits.join("  ·  "),
-                        action: mine ? function() { openTrophies(g) } : null })
-        })
-        return rows
+    // the profile card (ProfileCard.qml): USCL and Steam tabs; the Steam profile is fetched for it
+    function showProfile(person, tab) {
+        online.loadSteamProfile(person.id)
+        profileCard.show(person, tab)
+    }
+    function myPerson() {
+        return { id: online.steamId, name: system.onlineName || online.steamName, avatar: avatarUrl(prefs.avatar), me: true, state: "online",
+                 status: launcher.running && runningGame ? qsTr("Playing %1").arg(runningGame.title) : qsTr("Online in USCL") }
     }
     function trophyGamesPage() {
         var list = profile.summary.games || []
@@ -353,27 +347,12 @@ Window {
         return rows
     }
     // ✕ or △ on a friend: what the PS3's friend menu offers, as far as USCL and Steam go
-    function friendOptions(f) {
+    function friendOptions(person) {
         var o = []
-        if (f.session) o.push({ title: qsTr("Join Session"), action: function() { needsName(function() { online.join(f.session) }) } })
-        o.push({ title: qsTr("View USCL Profile"), action: function() { openFriendProfile(f) } },
-               { title: qsTr("View Steam Profile"), action: function() { online.openSteamProfile(f.id) } })
+        if (person.session) o.push({ title: qsTr("Join Session"), action: function() { needsName(function() { online.join(person.session) }) } })
+        o.push({ title: qsTr("View USCL Profile"), action: function() { showProfile(person, "uscl") } },
+               { title: qsTr("View Steam Profile"), action: function() { showProfile(person, "steam") } })
         return o
-    }
-    function openFriendProfile(f) {
-        openPage(function() { return friendProfilePage(f.id) }, f.avatar || ic("it_person"), friendsCat, null, f.name)
-    }
-    function friendProfilePage(id) {
-        var f = online.friends.find(function(x) { return x.id === id }) || { id: id, name: "" }
-        var p = f.profile || {}
-        var steam = { title: qsTr("View Steam Profile"), icon: ic("it_person"), help: qsTr("Opens %1's profile in Steam").arg(f.name), action: function() { online.openSteamProfile(id) } }
-        if (!p.games)
-            return [{ title: qsTr("No USCL Profile Yet"), icon: f.avatar || ic("it_person"),
-                      help: qsTr("%1's profile shows here once they open USCL while Steam is running").arg(f.name) }, steam]
-        var head = { title: f.name, icon: f.avatar || ic("it_person"),
-                     value: p.playing ? qsTr("Playing") : p.live ? qsTr("Online") : qsTr("Seen %1").arg(dayText(p.seen)),
-                     help: p.playing ? p.playing : p.live ? qsTr("In USCL now") : qsTr("Their profile as of the last time USCL saw them") }
-        return [head].concat(profileRows(p, false)).concat([steam])
     }
 
     // ---------------------------------------------------------------- game updates (Sony's patches)
@@ -807,9 +786,14 @@ Window {
             { title: qsTr("Picture"), value: (avatars.find(function(a) { return a[0] === prefs.avatar }) || ["", "USCL"])[1], help: qsTr("Shown in the clock box and on your profile"),
               icon: avatarUrl(prefs.avatar), choices: true,
               action: function() { options.show(avatars.map(function(a) { return { title: a[1], checked: a[0] === prefs.avatar, action: function() { prefs.avatar = a[0] } } })) } },
-            { title: qsTr("Steam Account"), value: online.steamName || qsTr("Not found"), help: qsTr("Sessions and invites use this Steam account: ✕ opens your Steam profile"),
-              icon: ic("it_person"), action: function() { online.openSteamProfile("") } }
-        ].concat(profileRows(profile.summary, true))
+            { title: qsTr("View My Profile"), icon: avatarUrl(prefs.avatar), value: qsTr("%n trophies", "", profile.summary.earned || 0),
+              help: qsTr("What friends see: trophies, play time and your latest games"), action: function() { showProfile(myPerson(), "uscl") } },
+            { title: qsTr("Steam Account"), value: online.steamName || qsTr("Not found"), help: qsTr("Sessions and invites use this Steam account: ✕ for its Steam profile"),
+              icon: ic("it_person"), action: function() { showProfile(myPerson(), "steam") } },
+            { title: qsTr("Trophies"), icon: cupIcon("gold"), value: String(profile.summary.earned || 0), help: trophyCounts(profile.summary),
+              action: function() { openPage(trophyGamesPage, cupIcon("gold"), 0, null, qsTr("Trophies")) } },
+            { title: qsTr("Play Time"), icon: ic("it_clock"), value: playTime(profile.summary.seconds || 0), help: qsTr("All games started from USCL") }
+        ]
     }
 
     // Add Games: an inner page listing folders; ○ goes up one folder
@@ -1074,14 +1058,16 @@ Window {
                        : playing ? qsTr("Playing %1").arg(playing)
                        : f.playing ? qsTr("Playing a game")
                        : f.state === "Busy" ? qsTr("Busy") : away ? qsTr("Away") : qsTr("Online")
+            let person = { id: f.id, name: f.name, avatar: f.avatar || "", level: f.level || 0, session: f.session || "", me: false,
+                           state: !f.online ? "offline" : away ? "away" : "online", status: status }
             friends.push({
                 title: f.name, icon: f.avatar || ic("it_person"), friend: true,
-                status: !f.online ? "offline" : away ? "away" : "online",
+                status: person.state,
                 cardColor: f.color || "", level: f.level || 0,
                 desc: status, value: f.session ? qsTr("Session") : !f.online ? qsTr("Offline") : playing || f.playing ? qsTr("Playing") : away ? qsTr("Away") : qsTr("Online"),
                 help: status + "  ·  " + (f.session ? qsTr("✕ to join or view their profile") : qsTr("✕ for their USCL or Steam profile")),
-                action: function() { options.show(friendOptions(f), 0) },
-                options: function() { return friendOptions(f) }
+                action: function() { options.show(friendOptions(person), 0) },
+                options: function() { return friendOptions(person) }
             })
         })
 
@@ -1136,6 +1122,7 @@ Window {
         if (prompt.open) prompt.pad(b)
         else if (dialog.open) dialog.input(b)
         else if (options.open) options.input(b)
+        else if (profileCard.open) profileCard.input(b)
         else if (topPage) page.input(b)
         else if (setup.open) setup.input(b)
         else if (activeTheme === "ps3") xmb.input(b)
@@ -1423,6 +1410,21 @@ Window {
 
             Notice { id: notice; theme: root.activeTheme; x: stage.width - 40 - width; y: 124 }
             TrophyToast { id: stageToast; objectName: "trophyToast"; theme: root.activeTheme; x: stageX; y: stageY; onShown: root.sound("notify") }
+
+            ProfileCard {
+                id: profileCard
+                objectName: "profileCard"
+                theme: root.activeTheme
+                dateFormat: prefs.dateFormat
+                gameIcon: root.profileGameIcon
+                // live: a friend's profile follows the friends list as it refreshes
+                uscl: person.me ? profile.summary : ((online.friends.find(function(f) { return f.id === person.id }) || {}).profile || {})
+                steam: online.steamProfiles[person.id] || {}
+                onSound: function(name) { root.sound(name) }
+                onOpenGame: function(game) { root.openTrophies(game) }
+                onJoin: { let session = person.session; root.needsName(function() { online.join(session) }) }
+                onOpenSteam: online.openSteamProfile(person.me ? "" : person.id)
+            }
 
             OptionsPanel {
                 id: options

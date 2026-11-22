@@ -13,6 +13,7 @@ Item {
     Page { id: page; anchors.fill: parent; visible: false; theme: home.theme; settingsSections: gallery.settingRows }
     ClockBox { theme: home.theme; x: gallery.width-width-(home.theme === "ps5" ? 56 : 40); y: home.theme === "ps5" ? 28 : home.nintendo ? 80 : 44; avatar: home.avatar; internet: 1; pads: 1; battery: 80; clock24: true }
     TrophyToast { id: toast; theme: home.theme; x: stageX; y: stageY }
+    ProfileCard { id: profileCard; theme: home.theme; gameIcon: function(g) { return Qt.resolvedUrl("../xmb/icons/" + ({PS3: "cat_ps3", Switch: "cat_switch", Wii: "cat_wii"})[g.console] + ".png") } }
     GameLaunch { id: launch; anchors.fill: parent; theme: home.theme; shown: false; starting: true; windowActive: false; title: "A New Adventure"; gameIcon: Qt.resolvedUrl("../xmb/icons/cat_ps3.png") }
     TestCase {
         name: "Capture"
@@ -67,6 +68,22 @@ Item {
                     wait(300); grabImage(gallery).save(directory + "/uscl-" + social[v][0] + "-" + themes[t] + ".png")
                     page.visible = false
                 }
+                // the profile card: a friend's USCL tab, then their Steam tab (made-up profile)
+                profileCard.uscl = {earned: 57, platinum: 1, gold: 6, silver: 14, bronze: 36, seconds: 310320, gameCount: 9, live: true, games: [
+                    {title: "Circuit Legends", console: "PS3", seconds: 147780, earned: 31, total: 48, last: 1795300000},
+                    {title: "Skyward Journey", console: "Switch", seconds: 45600, earned: 5, total: 6, last: 1795000000},
+                    {title: "Meadow Stories", console: "Wii", seconds: 7300, earned: 2, total: 6, last: 1794000000},
+                    {title: "Ocean Trails", console: "PS3", seconds: 3600, earned: 4, total: 51, last: 1793000000}]}
+                profileCard.steam = {name: "MapleKnight", status: "In-Game Circuit Legends", privacy: "public", memberSince: "March 3, 2012", location: "Somewhere Nice",
+                    summary: "Racing games, co-op and the occasional puzzle.\nAdd me if we've played together!", groups: ["Racers", "USCL Testers"],
+                    games: [{name: "Circuit Legends", icon: Qt.resolvedUrl("../xmb/icons/cat_ps3.png"), hours2wk: "6.5", hoursTotal: "412"},
+                            {name: "World Explorers", icon: Qt.resolvedUrl("../xmb/icons/cat_switch.png"), hours2wk: "1.2", hoursTotal: "38"}]}
+                profileCard.show({id: "1", name: "MapleKnight", avatar: avatar("rocket"), level: 31, session: "123", state: "online", status: "Playing Circuit Legends"}, "uscl")
+                profileCard.input("down")
+                wait(400); grabImage(gallery).save(directory + "/uscl-card-" + themes[t] + ".png")
+                profileCard.input("r1")
+                wait(400); grabImage(gallery).save(directory + "/uscl-cardsteam-" + themes[t] + ".png")
+                profileCard.close(); wait(300)
                 toast.show({name: "Legend of the Circuit", grade: "platinum", game: "Circuit Legends", icon: ""})
                 wait(700); grabImage(gallery).save(directory + "/uscl-trophy-" + themes[t] + ".png")
                 wait(5400)
