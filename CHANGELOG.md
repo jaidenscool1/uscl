@@ -1,6 +1,6 @@
 # USCL Changelog
 
-## 0.6.0-alpha — 2026-11-22
+## 0.5.5-alpha — 2026-11-22
 
 Trophies, play time and friend profiles on every theme, and a pass over every menu.
 
