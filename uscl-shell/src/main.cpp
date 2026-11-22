@@ -133,6 +133,28 @@ namespace
 		check(Online::sanitizeName("Zoë ★ the Great Destroyer") == "Zo_the_Great_Des", "name: symbols, length");
 		check(Online::personaFromVdf("\"users\"\n{\n\t\"1\"\n\t{\n\t\t\"PersonaName\"\t\t\"Old\"\n\t\t\"timestamp\"\t\t\"5\"\n\t}\n"
 		                             "\t\"2\"\n\t{\n\t\t\"PersonaName\"\t\t\"New One\"\n\t\t\"timestamp\"\t\t\"9\"\n\t}\n}\n") == "New One", "loginusers.vdf");
+		{
+			QString id;
+			Online::personaFromVdf("\"users\"\n{\n\t\"76561190000000001\"\n\t{\n\t\t\"PersonaName\"\t\t\"Old\"\n\t\t\"MostRecent\"\t\t\"1\"\n\t}\n"
+			                       "\t\"76561190000000002\"\n\t{\n\t\t\"PersonaName\"\t\t\"Other\"\n\t\t\"timestamp\"\t\t\"9\"\n\t}\n}\n", &id);
+			check(id == "76561190000000001", "loginusers.vdf: the most recent account's Steam ID");
+			// Steam Community profile XML (made-up profile, the shape steamcommunity.com/profiles/<id>/?xml=1 sends)
+			const QVariantMap p = Online::readSteamProfileXml(
+				"<?xml version=\"1.0\"?><profile><steamID64>1</steamID64><steamID><![CDATA[River &amp; Fox]]></steamID>"
+				"<onlineState>in-game</onlineState><stateMessage><![CDATA[In-Game<br/>Circuit Legends]]></stateMessage>"
+				"<privacyState>public</privacyState><avatarFull><![CDATA[https://example.invalid/a_full.jpg]]></avatarFull>"
+				"<vacBanned>0</vacBanned><memberSince>March 3, 2012</memberSince><location><![CDATA[Somewhere]]></location>"
+				"<summary><![CDATA[Hi <a href=\"x\">there</a><br>line two]]></summary>"
+				"<mostPlayedGames><mostPlayedGame><gameName><![CDATA[Circuit Legends]]></gameName><gameIcon><![CDATA[https://example.invalid/i.jpg]]></gameIcon>"
+				"<hoursPlayed>3.5</hoursPlayed><hoursOnRecord>1,204</hoursOnRecord></mostPlayedGame></mostPlayedGames>"
+				"<groups><group isPrimary=\"1\"><groupID64>2</groupID64><groupName><![CDATA[Racers]]></groupName><summary><![CDATA[not the profile]]></summary></group></groups>"
+				"</profile>");
+			const QVariantMap g = p["games"].toList().value(0).toMap();
+			check(p["name"] == "River & Fox" && p["status"] == "In-Game Circuit Legends" && p["online"] == "in-game" && p["summary"] == "Hi there\nline two" &&
+			      p["memberSince"] == "March 3, 2012" && !p["vacBanned"].toBool() && g["name"] == "Circuit Legends" && g["hours2wk"] == "3.5" &&
+			      g["hoursTotal"] == "1,204" && p["groups"].toList() == QVariantList{"Racers"}, "Steam profile XML");
+			check(Online::readSteamProfileXml("<html>not a profile</html>").isEmpty() && Online::readSteamProfileXml("").isEmpty(), "Steam profile XML: other pages");
+		}
 
 		// RPCS3 YAML edits keep everything else
 		const QString cfg = "Audio:\n  Volume: 100\nNet:\n  Bind address: 1.2.3.4\n  PSN status: Disconnected\nVFS:\n  x: y\n";

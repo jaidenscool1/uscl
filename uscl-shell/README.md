@@ -31,7 +31,7 @@ Settings → All Settings opens the classic RPCS3 window.
   ID: `<settings>/uscl/bans.txt`); Banned Players lists and lifts bans. Games started in a session run with
   `USCL_ONLINE` (no game patches or debugger), and a joining player's game must match the host's (same
   EBOOT.BIN, so the same update) before it starts.
-- **Friends:** your Steam friends (`uscl-bridge friends`) with a status dot; ✕ on one offers Join Session, View USCL Profile (their trophies, play time and latest games, shared with `uscl-bridge presence`) and View Steam Profile.
+- **Friends:** your Steam friends (`uscl-bridge friends`) with a status dot; ✕ on one offers Join Session and their profile card (`ProfileCard.qml`): a USCL tab (trophies, play time and latest games, shared with `uscl-bridge presence`) and a Steam tab (their Steam Community profile, read inside USCL).
 - **Trophies and play time:** PS3/PS4 trophies from RPCS3/shadPS4, USCL play-time trophies for the other consoles, a popup in the theme's style when one unlocks (`profile.cpp`, `TrophyToast.qml`; see [themes](../docs/CONSOLE-THEMES.md#trophies-and-profiles)).
 - **Settings:** online name, eight console themes (PS3, PS4, PS5, Xbox 360 Classic/2012, Xbox One, Switch and Switch 2), XMB colours, menu sounds, controllers, system software,
   All Settings (the classic RPCS3 window).

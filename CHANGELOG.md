@@ -4,7 +4,7 @@
 
 - Trophies on every console: PS3 and PS4 games show their own trophies (from RPCS3 and shadPS4), every other console earns six USCL play-time trophies. A new trophy pops up in the theme's own style (PS3, PS4, PS5, Xbox 360, Xbox One, Switch, Switch 2), bronze, silver, gold or platinum, over the game. My Profile, a game's options and Trophy Collection list them.
 - Play time is recorded for every game started from USCL.
-- Friends: choose a friend to join their session, view their USCL profile (trophies, play time, latest games) or open their Steam profile. Profiles are shared through Steam while USCL is open.
+- Friends: choose a friend to join their session or open their profile card: a USCL tab (trophies, play time, latest games, shared through Steam while USCL is open) and a Steam tab (their Steam Community profile, shown inside USCL), scrollable with the controller or mouse. My Profile opens yours.
 - Themes: friend status dots, menu icons visible on the light Xbox 360 and Switch 2 themes, each theme's own buttons in help text, smoother page and focus animations.
 
 - Switch firmware is identified by its content, not its folder name. USCL reads the real version from the firmware and skips firmware your keys can't open. It ignores folders that only look like firmware (another emulator's installed games), and finds keys packed in the same folder or zip as the firmware.

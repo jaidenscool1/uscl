@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QNetworkAccessManager>
 #include <QProcess>
 #include <QTimer>
 #include <QVariantList>
@@ -21,6 +22,10 @@ class Online : public QObject
 	Q_PROPERTY(QString friendsError READ friendsError NOTIFY friendsChanged)
 	Q_PROPERTY(QVariantList tests READ tests NOTIFY testsChanged)
 	Q_PROPERTY(QString steamName READ steamName CONSTANT)
+	Q_PROPERTY(QString steamId READ steamId CONSTANT)
+	// Steam profiles loaded by loadSteamProfile: id -> {name, online, status, avatar, memberSince, location, realName, summary,
+	// privacy, vacBanned, games: [{name, icon, logo, link, hours2wk, hoursTotal}], groups, loading, error}
+	Q_PROPERTY(QVariantMap steamProfiles READ steamProfiles NOTIFY steamProfilesChanged)
 	// everyone in the session: [{id (Steam ID), name, me}]
 	Q_PROPERTY(QVariantList players READ players NOTIFY stateChanged)
 	// joined: the host's game, "<serial> <gameHash>" (empty: the host didn't say)
@@ -41,6 +46,11 @@ public:
 	QString friendsError() const { return m_friends_error; }
 	QVariantList tests() const { return m_tests; }
 	QString steamName() const;
+	QString steamId() const;
+	QVariantMap steamProfiles() const { return m_steam_profiles; }
+	// fetches a Steam profile (Steam Community, no key needed) into steamProfiles; again after 5 minutes
+	Q_INVOKABLE void loadSteamProfile(const QString& id);
+	static QVariantMap readSteamProfileXml(const QByteArray& xml);
 	QVariantList players() const { return m_players; }
 	QString hostGame() const { return m_host_game; }
 	QVariantList bans() const;
@@ -83,7 +93,7 @@ public:
 
 	// Exposed for the self-test
 	static QString sanitizeName(const QString& persona);
-	static QString personaFromVdf(const QByteArray& vdf);
+	static QString personaFromVdf(const QByteArray& vdf, QString* steamId = nullptr);
 	static QString setYamlValue(const QString& yml, const QString& section, const QString& key, const QString& value);
 	static QString yamlValue(const QString& yml, const QString& section, const QString& key);
 	// Sets up shadPS4's portable folder (it uses ./user when that exists) for a PS4 game: settings and the USCL
@@ -95,6 +105,7 @@ signals:
 	void friendsChanged();
 	void testsChanged();
 	void bansChanged();
+	void steamProfilesChanged();
 	// something the host should see now, e.g. a player removed by the anticheat
 	void notice(const QString& text);
 
@@ -104,6 +115,7 @@ private:
 	void setState(const QString& state, const QString& message = {});
 	void setTest(int i, const QString& result, const QString& detail);
 	static QString toolPath(const QString& name);
+	static QPair<QString, QString> steamAccount();
 	static QString dataDir();
 	static QString templateDir();
 	static QString rpcs3File(const QString& name);
@@ -114,6 +126,8 @@ private:
 	QVariantList m_players;
 	QProcess m_friends_proc;
 	QProcess m_presence;
+	QNetworkAccessManager m_net;
+	QVariantMap m_steam_profiles;
 	QTimer m_presence_retry;
 	QVariantList m_friends;
 	QString m_friends_error;
