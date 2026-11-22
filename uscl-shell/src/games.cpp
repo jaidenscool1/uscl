@@ -65,6 +65,16 @@ GameModel::GameModel(QObject* parent)
 	reload();
 }
 
+GameModel::~GameModel()
+{
+	// a scan still running when USCL quits uses statics that go away with the program: stop it first
+	for (QThread* t : std::as_const(m_threads))
+	{
+		t->requestInterruption();
+		t->wait();
+	}
+}
+
 QString GameModel::rpcs3ConfigDir()
 {
 #ifdef _WIN32
@@ -434,6 +444,8 @@ namespace
 {
 	void walk(const QString& dir, int depth, QMap<QString, QString>& out, int& encrypted, int& archives, QSet<QString>& visited)
 	{
+		if (QThread::currentThread()->isInterruptionRequested())   // USCL is quitting
+			return;
 		const QString canonical = QFileInfo(dir).canonicalFilePath();
 		if (canonical.isEmpty() || visited.contains(canonical))
 			return;
@@ -630,9 +642,11 @@ void GameModel::setupSwitchFiles(const QString& extraFolder)
 	});
 	connect(t, &QThread::finished, this, [this, t, result] {
 		t->deleteLater();
+		m_threads.remove(t);
 		emit switchFilesDone(result->value("installed").toString(), result->value("tooNew").toStringList(), result->value("error").toString());
 		delete result;
 	});
+	m_threads.insert(t);
 	t->start();
 }
 
@@ -668,6 +682,7 @@ void GameModel::scanFolder(const QString& path)
 	QThread* t = QThread::create([found, encrypted, archives, path] { *found = findGames(path, encrypted, archives); });
 	connect(t, &QThread::finished, this, [this, t, found, encrypted, archives, scanned = path] {
 		t->deleteLater();
+		m_threads.remove(t);
 		int added = 0, listed = 0;
 		QString problem;
 		auto switch_games = SwitchCore::library();
@@ -769,6 +784,7 @@ void GameModel::scanFolder(const QString& path)
 			emit scanFailed(problem.trimmed());
 		setupSwitchFiles(scanned);
 	});
+	m_threads.insert(t);
 	t->start();
 }
 

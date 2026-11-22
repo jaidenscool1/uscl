@@ -2,7 +2,10 @@
 
 #include <QAbstractListModel>
 #include <QMap>
+#include <QSet>
 #include <QVector>
+
+class QThread;
 
 class GameArt;
 
@@ -24,6 +27,7 @@ public:
 	};
 
 	explicit GameModel(QObject* parent = nullptr);
+	~GameModel() override;   // stops and waits for the background scans
 
 	int rowCount(const QModelIndex& parent = {}) const override;
 	QVariant data(const QModelIndex& index, int role) const override;
@@ -84,4 +88,5 @@ private:
 	QVector<Game> m_games;
 	GameArt* m_art;
 	bool m_scanning = false;
+	QSet<QThread*> m_threads;   // background scans still running
 };
