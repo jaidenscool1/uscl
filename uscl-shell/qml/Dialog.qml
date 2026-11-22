@@ -55,11 +55,15 @@ Item {
     visible: opacity > 0
     opacity: open ? 1 : 0
     Behavior on opacity { NumberAnimation { duration: 200 } }
+    // the panel rises into place as it fades in
+    property real rise: open ? 0 : 24
+    Behavior on rise { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
 
     Rectangle { anchors.fill: parent; color: "#c8000000" }
     MouseArea { anchors.fill: parent; onWheel: function(wheel) { wheel.accepted = true } }
     Rectangle {
         visible: dlg.theme !== "ps3"; x: 160; y: 230; width: parent.width - 320; height: 670
+        transform: Translate { y: dlg.rise }
         color: themeStyle.panel; radius: themeStyle.radius
         border.width: 1; border.color: themeStyle.accent
     }
@@ -68,6 +72,7 @@ Item {
 
     Item {
         x: (parent.width - 1400) / 2; y: 300; width: 1400; height: 480
+        transform: Translate { y: dlg.rise }
         Text { width: 1400; height: 50; horizontalAlignment: Text.AlignHCenter; text: dlg.heading; color: dlg.theme === "ps3" ? "#b4ffffff" : themeStyle.muted; font.pixelSize: 25 }
         Rectangle { x: 200; y: 58; width: 1000; height: 2; color: dlg.theme === "ps3" ? "#40ffffff" : themeStyle.divider }
         Flickable {
@@ -123,6 +128,6 @@ Item {
         }
     }
     Text { visible: dlg.scrollable; x: 200; y: 840; text: qsTr("↑ ↓ / mouse wheel: Scroll"); color: dlg.theme === "ps3" ? "#c0ffffff" : themeStyle.muted; font.pixelSize: 22 }
-    Hints { id: dialogHints; theme: dlg.theme; y: 906; anchors.horizontalCenter: parent.horizontalCenter }
+    Hints { id: dialogHints; theme: dlg.theme; y: dlg.theme === "ps3" ? 906 : 830; anchors.horizontalCenter: parent.horizontalCenter }   // inside the modern panel
     MouseArea { x: dialogHints.x; y: dialogHints.y; width: dialogHints.width; height: dialogHints.height; onClicked: dlg.input("accept") }
 }

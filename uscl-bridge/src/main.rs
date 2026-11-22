@@ -129,8 +129,10 @@ fn friends() -> Result<(), String> {
             let session = f.game_played().filter(|g| g.game.app_id() == app && g.lobby.raw() != 0).map(|g| g.lobby.raw().to_string());
             let avatar = match (&avatar_dir, pictures.get(&f.id().raw())) {
                 (Some(dir), Some((size, rgba))) => {
+                    // written next to it, then renamed: the home screen may be reading the old picture right now
                     let path = dir.join(format!("{}.ppm", f.id().raw()));
-                    std::fs::write(&path, ppm(*size, rgba)).ok().map(|_| path.to_string_lossy().into_owned())
+                    let part = dir.join(format!("{}.ppm.part", f.id().raw()));
+                    std::fs::write(&part, ppm(*size, rgba)).and_then(|_| std::fs::rename(&part, &path)).ok().map(|_| path.to_string_lossy().into_owned())
                 }
                 _ => None,
             };

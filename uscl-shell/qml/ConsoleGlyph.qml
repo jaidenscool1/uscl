@@ -95,7 +95,13 @@ Canvas {
                 c.arc(47, 52, 12, -Math.PI / 2, 0);
                 c.stroke();
             }
-        } else if (kind === "party" || kind === "sound") {
+        } else if (kind === "sound") {   // a speaker with sound waves, apart from Party's headset
+            c.beginPath();
+            c.moveTo(8, 24); c.lineTo(20, 24); c.lineTo(32, 12); c.lineTo(32, 52); c.lineTo(20, 40); c.lineTo(8, 40); c.closePath();
+            c.stroke();
+            c.beginPath(); c.arc(32, 32, 12, -Math.PI / 4, Math.PI / 4); c.stroke();
+            c.beginPath(); c.arc(32, 32, 22, -Math.PI / 4, Math.PI / 4); c.stroke();
+        } else if (kind === "party") {
             c.beginPath();
             c.arc(32, 30, 21, Math.PI, Math.PI * 2);
             c.stroke();
@@ -111,7 +117,14 @@ Canvas {
             c.ellipse(21, 7, 22, 50);
             c.stroke();
             line(7, 32, 57, 32);
-        } else if (kind === "changelog" || kind === "help") {
+        } else if (kind === "help") {   // a question mark in a ring, so it isn't a second changelog page
+            circle(32, 32, 26, false);
+            c.beginPath();
+            c.arc(32, 25, 8, Math.PI, Math.PI * 2.5);
+            c.stroke();
+            line(32, 33, 32, 38);
+            circle(32, 46, 2.5, true);
+        } else if (kind === "changelog") {
             c.strokeRect(12, 8, 40, 48);
             line(22, 21, 42, 21);
             line(22, 32, 42, 32);

@@ -224,10 +224,10 @@ Item {
                     width: 560; height: row.sel ? 58 : page.rowH
                     verticalAlignment: Text.AlignVCenter
                     text: row.modelData.title
-                    color: row.sel ? "white" : "#a8ffffff"
+                    color: row.sel ? "white" : "#e0ffffff"
                     font.pixelSize: row.sel ? 40 : 29
                     elide: Text.ElideRight
-                    style: Text.Raised; styleColor: row.sel ? "#90000000" : "#70000000"
+                    style: Text.Outline; styleColor: "#50000000"   // a soft edge keeps it readable over the bright silk wave
                 }
                 Text {
                     x: 820; y: row.sel ? 32 : 0
@@ -237,7 +237,7 @@ Item {
                     color: row.sel ? "#f0ffffff" : "#80ffffff"
                     font.pixelSize: row.sel ? 29 : 25
                     elide: Text.ElideRight
-                    style: Text.Raised; styleColor: "#70000000"
+                    style: Text.Outline; styleColor: "#50000000"
                 }
                 Text {
                     visible: row.sel && !!row.modelData.help
@@ -246,7 +246,7 @@ Item {
                     text: row.modelData.help || ""
                     color: "#a0ffffff"; font.pixelSize: 25
                     elide: Text.ElideRight
-                    style: Text.Raised; styleColor: "#70000000"
+                    style: Text.Outline; styleColor: "#50000000"
                 }
             }
         }
