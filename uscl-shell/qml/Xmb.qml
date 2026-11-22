@@ -19,6 +19,7 @@ Item {
     readonly property int catTop: 190
     readonly property int catW: 200
     readonly property int colX: 200          // item column left (COL_X - PAD)
+    readonly property int friendCardWidth: 760 // the focused friend's card, about as long as the PS3's
     readonly property int focTop: 185        // focused row
     readonly property int rowH: 120
     readonly property int focH: 405
@@ -150,7 +151,7 @@ Item {
                 Rectangle {
                     visible: row.fr && row.sel
                     x: icon.x - 4; y: icon.y + 8
-                    width: 1320; height: icon.height - 16
+                    width: xmb.friendCardWidth; height: icon.height - 16
                     radius: 14
                     gradient: Gradient {
                         orientation: Gradient.Vertical
@@ -192,7 +193,7 @@ Item {
                        : row.sel ? (row.wide ? 220 + icon.width / 2 + 40 : 325) : (row.wide ? 220 + icon.width / 2 + 40 : 310)
                     y: row.fr ? icon.y + icon.height / 2 - (row.sel ? 44 : 38) : row.sel ? 262 : 10
                     height: row.fr ? 50 : row.sel ? 56 : 100
-                    width: Math.max(0, row.width - x - 90)
+                    width: Math.max(0, (row.fr ? icon.x - 4 + xmb.friendCardWidth - 110 : row.width - 90) - x)
                     verticalAlignment: Text.AlignVCenter
                     text: row.modelData.title
                     color: row.sel || row.fr ? "white" : "#b4ffffff"
@@ -232,7 +233,7 @@ Item {
                     visible: (row.sel || row.fr) && !!row.modelData.desc
                     x: row.fr ? titleText.x + 2 : row.wide ? 220 + icon.width / 2 + 42 : 327
                     y: row.fr ? titleText.y + titleText.height - 6 : 322
-                    height: row.fr ? 34 : 40; width: Math.max(0, row.width - x - 90)
+                    height: row.fr ? 34 : 40; width: Math.max(0, (row.fr ? icon.x - 4 + xmb.friendCardWidth - 30 : row.width - 90) - x)
                     font.pixelSize: row.fr ? (row.sel ? 25 : 22) : 25
                     verticalAlignment: Text.AlignVCenter
                     text: row.modelData.desc || ""
