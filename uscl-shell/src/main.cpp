@@ -586,13 +586,13 @@ namespace
 					const QString right_keys = write("keyscan/Downloaded/prod (1).keys.txt", keyFile(right, 0x0a));
 					write("keyscan/notes/keys.txt", "not keys at all\n");
 					const QString titles = write("keyscan/Title.keys.txt", QByteArray(32, 'a') + " = " + QByteArray(32, 'b') + "\n");
-					const auto found = SwitchCore::findConsoleFiles({root.filePath("games/keyscan")});
+					const auto found = SwitchCore::findConsoleFiles({root.filePath("games/keyscan")}, false);
 					check(found.value("keys").toString() == right_keys && found.value("keysChecked").toBool(), "Switch picks the keys that open this PC's NCAs");
 					check(found.value("titleKeyFiles").toStringList().contains(titles), "Switch finds renamed title keys");
 					check(found.value("firmware").toString().isEmpty(), "Switch skips a folder of NCAs without the SystemVersion title");
 					QFile::remove(right_keys);
 					// with no key that opens them, the NCAs can't tell wrong keys from damaged files: used, but not "checked"
-					const auto only_wrong = SwitchCore::findConsoleFiles({root.filePath("games/keyscan")});
+					const auto only_wrong = SwitchCore::findConsoleFiles({root.filePath("games/keyscan")}, false);
 					check(only_wrong.value("keys").toString() == wrong_keys && !only_wrong.value("keysChecked").toBool(), "Switch keys it can't verify aren't marked checked");
 					check(!SwitchCore::consoleFilesMissing(kart), "Switch console files present for a game that names no key generation");
 					write("profile-keys-incomplete.keys", "master_key_00 = " + QByteArray(32, '7') + "\n");
@@ -643,7 +643,7 @@ namespace
 					const auto read = SwitchContent::firmware(root.filePath("games/" + same), keyset);
 					check(read.isFirmware && read.version == "22.5.0" && read.generation == 5, "Switch firmware version read from SystemVersion");
 					check(!SwitchContent::firmware(root.filePath("games/keyscan2/yuzu/nand/user/Contents/registered"), keyset).isFirmware, "installed games aren't firmware");
-					const auto found2 = SwitchCore::findConsoleFiles({root.filePath("games/keyscan2")});
+					const auto found2 = SwitchCore::findConsoleFiles({root.filePath("games/keyscan2")}, false);
 					check(found2.value("keys").toString().endsWith(same + "prod.keys") && found2.value("firmware").toString().endsWith("Switch Stuff") &&
 					      found2.value("version").toString() == "22.5.0", "Switch keys and firmware in one folder: both found, firmware versioned");
 					QString error;

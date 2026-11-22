@@ -1,11 +1,16 @@
 # USCL Changelog
 
-## Unreleased
+## 0.6.0-alpha — 2026-11-22
+
+Trophies, play time and friend profiles on every theme, and a pass over every menu.
 
 - Trophies on every console: PS3 and PS4 games show their own trophies (from RPCS3 and shadPS4), every other console earns six USCL play-time trophies. A new trophy pops up in the theme's own style (PS3, PS4, PS5, Xbox 360, Xbox One, Switch, Switch 2), bronze, silver, gold or platinum, over the game. My Profile, a game's options and Trophy Collection list them.
 - Play time is recorded for every game started from USCL.
 - Friends: choose a friend to join their session or open their profile card: a USCL tab (trophies, play time, latest games, shared through Steam while USCL is open) and a Steam tab (their Steam Community profile, shown inside USCL), scrollable with the controller or mouse. My Profile opens yours.
 - Themes: friend status dots, menu icons visible on the light Xbox 360 and Switch 2 themes, each theme's own buttons in help text, smoother page and focus animations.
+- PS4: the function row works like the console's: every function in one row at the top, brought down and enlarged with Up, with a line saying what the selected one does.
+- Every menu checked in every theme: PS3 text stays readable over the bright background wave, the PS3 library lists games, Xbox 360 Classic's clock and hints stay clear of the blades, the Nintendo settings sidebar marks the open section, pages open on their first usable row, Add Games and Game Updates have their own headings, the name prompt is readable on light themes, How to Play and Sound have their own icons, dialogs rise in and notices slide in.
+- Quitting USCL while it's still looking for Switch keys (it does when it starts) or for games no longer crashes.
 
 - Switch firmware is identified by its content, not its folder name. USCL reads the real version from the firmware and skips firmware your keys can't open. It ignores folders that only look like firmware (another emulator's installed games), and finds keys packed in the same folder or zip as the firmware.
 - Switch keys are found without importing them by hand. USCL now also looks on every other drive, including the Switch's SD card (`switch\prod.keys` from Lockpick_RCM). It accepts the names key files get on Windows (`prod.keys.txt`, `prod (1).keys`, `keys.txt`), checks each file's `header_key` against a real NCA on the PC and picks the keys that work. Starting a Switch game without usable keys searches once more and starts the game if they turn up.

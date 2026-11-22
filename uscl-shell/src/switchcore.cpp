@@ -6,6 +6,7 @@
 #include <QCryptographicHash>
 #include <QDeadlineTimer>
 #include <QDir>
+#include <QThread>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
@@ -257,6 +258,8 @@ namespace
 	void collectConsoleFiles(const QString& dir, int depth, QStringList& keys, QStringList& titles, QStringList& firmware, QStringList& zips, const QString& skip,
 	                         QSet<QString>& visited, const QDeadlineTimer& until = QDeadlineTimer(QDeadlineTimer::Forever))
 	{
+		if (QThread::currentThread()->isInterruptionRequested())   // USCL is quitting
+			return;
 		const QString canonical = QFileInfo(dir).canonicalFilePath();
 		const QString excluded = QFileInfo(skip).canonicalFilePath();
 		if (canonical.isEmpty() || visited.contains(canonical) || until.hasExpired() ||
@@ -831,7 +834,7 @@ QVariantMap SwitchCore::installedConsoleFiles()
 	return eden;
 }
 
-QVariantMap SwitchCore::findConsoleFiles(const QStringList& folders)
+QVariantMap SwitchCore::findConsoleFiles(const QStringList& folders, bool thisPc)
 {
 	QStringList keys, titles, firmware, zips;
 	const QString home = QDir::homePath(), skip = profileDir();
@@ -842,6 +845,8 @@ QVariantMap SwitchCore::findConsoleFiles(const QStringList& folders)
 		collectConsoleFiles(url.isLocalFile() ? url.toLocalFile() : folder, 8, keys, titles, firmware, zips, skip, visited);
 	}
 	// Selected games folders supplement the normal search; keys often live on another drive.
+	if (thisPc)
+	{
 	for (const auto location : {QStandardPaths::DownloadLocation, QStandardPaths::DesktopLocation, QStandardPaths::DocumentsLocation})
 		for (const QString& dir : QStandardPaths::standardLocations(location))
 			collectConsoleFiles(dir, 6, keys, titles, firmware, zips, skip, visited);
@@ -858,6 +863,7 @@ QVariantMap SwitchCore::findConsoleFiles(const QStringList& folders)
 	for (const QString& game : library())
 		collectConsoleFiles(QFileInfo(game).absolutePath(), 2, keys, titles, firmware, zips, skip, visited);
 	collectFromDrives(keys, titles, firmware, zips, skip, visited);
+	}
 	for (const QString& zip : zips)
 		for (const QString& file : keysFromZip(zip))
 			(isTitleKeysName(QFileInfo(file).fileName()) ? titles : keys) << file;
