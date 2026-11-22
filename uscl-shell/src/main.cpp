@@ -7,6 +7,7 @@
 #include "padconfig.h"
 #include "gameart.h"
 #include "online.h"
+#include "profile.h"
 #include "system.h"
 #include "updater.h"
 #include "switchcontent.h"
@@ -26,7 +27,9 @@
 #include <QBuffer>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QDateTime>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QTemporaryFile>
 #include <QEventLoop>
 #include <QTimer>
@@ -844,6 +847,105 @@ namespace
 			if (frontend_set) qputenv("USCL_SWITCH_FRONTEND", old_frontend); else qunsetenv("USCL_SWITCH_FRONTEND");
 		}
 
+		// Trophies and play time: RPCS3's TROPUSR.DAT, trophy XML, USCL play-time trophies, presence round trip
+		{
+			const auto tropusr = [](const QList<int>& unlocked) {
+				QByteArray b(0x30 + 2 * 32, '\0');
+				const auto be32 = [&](qsizetype at, quint32 v) { qToBigEndian(v, b.data() + at); };
+				be32(0, 0x818F54AD);
+				be32(8, 2);
+				be32(0x30, 4); be32(0x34, 0x50); be32(0x3C, 3); qToBigEndian<quint64>(b.size(), b.data() + 0x40);
+				b.append(QByteArray(3 * 0x60, '\0'));
+				const qsizetype t6 = b.size();
+				be32(0x50, 6); be32(0x54, 0x60); be32(0x5C, 3); qToBigEndian<quint64>(t6, b.data() + 0x60);
+				b.append(QByteArray(3 * 0x70, '\0'));
+				for (int i = 0; i < 3; i++)
+				{
+					const qsizetype e = t6 + i * 0x70;
+					be32(e, 6); be32(e + 4, 0x60); be32(e + 8, i); be32(e + 16, i);
+					if (unlocked.contains(i)) { be32(e + 20, 1); qToBigEndian<quint64>(62135596800000000ull + 1700000000ull * 1000000, b.data() + e + 32); }
+				}
+				return b;
+			};
+			const QMap<int, qint64> got = Profile::readTropusr(tropusr({1}));
+			check(got.size() == 1 && got.value(1) == 1700000000, "TROPUSR.DAT unlocked trophies and times");
+			check(Profile::readTropusr("junk").isEmpty(), "TROPUSR.DAT rejects other files");
+			const QByteArray conf = "<!--sig--><trophyconf><npcommid>NPWR00001_00</npcommid><title-name>Test Game®</title-name>"
+			                        "<trophy id=\"000\" hidden=\"no\" ttype=\"P\" pid=\"-1\"><name>All Done</name><detail>Everything</detail></trophy>"
+			                        "<trophy id=\"001\" hidden=\"yes\" ttype=\"G\" pid=\"0\"><name>Secret</name><detail>Shh</detail></trophy>"
+			                        "<trophy id=\"002\" hidden=\"no\" ttype=\"B\" pid=\"0\" unlockstate=\"true\" timestamp=\"5\"><name>First</name><detail>Go</detail></trophy></trophyconf>";
+			const auto list = Profile::readTrophyXml(conf);
+			check(list.size() == 3 && list[0].grade == 'P' && list[1].hidden && list[1].name == "Secret" && list[2].unlocked && list[2].time == 5,
+			      "trophy XML: grades, hidden, names and shadPS4 unlock state");
+
+			QJsonObject record{{"uscl", QJsonObject{{"0", 1}, {"2", 2}}}};
+			const auto uscl = Profile::usclTrophies(record);
+			check(uscl.size() == 6 && uscl[0].unlocked && !uscl[1].unlocked && uscl[2].unlocked && uscl[5].grade == 'P', "USCL play-time trophies");
+
+			const QVariantMap summary{{"seconds", 7200}, {"bronze", 3}, {"silver", 2}, {"gold", 1}, {"platinum", 0},
+			                          {"games", QVariantList{QVariantMap{{"console", "Wii"}, {"seconds", 3600}, {"earned", 2}, {"total", 6},
+			                                                             {"last", 86400 * 20000}, {"title", "Pipe | Game " + QString(300, 'x')}}}}};
+			QVariantMap keys;
+			const auto p = Profile::presenceKeys(summary, "Now Playing");
+			for (auto it = p.begin(); it != p.end(); ++it)
+			{
+				keys[it.key()] = it.value();
+				check(it.value().toUtf8().size() <= 255, "presence values fit Steam's limit");
+			}
+			check(p.size() <= 20, "presence fits Steam's 20 keys");
+			const QVariantMap back = Profile::readPresence(keys);
+			const QVariantMap g = back["games"].toList().value(0).toMap();
+			check(back["seconds"].toInt() == 7200 && back["earned"].toInt() == 6 && back["playing"] == "Now Playing" && g["console"] == "Wii" &&
+			      g["seconds"].toInt() == 3600 && g["total"].toInt() == 6 && g["title"].toString().startsWith("Pipe | Game x"), "presence round trip");
+			check(Profile::readPresence({}).isEmpty(), "no presence: no profile");
+
+			// a Profile in a scratch settings folder: play-time trophies, then a PS3 trophy unlocked while the game runs
+			QTemporaryDir dir;
+			const QByteArray previous = qgetenv("XDG_CONFIG_HOME");
+			const bool was_set = qEnvironmentVariableIsSet("XDG_CONFIG_HOME");
+			qputenv("XDG_CONFIG_HOME", dir.path().toUtf8());
+#ifndef _WIN32 // on Windows the settings folder is the app's own: no scratch copy
+			{
+				Profile profile;
+				QVariantList unlocked;
+				QObject::connect(&profile, &Profile::unlocked, [&](const QVariantMap& t) { unlocked << t; });
+				profile.gameStarted({{"serial", "Wii-RTEST"}, {"title", "Wii Test"}, {"console", "Wii"}}, true);
+				check(unlocked.size() == 2 && unlocked[0].toMap()["grade"] == "bronze" && unlocked[1].toMap()["grade"] == "silver",
+				      "a Wii game earns First Steps and Better Together");
+				profile.gameStopped();
+				profile.gameStarted({{"serial", "Wii-RTEST"}, {"title", "Wii Test"}, {"console", "Wii"}}, true);
+				check(unlocked.size() == 2, "USCL trophies are earned once");
+				profile.gameStopped();
+
+				const QString set = Profile::setRoot("PS3") + "/NPWR00001_00";
+				QDir().mkpath(set);
+				const auto write = [](const QString& file, const QByteArray& data) { QFile f(file); return f.open(QIODevice::WriteOnly) && f.write(data) == data.size(); };
+				write(set + "/TROPCONF.SFM", conf);
+				write(set + "/TROPUSR.DAT", tropusr({}));
+				const QVariantMap ps3{{"serial", "BLUS00001"}, {"title", "Test Game"}, {"console", "PS3"}, {"path", dir.path()}};
+				profile.gameStarted(ps3, false);
+				check(unlocked.size() == 2, "a PS3 game earns no USCL trophies");
+				QThread::msleep(20); // a new modification time
+				write(set + "/TROPUSR.DAT", tropusr({1}));
+				QFile(set + "/TROPUSR.DAT").setFileTime(QDateTime::currentDateTime().addSecs(5), QFileDevice::FileModificationTime);
+				profile.poll();
+				check(unlocked.size() == 3 && unlocked[2].toMap()["name"] == "Secret" && unlocked[2].toMap()["grade"] == "gold",
+				      "a PS3 trophy unlocked while the game runs is announced");
+				profile.poll();
+				check(unlocked.size() == 3, "an unlock is announced once");
+				profile.gameStopped();
+				const QVariantMap s = profile.gameSummary(ps3);
+				check(s["earned"].toInt() == 1 && s["total"].toInt() == 3 && s["gold"].toInt() == 1, "the set found by title belongs to the game");
+				const QVariantList list = profile.trophies(ps3);
+				check(list.size() == 3 && list[1].toMap()["name"] == "Secret" && list[1].toMap()["unlocked"].toBool() && !list[2].toMap()["unlocked"].toBool(),
+				      "trophy list: an earned hidden trophy shows its name");
+				check(profile.summary()["earned"].toInt() == 3 && profile.summary()["games"].toList().size() == 2, "profile totals every game");
+				check(QFileInfo::exists(Profile::presenceFile()), "presence written for friends");
+			}
+#endif
+			if (was_set) qputenv("XDG_CONFIG_HOME", previous); else qunsetenv("XDG_CONFIG_HOME");
+		}
+
 		std::fprintf(stderr, failed ? "self-test: %d failed\n" : "self-test: ok\n", failed);
 		return failed ? 1 : 0;
 	}
@@ -958,6 +1060,7 @@ int main(int argc, char* argv[])
 	System system;
 	Online online;
 	Updater updater;
+	Profile profile;
 
 	GameUpdates gameUpdates;
 	Dlc dlc;
@@ -972,6 +1075,7 @@ int main(int argc, char* argv[])
 	engine.rootContext()->setContextProperty("gameUpdates", &gameUpdates);
 	engine.rootContext()->setContextProperty("dlc", &dlc);
 	engine.rootContext()->setContextProperty("party", &party);
+	engine.rootContext()->setContextProperty("profile", &profile);
 	engine.rootContext()->setContextProperty("windowed", app.arguments().contains("--windowed"));
 	engine.rootContext()->setContextProperty("smokeTest", smoke_test);
 	QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);

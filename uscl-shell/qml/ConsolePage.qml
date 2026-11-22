@@ -18,6 +18,13 @@ Item {
                                                                                              style.nintendo
                                                                                              ? 600 : 330
     readonly property real listTop: style.ps4 || style.blades ? 162 : style.nintendo ? 190 : 240
+    // white menu glyphs (xmb/icons) get a tile in the accent colour on light themes, where they'd vanish
+    readonly property bool lightRows: style.metro || style.lightSwitch
+    function glyphIcon(url) { return String(url || "").indexOf("xmb/icons/") >= 0 }
+    // the menus are written with PlayStation buttons; each theme shows its own
+    function buttons(text) {
+        return String(text || "").replace(/✕/g, style.confirmGlyph).replace(/△/g, style.optionsGlyph).replace(/○/g, style.backGlyph)
+    }
     Rectangle {
         anchors.fill: parent
         color: style.blades ? "#a18acb" : style.background
@@ -107,7 +114,7 @@ Item {
                 required property var modelData
                 required property int index
                 objectName: "libraryTool_"+modelData.key
-                width: 245; height: 72
+                width: 245; height: 58
                 readonly property bool selected: screen.controller.filterFocus && screen.controller.libraryNavIndex === screen.controller.filters.length+index
                 color: selected ? style.focusFill : "transparent"
                 border.width: selected ? 3 : 0; border.color: style.accent
@@ -298,7 +305,16 @@ Item {
             border.width: selected && !screen.controller.sectionFocus ? (style.nintendo ? 4 : 2) : 0
             border.color: style.blades ? "#675385" : style.ps4 ? "#cdd8ed" : style.accent
             opacity: modelData.disabled ? .45 : 1
+            Behavior on color { ColorAnimation { duration: 110 } }
+            Behavior on height { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+            Rectangle {
+                visible: !screen.settingsSidebar && screen.lightRows && screen.glyphIcon(entry.modelData.icon)
+                x: 18; y: 14; width: 56; height: 56
+                radius: style.lightSwitch ? 28 : 0
+                color: style.accent
+            }
             Image {
+                id: rowIcon
                 visible: !screen.settingsSidebar
                 x: 22
                 y: 18
@@ -307,6 +323,14 @@ Item {
                 source: entry.modelData.icon || ""
                 fillMode: Image.PreserveAspectFit
                 mipmap: true
+                asynchronous: true
+            }
+            // a friend's status, on their picture: online, away, offline
+            Rectangle {
+                visible: !screen.settingsSidebar && !!entry.modelData.status
+                x: rowIcon.x + rowIcon.width - 13; y: rowIcon.y + rowIcon.height - 13; width: 18; height: 18; radius: 9
+                color: entry.modelData.status === "online" ? "#3ec43e" : entry.modelData.status === "away" ? "#f0a30a" : "#8a8a8a"
+                border.width: 3; border.color: entry.color.a > 0 ? entry.color : style.background
             }
             Text {
                 x: screen.settingsSidebar ? 24 : entry.modelData.icon ? 99 : 26
@@ -337,7 +361,7 @@ Item {
                 y: 78
                 width: parent.width - 120
                 height: 40
-                text: entry.modelData.help || entry.modelData.desc || ""
+                text: screen.buttons(entry.modelData.help || entry.modelData.desc)
                 color: style.muted
                 font.pixelSize: 23
                 elide: Text.ElideRight
@@ -388,7 +412,7 @@ Item {
             maximumLineCount: 3
             elide: Text.ElideRight
             clip: true
-            text: screen.controller.cur ? screen.controller.cur.desc || "" : ""
+            text: screen.controller.cur ? screen.buttons(screen.controller.cur.desc || screen.controller.cur.help) : ""
             color: style.muted
             font.pixelSize: 27
             wrapMode: Text.Wrap
@@ -412,6 +436,7 @@ Item {
         }
         Text {
             y: 615
+            visible: !!(screen.controller.cur && screen.controller.cur.preview)
             text: qsTr("Enter to configure")
             color: style.muted
             font.pixelSize: 25
@@ -422,7 +447,7 @@ Item {
         y: 932
         width: parent.width - x - 96
         height: 48
-        text: screen.controller.cur ? screen.controller.cur.help || screen.controller.cur.desc || "" : ""
+        text: screen.controller.cur ? screen.buttons(screen.controller.cur.help || screen.controller.cur.desc) : ""
         color: style.muted
         font.pixelSize: 23
         wrapMode: Text.Wrap

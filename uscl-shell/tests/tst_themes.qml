@@ -17,6 +17,7 @@ Item {
     Dialog { id: dialog; anchors.fill: parent }
     TextPrompt { id: prompt; anchors.fill: parent }
     GameLaunch { id: launchScreen; anchors.fill: parent; shown: false }
+    TrophyToast { id: trophyToast; x: stageX; y: stageY }
     TestCase {
         name: "ConsoleThemes"
         when: windowShown
@@ -476,8 +477,8 @@ Item {
             var rows = []
             for (var i = 0; i < 200; i++) rows.push({title:"Game "+i,console:"Console "+i%10})
             page.rows = rows; page.current = 0; page.input("left")
-            for (i = 0; i < page.filters.length+2; i++) page.input("down")
-            compare(page.libraryNavIndex,page.filters.length+2)
+            for (i = 0; i < page.filters.length+3; i++) page.input("down")
+            compare(page.libraryNavIndex,page.filters.length+3)
             var spy = Qt.createQmlObject('import QtTest; SignalSpy { signalName: "libraryAction" }',page)
             spy.target = page
             page.input("accept"); compare(spy.signalArguments[0][0],"help")
@@ -638,6 +639,41 @@ Item {
             tryCompare(launchScreen, "visible", false)
             compare(launchScreen.opacity, 0)
             verify(!launchScreen.animating)
+        }
+        function test_trophy_toast_data() {
+            return [{tag: "ps3", corner: "topRight"}, {tag: "ps4", corner: "topLeft"}, {tag: "ps5", corner: "topRight"},
+                    {tag: "x360classic", corner: "bottom"}, {tag: "x360", corner: "bottom"}, {tag: "xboxone", corner: "bottom"},
+                    {tag: "switch", corner: "topRight"}, {tag: "switch2", corner: "topRight"}]
+        }
+        function test_trophy_toast(data) {
+            trophyToast.theme = data.tag
+            compare(trophyToast.corner, data.corner)
+            verify(trophyToast.stageX >= 0 && trophyToast.stageX + trophyToast.width <= 1920)
+            verify(trophyToast.stageY >= 0 && trophyToast.stageY + trophyToast.height <= 1080)
+            var shown = Qt.createQmlObject('import QtTest; SignalSpy { signalName: "shown" }', trophyToast)
+            shown.target = trophyToast
+            trophyToast.show({name: "First", grade: "gold"})
+            trophyToast.show({name: "Second", grade: "platinum"})
+            verify(trophyToast.active)
+            compare(shown.count, 1); compare(trophyToast.trophy.name, "First"); compare(trophyToast.gamerscore, 90)
+            tryCompare(shown, "count", 2, 8000)   // one at a time, in order
+            compare(trophyToast.trophy.name, "Second"); compare(trophyToast.gradeName, "Platinum")
+            tryCompare(trophyToast, "active", false, 8000)
+            shown.destroy()
+        }
+        function test_friend_rows_and_buttons() {
+            page.theme = "xboxone"; page.visible = true
+            page.rows = [{title: "RiverFox", status: "online", icon: "", help: "✕ for their USCL or Steam profile", options: function() { return [] }}]
+            var modern = findChild(page, "settingsRow0")
+            verify(modern)
+            var helpText = page.children.filter(function(c) { return c.controller === page })[0]
+            compare(helpText.buttons("✕ to join, △ for options"), "A to join, ☰ for options")
+            page.theme = "ps4"
+            compare(helpText.buttons("✕ to join"), "✕ to join")
+            var opened = Qt.createQmlObject('import QtTest; SignalSpy { signalName: "showOptions" }', page)
+            opened.target = page
+            page.input("options"); compare(opened.count, 1)   // △ on a friend: Join / USCL profile / Steam profile
+            opened.destroy()
         }
         function test_ps3() {
             navigation.input("down"); compare(navigation.item, 1)

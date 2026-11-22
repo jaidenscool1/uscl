@@ -58,7 +58,7 @@
         "sys_modules_dir": "",
         "trophy_notification_duration": 6.0,
         "trophy_notification_side": "right",
-        "trophy_popup_disabled": false,
+        "trophy_popup_disabled": true,
         "volume_slider": 100
     },
     "Input": {

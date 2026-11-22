@@ -31,7 +31,7 @@ Item {
     property int filterIndex: 0
     property bool filterFocus: false
     property int libraryNavIndex: 0
-    readonly property var libraryTools: [{key:"add",title:qsTr("Add Games")},{key:"updates",title:qsTr("Game Updates")},{key:"help",title:qsTr("How to Play")}]
+    readonly property var libraryTools: [{key:"add",title:qsTr("Add Games")},{key:"updates",title:qsTr("Game Updates")},{key:"trophies",title:qsTr("Trophies")},{key:"help",title:qsTr("How to Play")}]
     signal libraryAction(string section)
     property var settingsSections: []
     property int settingsSection: -1
@@ -261,6 +261,7 @@ Item {
         controller: page
         theme: page.theme
         heading: page.heading
+        transform: Translate { id: modernShift }
     }
 
     // ---- open / close: rows slide in from the right; from the crossbar the breadcrumb shrinks into place ----
@@ -273,9 +274,13 @@ Item {
             modernEnter.restart()
         }
     }
+    // each family's own page entrance: Xbox pages slide in from the right, PlayStation and Nintendo rise and fade in
+    readonly property bool xboxTheme: theme === "x360" || theme === "x360classic" || theme === "xboxone"
     ParallelAnimation {
         id: modernEnter
-        NumberAnimation { target: modernPage; property: "opacity"; from: .6; to: 1; duration: 120 }
+        NumberAnimation { target: modernPage; property: "opacity"; from: 0; to: 1; duration: 200; easing.type: Easing.OutCubic }
+        NumberAnimation { target: modernShift; property: "x"; from: page.xboxTheme ? 90 : 0; to: 0; duration: 260; easing.type: Easing.OutCubic }
+        NumberAnimation { target: modernShift; property: "y"; from: page.xboxTheme ? 0 : 28; to: 0; duration: 240; easing.type: Easing.OutCubic }
     }
     ParallelAnimation {
         id: enter
