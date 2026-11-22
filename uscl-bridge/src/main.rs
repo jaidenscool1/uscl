@@ -88,6 +88,10 @@ fn friends() -> Result<(), String> {
     let app = client.utils().app_id();
     let avatar_dir = std::env::args().nth(2).map(std::path::PathBuf::from);
     let all = client.friends().get_friends(FriendFlags::IMMEDIATE);
+    // their USCL profiles (`presence`) arrive with Rich Presence
+    for f in &all {
+        unsafe { steamworks_sys::SteamAPI_ISteamFriends_RequestFriendRichPresence(steamworks_sys::SteamAPI_SteamFriends_v018(), f.id().raw()) };
+    }
     // Steam loads big pictures on request: ask, give it a moment, then take what's there (medium otherwise)
     let mut pictures = std::collections::HashMap::new();
     if avatar_dir.is_some() {
@@ -136,13 +140,61 @@ fn friends() -> Result<(), String> {
             };
             let color = pictures.get(&f.id().raw()).map(|(_, rgba)| card_color(rgba));
             let playing = f.game_played().is_some_and(|g| g.game.app_id() != app);
+            let uscl: serde_json::Map<String, serde_json::Value> = PRESENCE_KEYS
+                .iter()
+                .filter_map(|k| friend_presence(f.id().raw(), k).map(|v| (k.to_string(), v.into())))
+                .collect();
             serde_json::json!({"id": f.id().raw().to_string(), "name": f.name(), "state": format!("{state:?}"),
                 "online": !matches!(state, FriendState::Offline | FriendState::Invisible), "session": session, "avatar": avatar,
-                "level": level, "color": color, "playing": playing})
+                "level": level, "color": color, "playing": playing, "uscl": uscl})
         })
         .collect();
     println!("{}", serde_json::Value::Array(list));
     Ok(())
+}
+
+/// The USCL profile in Rich Presence (uscl-shell profile.cpp presenceKeys): totals, what's playing, 6 latest games
+const PRESENCE_KEYS: [&str; 8] = ["uscl_p", "uscl_now", "uscl_g0", "uscl_g1", "uscl_g2", "uscl_g3", "uscl_g4", "uscl_g5"];
+
+fn friend_presence(id: u64, key: &str) -> Option<String> {
+    let key = std::ffi::CString::new(key).ok()?;
+    let value = unsafe {
+        steamworks_sys::SteamAPI_ISteamFriends_GetFriendRichPresence(steamworks_sys::SteamAPI_SteamFriends_v018(), id, key.as_ptr())
+    };
+    if value.is_null() {
+        return None;
+    }
+    let value = unsafe { std::ffi::CStr::from_ptr(value) }.to_string_lossy().into_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+/// `presence <file>`: keeps this player's USCL profile on Steam (Rich Presence, read by friends' `friends`) while
+/// USCL runs. The file is a JSON object of PRESENCE_KEYS the home screen rewrites; it's set again when it changes and
+/// every minute. Exits when USCL closes stdin (also when USCL crashes), so Steam doesn't keep showing it.
+fn presence(path: &str) -> Result<(), String> {
+    let client = Client::init_app(APP_ID).map_err(|e| format!("Steam init failed (is Steam running?): {e:?}"))?;
+    std::thread::spawn(|| {
+        use std::io::Read;
+        let mut buf = [0u8; 64];
+        while matches!(std::io::stdin().read(&mut buf), Ok(n) if n > 0) {}
+        std::process::exit(0);
+    });
+    let mut last = None;
+    let mut since = Instant::now();
+    loop {
+        let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        if modified != last || since.elapsed() > Duration::from_secs(60) {
+            last = modified;
+            since = Instant::now();
+            if let Ok(serde_json::Value::Object(keys)) = std::fs::read_to_string(path).map(|t| serde_json::from_str(&t).unwrap_or_default()) {
+                for key in PRESENCE_KEYS {
+                    client.friends().set_rich_presence(key, keys.get(key).and_then(|v| v.as_str()).filter(|v| !v.is_empty()));
+                }
+            }
+        }
+        client.run_callbacks();
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
 
 /// The PS3 colours each friend's card with their profile colour; Steam has none, so take the picture's average,
@@ -236,6 +288,16 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("presence") => {
+            let Some(path) = std::env::args().nth(2) else {
+                eprintln!("usage: uscl-bridge presence <profile file>");
+                std::process::exit(2);
+            };
+            if let Err(e) = presence(&path) {
+                eprintln!("FAIL: {e}");
+                std::process::exit(1);
+            }
+        }
         Some("client-test") => match serve::client_test() {
             Ok(()) => println!("PASS"),
             Err(e) => {
@@ -244,7 +306,7 @@ fn main() {
             }
         },
         _ => {
-            eprintln!("usage: uscl-bridge host [skate3 | bo2 | switch | dolphin | 3ds | tcp:PORT,udp:FIRST-LAST,sudp:PORT,...] | join [session id | code] | friends | selftest | serve | client-test");
+            eprintln!("usage: uscl-bridge host [skate3 | bo2 | switch | dolphin | 3ds | tcp:PORT,udp:FIRST-LAST,sudp:PORT,...] | join [session id | code] | friends | presence <file> | selftest | serve | client-test");
             std::process::exit(2);
         }
     }

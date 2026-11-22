@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Trophies on every console: PS3 and PS4 games show their own trophies (from RPCS3 and shadPS4), every other console earns six USCL play-time trophies. A new trophy pops up in the theme's own style (PS3, PS4, PS5, Xbox 360, Xbox One, Switch, Switch 2), bronze, silver, gold or platinum, over the game. My Profile, a game's options and Trophy Collection list them.
+- Play time is recorded for every game started from USCL.
+- Friends: choose a friend to join their session, view their USCL profile (trophies, play time, latest games) or open their Steam profile. Profiles are shared through Steam while USCL is open.
+- Themes: friend status dots, menu icons visible on the light Xbox 360 and Switch 2 themes, each theme's own buttons in help text, smoother page and focus animations.
+
 - Switch firmware is identified by its content, not its folder name. USCL reads the real version from the firmware and skips firmware your keys can't open. It ignores folders that only look like firmware (another emulator's installed games), and finds keys packed in the same folder or zip as the firmware.
 - Switch keys are found without importing them by hand. USCL now also looks on every other drive, including the Switch's SD card (`switch\prod.keys` from Lockpick_RCM). It accepts the names key files get on Windows (`prod.keys.txt`, `prod (1).keys`, `keys.txt`), checks each file's `header_key` against a real NCA on the PC and picks the keys that work. Starting a Switch game without usable keys searches once more and starts the game if they turn up.
 - A USCL ticker next to every game shows how well it plays online: USCL Online, USCL Online Beta, USCL Online Soon or Offline. It's read from the game tracker built into the app, and the Information panel explains it.

@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QProcess>
+#include <QTimer>
 #include <QVariantList>
 
 #include <array>
@@ -53,6 +54,13 @@ public:
 	Q_INVOKABLE void join(const QString& session);
 	Q_INVOKABLE void stop();
 	Q_INVOKABLE void refreshFriends();
+	// Keeps this player's USCL profile (Profile::presenceFile) on Steam for friends while USCL runs: `uscl-bridge
+	// presence`, started again when Steam comes back
+	Q_INVOKABLE void startPresence();
+	// Steam's profile page for a friend (or this player, with no id), in the Steam client
+	Q_INVOKABLE static void openSteamProfile(const QString& id);
+	// a friend's USCL profile from their Rich Presence keys; the last one seen is kept for when they're offline
+	static QVariantMap friendProfile(const QString& id, const QVariantMap& keys, const QString& cacheDir);
 	Q_INVOKABLE void testConnection(const QString& console = "PS3");
 	// Starts Steam in the tray (-silent: no window) when it isn't running, so sessions and friends work without
 	// the Steam window popping up over the home screen
@@ -105,6 +113,8 @@ private:
 	QString m_state = "off", m_session, m_game, m_message, m_host_game;
 	QVariantList m_players;
 	QProcess m_friends_proc;
+	QProcess m_presence;
+	QTimer m_presence_retry;
 	QVariantList m_friends;
 	QString m_friends_error;
 	QVariantList m_tests;

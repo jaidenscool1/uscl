@@ -164,14 +164,19 @@ Window {
         if (emuConsoles.indexOf(g.console) >= 0) {   // Wii -> Dolphin, 3DS -> Azahar
             // in a session: our Dolphin hosts or joins NetPlay (Wii), our Azahar joins the room (3DS), over the tunnel
             var netplay = ["Wii", "GameCube", "3DS"].indexOf(g.console) < 0 ? "" : online.state === "hosting" ? "host" : online.state === "joined" ? "join" : ""
-            if (launcher.startEmu(g.path, g.title, g.console, netplay, system.onlineName || online.steamName, online.players.length)) runningGame = g
+            if (launcher.startEmu(g.path, g.title, g.console, netplay, system.onlineName || online.steamName, online.players.length)) gameStarted(g)
             return
         }
         if (!games.isPs4Serial(g.serial) && g.console !== "Switch") {
             if (prefs.autoScale) system.setRpcs3Value("Video", "Resolution Scale", String(autoScaleValue))
+            system.setRpcs3Value("Miscellaneous", "Show trophy popups", "false")   // USCL shows them in the theme's style
         }
         // shortcut: a game started before the session runs as it started (patches on); restart it to play online
-        if (launcher.startGame(g.path, g.title, online.state !== "off" && !updateNeeded(g), g.console, system.onlineName || online.steamName)) runningGame = g
+        if (launcher.startGame(g.path, g.title, online.state !== "off" && !updateNeeded(g), g.console, system.onlineName || online.steamName)) gameStarted(g)
+    }
+    function gameStarted(g) {
+        runningGame = g
+        profile.gameStarted(g, online.state === "hosting" || online.state === "joined")   // play time and trophies
     }
     // USCL goes online only on a game's newest update, so everyone in a session runs the same game code
     function updateNeeded(g) { return (g.console || "PS3") === "PS3" ? gameUpdates.requiredVersion(g.serial, g.version) : "" }
@@ -284,6 +289,91 @@ Window {
             { title: qsTr("View Profile in Discord"),
               action: function() { party.openProfile(m.id) } }
         ], 0)
+    }
+
+    // ---------------------------------------------------------------- profiles, play time and trophies (profile.cpp)
+    function playTime(seconds) {
+        var h = Math.floor(seconds / 3600), m = Math.floor(seconds % 3600 / 60)
+        return h ? qsTr("%1 h %2 min").arg(h).arg(m) : qsTr("%1 min").arg(m)
+    }
+    function dayText(secs) { return secs ? Qt.formatDate(new Date(secs * 1000), prefs.dateFormat) : "" }
+    function cupIcon(grade) { return "qrc:/qt/qml/Uscl/xmb/trophies/" + (grade || "bronze") + ".png" }
+    function gradeLabel(grade) { return ({ bronze: qsTr("Bronze"), silver: qsTr("Silver"), gold: qsTr("Gold"), platinum: qsTr("Platinum") })[grade] || grade }
+    function trophyCounts(p) {
+        return qsTr("Platinum %1  ·  Gold %2  ·  Silver %3  ·  Bronze %4").arg(p.platinum || 0).arg(p.gold || 0).arg(p.silver || 0).arg(p.bronze || 0)
+    }
+    function findGame(serial) {
+        for (var i = 0; i < games.count; i++) if (games.get(i).serial === serial) return games.get(i)
+        return null
+    }
+    function profileGameIcon(g) {
+        var own = findGame(g.serial)
+        return own && own.icon || ic((consoleMeta[g.console] || [g.console, "cat_game"])[1])
+    }
+    // a profile's rows: the player's own (profile.summary) or a friend's (from their Rich Presence)
+    function profileRows(p, mine) {
+        var best = p.platinum ? "platinum" : p.gold ? "gold" : p.silver ? "silver" : "bronze"
+        var rows = [{ title: qsTr("Trophies"), icon: cupIcon(best), value: String(p.earned || 0), help: trophyCounts(p),
+                      action: mine ? function() { openPage(trophyGamesPage, cupIcon("gold"), 0, null, qsTr("Trophies")) } : null },
+                    { title: qsTr("Play Time"), icon: ic("it_clock"), value: playTime(p.seconds || 0), help: qsTr("All games started from USCL") }]
+        ;(p.games || []).slice(0, mine ? 12 : 6).forEach(function(g) {
+            var bits = []
+            if (g.total) bits.push(qsTr("Trophies %1 / %2").arg(g.earned).arg(g.total))
+            if (g.last) bits.push(qsTr("Last played %1").arg(dayText(g.last)))
+            rows.push({ title: g.title, icon: profileGameIcon(g), value: g.seconds ? playTime(g.seconds) : "", help: bits.join("  ·  "),
+                        action: mine ? function() { openTrophies(g) } : null })
+        })
+        return rows
+    }
+    function trophyGamesPage() {
+        var list = profile.summary.games || []
+        if (!list.length) return [{ title: qsTr("No Trophies Yet"), help: qsTr("Play a game from USCL to start earning them"), disabled: true }]
+        return list.map(function(g) {
+            return { title: g.title, icon: profileGameIcon(g), value: g.total ? Math.round(100 * g.earned / g.total) + "%" : "",
+                     help: g.total ? qsTr("Trophies %1 / %2").arg(g.earned).arg(g.total) : qsTr("No trophies found yet"), action: function() { openTrophies(g) } }
+        })
+    }
+    function openTrophies(g) {
+        var game = findGame(g.serial) || g
+        openPage(function() { return trophyListPage(game) }, profileGameIcon(g), 0, null, g.title)
+    }
+    function trophyListPage(g) {
+        var list = profile.trophies(g)
+        if (!list.length)
+            return [{ title: qsTr("No Trophies Found"), disabled: true,
+                      help: qsTr("PS3 and PS4 trophies appear once the game has started; other consoles earn USCL trophies by playing") }]
+        var s = profile.gameSummary(g)
+        var rows = [{ title: qsTr("Progress"), icon: cupIcon(s.platinum ? "platinum" : "gold"), value: Math.round(100 * s.earned / s.total) + "%",
+                      help: qsTr("%1 of %2 earned  ·  ").arg(s.earned).arg(s.total) + trophyCounts(s) }]
+        list.forEach(function(t) {
+            rows.push({ title: t.name, icon: t.icon || cupIcon(t.grade), disabled: !t.unlocked,
+                        value: t.unlocked ? dayText(t.time) || qsTr("Earned") : gradeLabel(t.grade),
+                        help: gradeLabel(t.grade) + (t.detail ? "  ·  " + t.detail : "") })
+        })
+        return rows
+    }
+    // ✕ or △ on a friend: what the PS3's friend menu offers, as far as USCL and Steam go
+    function friendOptions(f) {
+        var o = []
+        if (f.session) o.push({ title: qsTr("Join Session"), action: function() { needsName(function() { online.join(f.session) }) } })
+        o.push({ title: qsTr("View USCL Profile"), action: function() { openFriendProfile(f) } },
+               { title: qsTr("View Steam Profile"), action: function() { online.openSteamProfile(f.id) } })
+        return o
+    }
+    function openFriendProfile(f) {
+        openPage(function() { return friendProfilePage(f.id) }, f.avatar || ic("it_person"), friendsCat, null, f.name)
+    }
+    function friendProfilePage(id) {
+        var f = online.friends.find(function(x) { return x.id === id }) || { id: id, name: "" }
+        var p = f.profile || {}
+        var steam = { title: qsTr("View Steam Profile"), icon: ic("it_person"), help: qsTr("Opens %1's profile in Steam").arg(f.name), action: function() { online.openSteamProfile(id) } }
+        if (!p.games)
+            return [{ title: qsTr("No USCL Profile Yet"), icon: f.avatar || ic("it_person"),
+                      help: qsTr("%1's profile shows here once they open USCL while Steam is running").arg(f.name) }, steam]
+        var head = { title: f.name, icon: f.avatar || ic("it_person"),
+                     value: p.playing ? qsTr("Playing") : p.live ? qsTr("Online") : qsTr("Seen %1").arg(dayText(p.seen)),
+                     help: p.playing ? p.playing : p.live ? qsTr("In USCL now") : qsTr("Their profile as of the last time USCL saw them") }
+        return [head].concat(profileRows(p, false)).concat([steam])
     }
 
     // ---------------------------------------------------------------- game updates (Sony's patches)
@@ -717,8 +807,9 @@ Window {
             { title: qsTr("Picture"), value: (avatars.find(function(a) { return a[0] === prefs.avatar }) || ["", "USCL"])[1], help: qsTr("Shown in the clock box and on your profile"),
               icon: avatarUrl(prefs.avatar), choices: true,
               action: function() { options.show(avatars.map(function(a) { return { title: a[1], checked: a[0] === prefs.avatar, action: function() { prefs.avatar = a[0] } } })) } },
-            { title: qsTr("Steam Account"), value: online.steamName || qsTr("Not found"), help: qsTr("Sessions and invites use the Steam account signed in on this PC"), disabled: true }
-        ]
+            { title: qsTr("Steam Account"), value: online.steamName || qsTr("Not found"), help: qsTr("Sessions and invites use this Steam account: ✕ opens your Steam profile"),
+              icon: ic("it_person"), action: function() { online.openSteamProfile("") } }
+        ].concat(profileRows(profile.summary, true))
     }
 
     // Add Games: an inner page listing folders; ○ goes up one folder
@@ -876,6 +967,7 @@ Window {
                                   else needsName(function() { online.host(g.serial, g.title, g.path, g.console) })
                               } },
                             g.console === "PS3" ? { title: qsTr("Downloadable Content"), action: function() { openDlc(g) } } : null,
+                            { title: qsTr("Trophies"), action: function() { openTrophies(g) } },
                             { title: pinnedIds.indexOf(g.serial) >= 0 ? qsTr("Unpin from Home") : qsTr("Pin to Home"), action: function() { togglePin(g.serial) } },
                             { title: qsTr("Information"), action: function() { dialog.show(qsTr("Information"), gameInfo(g)) } },
                             { title: qsTr("Remove from List"), action: function() {
@@ -932,6 +1024,8 @@ Window {
               desc: gameUpdates.busy ? gameUpdates.status
                   : pending ? qsTr("%n game(s) have updates: choose which to install", "", pending)
                   : gameUpdates.checking ? qsTr("Checking for updates...") : qsTr("All your games are up to date") },
+            { id: "trophies", title: qsTr("Trophy Collection"), icon: cupIcon("gold"), action: function() { openPage(trophyGamesPage, cupIcon("gold"), gamesCat, null, qsTr("Trophies")) },
+              desc: qsTr("%1 trophies  ·  %2").arg(profile.summary.earned || 0).arg(trophyCounts(profile.summary)) },
             { id: "help", title: qsTr("How to Play"), icon: ic("it_help"), action: guide, desc: qsTr("Controls, quitting a game, and playing online") }
         ]
 
@@ -974,16 +1068,20 @@ Window {
             friends.push({ title: qsTr("No Friends Online"), icon: ic("cat_friends"), desc: qsTr("✕ to check again"), action: online.refreshFriends })
         online.friends.forEach(function(f) {
             var away = ["Away", "Snooze", "Busy"].indexOf(f.state) >= 0
+            var playing = f.profile && f.profile.playing
+            var status = f.session ? qsTr("In a USCL session")
+                       : !f.online ? qsTr("Offline")
+                       : playing ? qsTr("Playing %1").arg(playing)
+                       : f.playing ? qsTr("Playing a game")
+                       : f.state === "Busy" ? qsTr("Busy") : away ? qsTr("Away") : qsTr("Online")
             friends.push({
                 title: f.name, icon: f.avatar || ic("it_person"), friend: true,
                 status: !f.online ? "offline" : away ? "away" : "online",
                 cardColor: f.color || "", level: f.level || 0,
-                desc: f.session ? qsTr("In a USCL session: ✕ to join")
-                    : !f.online ? qsTr("Offline")
-                    : f.playing ? qsTr("Playing a game")
-                    : f.state === "Busy" ? qsTr("Busy") : away ? qsTr("Away") : qsTr("Online"),
-                action: f.session ? function() { needsName(function() { online.join(f.session) }) }
-                                  : function() { notice.show(f.online ? qsTr("%1 isn't in a USCL session").arg(f.name) : qsTr("%1 is offline").arg(f.name), ic("it_person")) }
+                desc: status, value: f.session ? qsTr("Session") : !f.online ? qsTr("Offline") : playing || f.playing ? qsTr("Playing") : away ? qsTr("Away") : qsTr("Online"),
+                help: status + "  ·  " + (f.session ? qsTr("✕ to join or view their profile") : qsTr("✕ for their USCL or Steam profile")),
+                action: function() { options.show(friendOptions(f), 0) },
+                options: function() { return friendOptions(f) }
             })
         })
 
@@ -1062,6 +1160,7 @@ Window {
         function onFinished(crashed, details) {
             var wasSwitch = !!runningGame && runningGame.console === "Switch"
             runningGame = null
+            profile.gameStopped()
             if (ownSession) { ownSession = false; online.stop() } // the game's own session ends with it
             // the window manager may have taken us out of full screen when the game's window appeared
             if (!windowed) { root.showFullScreen(); root.requestActivate() }
@@ -1158,10 +1257,30 @@ Window {
                 }
                 launchGame(g)
             }
+            if ((online.state === "hosting" || online.state === "joined") && launcher.running) profile.sessionOnline()
             if (online.state === "hosting" || online.state === "joined") { sound("notify"); notice.show(sessionText(), ic("it_stream")) }
             else if (online.state === "off" && online.message) { sound("error"); notice.show(online.message, ic("it_nettest")) }
         }
         function onNotice(text) { sound("error"); notice.show(text, ic("it_person")) }
+    }
+    Connections {
+        target: profile
+        // over the game while it's on screen (a window of its own), else on the home screen
+        function onUnlocked(trophy) { (launcher.gameShown ? overlayToast : stageToast).show(trophy) }
+    }
+    Window {
+        id: trophyOverlay
+        objectName: "trophyOverlay"
+        flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
+        color: "transparent"
+        screen: root.screen
+        // the toast's own spot on a 1920x1080 stage fitted to the screen, like the home screen's
+        readonly property real s: Math.min(Screen.width / 1920, Screen.height / 1080)
+        x: Screen.virtualX + (Screen.width - 1920 * s) / 2 + overlayToast.stageX * s
+        y: Screen.virtualY + (Screen.height - 1080 * s) / 2 + overlayToast.stageY * s
+        width: Math.ceil(overlayToast.width * s); height: Math.ceil(overlayToast.height * s)
+        visible: overlayToast.active
+        TrophyToast { id: overlayToast; theme: root.activeTheme; scale: trophyOverlay.s; transformOrigin: Item.TopLeft; onShown: root.sound("notify") }
     }
     Connections {
         target: system
@@ -1303,6 +1422,7 @@ Window {
             }
 
             Notice { id: notice; theme: root.activeTheme; x: stage.width - 40 - width; y: 124 }
+            TrophyToast { id: stageToast; objectName: "trophyToast"; theme: root.activeTheme; x: stageX; y: stageY; onShown: root.sound("notify") }
 
             OptionsPanel {
                 id: options
@@ -1354,6 +1474,8 @@ Window {
     Component.onCompleted: {
         if (!smokeTest) {
             online.startSteam()
+            profile.publish()         // friends see your profile (Steam Rich Presence) while USCL is open
+            online.startPresence()
             checkGameUpdates()
             games.setupSwitchFiles()   // Switch keys / system software put on the PC since: installed in the background
         }

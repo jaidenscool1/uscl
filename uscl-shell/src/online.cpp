@@ -1,10 +1,13 @@
 #include "online.h"
 #include "games.h"
+#include "profile.h"
 #include "launcher.h"
 #include "switchcontent.h"
 #include "switchcore.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
+#include <QDesktopServices>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -17,6 +20,7 @@
 #include <QJsonObject>
 #include <QRandomGenerator>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QSettings>
 #include <QTcpServer>
 #include <QUdpSocket>
@@ -120,11 +124,13 @@ Online::Online(QObject* parent)
 		{
 			// friends in a USCL session first, then online, then offline; by name within each
 			QVariantList in_session, online, offline;
+			const QString profiles = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/friend-profiles";
 			for (const QJsonValue& v : doc.array())
 			{
 				QVariantMap f = v.toObject().toVariantMap();
 				if (v["avatar"].isString())
 					f["avatar"] = QUrl::fromLocalFile(v["avatar"].toString()).toString();
+				f["profile"] = friendProfile(v["id"].toString(), f.take("uscl").toMap(), profiles);
 				(v["session"].isString() ? in_session : v["online"].toBool(true) ? online : offline).push_back(f);
 			}
 			const auto by_name = [](const QVariant& a, const QVariant& b) {
@@ -136,10 +142,68 @@ Online::Online(QObject* parent)
 		}
 		emit friendsChanged();
 	});
+	// Steam closed or wasn't up yet: try again every half minute (startPresence checks Steam first)
+	m_presence_retry.setInterval(30 * 1000);
+	connect(&m_presence_retry, &QTimer::timeout, this, &Online::startPresence);
+	connect(&m_presence, &QProcess::finished, this, [this] { m_presence_retry.start(); });
+}
+
+void Online::startPresence()
+{
+	if (m_presence.state() != QProcess::NotRunning)
+		return;
+	m_presence_retry.start();
+	if (!steamRunning())
+		return;
+#ifdef __linux__
+	m_presence.setChildProcessModifier([] { prctl(PR_SET_PDEATHSIG, SIGKILL); });
+#endif
+	// it quits when its stdin closes: when USCL quits or crashes (Windows too)
+	m_presence.start(toolPath("uscl-bridge"), {"presence", Profile::presenceFile()});
+	if (m_presence.waitForStarted(3000))
+		m_presence_retry.stop();
+}
+
+void Online::openSteamProfile(const QString& id)
+{
+	// the Steam client's own page; the web profile when the client doesn't take steam:// links
+	if (!QDesktopServices::openUrl(QUrl(id.isEmpty() ? "steam://url/SteamIDMyProfile" : "steam://url/SteamIDPage/" + id)) && !id.isEmpty())
+		QDesktopServices::openUrl(QUrl("https://steamcommunity.com/profiles/" + id));
+}
+
+QVariantMap Online::friendProfile(const QString& id, const QVariantMap& keys, const QString& cacheDir)
+{
+	static const QRegularExpression steam_id("^[0-9]{1,20}$");
+	if (!steam_id.match(id).hasMatch())
+		return {};
+	const QString file = cacheDir + '/' + id + ".json";
+	QVariantMap live = Profile::readPresence(keys);
+	if (!live.isEmpty())
+	{
+		live["seen"] = QDateTime::currentSecsSinceEpoch();
+		QDir().mkpath(cacheDir);
+		QSaveFile f(file);
+		if (f.open(QIODevice::WriteOnly))
+		{
+			f.write(QJsonDocument(QJsonObject::fromVariantMap(live)).toJson(QJsonDocument::Compact));
+			f.commit();
+		}
+		live["live"] = true;
+		return live;
+	}
+	QFile f(file);
+	if (!f.open(QIODevice::ReadOnly))
+		return {};
+	QVariantMap cached = QJsonDocument::fromJson(f.readAll()).object().toVariantMap();
+	cached["playing"] = QString(); // only true while they're on
+	cached["live"] = false;
+	return cached;
 }
 
 Online::~Online()
 {
+	m_presence.closeWriteChannel();
+	m_presence.waitForFinished(2000);
 	stop();
 	for (QProcess* p : m_services)
 	{
@@ -204,6 +268,20 @@ QString Online::preparePs4()
 	QDir().mkpath(user);
 	if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
 		f.write(QJsonDocument(root).toJson());
+	// USCL shows trophies in the theme's own style (Profile + TrophyToast.qml): shadPS4's popup would be a second one
+	QFile config(user + "/config.json");
+	if (config.open(QIODevice::ReadOnly))
+	{
+		QJsonObject c = QJsonDocument::fromJson(config.readAll()).object();
+		config.close();
+		QJsonObject general = c["General"].toObject();
+		if (!c.isEmpty() && !general["trophy_popup_disabled"].toBool() && config.open(QIODevice::WriteOnly | QIODevice::Truncate))
+		{
+			general["trophy_popup_disabled"] = true;
+			c["General"] = general;
+			config.write(QJsonDocument(c).toJson());
+		}
+	}
 	return dir;
 }
 

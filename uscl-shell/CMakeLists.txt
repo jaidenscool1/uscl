@@ -26,6 +26,7 @@ qt_add_executable(uscl
     src/gameart.cpp src/gameart.h
     src/system.cpp src/system.h
     src/online.cpp src/online.h
+    src/profile.cpp src/profile.h
     src/updater.cpp src/updater.h
     third_party/tweetnacl/tweetnacl.c
 )
@@ -55,6 +56,7 @@ qt_add_qml_module(uscl
         qml/Dialog.qml
         qml/Hints.qml
         qml/Notice.qml
+        qml/TrophyToast.qml
         qml/ClockBox.qml
         qml/Boot.qml
         qml/GameLaunch.qml

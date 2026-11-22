@@ -28,7 +28,8 @@ Nintendo tool glyphs are original vector drawings, with colors
 that remain visible on the light toolbar. The status clock is separate from profile actions.
 
 USCL actions replace console-only services in the corresponding regions. There are no pretend storefronts,
-achievements, media apps or platform subscriptions. For example, the Xbox spotlight opens USCL's offline
+media apps or platform subscriptions. Trophies are real: PS3/PS4 games' own trophies from RPCS3 and shadPS4,
+and USCL's six play-time trophies for consoles without any (see Trophies and profiles below). For example, the Xbox spotlight opens USCL's offline
 changelog, Nintendo's import shortcut opens Add Games, and chat opens USCL's existing Party integration.
 The original four-blade Media position becomes Library. These substitutions, original fonts/artwork and
 remaining visual differences mean this is not a certified pixel-identical recreation.
@@ -203,3 +204,26 @@ QSG_RENDER_LOOP=basic EGL_PLATFORM=surfaceless QSG_INFO=1 \
 The QRhi pipeline log verifies that this exercises OpenGL rather than silently repeating the software
 renderer. No window, focus or injected input reaches the active desktop. These commands depend on
 headless EGL support and are verified on this host, not claimed portable to every graphics driver.
+
+## Trophies and profiles
+
+`uscl-shell/src/profile.cpp` records play time per game and collects trophies:
+
+| Console | Trophies | Read from |
+|---|---|---|
+| PS3 | the game's own | RPCS3 `dev_hdd0/home/00000001/trophy/<NPWR…>/` (`TROPCONF.SFM`, `TROPUSR.DAT`) |
+| PS4 | the game's own | our shadPS4 `uscl/shadps4/user/trophy/<NPWR…>/Xml`, unlocks in `user/home/<id>/trophy/<NPWR…>.xml` |
+| Every other console | USCL's six play-time trophies | `uscl/profile.json`: First Steps (start, bronze), Settling In (1 h, bronze), Better Together (a USCL session, silver), Regular (5 h, silver), Dedicated (20 h, gold), USCL Master (all of them, platinum) |
+
+While a game runs USCL checks the emulator's trophy files every 2 seconds and shows a new one in the theme's
+style (`qml/TrophyToast.qml`): PS3 card top right, PS4 bar top left, PS5 card top right, Xbox 360 "Achievement
+unlocked" pill and Xbox One bar at the bottom (grades shown as 15/30/90/180G), Switch / Switch 2 card top right.
+Over a game it's a small always-on-top, click-through window; RPCS3's and shadPS4's own popups are switched off.
+
+Friends: ✕ (or △) on a friend offers Join Session (when they're in one), View USCL Profile and View Steam
+Profile. The USCL profile (trophies by grade, total play time, the 6 latest games) reaches friends through
+Steam Rich Presence: `uscl-bridge presence <uscl/presence.json>` runs while USCL is open. The last profile seen
+is cached, so offline friends still show it. My Profile, the game options (Trophies) and Trophy Collection
+(Game column / library sidebar) list trophies per game.
+
+`python3 -I uscl-shell/tools/trophy_icons.py` renders the four grade cups (original art) into `xmb/trophies/`.
