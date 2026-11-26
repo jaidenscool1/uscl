@@ -12,6 +12,7 @@
 #include <QMap>
 #include <QTimer>
 
+#include <filesystem>
 #include <utility>
 #include <QSettings>
 #include <QUrl>
@@ -216,6 +217,40 @@ QString Launcher::azaharConfigFile()
 
 // Every Dolphin start: fullscreen like the other consoles; pads count even when the home screen kept the focus (Dolphin
 // drops all input otherwise); the Wii Remote's speaker plays through the PC (Wii Sports' racket and pins; off by default)
+// Some PS5 dumps reach the PC through a copy that appends an extension it guessed from the content: the game then
+// finds no d/0/userinterface (its UI, now userinterface.txt; the screen stays black after the logos), no wem_* audio
+// streams (now .wav) and no pkg_settings.set (a crash at boot). Each such file gets its own name back as a hard link
+// (a symlink where that fails); nothing is renamed or removed.
+static void repairPs5Dump(const QString& dir)
+{
+	namespace fs = std::filesystem;
+	const auto link = [](const fs::path& from, const fs::path& to) {
+		std::error_code ec;
+		if (fs::exists(to, ec))
+			return;
+		fs::create_hard_link(from, to, ec);
+		if (ec)
+			fs::create_symlink(from.filename(), to, ec);
+	};
+	const fs::path root(dir.toStdU16String());
+	link(root / "pkg_settings.set.txt", root / "pkg_settings.set");
+	std::error_code ec;
+	for (const auto& folder : fs::directory_iterator(root / "d", ec))
+	{
+		std::error_code inner;
+		for (const auto& file : fs::directory_iterator(folder.path(), inner))
+			if (const auto ext = file.path().extension(); file.is_regular_file(inner) && (ext == ".wav" || ext == ".txt"))
+				link(file.path(), file.path().parent_path() / file.path().stem());
+	}
+	// sce_sys: icon0.dds.dds, snd0.at9.wav: a second extension after the real one.
+	for (const auto& file : fs::directory_iterator(root / "sce_sys", ec))
+	{
+		const auto stem = file.path().stem();
+		if (file.is_regular_file(ec) && stem.has_extension() && (file.path().extension() == ".dds" || file.path().extension() == ".wav" || file.path().extension() == ".txt"))
+			link(file.path(), file.path().parent_path() / stem);
+	}
+}
+
 static QStringList dolphinOptions()
 {
 	return {"-C", "Dolphin.Display.Fullscreen=True", "-C", "Dolphin.Input.BackgroundInput=True",
@@ -316,7 +351,14 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 			emit finished(true, tr("The PS5 emulator (KytyPS5) is missing. Put its release folder next to USCL as KytyPS5, or set USCL_KYTYPS5."));
 			return false;
 		}
-		args = {"--game", path, "--fullscreen", "--shader-cache", "--hide-cursor"};
+		repairPs5Dump(path);
+		// As the Wolverine fork's launcher runs it: --amd-cpu emulates the PS5's AMD-only instructions on any host
+		// and gives the game hooks their code area (--redzone does that on Windows too).
+		// Base PS5 mode: the fork's default Pro mode (FSR 3.1, ray tracing) runs out of an 8 GB card (2 fps vs 15).
+		args = {"--game", path, "--fullscreen", "--shader-cache", "--hide-cursor", "--amd-cpu", "--readback-linear-images", "--tessellation", "--trinity", "false"};
+#ifdef _WIN32
+		args << "--redzone";
+#endif
 	}
 	else
 		return false;

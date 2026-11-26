@@ -1,0 +1,39 @@
+From e0d26351bb6029b06c9036761ec364c3c69e351e Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 09:54:37 -0700
+Subject: [PATCH] shader: CompileProgram clears the SRT reads' values with the
+ storage they lived in
+
+CompileProgram frees value_storage, which holds the instructions the SRT
+reads' values point to, then MarkTrackedWrites' runtime validator follows a
+ReadConst into srt_reads[slot].value: a use-after-free. In Marvel's
+Wolverine (title scene, Linux) the freed node read as an argument-less
+Identity and the precompile or compute-ahead worker stopped with
+"index >= self.NumArgs()" (Value.h). The values are cleared with their
+storage; the validator then treats those reads as not host-evaluable, the
+conservative answer. Nothing after the clear reads them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/graphics/shader/recompiler/ShaderRecompiler.cpp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/src/graphics/shader/recompiler/ShaderRecompiler.cpp b/src/graphics/shader/recompiler/ShaderRecompiler.cpp
+index dc858729..096c3e27 100644
+--- a/src/graphics/shader/recompiler/ShaderRecompiler.cpp
++++ b/src/graphics/shader/recompiler/ShaderRecompiler.cpp
+@@ -779,6 +779,11 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
+ 	}
+ 	IR::DropBoundDescriptorWords(ir);
+ 	ir.value_storage.clear();
++	// The SRT reads' values lived in value_storage: emptied, MarkTrackedWrites' validator would follow freed
++	// instructions (a fatal "index >= NumArgs" in the precompile, Marvel's Wolverine's title on Linux).
++	for (auto& read: ir.srt_reads) {
++		read.value = {};
++	}
+ 	IR::RemoveIdentities(ir);
+ 	IR::EliminateDeadCode(ir.blocks);
+ 	IR::BranchResult branches;
+-- 
+2.56.0
+

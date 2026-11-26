@@ -1,0 +1,45 @@
+From 979dc0f64c0545b55b55d6b637370ba866008847 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 05:40:13 -0700
+Subject: [PATCH] ffx_vk: align the effect-context array to its alignas(32)
+
+The scratch arrays before it are only 4-byte padded, and the compiler emits aligned
+vector stores into EffectContext. On Linux (glibc/clang, different struct sizes) the
+array lands 8-byte aligned and CreateBackendContextVK faults with a GP fault
+(vmovdqa) as soon as PS5 Pro mode creates the FSR 3.1 context. Align the pointer at
+map time and reserve the slack in ffxGetScratchMemorySizeVK.
+
+Tested: Marvel's Wolverine (PPSA03671 1.05) on Linux/RTX 4060 now runs in Pro mode
+instead of crashing at startup.
+---
+ 3rdparty/FidelityFX-SDK/sdk/src/backends/vk/ffx_vk.cpp | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/3rdparty/FidelityFX-SDK/sdk/src/backends/vk/ffx_vk.cpp b/3rdparty/FidelityFX-SDK/sdk/src/backends/vk/ffx_vk.cpp
+index 74c59e27..06337bbb 100644
+--- a/3rdparty/FidelityFX-SDK/sdk/src/backends/vk/ffx_vk.cpp
++++ b/3rdparty/FidelityFX-SDK/sdk/src/backends/vk/ffx_vk.cpp
+@@ -288,7 +288,8 @@ FFX_API size_t ffxGetScratchMemorySizeVK(VkPhysicalDevice physicalDevice, size_t
+     uint32_t contextArraySize = FFX_ALIGN_UP(maxContexts * sizeof(BackendContext_VK::EffectContext), sizeof(uint32_t));
+     
+     return FFX_ALIGN_UP(sizeof(BackendContext_VK) + extensionPropArraySize + gpuJobDescArraySize + resourceViewArraySize + stagingRingBufferArraySize +
+-                            pipelineArraySize + resourceArraySize + contextArraySize,
++                            pipelineArraySize + resourceArraySize + contextArraySize +
++                            alignof(BackendContext_VK::EffectContext),  // slack: the context array is aligned at map time
+                         sizeof(uint64_t));
+ }
+ 
+@@ -1443,7 +1444,9 @@ FfxErrorCode CreateBackendContextVK(FfxInterface* backendInterface, FfxEffect ef
+             backendContext->pResources[i].uavViewIndex = backendContext->pResources[i].srvViewIndex = -1;
+         }
+ 
+-        // Map context array
++        // Map context array. EffectContext is alignas(32) but the arrays before it are only 4-byte padded, and the
++        // compiler emits aligned vector stores into it: align the pointer (slack reserved in ffxGetScratchMemorySizeVK).
++        pMem = (uint8_t*)FFX_ALIGN_UP((uintptr_t)pMem, alignof(BackendContext_VK::EffectContext));
+         backendContext->pEffectContexts = (BackendContext_VK::EffectContext*)pMem;
+         memset(backendContext->pEffectContexts, 0, contextArraySize);
+         pMem += contextArraySize;
+-- 
+2.56.0
+

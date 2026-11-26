@@ -1,0 +1,61 @@
+From 2c25fd532eff4dbac264ed3f2490f8dbc977d693 Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 09:54:37 -0700
+Subject: [PATCH] vma: only the main video memory heap decides that a card is
+ near full
+
+RoomTypes tested every device-local heap against RoomBytes (512 MiB). A card
+without Resizable BAR also has a 256 MiB device-local, host-visible heap
+(budget ~165 MiB on an RTX 4060, Linux 615.78), which is always below that:
+every image went to system memory from the first allocation. Marvel's
+Wolverine's logos ran at 7 fps with the GPU at 99% SM and 0% memory
+bandwidth (PCIe stalls); with only the largest device-local heap tested they
+run at 60 fps, and the title screen went from 1.7 to 14 fps.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/graphics/host_gpu/vma.cpp | 24 +++++++++++++++---------
+ 1 file changed, 15 insertions(+), 9 deletions(-)
+
+diff --git a/src/graphics/host_gpu/vma.cpp b/src/graphics/host_gpu/vma.cpp
+index 830ca949..82254f74 100644
+--- a/src/graphics/host_gpu/vma.cpp
++++ b/src/graphics/host_gpu/vma.cpp
+@@ -220,19 +220,25 @@ uint32_t GraphicContext::RoomTypes(uint32_t types, uint64_t size) const {
+ 	if ((types & ~local) == 0 || !CanReportMemoryUsage()) return types; // nowhere else to go (or a unified memory GPU)
+ 	VmaBudget budgets[VK_MAX_MEMORY_HEAPS] {};
+ 	vmaGetHeapBudgets(allocator, budgets);
++	// Only the main video memory heap decides. Without Resizable BAR the card also has a 256 MiB device-local,
++	// host-visible heap whose budget is below RoomBytes: counted, it sent every image to system memory.
++	uint32_t main_heap = UINT32_MAX;
+ 	for (uint32_t heap = 0; heap < memory.memoryHeapCount; heap++) {
+ 		if ((memory.memoryHeaps[heap].flags & vk::MemoryHeapFlagBits::eDeviceLocal) &&
+-		    budgets[heap].usage + size + RoomBytes > budgets[heap].budget) {
+-			static std::atomic_bool logged = false;
+-			if (!logged.exchange(true)) {
+-				LOGF("Video memory near full: images go to system memory, the last %" PRIu64
+-				     " MiB stay for sparse buffer pages (logged for the first one only)\n",
+-				     RoomBytes >> 20u);
+-				LogMemoryBudget();
+-			}
+-			return types & ~local;
++		    (main_heap == UINT32_MAX || memory.memoryHeaps[heap].size > memory.memoryHeaps[main_heap].size)) {
++			main_heap = heap;
+ 		}
+ 	}
++	if (main_heap != UINT32_MAX && budgets[main_heap].usage + size + RoomBytes > budgets[main_heap].budget) {
++		static std::atomic_bool logged = false;
++		if (!logged.exchange(true)) {
++			LOGF("Video memory near full: images go to system memory, the last %" PRIu64
++			     " MiB stay for sparse buffer pages (logged for the first one only)\n",
++			     RoomBytes >> 20u);
++			LogMemoryBudget();
++		}
++		return types & ~local;
++	}
+ 	return types;
+ }
+ 
+-- 
+2.56.0
+
