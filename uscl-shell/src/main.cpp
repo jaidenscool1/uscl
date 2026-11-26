@@ -371,6 +371,13 @@ namespace
 				check(disc.value("console") == "Wii" && disc.value("serial") == "Wii-RSPE01" && disc.value("title") == "Wii Sports", "Wii disc from its header");
 				check(cart.value("console") == "DS" && cart.value("serial") == "DS-AMCE" && cart.value("title") == "Mario Kart DS", "DS cartridge from its header");
 				check(GameModel::emuGame(kart).isEmpty() && GameModel::isEmuSerial("3DS-CTRPAMKE") && !GameModel::isEmuSerial("BLUS31011"), "emulator game ids");
+				// a PS5 game folder: eboot.bin + sce_sys/param.json (title from the default language)
+				write("emu/PPSA03671-app0/eboot.bin", "SELF");
+				write("emu/PPSA03671-app0/sce_sys/param.json", R"({"titleId":"PPSA03671","localizedParameters":)"
+				                                                 R"({"defaultLanguage":"en-US","en-US":{"titleName":"Marvel's Wolverine"}}})");
+				const QVariantMap ps5 = GameModel::emuGame(root.filePath("games/emu/PPSA03671-app0"));
+				check(ps5.value("console") == "PS5" && ps5.value("serial") == "PS5-PPSA03671" && ps5.value("title") == "Marvel's Wolverine"
+				      && GameModel::isEmuSerial("PS5-PPSA03671") && GameModel::emuGame(root.filePath("games/emu")).isEmpty(), "PS5 game folder");
 				QDir(root.filePath("games/emu")).removeRecursively();
 			}
 			check(SwitchCore::isSerial("0100152000022000") && !SwitchCore::isSerial("BLUS31426"), "console ID separation");
@@ -1028,7 +1035,7 @@ int main(int argc, char* argv[])
 			const QVariantMap g = games.get(i);
 			byConsole[g.value("console").toString()] << g.value("title").toString();
 		}
-		for (const QString& c : {QStringLiteral("PS3"), QStringLiteral("PS4"), QStringLiteral("Wii"),
+		for (const QString& c : {QStringLiteral("PS3"), QStringLiteral("PS4"), QStringLiteral("PS5"), QStringLiteral("Wii"),
 		                         QStringLiteral("WiiU"), QStringLiteral("3DS"), QStringLiteral("Switch"), QStringLiteral("Xbox360")})
 			if (byConsole.contains(c))
 			{

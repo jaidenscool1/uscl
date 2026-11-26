@@ -228,6 +228,7 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 	if (running())
 		return false;
 	QString program = "flatpak";
+	QString workdir;
 	QStringList args;
 	QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
 	if ((console == "Wii" || console == "GameCube") && !ownDolphin().isEmpty())
@@ -297,11 +298,31 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 		program = "wine";
 		args = {xenia, "--fullscreen", path};
 	}
+	else if (console == "PS5")
+	{
+		// KytyPS5 (github.com/KytyPS5/KytyPS5, GPL-2.0), its release folder as-is: own folder, it ships its own Qt.
+		// It keeps shader caches and temp data in the working directory, so it gets a USCL profile folder.
+#ifdef _WIN32
+		const QString kyty_file = "/KytyPS5/kyty_emulator.exe";
+#else
+		const QString kyty_file = "/KytyPS5/kyty_emulator";
+#endif
+		program = qEnvironmentVariableIsSet("USCL_KYTYPS5") ? qEnvironmentVariable("USCL_KYTYPS5")
+		        : QFileInfo(QCoreApplication::applicationDirPath() + kyty_file).isExecutable() ? QCoreApplication::applicationDirPath() + kyty_file
+		                                                                                      : QDir::homePath() + "/.local/share/uscl" + kyty_file;
+		workdir = GameModel::rpcs3ConfigDir() + "uscl/kytyps5";
+		if (!QFileInfo(program).isExecutable() || !QDir().mkpath(workdir))
+		{
+			emit finished(true, tr("The PS5 emulator (KytyPS5) is missing. Put its release folder next to USCL as KytyPS5, or set USCL_KYTYPS5."));
+			return false;
+		}
+		args = {"--game", path, "--fullscreen", "--shader-cache", "--hide-cursor"};
+	}
 	else
 		return false;
 	env.remove("USCL_ONLINE");
 	env.insert("USCL_SHELL", "1");
-	m_process.setWorkingDirectory({});
+	m_process.setWorkingDirectory(workdir);
 	applyLoadingEnvironment(env, true);
 	m_process.setProcessEnvironment(env);
 	m_tail.clear();

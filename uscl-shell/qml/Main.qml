@@ -894,17 +894,17 @@ Window {
 
     // column order: Users, Settings, Online, Games, Party, Friends. Games has one entry per console you have games
     // for; ✕ on one opens its games, like the PS3's Game column entries open their lists
-    // games that run in Dolphin, Azahar, melonDS, Cemu, Xenia: no PS3 system software or RPCN
-    readonly property var emuConsoles: ["Wii", "GameCube", "WiiU", "3DS", "DS", "Xbox360"]
+    // games that run in Dolphin, Azahar, melonDS, Cemu, Xenia, KytyPS5: no PS3 system software or RPCN
+    readonly property var emuConsoles: ["Wii", "GameCube", "WiiU", "3DS", "DS", "Xbox360", "PS5"]
     // the Games entry a game is listed under: Switch 2 games (program ids starting 04) get their own
     function menuConsole(g) { var c = g.console || "PS3"; return c === "Switch" && /^04/.test(g.serial) ? "Switch2" : c }
     readonly property var presentConsoles: {
         games.count
-        var order = ["PS3", "PS4", "Switch", "Switch2", "Wii", "GameCube", "WiiU", "3DS", "DS", "Xbox360"], set = ({})
+        var order = ["PS3", "PS4", "PS5", "Switch", "Switch2", "Wii", "GameCube", "WiiU", "3DS", "DS", "Xbox360"], set = ({})
         for (var i = 0; i < games.count; i++) set[menuConsole(games.get(i))] = true
         return order.filter(function(c) { return set[c] }).concat(Object.keys(set).filter(function(c) { return order.indexOf(c) < 0 }))
     }
-    readonly property var consoleMeta: ({ "PS3": [qsTr("PlayStation 3"), "cat_ps3"], "PS4": [qsTr("PlayStation 4"), "cat_ps4"],
+    readonly property var consoleMeta: ({ "PS3": [qsTr("PlayStation 3"), "cat_ps3"], "PS4": [qsTr("PlayStation 4"), "cat_ps4"], "PS5": [qsTr("PlayStation 5"), "cat_ps5"],
                                           "Switch": [qsTr("Nintendo Switch"), "cat_switch"], "Switch2": [qsTr("Nintendo Switch 2"), "cat_switch2"],
                                           "Wii": [qsTr("Wii"), "cat_wii"], "GameCube": [qsTr("GameCube"), "cat_gamecube"], "WiiU": [qsTr("Wii U"), "cat_wiiu"],
                                           "3DS": [qsTr("Nintendo 3DS"), "cat_3ds"], "DS": [qsTr("Nintendo DS"), "cat_ds"],

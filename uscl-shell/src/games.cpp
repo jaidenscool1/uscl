@@ -51,6 +51,12 @@ namespace
 		return QFileInfo(dir + "/sce_sys/param.sfo").isFile() && QFileInfo(dir + "/eboot.bin").isFile()
 			&& !dir.endsWith("-UPDATE", Qt::CaseInsensitive);
 	}
+
+	// A PS5 game folder (run by KytyPS5): sce_sys/param.json next to eboot.bin
+	bool isPs5Dir(const QString& dir)
+	{
+		return QFileInfo(dir + "/sce_sys/param.json").isFile() && QFileInfo(dir + "/eboot.bin").isFile();
+	}
 }
 
 bool GameModel::isPs4Serial(const QString& serial)
@@ -398,9 +404,18 @@ void GameModel::loadEmuGames()
 		g.version = o.value("version").toString();
 		if (!g.title.isEmpty() && !g.path.isEmpty()
 		    && (g.console == "Wii" || g.console == "GameCube" || g.console == "WiiU" || g.console == "3DS" || g.console == "DS"
-		        || g.console == "Xbox360")
+		        || g.console == "Xbox360" || g.console == "PS5")
 		    && QFileInfo::exists(g.path))
+		{
+			if (g.console == "PS5")   // the game's own art, as the PS5 home screen shows it
+			{
+				if (g.icon.isEmpty() && QFileInfo::exists(g.path + "/sce_sys/icon0.png"))
+					g.icon = g.path + "/sce_sys/icon0.png";
+				if (QFileInfo::exists(g.path + "/sce_sys/pic0.png"))
+					g.pic = g.path + "/sce_sys/pic0.png";
+			}
 			m_games.push_back(g);
+		}
 	}
 }
 
@@ -455,6 +470,12 @@ namespace
 			return f.open(QIODevice::ReadOnly) ? GameModel::readSfo(f.readAll()).value("TITLE_ID") : QString();
 		};
 		// a disc folder, or an installed game: this folder is the game, don't look inside it
+		if (isPs5Dir(dir))
+		{
+			if (const QVariantMap emu = GameModel::emuGame(dir); !emu.isEmpty() && !out.contains(emu["serial"].toString()))
+				out[emu["serial"].toString()] = dir;
+			return;
+		}
 		if (isPs4Dir(dir))
 		{
 			if (const QString serial = serialOf(dir + "/sce_sys/param.sfo"); !serial.isEmpty() && !out.contains(serial))
@@ -553,7 +574,7 @@ namespace
 
 bool GameModel::isEmuSerial(const QString& serial)
 {
-	for (const char* c : {"Wii-", "GameCube-", "3DS-", "DS-", "WiiU-", "Xbox360-"})
+	for (const char* c : {"Wii-", "GameCube-", "3DS-", "DS-", "WiiU-", "Xbox360-", "PS5-"})
 		if (serial.startsWith(c))
 			return true;
 	return false;
@@ -562,6 +583,20 @@ bool GameModel::isEmuSerial(const QString& serial)
 QVariantMap GameModel::emuGame(const QString& path)
 {
 	const QFileInfo info(path);
+	if (info.isDir())
+	{
+		// PS5: title id + default-language name from sce_sys/param.json
+		QFile f(path + "/sce_sys/param.json");
+		if (!isPs5Dir(path) || f.size() > 4 * 1024 * 1024 || !f.open(QIODevice::ReadOnly))
+			return {};
+		const QJsonObject p = QJsonDocument::fromJson(f.readAll()).object();
+		const QJsonObject names = p["localizedParameters"].toObject();
+		const QString id = idPart(p["titleId"].toString());
+		QString title = names[names["defaultLanguage"].toString()].toObject()["titleName"].toString().simplified();
+		if (id.isEmpty())
+			return {};
+		return {{"title", title.isEmpty() ? id : title}, {"console", "PS5"}, {"serial", "PS5-" + id}, {"path", info.absoluteFilePath()}};
+	}
 	const QString ext = info.suffix().toLower();
 	static const QStringList known = {"iso", "gcm", "wbfs", "ciso", "rvz", "wia", "gcz", "3ds", "cci", "cxi", "3dsx", "nds",
 	                                  "wua", "wud", "wux", "rpx", "xex"};
@@ -757,7 +792,7 @@ void GameModel::scanFolder(const QString& path)
 				}
 				const QVariantMap g = emuGame(it.value());
 				static const QMap<QString, QString> emu = {{"Wii", "dolphin"}, {"GameCube", "dolphin"}, {"3DS", "azahar"},
-				                                           {"DS", "melonds"}, {"WiiU", "cemu"}, {"Xbox360", "xenia"}};
+				                                           {"DS", "melonds"}, {"WiiU", "cemu"}, {"Xbox360", "xenia"}, {"PS5", "kytyps5"}};
 				list.append(QJsonObject{{"title", g["title"].toString()}, {"console", g["console"].toString()}, {"path", g["path"].toString()},
 				                        {"serial", g["serial"].toString()}, {"emu", emu.value(g["console"].toString())}});
 				emu_added++;

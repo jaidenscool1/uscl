@@ -32,7 +32,7 @@ USCL (one install, one icon)
   crashes, you land back on the home screen with a message instead of losing the whole app. The shell watches
   the controller the whole time: holding the PS/Guide button brings up "Quit game / Back to home".
 - **Built for more consoles from day one** (see PLAN.md): a game entry says which core runs it. Later cores
-  would be Xenia (Xbox 360) and shadPS4 (PS4); no PS5 emulator is usable yet, so the slot stays empty. The
+  would be Xenia (Xbox 360) and shadPS4 (PS4); PS5 games start in KytyPS5 (experimental). The
   online layer (bridge, servers) doesn't care which core is running.
 - **Controller input:** SDL3, which our RPCS3 build already uses, so any pad works the same everywhere
   (DualSense, DualShock, Xbox, Switch, Steam Deck). Qt has no gamepad support of its own in Qt 6.

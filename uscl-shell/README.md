@@ -10,6 +10,7 @@ plus SDL3 for controllers. Each game runs in its emulator as a separate process,
 | Switch | our Eden core ([docs/SWITCH.md](../docs/SWITCH.md)) | `switchcore.cpp` |
 | Wii / GameCube, 3DS, Wii U | Dolphin, Azahar, Cemu (Flathub apps) | `launcher.cpp` `startEmu` |
 | Xbox 360 | Xenia under Wine (experimental) | `launcher.cpp` `startEmu` |
+| PS5 | KytyPS5 (experimental; a game folder with `eboot.bin` + `sce_sys/param.json`) | `launcher.cpp` `startEmu` |
 
 Settings → All Settings opens the classic RPCS3 window.
 

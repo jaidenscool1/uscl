@@ -153,9 +153,22 @@ def switch2(d, S):
     font.set_variation_by_axes([900])
     d.text((int(S*0.50), int(S*0.50)), "2", font=font, fill=255, anchor="mm")
 
+# --- PS5: standing upright, the dark core between two tall curved white side panels ---
+def ps5(d, S):
+    t = int(S * 0.05)
+    # core body
+    rrect(d, [int(S*0.42), int(S*0.12), int(S*0.58), int(S*0.88)], int(S*0.04), outline_w=t)
+    # side panels: wider at top and bottom, pinched toward the core at the waist
+    for side in (-1, 1):
+        cx = S * 0.5
+        inner, outer, waist = S * 0.10, S * 0.36, S * 0.22
+        pts = [(cx + side*inner, S*0.06), (cx + side*outer, S*0.10), (cx + side*waist, S*0.50),
+               (cx + side*outer, S*0.90), (cx + side*inner, S*0.94)]
+        d.line([(int(x), int(y)) for x, y in pts], fill=255, width=t, joint="curve")
+
 def main():
     os.makedirs(OUT, exist_ok=True)
-    for name, fn in [("cat_ps3", ps3), ("cat_ps4", ps4), ("cat_wii", wii), ("cat_wiiu", wiiu),
+    for name, fn in [("cat_ps3", ps3), ("cat_ps4", ps4), ("cat_ps5", ps5),("cat_wii", wii), ("cat_wiiu", wiiu),
                      ("cat_3ds", nds3), ("cat_x360", x360), ("cat_switch", switch),
                      ("cat_gamecube", gamecube), ("cat_ds", nds), ("cat_switch2", switch2)]:
         render(fn).save(os.path.join(OUT, name + ".png"))

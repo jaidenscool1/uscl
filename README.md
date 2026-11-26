@@ -35,6 +35,7 @@ PS3 came first. USCL now also runs PS4, Switch, Wii, GameCube, 3DS, Wii U, Switc
 | **Nintendo 3DS** | Azahar, our build ([`uscl-3ds`](uscl-3ds/) patches) | Azahar rooms over Steam | 🟡 Mario Kart 7 local race between two copies in one room; home screen hosts the room; two PCs next |
 | **Wii U** | Cemu (no fork yet) | later: a Pretendo / NEX stand-in | ⚪ starts Cemu from USCL (untested) |
 | **Xbox 360** | Xenia (Wine on Linux) | later | ⚪ experimental launch |
+| **PlayStation 5** | KytyPS5 (official release builds, no fork) | later | ⚪ experimental launch: Marvel's Wolverine boots to a black screen after the logo (upstream issue #2483) |
 | **Nintendo Switch 2** | Eglantine, our build ([`uscl-eglantine`](uscl-eglantine/)) | none yet | 🟠 Mario Kart World plays offline; online room integration pending |
 | **Nintendo DS** | melonDS, our build ([`uscl-melonds`](uscl-melonds/)) | per-game agent + LAN link over Steam | 🟠 HeartGold tested with two local copies; agent launch only, no home-screen launch yet |
 | **More** | | | planned: see [PLAN.md](PLAN.md) |
@@ -44,8 +45,9 @@ PS3 came first. USCL now also runs PS4, Switch, Wii, GameCube, 3DS, Wii U, Switc
 
 Where we change an emulator, we keep our changes as patch files against a pinned upstream commit (the `uscl-*`
 folders). The packaging recipes include those builds; actual contents depend on the release and, on Linux,
-which local builds were available when packaging. Cemu and Xenia have no maintained USCL patch set here; on
-Linux Cemu uses its Flathub app and Xenia uses Wine.
+which local builds were available when packaging. Cemu, Xenia and KytyPS5 have no maintained USCL patch set here; on
+Linux Cemu uses its Flathub app and Xenia uses Wine. KytyPS5's release folder goes next to USCL as `KytyPS5/`
+(or `~/.local/share/uscl/KytyPS5/`, or set `USCL_KYTYPS5`); fixes for it go upstream.
 
 ## Get it
 Download the newest version from **[Releases](https://github.com/jaidenscool1/uscl/releases)**.
@@ -218,7 +220,8 @@ signature before it installs an update. To report a security problem privately, 
 - Emulators: [RPCS3](https://github.com/RPCS3/rpcs3) (GPL-2.0), [shadPS4](https://github.com/shadps4-emu/shadPS4)
   (GPL-2.0), [Eden](https://git.eden-emu.dev/eden-emu/eden) (GPL-3.0), [Dolphin](https://github.com/dolphin-emu/dolphin)
   (GPL-2.0), [Azahar](https://github.com/azahar-emu/azahar) (GPL-2.0), [Cemu](https://github.com/cemu-project/Cemu)
-  (MPL-2.0), [Xenia](https://github.com/xenia-canary/xenia-canary) (BSD)
+  (MPL-2.0), [Xenia](https://github.com/xenia-canary/xenia-canary) (BSD), [KytyPS5](https://github.com/KytyPS5/KytyPS5)
+  (GPL-2.0)
 - Servers: [RPCN](https://github.com/RipleyTom/rpcn) (AGPL-3.0), [shadNet](https://github.com/shadps4-emu/shadNet)
   (GPL-2.0), [open-bitdemon-emulator](https://github.com/Laupetin/open-bitdemon-emulator) (AGPL-3.0),
   [Skate3BlazeServer](https://github.com/skate6743/Skate3BlazeServer)
