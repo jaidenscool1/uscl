@@ -5,9 +5,9 @@
 | **Console** | PlayStation 5 |
 | **Upstream** | [Senaxx/KytyPS5](https://github.com/Senaxx/KytyPS5) `main`, a Marvel's Wolverine 1.05 fork of [KytyPS5/KytyPS5](https://github.com/KytyPS5/KytyPS5) (GPL-2.0) |
 | **Pinned base** | `ec6c3f18` |
-| **Our changes** | `patches/0001…0004`, a `git am` series |
+| **Our changes** | `patches/0001…0005`, a `git am` series |
 | **Ships in** | not yet: built locally, the shell runs it from `~/.local/share/uscl/KytyPS5/` (or `USCL_KYTYPS5`) |
-| **Status** | Marvel's Wolverine (`PPSA03671` 1.05) boots, plays the logos, the initial setup, the title, saves and the opening fight on Linux (RTX 4060 8 GB, i5-10600K, no Resizable BAR). Slow on 8 GB: base PS5 mode at the lowest render step, title ~8 fps, first fight 5–6 fps; Pro mode 2–3 fps |
+| **Status** | Marvel's Wolverine (`PPSA03671` 1.05) boots, plays the logos, the initial setup, the title, saves and the opening fight on Linux (RTX 4060 8 GB, i5-10600K, no Resizable BAR). On 8 GB: base PS5 mode at the lowest render step, title 14–21 fps (depends on the title scene), first fight 15–16 fps (3–5 before 0005); Pro mode 2–3 fps (not re-measured) |
 
 ## Build (Linux)
 ```
@@ -33,6 +33,13 @@ each place compiles shaders while playing.
 - **0004** On an 8 GB card the sparse buffer pages (video memory only, never unmapped) outgrew the 512 MiB the fork
   keeps for them, and the next page stopped the emulator in the first fight. Device-local buffers now leave that room
   too, and on cards under 10 GiB it is a fifth of the budget. Debug: `KYTY_VMA_DUMP=<s>` writes every allocation.
+- **0005** That room sent 2.4 GB to system memory in the first fight, among it a 248 MiB buffer a compute pass reads
+  and writes every frame (3–5 fps, PCIe 1.8–2.8 GB/s out). On cards under 10 GiB now: `VK_EXT_pageable_device_local_memory`
+  with `VK_EXT_memory_priority` (a full card pages memory out instead of failing a sparse page; on for every card that
+  has them), buffers, render targets and sparse buffer pages in one VMA pool at the highest priority, and textures
+  giving way first (1 GiB room; the game samples them through its image heap, so the cache cannot free them). First
+  fight 15–16 fps over four runs of 3+ minutes, no sparse-page exits. Debug: `KYTY_NO_PAGEABLE=1`,
+  `KYTY_VRAM_ROOM_MB=1428` (the old room), `KYTY_TEXTURE_ROOM_MB`, `KYTY_VRAM_TRACE`.
 
 ## What the shell does for PS5 games
 - Arguments: `--game <dir> --fullscreen --shader-cache --hide-cursor --amd-cpu --readback-linear-images --tessellation
@@ -46,9 +53,11 @@ each place compiles shaders while playing.
   is renamed or removed.
 
 ## Known open issues
-- Video memory: at the title the game holds ~5.3 GB on the card (2 GB of it sparse buffer pages); near full, images
-  and buffers go to system memory and the GPU waits on PCIe. 60 fps needs a residency manager (unmap idle sparse
-  pages, spill least-used textures first) and less per-dispatch synchronisation; not started.
+- 60 fps is out of reach on an RTX 4060 with this emulator: the lowest render step costs 43 ms of GPU work per frame
+  (~20 ms fixed, ~15 ms per megapixel; 75 ms at 2560x1440, where a PS5 needs ~16 ms), so the translated GPU work is
+  ~3–4x native and the card would need ~2.6x less of it. Not the limit (measured): dispatch barriers, submit count,
+  the background precompile. The game's render thread spin-waits on GPU progress (31 % GPU idle). The fork's
+  USCL-FORK.md has the full table; its `KYTY_GPU_PROF=1` / `KYTY_WAIT_STATS=1` switches are not in these patches.
 - `--readback-linear-images` is required (without it the title runs at 1 fps).
 - Pro mode (the fork's default) needs more than 8 GB of video memory, so the shell plays base mode; a Pro setting for
   larger cards is still to do.
