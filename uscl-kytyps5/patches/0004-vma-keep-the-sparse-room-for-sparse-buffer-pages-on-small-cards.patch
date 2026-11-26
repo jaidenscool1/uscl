@@ -1,0 +1,109 @@
+From f6117511 Mon Sep 17 00:00:00 2001
+From: Claude Opus 5.5 <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 11:00:00 -0700
+Subject: [PATCH 4/4] vma: keep the sparse room for sparse buffer pages on small cards
+
+On an 8 GB card (RTX 4060) Marvel's Wolverine's first fight filled video memory: images
+left the last 512 MiB to sparse buffer pages, but device-local buffers did not, and the
+sparse pages (video memory only, never unmapped) outgrew it; the next one stopped the
+emulator (m_pages[page] == nullptr in streamBuffer.cpp). Device-local buffers now go to
+system memory near a full card like images, and on cards under 10 GiB the room is a fifth
+of the budget. A failed sparse page and the budget are printed to stderr.
+debug: KYTY_VMA_DUMP=<s> writes VMA's detailed statistics to vma_dump.json.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+diff --git a/src/graphics/host_gpu/renderer/cache/streamBuffer.cpp b/src/graphics/host_gpu/renderer/cache/streamBuffer.cpp
+index 0d07f105..99d5f77e 100644
+--- a/src/graphics/host_gpu/renderer/cache/streamBuffer.cpp
++++ b/src/graphics/host_gpu/renderer/cache/streamBuffer.cpp
+@@ -166,6 +166,12 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
+ 	allocation_info.preferredFlags = usage == MemoryUsage::DeviceLocal
+ 	                                     ? VkMemoryPropertyFlags {}
+ 	                                     : VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
++	// Near a full card a buffer goes to system memory like an image (RoomTypes): the last RoomBytes stay for sparse
++	// buffer pages, which may live in video memory only. Without it an 8 GB card filled up with buffers and the next
++	// sparse page stopped the emulator (Marvel's Wolverine's first fight, base mode).
++	if (usage == MemoryUsage::DeviceLocal) {
++		allocation_info.memoryTypeBits = graphics.RoomTypes(UINT32_MAX, size);
++	}
+ 
+ 	VmaAllocationInfo allocation_result {};
+ 	VkBuffer          native_buffer = VK_NULL_HANDLE;
+diff --git a/src/graphics/host_gpu/vma.cpp b/src/graphics/host_gpu/vma.cpp
+index 82254f74..4fc8f733 100644
+--- a/src/graphics/host_gpu/vma.cpp
++++ b/src/graphics/host_gpu/vma.cpp
+@@ -1,3 +1,7 @@
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <thread>
+ #include "graphics/host_gpu/vulkanCommon.h"
+ 
+ #if defined(__clang__)
+@@ -54,6 +58,20 @@ bool GraphicContext::CreateAllocator() {
+ 		LOGF("vmaCreateAllocator failed: %s\n", vk::to_string(result).c_str());
+ 		return false;
+ 	}
++	// debug: KYTY_VMA_DUMP=<seconds> writes VMA's detailed statistics (every allocation) to vma_dump.json then.
++	if (const char* dump = std::getenv("KYTY_VMA_DUMP"); dump != nullptr) {
++		std::thread([this, seconds = std::strtol(dump, nullptr, 10)] {
++			std::this_thread::sleep_for(std::chrono::seconds(seconds));
++			char* json = nullptr;
++			vmaBuildStatsString(allocator, &json, VK_TRUE);
++			if (FILE* file = std::fopen("vma_dump.json", "w"); file != nullptr) {
++				std::fputs(json, file);
++				std::fclose(file);
++			}
++			vmaFreeStatsString(allocator, json);
++			std::fprintf(stderr, "VMA statistics written to vma_dump.json\n");
++		}).detach();
++	}
+ 	return true;
+ }
+ 
+@@ -79,6 +97,9 @@ void GraphicContext::LogMemoryBudget() const {
+ 		     i, static_cast<uint64_t>(budgets[i].usage), static_cast<uint64_t>(budgets[i].budget),
+ 		     static_cast<uint64_t>(budgets[i].statistics.allocationBytes),
+ 		     static_cast<uint64_t>(budgets[i].statistics.blockBytes));
++		std::fprintf(stderr, "VMA heap %u: usage=%" PRIu64 " MiB, budget=%" PRIu64 " MiB, allocated=%" PRIu64 " MiB\n", i,
++		             static_cast<uint64_t>(budgets[i].usage) >> 20u, static_cast<uint64_t>(budgets[i].budget) >> 20u,
++		             static_cast<uint64_t>(budgets[i].statistics.allocationBytes) >> 20u);
+ 	}
+ }
+ 
+@@ -229,12 +250,18 @@ uint32_t GraphicContext::RoomTypes(uint32_t types, uint64_t size) const {
+ 			main_heap = heap;
+ 		}
+ 	}
+-	if (main_heap != UINT32_MAX && budgets[main_heap].usage + size + RoomBytes > budgets[main_heap].budget) {
++	// The room scales with the card: on 8 GB the game's sparse buffer pages (video memory only, never unmapped) grew
++	// past a fixed 512 MiB in Marvel's Wolverine's first fight and the next page stopped the emulator.
++	// Larger cards keep the fixed room.
++	constexpr uint64_t small_card = 10ull << 30u;
++	const uint64_t     budget     = main_heap == UINT32_MAX ? 0 : uint64_t {budgets[main_heap].budget};
++	const uint64_t     room       = budget != 0 && budget < small_card ? std::max(RoomBytes, budget / 5u) : RoomBytes;
++	if (main_heap != UINT32_MAX && budgets[main_heap].usage + size + room > budgets[main_heap].budget) {
+ 		static std::atomic_bool logged = false;
+ 		if (!logged.exchange(true)) {
+ 			LOGF("Video memory near full: images go to system memory, the last %" PRIu64
+ 			     " MiB stay for sparse buffer pages (logged for the first one only)\n",
+-			     RoomBytes >> 20u);
++			     room >> 20u);
+ 			LogMemoryBudget();
+ 		}
+ 		return types & ~local;
+@@ -262,7 +289,9 @@ VmaAllocation GraphicContext::AllocateSparse(const vk::MemoryRequirements& image
+ 	create.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+ 	VmaAllocation     allocation = nullptr;
+ 	VmaAllocationInfo info {};
+-	if (vmaAllocateMemory(allocator, &need, &create, &allocation, &info) != VK_SUCCESS) {
++	if (const auto result = vmaAllocateMemory(allocator, &need, &create, &allocation, &info); result != VK_SUCCESS) {
++		std::fprintf(stderr, "AllocateSparse failed: result=%d size=%" PRIu64 " types=0x%x (asked 0x%x)\n",
++		             static_cast<int>(result), static_cast<uint64_t>(need.size), need.memoryTypeBits, image.memoryTypeBits);
+ 		LogMemoryBudget();
+ 		return nullptr;
+ 	}
+-- 
+2.47.0

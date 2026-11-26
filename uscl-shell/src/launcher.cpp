@@ -359,6 +359,11 @@ bool Launcher::startEmu(const QString& path, const QString& title, const QString
 #ifdef _WIN32
 		args << "--redzone";
 #endif
+		// Marvel's Wolverine: its dynamic resolution misjudges the emulated GPU (2560x1440 at 4 fps on an RTX 4060), so
+		// the 3D renders at the lowest step of its table.
+		QFile param(path + "/sce_sys/param.json");
+		if (param.open(QIODevice::ReadOnly) && param.readAll().contains("PPSA03671"))
+			args << "--render-resolution" << "1664x936";
 	}
 	else
 		return false;
