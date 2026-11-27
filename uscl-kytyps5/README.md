@@ -5,9 +5,9 @@
 | **Console** | PlayStation 5 |
 | **Upstream** | [Senaxx/KytyPS5](https://github.com/Senaxx/KytyPS5) `main`, a Marvel's Wolverine 1.05 fork of [KytyPS5/KytyPS5](https://github.com/KytyPS5/KytyPS5) (GPL-2.0) |
 | **Pinned base** | `ec6c3f18` |
-| **Our changes** | `patches/0001…0006`, a `git am` series |
+| **Our changes** | `patches/0001…0007`, a `git am` series |
 | **Ships in** | not yet: built locally, the shell runs it from `~/.local/share/uscl/KytyPS5/` (or `USCL_KYTYPS5`) |
-| **Status** | Marvel's Wolverine (`PPSA03671` 1.05) boots, plays the logos, the initial setup, the title, saves and the opening fight on Linux (RTX 4060 8 GB, i5-10600K, no Resizable BAR). On 8 GB: base PS5 mode at the lowest render step, title 14–21 fps (depends on the title scene), first fight 15–16 fps (3–5 before 0005); Pro mode 2–3 fps (not re-measured) |
+| **Status** | Marvel's Wolverine (`PPSA03671` 1.05) boots, plays the logos, the initial setup, the title, saves and the opening fight on Linux (RTX 4060 8 GB, i5-10600K, no Resizable BAR). On 8 GB: base PS5 mode at the lowest render step, title 14–21 fps (depends on the title scene), first fight 15–17 fps (3–5 before 0005; 0007 cut its GPU work by 10 %); Pro mode 2–3 fps (not re-measured) |
 
 ## Build (Linux)
 ```
@@ -45,6 +45,13 @@ each place compiles shaders while playing.
   clang PGO build inlined the function and crashed at boot (Wolverine's trophy thread jumped to 0). The stack-switching
   asm now saves rbx with the other registers and stores the exact host rsp/rbp itself. No speed change; it keeps the
   thread exit correct under any compiler or flags. (The Windows path was edited to match, not built here.)
+- **0007** The fork reads every buffer by device address (its "buffer table" variant), where robustBufferAccess2
+  cannot apply, so the translated shaders put each dword of a buffer load behind its own bounds compare, branch and
+  64-bit address math (Wolverine's top pixel shader: 139 such loads, 229 branches). On NVIDIA with robustBufferAccess2
+  programs now read buffers through descriptors, which need neither (0 and 86). Wolverine's first fight, RTX 4060,
+  4 runs each: GPU work 47.7 → 42.7 ms a frame (a skinning dispatch 2.6 → 0.8 ms); at 1664x936 fps moves 15.1 → 15.4
+  because the command processor then paces the frame, at 2560x1440 ~+0.7 fps. Same screens, 3 runs of 3 minutes
+  without a failure. Other GPUs keep the table (not measured); `KYTY_BUFFER_TABLE=0/1` picks either.
 
 ## What the shell does for PS5 games
 - Arguments: `--game <dir> --fullscreen --shader-cache --hide-cursor --amd-cpu --readback-linear-images --tessellation
@@ -63,14 +70,17 @@ each place compiles shaders while playing.
   bottleneck: the GPU does 43–47 ms of work (~40 ms of translated guest passes, ~6.7 ms of emulator copies, mostly
   ~20 MB of buffer uploads over PCIe), the emulator's command processor takes ~50 ms of one CPU core for the frame's
   ~2,450 draws and dispatches, and the game reads GPU results ~4 times a frame, each a wait for all queued GPU work, so
-  the GPU's frame sits on the critical path. The game's render thread spin-waits on a counter the command processor
+  the GPU's frame sits on the critical path. Since 0007 the GPU does ~43 ms and the command processor (~88 % busy) is the
+  longest link at the lowest render step. The game's render thread spin-waits on a counter the command processor
   writes when it parses a ReleaseMem, not on the GPU. Not the limit (measured): occlusion queries, the ahead scanner,
   write-combined staging, vblank pacing, parallel upload copies, ThinLTO, PGO (−4 % command-processor time, fps within
   noise), jemalloc, the performance overlay, a core reserved for the GPU thread (slower). In PS5 terms: the console
   runs this frame in under 16.7 ms with unified memory and a hardware command processor; here each frame pays for
   ~3–4x heavier translated shaders, a software command processor and CPU↔GPU read backs over PCIe 3.0 x8. Next steps
-  are large: the recompiler's output for the top passes, a per-draw state cache for the command processor, GPU-side
-  descriptor resolution, uploads on a transfer queue. The fork's `KYTY_GPU_PROF=1` / `KYTY_WAIT_STATS=1` /
+  are large (the fork's USCL-FORK.md, rows 38-48): the command processor's per-draw cost (per-page write generations so
+  unchanged descriptor tables and buffers are not re-checked), exec-mask regions in the translated shaders, GPU-side
+  descriptor resolution, and uploads on a transfer queue (needs per-page read tracking first, because guest labels are
+  released at parse time). The fork's `KYTY_GPU_PROF=1` / `KYTY_WAIT_STATS=1` /
   `KYTY_FAULT_STATS=1` switches are not in these patches.
 - `--readback-linear-images` is required (without it the title runs at 1 fps).
 - Pro mode (the fork's default) needs more than 8 GB of video memory, so the shell plays base mode; a Pro setting for
