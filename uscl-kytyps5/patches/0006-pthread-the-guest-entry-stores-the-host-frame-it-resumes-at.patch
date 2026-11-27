@@ -1,0 +1,88 @@
+From 2dc86f4d44c3f83729b7374b0a0466bfcae24d6d Mon Sep 17 00:00:00 2001
+From: HempFiend <17104973+jaidenscool1@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 22:01:47 -0700
+Subject: [PATCH] pthread: the guest entry stores the host frame it resumes at
+ from the asm that switches stacks
+
+PthreadExit resumes RunOnGuestStack's frame after the call into the guest, with rsp, rbp and rbx
+taken by a separate asm statement earlier in the function (rsp as "4 pushes below"). That holds
+for one code layout only: a clang PGO build of the fork inlined the function, and the first guest
+thread to exit (Marvel's Wolverine's User Trophy Thread) resumed with the wrong rsp and rbx and
+jumped to 0 at boot. The stack-switching asm now pushes rbx with r12-r15 and stores the exact host
+rsp and rbp through a pointer before the call. The Windows entry clears its stack bounds with rdx
+now, as rcx holds that pointer (not built on Windows here).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/kernel/pthread.cpp | 27 ++++++++++++++++++---------
+ 1 file changed, 18 insertions(+), 9 deletions(-)
+
+diff --git a/src/kernel/pthread.cpp b/src/kernel/pthread.cpp
+index b4c78198..0ec8e64d 100644
+--- a/src/kernel/pthread.cpp
++++ b/src/kernel/pthread.cpp
+@@ -392,7 +392,7 @@ struct PthreadPrivate {
+ 	std::atomic_bool      free;
+ 	uint64_t              host_thread_id;
+ 	uintptr_t             guest_host_rbx;
+-	uintptr_t             guest_host_rsp;
++	uintptr_t             guest_host_rsp; // guest_host_rbp follows it (RunOnGuestStack stores both through one pointer)
+ 	uintptr_t             guest_host_rbp;
+ 	uint64_t              cond_sequence = 0;
+ 	std::condition_variable cond_cv;
+@@ -915,20 +915,28 @@ static KYTY_SYSV_ABI void* RunOnGuestStack(void* arg, pthread_entry_func_t func,
+ 	               "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11",
+ 	               "xmm12", "xmm13", "xmm14", "xmm15");
+ #else
+-	// PthreadExit resumes at this frame, so all four saved registers stay on the host stack.
+-	asm volatile("pushq %%r12\n\t"
++	// PthreadExit resumes at this frame (after the call below) with r12 = the host rsp and r13 = the host rbp stored here,
++	// so they are stored by the same asm that switches stacks, and rbx goes on the host stack with the others: values
++	// taken by a separate statement hold only for one code layout (a PGO build inlined this function, and the exiting
++	// thread resumed with the wrong rsp and rbx: a jump to 0).
++	uintptr_t  unused_frame[2] {};
++	uintptr_t* host_frame = g_pthread_self != nullptr ? &g_pthread_self->guest_host_rsp : unused_frame;
++	asm volatile("pushq %%rbx\n\t"
++	             "pushq %%r12\n\t"
+ 	             "pushq %%r13\n\t"
+ 	             "pushq %%r14\n\t"
+ 	             "pushq %%r15\n\t"
+ #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+ 	             "movq %%gs:0x08, %%r14\n\t"
+ 	             "movq %%gs:0x10, %%r15\n\t"
+-	             "xorq %%rcx, %%rcx\n\t"
+-	             "movq %%rcx, %%gs:0x08\n\t"
+-	             "movq %%rcx, %%gs:0x10\n\t"
++	             "xorq %%rdx, %%rdx\n\t" // rcx holds host_frame
++	             "movq %%rdx, %%gs:0x08\n\t"
++	             "movq %%rdx, %%gs:0x10\n\t"
+ #endif
+ 	             "movq %%rsp, %%r12\n\t"
+ 	             "movq %%rbp, %%r13\n\t"
++	             "movq %%r12, (%%rcx)\n\t"
++	             "movq %%r13, 8(%%rcx)\n\t"
+ 	             "movq %[guest_rsp], %%rsp\n\t"
+ 	             "movq %[guest_rbp], %%rbp\n\t"
+ 	             "callq *%%rsi\n\t"
+@@ -942,14 +950,15 @@ static KYTY_SYSV_ABI void* RunOnGuestStack(void* arg, pthread_entry_func_t func,
+ 	             "popq %%r14\n\t"
+ 	             "popq %%r13\n\t"
+ 	             "popq %%r12\n\t"
+-	             : "=a"(ret), "+D"(arg), "+S"(func)
++	             "popq %%rbx\n\t"
++	             : "=a"(ret), "+D"(arg), "+S"(func), "+c"(host_frame)
+ 	             : [guest_rsp] "r"(guest_rsp), [guest_rbp] "r"(guest_rbp)
+ #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+-	             : "cc", "memory", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2",
++	             : "cc", "memory", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2",
+ 	               "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11",
+ 	               "xmm12", "xmm13", "xmm14", "xmm15");
+ #else
+-	             : "cc", "memory", "rcx", "rdx", "r8", "r9", "r10", "r11", "r12", "r13", "xmm0",
++	             : "cc", "memory", "rdx", "r8", "r9", "r10", "r11", "r12", "r13", "xmm0",
+ 	               "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10",
+ 	               "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");
+ #endif
+-- 
+2.56.0
+

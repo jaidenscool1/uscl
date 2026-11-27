@@ -5,7 +5,7 @@
 | **Console** | PlayStation 5 |
 | **Upstream** | [Senaxx/KytyPS5](https://github.com/Senaxx/KytyPS5) `main`, a Marvel's Wolverine 1.05 fork of [KytyPS5/KytyPS5](https://github.com/KytyPS5/KytyPS5) (GPL-2.0) |
 | **Pinned base** | `ec6c3f18` |
-| **Our changes** | `patches/0001…0005`, a `git am` series |
+| **Our changes** | `patches/0001…0006`, a `git am` series |
 | **Ships in** | not yet: built locally, the shell runs it from `~/.local/share/uscl/KytyPS5/` (or `USCL_KYTYPS5`) |
 | **Status** | Marvel's Wolverine (`PPSA03671` 1.05) boots, plays the logos, the initial setup, the title, saves and the opening fight on Linux (RTX 4060 8 GB, i5-10600K, no Resizable BAR). On 8 GB: base PS5 mode at the lowest render step, title 14–21 fps (depends on the title scene), first fight 15–16 fps (3–5 before 0005); Pro mode 2–3 fps (not re-measured) |
 
@@ -40,6 +40,11 @@ each place compiles shaders while playing.
   giving way first (1 GiB room; the game samples them through its image heap, so the cache cannot free them). First
   fight 15–16 fps over four runs of 3+ minutes, no sparse-page exits. Debug: `KYTY_NO_PAGEABLE=1`,
   `KYTY_VRAM_ROOM_MB=1428` (the old room), `KYTY_TEXTURE_ROOM_MB`, `KYTY_VRAM_TRACE`.
+- **0006** A guest thread that exits through `PthreadExit` resumes the host frame of `RunOnGuestStack`, whose rsp, rbp
+  and rbx were taken by a separate asm statement (rsp as "4 pushes below"), which holds for one code layout only. A
+  clang PGO build inlined the function and crashed at boot (Wolverine's trophy thread jumped to 0). The stack-switching
+  asm now saves rbx with the other registers and stores the exact host rsp/rbp itself. No speed change; it keeps the
+  thread exit correct under any compiler or flags. (The Windows path was edited to match, not built here.)
 
 ## What the shell does for PS5 games
 - Arguments: `--game <dir> --fullscreen --shader-cache --hide-cursor --amd-cpu --readback-linear-images --tessellation
@@ -53,11 +58,20 @@ each place compiles shaders while playing.
   is renamed or removed.
 
 ## Known open issues
-- 60 fps is out of reach on an RTX 4060 with this emulator: the lowest render step costs 43 ms of GPU work per frame
-  (~20 ms fixed, ~15 ms per megapixel; 75 ms at 2560x1440, where a PS5 needs ~16 ms), so the translated GPU work is
-  ~3–4x native and the card would need ~2.6x less of it. Not the limit (measured): dispatch barriers, submit count,
-  the background precompile. The game's render thread spin-waits on GPU progress (31 % GPU idle). The fork's
-  USCL-FORK.md has the full table; its `KYTY_GPU_PROF=1` / `KYTY_WAIT_STATS=1` switches are not in these patches.
+- 60 fps is out of reach on an RTX 4060 with this emulator, and the first fight stays at 15–16 fps after a night of
+  measuring (the fork's USCL-FORK.md, "What paces the frame", rows 19–37). The frame (~65 ms) is a chain with no single
+  bottleneck: the GPU does 43–47 ms of work (~40 ms of translated guest passes, ~6.7 ms of emulator copies, mostly
+  ~20 MB of buffer uploads over PCIe), the emulator's command processor takes ~50 ms of one CPU core for the frame's
+  ~2,450 draws and dispatches, and the game reads GPU results ~4 times a frame, each a wait for all queued GPU work, so
+  the GPU's frame sits on the critical path. The game's render thread spin-waits on a counter the command processor
+  writes when it parses a ReleaseMem, not on the GPU. Not the limit (measured): occlusion queries, the ahead scanner,
+  write-combined staging, vblank pacing, parallel upload copies, ThinLTO, PGO (−4 % command-processor time, fps within
+  noise), jemalloc, the performance overlay, a core reserved for the GPU thread (slower). In PS5 terms: the console
+  runs this frame in under 16.7 ms with unified memory and a hardware command processor; here each frame pays for
+  ~3–4x heavier translated shaders, a software command processor and CPU↔GPU read backs over PCIe 3.0 x8. Next steps
+  are large: the recompiler's output for the top passes, a per-draw state cache for the command processor, GPU-side
+  descriptor resolution, uploads on a transfer queue. The fork's `KYTY_GPU_PROF=1` / `KYTY_WAIT_STATS=1` /
+  `KYTY_FAULT_STATS=1` switches are not in these patches.
 - `--readback-linear-images` is required (without it the title runs at 1 fps).
 - Pro mode (the fork's default) needs more than 8 GB of video memory, so the shell plays base mode; a Pro setting for
   larger cards is still to do.
